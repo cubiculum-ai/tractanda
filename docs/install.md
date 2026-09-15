@@ -6,6 +6,8 @@ Linux remains in development. Its source and local HTTP embedding-provider inter
 
 ## Install an empty or sample database
 
+The native `.pkg` opens in macOS Installer and asks for administrator authentication. On a new installation it creates a sample database for the logged-in console user. On an existing installation it upgrades the system registry's default database, preserving its owner, data and port. The welcome and license pages explain the preview's scope. Use the archive installer below to choose an empty database, a different name or custom ports; the same native setup engine performs both forms of installation.
+
 Unpack the bundle, open Terminal in its directory, and run:
 
 ```sh
@@ -75,3 +77,5 @@ This unloads the database's owned jobs and removes their definitions and connect
 ## Build a distribution
 
 Developers build the Swift products and use `scripts/package-macos.py` from a staged, audited Git checkout to assemble a new payload. Documentation, examples, templates and skill files come from that reviewed index; ignored research files and interpreter caches are excluded. Supply a Developer ID identity for a distributable signature; the default ad-hoc identity is for local development. The packager includes runtime libraries, removes development library search paths, hashes the payload and asks the bundled installer to validate it. Notarization and publication are separate release steps.
+
+Wrap that bundle in a native Installer product with `python3 scripts/build-macos-pkg.py --bundle PATH --output Tractanda.pkg --sign-identity 'Developer ID Installer: …'`. The package embeds the same verified bundle as private Installer script resources and calls `tractanda-setup`; it leaves no separate persistent staging copy. It targets the running Apple Silicon system, requires macOS 15 or later, and includes welcome, license and completion pages.
