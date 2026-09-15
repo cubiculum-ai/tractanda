@@ -1,0 +1,9 @@
+{
+  "using": ["https://tractanda.ai/ns/local-prototype/2"],
+  "methodCalls": [
+    ["TractandaItem/query", {"expression": "kMDItemContentTypeTree == \"MessageItem\""}, "q"],
+    ["TractandaItem/get", {
+      "#ids": {"resultOf": "q", "name": "TractandaItem/query", "path": "/ids"}
+    }, "g"]
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "name": "tractanda",
+  "version": "0.1.0-poc.1",
+  "description": "Work with Tractanda knowledge, multidimensional categories and contextual views through its API.",
+  "author": {
+    "name": "rcfa - Cubiculum-AI",
+    "url": "https://github.com/cubiculum-ai"
+  },
+  "repository": "https://github.com/cubiculum-ai/tractanda",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "skills": "./skills/"
+}

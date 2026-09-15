@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tractanda"
+  short_description: "Query and maintain shared knowledge in Tractanda"
+  default_prompt: "Use $tractanda to find the relevant project context and maintain its knowledge base."

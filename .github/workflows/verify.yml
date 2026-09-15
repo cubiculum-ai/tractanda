@@ -1,0 +1,38 @@
+name: Verify source
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    # Same multi-platform Swift 6.4 Debian image as containers/test/Containerfile.
+    container:
+      image: docker.io/swiftlang/swift@sha256:8554bb765eac670fb9900a933bd5a695b949bbaabbd388b7a6ba4ad943647efe
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install platform and test dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends libsqlite3-dev libpam0g-dev uuid-dev python3 acl
+      - name: Verify the published source tree
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          python3 scripts/audit-release.py --staged
+          swift --version
+          useradd --uid 2000 --user-group --create-home --shell /bin/sh tractanda-ci
+          chown -R tractanda-ci:tractanda-ci "$GITHUB_WORKSPACE"
+          runuser -u tractanda-ci -- env TRACTANDA_UUID_NODE=00:00:00:00:00:01 \
+            sh -c 'cd "$1" && sh scripts/test.sh' sh "$GITHUB_WORKSPACE"

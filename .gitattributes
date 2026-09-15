@@ -1,0 +1,3 @@
+# Preserve upstream license and vendored-source bytes, including their whitespace.
+LICENSES/** -whitespace
+Sources/CTractandaVec1/Vendor/** -whitespace

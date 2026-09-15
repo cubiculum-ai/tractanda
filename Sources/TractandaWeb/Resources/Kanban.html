@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23192d4a'/%3E%3Ctext x='11' y='25' font-family='Georgia' font-size='28' fill='%23a9c0df'%3Et%3C/text%3E%3C/svg%3E">
+  <title>Tractanda · Project board</title>
+  <style>
+    :root{--paper:#f7f6f2;--ink:#253247;--muted:#657084;--line:#dce0e6;--accent:#254a73;--accent-light:#e6edf7;--nav:#192d4a;--white:#fff;--amber:#956324;--radius:12px;--shadow:0 2px 3px #192d4a04,0 8px 18px #192d4a04}
+    *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}button,input,select,textarea{font:inherit}button,a,input,select,textarea{-webkit-tap-highlight-color:transparent}button{cursor:pointer}button:disabled{opacity:.45;cursor:default}button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible,summary:focus-visible{outline:3px solid #7898bf;outline-offset:3px}a{color:var(--accent);text-underline-offset:3px}button{color:inherit}button,input,select,textarea{border:1px solid var(--line);border-radius:7px}input,select,textarea{background:white;padding:9px 11px;min-height:39px}textarea{resize:vertical;line-height:1.6}button{padding:8px 12px;background:white;font-weight:550}button:hover:not(:disabled){background:#edf1f7}button.primary{background:var(--accent);color:white;border-color:var(--accent)}button.primary:hover{background:#193757}button.quiet{background:transparent;border-color:transparent}svg{display:block;flex:none}.shell{display:grid;grid-template-columns:205px minmax(0,1fr);min-height:100vh}
+    .sidebar{background:var(--nav);color:#eaf0f8;padding:31px 20px 22px;display:flex;flex-direction:column;gap:31px;min-width:0}.brand{display:flex;align-items:center;gap:10px;font-family:Georgia,serif;font-size:25px;letter-spacing:-.6px}.brand-mark{display:grid;place-items:center;width:32px;height:35px;background:#a9c0df;color:#192d4a;border-radius:7px 7px 16px 7px;font:700 24px Georgia,serif}.sidebar .eyebrow{color:#a8bbd5;margin-bottom:12px}.nav-list{display:grid;gap:5px}.nav-list button{width:100%;text-align:left;background:transparent;color:#d0dcee;border:none;padding:11px 12px;display:flex;align-items:center;gap:11px;font-weight:500}.nav-list button[aria-pressed=true]{background:#ffffff12;color:white;box-shadow:inset 3px 0 #aec5e5}.nav-list button:hover{background:#ffffff18}.nav-list a{padding:7px 12px;display:block;color:#c3d3e9;text-decoration:none;font-size:13px}.nav-list a:hover{color:white}.sidebar-note{margin-top:auto;border-top:1px solid #ffffff1d;padding-top:19px;color:#bacbe2;font-size:12px}.sidebar-note p{margin:7px 0}.domain{color:#e4edf8;font-weight:600}.eyebrow{font-size:10px;font-weight:650;letter-spacing:1.9px;text-transform:uppercase}
+    main{min-width:0;padding:0 30px 28px}.topbar{min-height:77px;display:flex;align-items:center;justify-content:space-between;gap:16px;border-bottom:1px solid var(--line)}.breadcrumb{color:var(--muted);font-size:12px;display:flex;align-items:center;gap:10px}.breadcrumb strong{font-weight:550;color:var(--ink)}.breadcrumb span:nth-child(2){color:#b2bbc8}.top-actions{display:flex;align-items:center;gap:8px}.save-indicator{font-size:11px;color:var(--muted);max-width:205px;text-align:right;line-height:1.35}.save-indicator.dirty{color:var(--amber)}.hero{display:flex;justify-content:space-between;align-items:center;gap:20px;padding:25px 0 20px}h1{margin:0;font:normal 35px/1.16 Georgia,"Times New Roman",serif;letter-spacing:-.9px}.subtitle{color:var(--muted);margin:7px 0 0;font-size:13px}.hero-label{font-size:10px;color:var(--accent);font-weight:650;letter-spacing:1.2px;text-transform:uppercase;margin-bottom:8px}.stats{display:flex;gap:26px;align-items:center}.stat{min-width:60px}.stat b{display:block;font-size:23px;font-weight:500;line-height:1.2;letter-spacing:-.7px}.stat span{font-size:11px;color:var(--muted)}.stat:last-child{border-left:1px solid var(--line);padding-left:25px}.next-up{display:flex;justify-content:space-between;align-items:center;gap:20px;border:1px solid #d3ddeb;background:#eaf0f8;border-radius:var(--radius);padding:13px 16px;margin-bottom:20px}.next-up .eyebrow{color:var(--accent);font-size:9px;letter-spacing:1.3px;margin-bottom:3px}.next-title{font-size:13px;font-weight:600}.next-detail{color:var(--muted);font-size:12px;margin-top:2px}.next-up button{flex:none;background:transparent;border-color:#b8c9df;font-size:12px}.toolbar{display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap}.search{position:relative;flex:1;min-width:190px;max-width:310px}.search input{width:100%;padding-left:33px;font-size:12px;background:#fffefb}.search svg{position:absolute;top:12px;left:11px;color:#8493a8}.toolbar select,.toolbar button{font-size:12px}.toolbar .grow{flex:1}.filter-count{font-size:11px;color:var(--muted)}.toolbar .export{margin-left:auto}
+    .board-scroll{overflow-x:auto;padding:1px 0 14px}.board{display:grid;grid-template-columns:repeat(5,minmax(226px,1fr));gap:13px;min-width:1190px;align-items:start}.lane{border-radius:11px;background:#eceff4;border:1px solid #dfe4ec;min-width:0;transition:background .15s}.lane[data-complete=false]{background:#eaf0f7;border-color:#d5dfec}.lane[data-complete=true]{background:#eaf0f5}.lane.drop-target{background:#dbe6f5;outline:2px solid #7c9fc7;outline-offset:-2px}.lane-heading{display:flex;align-items:center;gap:8px;padding:15px 13px 12px}.lane-heading h2{font-size:12px;font-weight:650;margin:0}.lane-count{margin-left:auto;font:11px ui-monospace,SFMono-Regular,monospace;color:var(--muted);background:#ffffff9a;padding:1px 6px;border-radius:4px}.status-dot{width:7px;height:7px;border-radius:50%;background:#98a8bd}.lane[data-complete=false] .status-dot{background:#517ca9}.lane[data-complete=true] .status-dot{background:#416e9d}.lane-cards{padding:0 8px 9px;min-height:300px;max-height:calc(100vh - 360px);overflow-y:auto;scrollbar-width:thin;scrollbar-color:#cbd4e0 transparent}.card{background:#fffefc;border:1px solid #dce2eb;border-radius:9px;padding:13px 12px 11px;margin-bottom:9px;box-shadow:var(--shadow);position:relative}.card:last-child{margin-bottom:0}.card.dragging{opacity:.4}.card-head{display:flex;align-items:center;gap:6px;justify-content:space-between;margin-bottom:9px}.card-id{font:10px ui-monospace,SFMono-Regular,monospace;color:#78869a;letter-spacing:.4px}.priority{font-size:9px;font-weight:600;letter-spacing:.3px;border-radius:3px;padding:1px 5px;color:#78775d;background:#f0eee2}.priority.p1{color:#93653b;background:#f6eddc}.priority.p3{color:#788498;background:#edf0f6}.card-title{border:0;background:none;padding:0;display:block;text-align:left;width:100%;font-size:13px;font-weight:600;line-height:1.45;letter-spacing:-.1px;border-radius:2px}.card-title:hover:not(:disabled){background:none;color:var(--accent)}.card-summary{font-size:11px;color:var(--muted);line-height:1.6;margin:7px 0 11px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}.tag-row{display:flex;flex-wrap:wrap;gap:5px}.tag{font-size:9px;padding:2px 6px;border-radius:4px;color:#456687;background:#e9eff7;letter-spacing:.1px}.tag.learning{color:#725f90;background:#efebf4}.tag.clients{color:#4b6776;background:#e9eff3}.tag.access{color:#816b47;background:#f4efdf}.tag.planning{color:#456b94;background:#e6eef8}.task-steps{display:flex;gap:8px;align-items:center;margin-top:12px;font:10px ui-monospace,SFMono-Regular,monospace;color:#7c899c}.mini-progress{flex:1;height:3px;background:#eaf0f7;border-radius:2px;overflow:hidden}.mini-progress i{display:block;height:100%;background:#819fc4;border-radius:2px}.card-foot{display:flex;align-items:center;justify-content:space-between;margin-top:11px;border-top:1px solid #edf0f5;padding-top:9px;font-size:10px;color:#79879b}.owner{display:flex;gap:6px;align-items:center}.avatar{width:18px;height:18px;display:grid;place-items:center;border:1px solid #d6e0ee;border-radius:50%;font-size:8px;background:#edf2f9;color:#526d91}.dependency-count{color:#826e4a}.empty-lane{padding:25px 14px 32px;text-align:center;color:#8190a5;font-size:11px}.empty-lane .empty-icon{font-size:22px;font-weight:300;line-height:1.2;margin-bottom:9px;color:#a1aec1}.empty-lane p{max-width:145px;margin:0 auto;line-height:1.65}.board-footer{display:flex;justify-content:space-between;gap:15px;color:var(--muted);font-size:11px;padding-top:7px}.board-footer a{color:var(--muted)}
+    .roadmap{display:none}.roadmap.active{display:block}.plan-intro{display:grid;grid-template-columns:1.2fr 1fr;gap:24px;margin:6px 0 25px}.plan-box{background:#fffefb;border:1px solid var(--line);padding:20px;border-radius:var(--radius)}.plan-box h2{font:normal 22px Georgia,serif;margin:0 0 12px}.plan-box p,.plan-box li{color:var(--muted);font-size:13px}.plan-box ul{padding-left:18px;margin-bottom:0}.sequence{display:grid;gap:9px}.sequence-row{display:grid;grid-template-columns:40px minmax(0,1fr) auto;gap:13px;align-items:center;background:#fffefb;border:1px solid var(--line);border-radius:9px;padding:14px 17px}.sequence-num{font:22px Georgia,serif;color:#8a9bb5}.sequence-title{font-weight:600;font-size:13px}.sequence-description{color:var(--muted);font-size:12px;margin-top:3px}.sequence-row button{font-size:11px}.sequence-row .original-order{font-size:10px;color:#8995a8}.roadmap details{margin:20px 0;color:var(--muted);font-size:12px}.roadmap summary{cursor:pointer}.roadmap ol{padding-left:24px;line-height:1.9}
+    dialog{border:1px solid #d3ddec;padding:0;border-radius:15px;max-width:760px;width:calc(100vw - 34px);color:var(--ink);background:var(--paper);box-shadow:0 25px 100px #10223f40;max-height:90vh}dialog::backdrop{background:#192d4a66;backdrop-filter:blur(2px)}.dialog-head{display:flex;align-items:center;justify-content:space-between;padding:19px 24px 15px;border-bottom:1px solid var(--line)}.dialog-head h2{font:normal 24px Georgia,serif;margin:4px 0 0}.dialog-head button{border:0;background:transparent;font-size:23px;line-height:1;padding:6px}.dialog-body{padding:21px 24px;overflow-y:auto;max-height:calc(90vh - 158px)}.dialog-layout{display:grid;grid-template-columns:minmax(0,1fr) 155px;gap:22px}.field{display:flex;flex-direction:column;gap:5px;margin-bottom:14px}.field>span,.section-label{font-size:10px;letter-spacing:.7px;text-transform:uppercase;color:#63758e;font-weight:650}.field input,.field textarea,.field select{width:100%;font-size:13px}.field.title input{font-size:16px;font-weight:550}.field textarea{min-height:88px}.section-label{margin:20px 0 10px}.check-row{display:flex;align-items:flex-start;gap:10px;padding:9px 0;border-bottom:1px solid #e1e7f0;font-size:12px}.check-row input{min-height:0;flex:none;margin:3px 0 0;width:15px;height:15px;accent-color:var(--accent)}.check-row span{line-height:1.5}.source-note{display:block;color:#8290a5;font-size:10px;margin-top:3px}.acceptance{padding-left:17px;font-size:12px;color:var(--muted);line-height:1.75}.dependency-links{display:flex;gap:5px;flex-wrap:wrap}.dependency-links span{font-size:10px;border:1px solid #d1dcec;border-radius:4px;padding:3px 6px;line-height:1.7}.dependency-links .pending{border-color:#dccaab;background:#f6efe0;color:#81623a}.evidence{font-size:12px;display:grid;gap:5px}.history-list{font-size:11px;color:var(--muted);padding-left:15px;line-height:1.8;max-height:150px;overflow:auto}.dialog-actions{display:flex;justify-content:space-between;gap:10px;padding:14px 24px;border-top:1px solid var(--line);background:#eff2f7}.dialog-actions .actions-right{display:flex;gap:8px}.dialog-error{color:#955038;font-size:12px;margin:10px 0;min-height:0}.dialog-error:empty{display:none}.helper{font-size:11px;line-height:1.6;color:var(--muted)}.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);padding:12px 18px;background:#192d4a;color:white;box-shadow:0 6px 25px #17305030;border-radius:9px;z-index:20;font-size:12px;max-width:min(600px,90vw);opacity:0;pointer-events:none;transition:opacity .15s}.toast.visible{opacity:1}.toast.error{background:#7e4936}.help-copy{line-height:1.75;font-size:13px}.help-copy h3{font-size:13px;margin:20px 0 4px}.help-copy p{margin:6px 0}.kbd{border:1px solid #d3ddec;background:#eaf0f8;border-radius:3px;padding:0 4px;font:11px ui-monospace,monospace}.hidden{display:none!important}[hidden]{display:none!important}
+    @media(min-width:1750px){main{padding-left:38px;padding-right:38px}.shell{grid-template-columns:220px minmax(0,1fr)}.board{gap:17px}.card{padding:15px}.card-title{font-size:14px}.card-summary{font-size:12px}}
+    @media(max-width:1100px){.shell{grid-template-columns:175px minmax(0,1fr)}.sidebar{padding:26px 14px}.brand{font-size:22px}main{padding:0 20px 22px}.stats{gap:15px}.stat:last-child{padding-left:15px}.hero{align-items:flex-start}.save-indicator{display:none}.lane-cards{max-height:580px}}
+    @media(max-width:720px){.shell{display:block}.sidebar{padding:15px 18px;gap:0;display:flex;flex-direction:row;align-items:center;justify-content:space-between}.sidebar .reference-nav,.sidebar .sidebar-note,.sidebar .eyebrow{display:none}.sidebar .nav-list{display:flex}.sidebar .nav-list button{width:auto;font-size:12px;padding:8px 12px}.nav-list button svg{display:none}.brand{font-size:23px}.brand-mark{width:25px;height:28px;font-size:21px}.topbar{min-height:65px}.breadcrumb{font-size:11px}.top-actions button{font-size:11px;padding:7px 9px}main{padding:0 16px 20px}.hero{display:block;padding:23px 0 17px}h1{font-size:32px}.stats{margin-top:17px;gap:23px}.stat b{font-size:21px}.stat:last-child{padding-left:23px}.next-up{align-items:flex-start;gap:10px}.next-detail{display:none}.next-up button{font-size:10px;padding:6px 8px}.toolbar{gap:7px}.toolbar .search{max-width:none;flex-basis:100%}.toolbar select{flex:1;min-width:0}.toolbar .grow{display:none}.toolbar .filter-count{flex-basis:100%}.board{min-width:1190px}.lane-cards{max-height:none;min-height:270px}.board-footer{flex-direction:column;gap:5px}.plan-intro{grid-template-columns:1fr}.sequence-row{grid-template-columns:28px 1fr;gap:10px;padding:14px}.sequence-row button{grid-column:2;justify-self:start}.dialog-layout{grid-template-columns:1fr}.dialog-side{display:grid;grid-template-columns:1fr 1fr;gap:0 12px;grid-row:1}.dialog-body{padding:16px}.dialog-head{padding:16px}.dialog-actions{padding:12px 16px}.dialog-side .field{margin-bottom:10px}}
+    @media(prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
+    .learning-actions{display:flex;gap:7px;flex-wrap:wrap;margin:10px 0}.learning-item{border-top:1px solid var(--line);padding:12px 0}.learning-item h4{margin:0 0 5px;font-size:14px;overflow-wrap:anywhere}.learning-item p{margin:3px 0;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}.learning-settings{display:grid;grid-template-columns:1fr 1fr;gap:12px}.learning-status{background:#eaf0f8;border-radius:8px;padding:12px;line-height:1.6;font-size:12px}.learning-notice{font-size:12px;color:var(--accent);line-height:1.6}.learning-notice:empty{display:none}@media(max-width:480px){.learning-settings{grid-template-columns:1fr}.top-actions{flex-wrap:wrap;justify-content:flex-end}.learning-actions button{min-height:38px}}
+    @media print{.sidebar,.topbar,.toolbar,.next-up button,.board-footer,.toast,dialog{display:none!important}.shell{display:block}main{padding:0}.hero{padding:0 0 20px}.board-scroll{overflow:visible}.board{min-width:0;grid-template-columns:repeat(2,minmax(0,1fr))}.lane-cards{max-height:none;overflow:visible}.card{break-inside:avoid}.lane{break-inside:avoid}.card-summary{-webkit-line-clamp:unset}.roadmap{display:block}body{font-size:11px}}
+    .login-screen{display:none;min-height:100svh;place-items:center;padding:40px 20px}.needs-login .login-screen{display:grid}.needs-login .shell{display:none}.login-card{width:min(100%,440px);background:#fffefc;border:1px solid var(--line);border-radius:16px;overflow:hidden;box-shadow:0 14px 50px #192d4a0b}.login-brand{display:flex;align-items:center;gap:12px;background:var(--nav);color:#eaf0f8;padding:27px 32px;font:28px Georgia,serif}.login-content{padding:30px 32px 28px}.login-content h1{font-size:29px;letter-spacing:-.5px}.login-description{margin:10px 0 24px;color:var(--muted);line-height:1.65;font-size:13px}.login-field{display:block;font-size:12px;font-weight:600;margin:17px 0}.login-field input{display:block;width:100%;margin-top:7px;min-height:44px;font-size:14px}.login-password{display:flex;align-items:center;gap:7px}.login-password input{min-width:0}.login-password button{font-size:11px;padding:7px;margin-top:7px;min-width:48px}.login-remember{display:flex;align-items:center;gap:9px;font-size:12px;color:var(--muted);margin:18px 0 22px}.login-remember input{min-height:0;margin:0;width:16px;height:16px;accent-color:var(--accent)}.login-submit{width:100%;min-height:44px}.login-message{font-size:12px;line-height:1.6;color:var(--muted);margin:12px 0 0}.login-message.error{color:#955038}.login-message:empty{display:none}.login-content details{font-size:11px;color:var(--muted);border-top:1px solid var(--line);margin-top:24px;padding-top:16px}.login-content summary{cursor:pointer}.login-content details p{line-height:1.6}.login-token-form{display:grid;gap:8px;margin-top:10px}.login-token-form input{width:100%;min-width:0}.login-footer{text-align:center;color:var(--muted);font-size:11px;margin:22px 0 0}.login-footer a{color:var(--muted)}@media(max-width:480px){.login-screen{padding:24px 16px}.login-content{padding:25px 23px}.login-brand{padding:23px}.top-actions #sign-out{font-size:11px}}
+  </style>
+</head>
+<body class="@@BODY_CLASS@@">
+<section class="login-screen" id="login-screen" aria-labelledby="login-title">
+  <div><div class="login-card">
+    <div class="login-brand"><span class="brand-mark" aria-hidden="true">t</span>Tractanda</div>
+    <div class="login-content">
+      <h1 id="login-title">Sign in</h1>
+      <p class="login-description" id="login-description">Open your local workspace with your computer account.</p>
+      <form id="login-form" method="post" action="/auth/login">
+        <label class="login-field" for="login-username">Account name<input id="login-username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="128"></label>
+        <label class="login-field" for="login-password">Password<span class="login-password"><input id="login-password" name="password" type="password" autocomplete="current-password" required maxlength="4096"><button id="show-password" type="button" aria-label="Show password" aria-pressed="false">Show</button></span></label>
+        <label class="login-remember"><input id="remember-browser" type="checkbox" checked>Keep this browser signed in</label>
+        <button class="primary login-submit" id="sign-in" type="submit">Sign in</button>
+      </form>
+      <p class="login-message" id="login-message" role="status" aria-live="polite">Checking the local server…</p>
+      <details id="launch-access"><summary>Use a launch link or token</summary><p>Launch links still work. You can also paste a token from the web command’s session file.</p><form class="login-token-form" id="token-form"><label for="session-token">Session token</label><input type="password" id="session-token" autocomplete="off" spellcheck="false"><button type="submit" id="connect-session">Connect with token</button></form></details>
+    </div>
+  </div><p class="login-footer">Your local Tractanda workspace · <a href="https://tractanda.ai" rel="noreferrer">tractanda.ai</a></p></div>
+</section>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand"><span class="brand-mark" aria-hidden="true">t</span>Tractanda</div>
+    <div><div class="eyebrow">Workspace</div><nav class="nav-list" aria-label="Workspace views">
+      <button id="board-tab" type="button" aria-pressed="true"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><rect x="1" y="2" width="4" height="12" rx="1"/><rect x="6" y="2" width="4" height="8" rx="1"/><rect x="11" y="2" width="4" height="10" rx="1"/></svg>Project board</button>
+      <button id="roadmap-tab" type="button" aria-pressed="false"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><path d="M4 3h9M4 8h9M4 13h9"/><circle cx="1.5" cy="3" r=".5"/><circle cx="1.5" cy="8" r=".5"/><circle cx="1.5" cy="13" r=".5"/></svg>Sequence &amp; decisions</button>
+    </nav></div>
+    <div class="reference-nav"><div class="eyebrow">Reference desk</div><nav class="nav-list" aria-label="Project references">
+      <a href="/manual">Using the web client ↗</a>
+    </nav></div>
+    <div class="sidebar-note"><span class="domain">tractanda.ai</span><p>One information system.<br>Many ways to work with it.</p><p><span id="record-kind">HTML snapshot</span><br><span id="sidebar-date"></span></p></div>
+  </aside>
+  <main>
+    <section id="connection-panel" hidden aria-live="polite" style="margin-top:16px;padding:12px 16px;border:1px solid #b8c9df;border-radius:10px;background:#eaf0f8">
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><strong id="connection-message">Connecting to Tractanda…</strong><label id="project-picker-label" hidden>Project / view <select id="project-picker" aria-label="Project or saved view"></select></label><button type="button" id="refresh-projects" hidden>Refresh projects</button><button type="button" id="refresh-board">Refresh</button><button type="button" id="retry-write" hidden>Retry same edit</button></div>
+    </section>
+    <header class="topbar"><div class="breadcrumb"><span>Tractanda</span><span>/</span><strong id="breadcrumb-project">Project board</strong></div><div class="top-actions"><span id="save-indicator" class="save-indicator" role="status">File snapshot</span><button id="learning-button" type="button" hidden>Learning</button><button id="help-button" class="quiet" type="button" aria-label="Board help">?</button><button id="save-html" type="button">Save HTML</button><button id="new-task" class="primary" type="button">＋ New task</button><button id="sign-out" type="button" class="quiet" hidden>Sign out</button></div></header>
+    <div class="hero"><div><div class="hero-label" id="hero-label">Kanban</div><h1 id="page-title">Project board</h1><p class="subtitle" id="page-subtitle">A category-derived project board.</p></div><div class="stats" aria-label="Project counts"><div class="stat"><b id="stat-ready">0</b><span>Items in view</span></div><div class="stat"><b id="stat-active">0</b><span>Column categories</span></div><div class="stat"><b id="stat-done">0 / 0</b><span>Completed</span></div></div></div>
+    <section class="next-up" id="next-up" aria-label="Next agreed milestone"><div><div class="eyebrow">Next milestone · agreed sequence</div><div class="next-title" id="next-title"></div><div class="next-detail">Dependencies and acceptance steps are recorded on each card.</div></div><button id="sequence-button" type="button">Why this order →</button></section>
+    <section id="board-view" aria-label="Kanban board">
+      <div class="toolbar"><label class="search"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="6.5" cy="6.5" r="4.5"/><path d="m10 10 4 4"/></svg><input id="search" type="search" aria-label="Search tasks" placeholder="Find a task, topic or ID…"></label><select id="track-filter" aria-label="Filter by workstream"><option value="all">All workstreams</option></select><select id="scope-filter" aria-label="Filter by task kind"><option value="all">All work</option><option value="milestone">Requested milestones</option><option value="followup">Supporting work</option><option value="foundation">Foundation</option></select><span class="grow"></span><span id="filter-count" class="filter-count"></span><button id="undo-button" type="button" disabled>Undo</button><button id="export-json" type="button">Export JSON</button></div>
+      <div class="board-scroll"><div class="board" id="board"></div></div>
+      <footer class="board-footer"><span>Open a card for steps, dependencies and acceptance. Drag a card to move it.</span><span>Edits stay in this tab until saved. <button type="button" class="quiet" id="footer-help" style="padding:0;font-size:inherit;text-decoration:underline">How saving works</button></span></footer>
+    </section>
+    <section class="roadmap" id="roadmap-view" aria-label="Agreed execution sequence">
+      <div class="plan-intro"><div class="plan-box"><h2>Why this order</h2><p>The CLI and item service support an early web kanban, without waiting for learning. The portable LSM and learning workflow remain the next substantial feature sequence.</p><p>Move real ACL tests and MCP ahead of the larger clients. That brings agents into the same working system sooner. Add automatic classification once real suggestions and corrections establish useful behavior.</p></div><div class="plan-box"><h2>What stays true</h2><ul><li>One independent binary learner per category.</li><li>Manual decisions keep their authority.</li><li>Learned state can be discarded and rebuilt.</li><li>Every client uses the common service.</li><li>Live edits create item revisions. HTML exports are independent snapshots.</li></ul></div></div>
+      <div class="sequence" id="sequence"></div><details><summary>Your original sequence</summary><ol id="original-sequence"></ol></details>
+    </section>
+    <noscript><p>This board needs JavaScript to display and edit tasks.</p></noscript>
+  </main>
+</div>
+<dialog id="task-dialog" aria-labelledby="dialog-title"><form id="task-form"><div class="dialog-head"><div><span id="dialog-id" class="card-id"></span><h2 id="dialog-title">Task details</h2></div><button type="button" id="close-dialog" aria-label="Cancel task edits">×</button></div><div class="dialog-body" id="dialog-body"></div><div class="dialog-actions"><span class="helper">Apply here, then Save HTML to keep it.</span><div class="actions-right"><button type="button" id="cancel-dialog">Cancel</button><button type="submit" class="primary">Apply changes</button></div></div></form></dialog>
+<dialog id="learning-dialog" aria-labelledby="learning-title"><div class="dialog-head"><h2 id="learning-title">Category learning</h2><button type="button" id="close-learning" aria-label="Close category learning">×</button></div><div class="dialog-body" id="learning-body"></div></dialog>
+<dialog id="help-dialog" aria-labelledby="help-title"><div class="dialog-head"><h2 id="help-title">Using this project board</h2><button type="button" id="close-help" aria-label="Close board help">×</button></div><div class="dialog-body help-copy"><p>This client displays one saved project view at a time. Choose a project after signing in; Refresh projects discovers new views you may read.</p><p>Open a card or drag it to make one guarded item edit. A pending edit or open draft must be resolved before changing projects, so it always keeps the original project categories.</p><p><a href="/manual">Open the web client manual</a></p></div></dialog>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<!-- Snapshot data. Update canonical items through the API and export again. -->
+<script type="application/json" id="board-data">
+@@BOARD_DATA@@
+</script>
+<script type="application/json" id="client-config">@@CLIENT_CONFIG@@</script>
+<script nonce="@@SCRIPT_NONCE@@">
+"use strict";
+(() => {
+  const originalTemplate = '<!doctype html>\n' + document.documentElement.outerHTML;
+  const configuration = JSON.parse(document.getElementById('client-config').textContent);
+  const isLive = configuration.mode === 'live';
+  let data = JSON.parse(document.getElementById('board-data').textContent) || {tasks:[], originalSequence:[], recommendedSequence:[], revision:0, updatedAt:new Date().toISOString()};
+  const columns = () => data.columns||[];
+  const filters = () => data.filters||[];
+  const isComplete = task => !!data.completionCategoryID && task.categoryIDs.includes(data.completionCategoryID);
+  const categoryName = id => [...columns(),...filters()].find(c=>c.id===id)?.name||'Category';
+  data.revision??=0;
+  const byId = id => data.tasks.find(task => task.id === id);
+  const $ = id => document.getElementById(id);
+  let dirty = false, undoStack = [], changes = 0, toastTimer, dragID, draft, isNew, saveHandle;
+  const initialViewID = data.viewItemID || data.projectID;
+  let savedRevision = data.revision;
+  function element(tag, attrs={}, children=[]) {
+    const node = document.createElement(tag);
+    for (const [key,value] of Object.entries(attrs)) {
+      if (key === 'text') node.textContent = value;
+      else if (key === 'class') node.className = value;
+      else if (key.startsWith('on')) node.addEventListener(key.slice(2),value);
+      else node.setAttribute(key,String(value));
+    }
+    for (const child of [].concat(children)) if (child != null) node.append(typeof child === 'string' ? document.createTextNode(child) : child);
+    return node;
+  }
+  let editingBase=null;
+  const clone = value => JSON.parse(JSON.stringify(value));
+  const currentDate = () => new Date().toISOString();
+  function dateLabel(value) { return new Intl.DateTimeFormat('en',{day:'numeric',month:'short',year:'numeric'}).format(new Date(value)); }
+  function toast(message,error=false) { clearTimeout(toastTimer);$('toast').textContent=message;$('toast').className='toast visible'+(error?' error':'');toastTimer=setTimeout(()=>$('toast').className='toast',5000); }
+  function saveState(message) { if(isLive){updateConnectionState(message);return;} $('save-indicator').textContent=message || (dirty ? changes+' unsaved change'+(changes===1?'':'s') : 'Saved snapshot · '+dateLabel(data.updatedAt));$('save-indicator').classList.toggle('dirty',dirty);$('undo-button').disabled=undoStack.length===0; }
+  function pending(task) { return task.dependsOn.map(byId).filter(other=>!other || !isComplete(other)); }
+  function completionError(task) {
+    if(!isComplete(task))return "";
+    if(task.checklist.some(step=>!step.done))return 'Complete the checklist before moving this task to Done.';
+    if(pending(task).length)return 'Complete the dependencies before moving this task to Done.';
+    return '';
+  }
+  function commit(next,message) {
+    undoStack.push(clone(data));if(undoStack.length>30)undoStack.shift();
+    next.revision=data.revision+1;next.updatedAt=currentDate();
+    next.activity=[...(next.activity||[]),{at:next.updatedAt,text:message}].slice(-100);
+    data=next;changes++;dirty=true;render();saveState();toast(message);
+  }
+  function moveTask(id,source,target) {
+    if(isLive && (isSaving || pendingWrite))return;
+    const task=byId(id);if(!task || source===target)return;
+    const updated=clone(task);updated.originalCategoryIDs=[...task.categoryIDs];updated.originalFilterCategoryIDs=[...task.filterCategoryIDs];updated.categoryIDs=updated.categoryIDs.filter(id=>id!==source);
+    if(target && !updated.categoryIDs.includes(target))updated.categoryIDs.push(target);
+    const error=completionError(updated);if(error){toast(error,true);return;}
+    if(isLive){void saveLiveTask(updated,revisionsByID.get(task.id));return;}
+    updated.updatedAt=currentDate();updated.history.push({at:updated.updatedAt,text:'Assigned to '+categoryName(target)});
+    const next=clone(data);next.tasks[next.tasks.findIndex(t=>t.id===id)]=updated;commit(next,'Category assignment updated.');
+  }
+  function taskCard(task,sourceCategoryID) {
+    const checked=task.checklist.filter(step=>step.done).length,total=task.checklist.length;
+    const card=element('article',{class:'card',draggable:'true','data-task-id':task.id});
+    card.append(element('div',{class:'card-head'},[element('span',{class:'card-id',text:task.reference||task.id}),element('span',{class:'priority '+task.priority.toLowerCase(),text:task.priority})]));
+    card.append(element('button',{class:'card-title',type:'button',text:task.title,onclick:()=>openTask(task.id)}));
+    card.append(element('p',{class:'card-summary',text:task.summary}));
+    card.append(element('div',{class:'tag-row'},task.filterCategoryIDs.map(id=>element('span',{class:'tag',text:categoryName(id)}))));
+    if(total){const fill=element('i');fill.style.width=(100*checked/total)+'%';card.append(element('div',{class:'task-steps'},[element('span',{text:checked+' / '+total+' steps'}),element('span',{class:'mini-progress','aria-hidden':'true'},fill)]));}
+    const blockers=pending(task).length;
+    card.append(element('div',{class:'card-foot'},[element('span',{class:'owner'},[element('span',{class:'avatar','aria-hidden':'true',text:task.owner ? task.owner[0].toUpperCase():'–'}),task.owner||'Unassigned']),element('span',{class:blockers?'dependency-count':'',text:blockers?blockers+' prerequisite'+(blockers===1?'':'s'):isComplete(task)?'Complete':task.kind==='milestone'?'Milestone':'Supporting work'})]));
+    card.addEventListener('dragstart',event=>{dragID={itemID:task.id,categoryID:sourceCategoryID};event.dataTransfer.setData('text/plain',JSON.stringify(dragID));event.dataTransfer.effectAllowed='move';card.classList.add('dragging');});
+    card.addEventListener('dragend',()=>{dragID=null;card.classList.remove('dragging');document.querySelectorAll('.drop-target').forEach(n=>n.classList.remove('drop-target'));});
+    return card;
+  }
+  function render() {
+    const previousFilter=$('track-filter').value;$('track-filter').replaceChildren(element('option',{value:'all',text:'All categories'}),...filters().map(c=>element('option',{value:c.id,text:c.name})));if(filters().some(c=>c.id===previousFilter))$('track-filter').value=previousFilter;
+    const search=$('search').value.trim().toLowerCase(),track=$('track-filter').value,scope=$('scope-filter').value;
+    const tasks=data.tasks.filter(task=>(track==='all'||task.filterCategoryIDs.includes(track))&&(scope==='all'||task.kind===scope)&&(!search||[task.reference,task.title,task.summary,task.notes,...task.checklist.map(s=>s.title)].join(' ').toLowerCase().includes(search))).sort((a,b)=>a.order-b.order||a.id.localeCompare(b.id));
+    $('board').replaceChildren();
+    $('board').style.gridTemplateColumns='repeat('+Math.max(1,columns().length)+',minmax(226px,1fr))';
+    const lanes=[...columns()];if(tasks.some(t=>!t.categoryIDs.length))lanes.push({id:null,name:'No displayed category'});
+    for(const status of lanes){
+      const matching=tasks.filter(t=>status.id?t.categoryIDs.includes(status.id):!t.categoryIDs.length);
+      const lane=element('section',{class:'lane','data-category-id':status.id||'', 'data-complete':status.id===data.completionCategoryID,'aria-label':status.name});
+      lane.append(element('div',{class:'lane-heading'},[element('span',{class:'status-dot','aria-hidden':'true'}),element('h2',{text:status.name}),element('span',{class:'lane-count',text:String(matching.length).padStart(2,'0')})]));
+      const cards=element('div',{class:'lane-cards'});
+      if(matching.length)matching.forEach(t=>cards.append(taskCard(t,status.id)));
+      else cards.append(element('div',{class:'empty-lane'},[element('div',{class:'empty-icon','aria-hidden':'true',text:status.id===data.completionCategoryID?'✓':'○'}),element('p',{text:search||track!=='all'||scope!=='all'?'No tasks match these filters.':'No matching items in this category.'})]));
+      lane.append(cards);
+      lane.addEventListener('dragover',event=>{if(dragID){event.preventDefault();event.dataTransfer.dropEffect='move';lane.classList.add('drop-target');}});
+      lane.addEventListener('dragleave',event=>{if(!lane.contains(event.relatedTarget))lane.classList.remove('drop-target');});
+      lane.addEventListener('drop',event=>{event.preventDefault();lane.classList.remove('drop-target');if(status.id && dragID && event.dataTransfer.getData('text/plain')===JSON.stringify(dragID))moveTask(dragID.itemID,dragID.categoryID,status.id);dragID=null;});
+      $('board').append(lane);
+    }
+    $('filter-count').textContent=tasks.length+' of '+data.tasks.length+' tasks';
+    $('stat-ready').textContent=String(data.tasks.length).padStart(2,'0');
+    $('stat-active').textContent=String(columns().length).padStart(2,'0');
+    $('stat-done').textContent=data.tasks.filter(isComplete).length+' / '+data.tasks.length;
+    $('sidebar-date').textContent=dateLabel(data.updatedAt);
+    $('record-kind').textContent=isLive?'Live project board':'HTML snapshot';
+    const sequenceConfigured=(data.recommendedSequence||[]).length||(data.originalSequence||[]).length;
+    $('next-up').hidden=!sequenceConfigured;$('roadmap-tab').hidden=!sequenceConfigured;
+    const projectTitle=data.title||'Project board';$('breadcrumb-project').textContent=projectTitle;$('hero-label').textContent='Kanban';
+    if(document.title!=='Sign in · Tractanda')document.title='Tractanda · '+projectTitle;
+    if($('board-tab').getAttribute('aria-pressed')==='true'){$('page-title').textContent=projectTitle;$('page-subtitle').textContent='A category-derived project board.';}
+    const next=(data.recommendedSequence||[]).map(byId).find(t=>t&&!isComplete(t));$('next-title').textContent=next?next.title:'All agreed milestones are complete.';
+    $('sequence').replaceChildren();
+    data.recommendedSequence.forEach((id,index)=>{const task=byId(id);if(!task)return;$('sequence').append(element('div',{class:'sequence-row'},[element('div',{class:'sequence-num',text:String(index+1).padStart(2,'0')}),element('div',{},[element('div',{class:'sequence-title',text:task.title}),element('div',{class:'sequence-description',text:task.rationale||task.summary}),element('div',{class:'original-order',text:'Original position '+task.originalPosition+(task.optional?' · timing depends on real feedback':'')})]),element('button',{type:'button',text:(task.reference||task.id)+' ↗',onclick:()=>openTask(id)})]));});
+    $('original-sequence').replaceChildren(...data.originalSequence.map(id=>element('li',{text:byId(id)?.requestedTitle||byId(id)?.title||id})));
+  }
+  function showView(name) {
+    if(name==='roadmap'&&!((data.recommendedSequence||[]).length||(data.originalSequence||[]).length))name='board';
+    $('board-view').hidden=name!=='board';$('roadmap-view').classList.toggle('active',name==='roadmap');
+    $('board-tab').setAttribute('aria-pressed',String(name==='board'));$('roadmap-tab').setAttribute('aria-pressed',String(name==='roadmap'));
+    $('page-title').textContent=name==='board'?(data.title||'Project board'):'Sequence & decisions';
+    $('page-subtitle').textContent=name==='board'?'A category-derived project board.':'The agreed order, with the dependencies made explicit.';
+  }
+  function field(label,node,extra='') { return element('label',{class:'field '+extra},[element('span',{text:label}),node]); }
+  function select(options,value,id) { const node=element('select',{id});for(const option of options){const item=element('option',{value:option.id||option,text:option.name||option});item.selected=(option.id||option)===value;node.append(item);}return node; }
+  function openTask(id) {
+    if(isLive && (isSaving || pendingWrite)){toast('Resolve the pending edit before starting another.',true);return;}
+    isNew=!id;const now=currentDate();
+    draft=isNew?{id:crypto.randomUUID(),title:'',summary:'',kind:'',categoryIDs:data.defaultCategoryID?[data.defaultCategoryID]:[],filterCategoryIDs:[],priority:'',owner:'',optional:false,order:Math.max(0,...data.tasks.map(t=>t.order))+1,dependsOn:[],checklist:[],acceptance:[],notes:'',evidence:[],history:[],createdAt:now,updatedAt:now}:clone(byId(id));
+    draft.originalCategoryIDs=[...draft.categoryIDs];draft.originalFilterCategoryIDs=[...draft.filterCategoryIDs];
+    draft.acceptance??=[];draft.evidence??=[];draft.history??=[];
+    editingBase=isLive&&!isNew?clone(revisionsByID.get(draft.id)):null;
+    $('dialog-id').textContent=(draft.reference||'Item')+(isNew?' · New task':' · '+draft.kind);$('dialog-title').textContent=isNew?'Add a task':'Task details';
+    const body=$('dialog-body');body.replaceChildren();
+    const main=element('div'),side=element('div',{class:'dialog-side'});
+    const title=element('input',{id:'edit-title',type:'text',required:'required',maxlength:'180',placeholder:'A concrete outcome'});title.value=draft.title;
+    const summary=element('textarea',{id:'edit-summary',rows:'3',maxlength:'3000'});summary.value=draft.summary;
+    main.append(field('Title',title,'title'),field('Description',summary));
+    if(draft.checklist.length){main.append(element('p',{class:'section-label',text:'Steps & verification'}));draft.checklist.forEach((step,index)=>{const check=element('input',{type:'checkbox','data-step-id':step.id});check.checked=step.done;check.addEventListener('change',()=>draft.checklist[index].done=check.checked);const caption=element('span',{},[step.title,step.source?element('small',{class:'source-note',text:step.source}):null]);main.append(element('label',{class:'check-row'},[check,caption]));});}
+    const extra=element('textarea',{id:'edit-extra-steps',rows:'2',placeholder:'One new step per line',maxlength:'4000'});main.append(field('Add checklist steps',extra));
+    if(draft.acceptance.length)main.append(element('p',{class:'section-label',text:'Done means'}),element('ul',{class:'acceptance'},draft.acceptance.map(t=>element('li',{text:t}))));
+    const notes=element('textarea',{id:'edit-notes',rows:'3',maxlength:'12000',placeholder:'Progress, decisions or evidence'});notes.value=draft.notes;main.append(field('Working notes',notes));
+    function categoryChoices(title,choices,selected,attribute){
+      const group=element('fieldset',{},[element('legend',{text:title})]);
+      choices.forEach(category=>{const input=element('input',{type:'checkbox',[attribute]:category.id});input.checked=selected.includes(category.id);group.append(element('label',{class:'check-row'},[input,category.name]));});
+      return group;
+    }
+    side.append(categoryChoices('Column categories',columns(),draft.categoryIDs,'data-column-choice'),
+      categoryChoices('Other categories',filters(),draft.filterCategoryIDs,'data-filter-choice'));
+    const priority=element('input',{id:'edit-priority',type:'text',maxlength:'100'});priority.value=draft.priority;side.append(field('Priority',priority));
+    const owner=element('input',{id:'edit-owner',type:'text',maxlength:'100',placeholder:'Unassigned'});owner.value=draft.owner;side.append(field('Owner',owner));
+    if(draft.dependsOn.length){side.append(element('p',{class:'section-label',text:'Dependencies'}));side.append(element('div',{class:'dependency-links'},draft.dependsOn.map(id=>element('span',{class:(byId(id)&&isComplete(byId(id)))?'':'pending',title:byId(id)?.title||id,text:((byId(id)&&isComplete(byId(id)))?'✓ ':'')+(byId(id)?.reference||id)}))));}
+    side.append(element('p',{class:'helper',text:'Updated '+dateLabel(draft.updatedAt)}));
+    body.append(element('div',{class:'dialog-layout'},[main,side]));
+    if(draft.evidence.length){body.append(element('p',{class:'section-label',text:'References & evidence'}),element('div',{class:'evidence'},draft.evidence.map(link=>referenceElement(link))));}
+    if(draft.history.length){const history=element('details',{},[element('summary',{class:'helper',text:'Task history ('+draft.history.length+')'}),element('ul',{class:'history-list'},draft.history.slice().reverse().map(entry=>element('li',{text:dateLabel(entry.at)+' · '+entry.text})))]);history.style.marginTop='18px';body.append(history);}
+    body.append(element('div',{id:'dialog-error',class:'dialog-error',role:'alert'}));
+    if(isLive)appendRevisionHistory(body, isNew?undefined:draft.id);
+    $('task-form').querySelector('[type=submit]').disabled=false;
+    if(!$('task-dialog').open)$('task-dialog').showModal();if(isLive)updateConnectionState();title.focus();
+  }
+  $('task-form').addEventListener('submit',async event=>{
+    event.preventDefault();draft.title=$('edit-title').value.trim();if(!draft.title){$('dialog-error').textContent='A task needs a title.';return;}
+    draft.summary=$('edit-summary').value.trim();draft.categoryIDs=Array.from(document.querySelectorAll('[data-column-choice]:checked'),n=>n.dataset.columnChoice);draft.priority=$('edit-priority').value;draft.filterCategoryIDs=Array.from(document.querySelectorAll('[data-filter-choice]:checked'),n=>n.dataset.filterChoice);draft.owner=$('edit-owner').value.trim();draft.notes=$('edit-notes').value.trim();
+    const additions=$('edit-extra-steps').value.split('\n').map(t=>t.trim()).filter(Boolean);
+    const candidate=clone(draft);additions.forEach(title=>candidate.checklist.push({id:crypto.randomUUID(),title,done:false}));
+    const error=completionError(candidate);if(error){$('dialog-error').textContent=error;$('dialog-error').scrollIntoView({block:'nearest'});return;}
+    if(isLive){await saveLiveTask(candidate,editingBase);return;}
+    candidate.updatedAt=currentDate();candidate.history.push({at:candidate.updatedAt,text:isNew?'Created in the HTML board.':'Edited task details and/or progress in the HTML board.'});
+    const next=clone(data);if(isNew)next.tasks.push(candidate);else next.tasks[next.tasks.findIndex(t=>t.id===candidate.id)]=candidate;
+    $('task-dialog').close();commit(next,candidate.id+(isNew?' added.':' updated.'));
+  });
+  function encodedData(value){return JSON.stringify(value,null,2).replace(/</g,'\\u003c').replace(/\u2028/g,'\\u2028').replace(/\u2029/g,'\\u2029');}
+  function serializedHTML(){const documentCopy=new DOMParser().parseFromString(originalTemplate,'text/html');documentCopy.body.classList.remove('needs-login');documentCopy.getElementById('board-data').textContent='\n'+encodedData(data)+'\n';documentCopy.getElementById('client-config').textContent=JSON.stringify({mode:'snapshot'});return '<!doctype html>\n'+documentCopy.documentElement.outerHTML;}
+  function download(name,content,type){const url=URL.createObjectURL(new Blob([content],{type}));const link=element('a',{href:url,download:name});document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);}
+  function projectFilename(extension){const name=(isLive&&data.title?data.title:'Tractanda-Kanban').replace(/[^a-z0-9]+/gi,'-').replace(/^-|-$/g,'')||'Tractanda-Kanban';return name+'.'+extension;}
+  async function saveHTML(){
+    if(isLive){if(isSaving||pendingWrite){toast('Resolve the pending edit before exporting.',true);return;}download(projectFilename('html'),serializedHTML(),'text/html');toast('HTML snapshot exported. The server remains the current record.');return;}
+    if('showSaveFilePicker' in window){
+      try{
+        if(!saveHandle)saveHandle=await window.showSaveFilePicker({suggestedName:'Tractanda-Kanban.html',types:[{description:'Tractanda board',accept:{'text/html':['.html']}}]});
+        const existing=await saveHandle.getFile();
+        if(existing.size){const source=await existing.text();const priorDoc=new DOMParser().parseFromString(source,'text/html');const embedded=priorDoc.getElementById('board-data');if(embedded){const prior=JSON.parse(embedded.textContent);if((prior.viewItemID||prior.projectID)===initialViewID&&prior.revision>savedRevision){saveHandle=undefined;toast('The selected file has newer changes. Open that version before editing further.',true);return;}}}
+        const writable=await saveHandle.createWritable();await writable.write(serializedHTML());await writable.close();
+        dirty=false;changes=0;savedRevision=data.revision;saveState('HTML file saved');toast('Board saved to the selected HTML file.');return;
+      }catch(error){if(error.name==='AbortError')return;saveHandle=undefined;toast('Direct saving is unavailable; downloading an HTML copy instead.');}
+    }
+    download('Tractanda-Kanban.html',serializedHTML(),'text/html');saveState('Copy downloaded · replace the original');toast('Updated HTML downloaded. Replace the project file with that copy.');
+  }
+
+  ['track-filter','scope-filter'].forEach(id=>$(id).addEventListener('change',render));$('search').addEventListener('input',render);
+  $('board-tab').addEventListener('click',()=>showView('board'));$('roadmap-tab').addEventListener('click',()=>showView('roadmap'));$('sequence-button').addEventListener('click',()=>showView('roadmap'));
+  $('task-dialog').addEventListener('close',()=>{if(isLive)updateConnectionState();});
+  $('new-task').addEventListener('click',()=>openTask());['close-dialog','cancel-dialog'].forEach(id=>$(id).addEventListener('click',()=>{if(!isSaving)$('task-dialog').close();}));
+  ['help-button','footer-help'].forEach(id=>$(id).addEventListener('click',()=>$('help-dialog').showModal()));$('close-help').addEventListener('click',()=>$('help-dialog').close());
+  $('save-html').addEventListener('click',saveHTML);$('export-json').addEventListener('click',()=>{download(projectFilename('json'),JSON.stringify(data,null,2),'application/json');toast('Board data exported. Use the connected client for live changes.');});
+  $('undo-button').addEventListener('click',()=>{if(!undoStack.length)return;const previous=undoStack.pop();previous.revision=data.revision+1;previous.updatedAt=currentDate();data=previous;dirty=true;changes++;render();saveState();toast('Last board edit undone.');});
+  document.addEventListener('keydown',event=>{if(event.key==='/'&&!event.metaKey&&!event.ctrlKey&&!event.altKey&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)&&!document.querySelector('dialog[open]')){event.preventDefault();showView('board');$('search').focus();}});
+  window.addEventListener('beforeunload',event=>{if(dirty){event.preventDefault();event.returnValue='';}});
+  @@LIVE_CLIENT@@
+  @@LEARNING_CLIENT@@
+  render();saveState();
+  if(isLive)void startLiveClient();
+})();
+</script>
+</body>
+</html>

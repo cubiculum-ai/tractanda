@@ -1,0 +1,65 @@
+# Build products, dependency checkouts and local package state.
+.build/
+.swiftpm/
+**/DerivedData/
+*.xcuserstate
+xcuserdata/
+.DS_Store
+__pycache__/
+*.py[cod]
+node_modules/
+.playwright-cli/
+
+# Private development history, data, runtime credentials, signatures and model assets.
+/work/
+/outputs/
+/output/
+/logs/
+/tmp/
+/data/
+/domain-research/
+/AGENTS.md
+/.agents/*
+!/.agents/plugins/
+/.agents/plugins/*
+!/.agents/plugins/marketplace.json
+/.codex/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.sqlite3-*
+*.sock
+*.tractanda
+*.emlx
+*.safetensors
+*.gguf
+*.onnx
+
+# All historical reference material is local research only, never release content.
+# This covers the original manuals/patent, copied PDFs, extracted text and page renders.
+/references/
+/Lotus*/
+/lotus*/
+/Agenda*/
+/agenda*/
+*.pdf
+*.PDF
+
+# Unreleased framework and model experiments, including downloaded third-party assets.
+/experiments/
+
+# Machine-specific launch/signing helpers retained locally.
+/scripts/run-project-*.sh
+/scripts/sign-macos.py
+# Superseded local filename; the authored public template is starter-categories.json.
+/templates/agenda-categories.json
+
+# Local static-site output.
+/_site/

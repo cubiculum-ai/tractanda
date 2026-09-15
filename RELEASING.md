@@ -1,0 +1,15 @@
+# Preparing a proof-of-concept release
+
+The first candidate is **0.1.0-poc.1** for `cubiculum-ai/tractanda`. This document does not create a tag, publish a repository or promise binary support.
+
+1. Review the source-available license, required notice and dependency notices. Commercial licensing is separate. Resolve contribution/relicensing rights before incorporating outside code.
+2. Run `python3 scripts/audit-release.py`, stage only the intended public files, then run `python3 scripts/audit-release.py --staged`. Inspect the manifest. Reference documents, private work history, data stores, credentials, model weights and machine-specific helpers must remain excluded. An ignore rule alone does not remove a previously committed file from history.
+3. Build and run `sh scripts/test.sh` from an exported source tree, with no local `outputs/`, `references/`, experiments or developer runtime files. Test the documented fresh-store setup and example project creation. Test two projects in the live browser example, including guarded edits and retry isolation.
+4. Record platform/toolchain, test results and known gaps in the release notes. The Linux workflow is configured independently of local macOS checks: pending CI is not a Linux pass. Keep optional model/runtime claims separate from core build results.
+5. Review the version, repository visibility and complete initial commit before pushing. Prepare the macOS arm64 executable bundle with its installer, boot-time LaunchDaemons, empty/sample setup and bundled Qwen runtime/weights. Use the existing daemon account for the preview; create no OS account. Verify installation, upgrade, rollback and data-preserving uninstall. Preserve private development history locally but publish one clean initial Git snapshot. Do not label unnotarized executables notarized or the preview production-ready. Linux installer/runtime readiness is not a first-push gate.
+6. After the repository exists, enable private vulnerability reporting and select GitHub Actions as the Pages source. Run the **Publish user manual** workflow when ready. It publishes only the static user manual, with no database or live project content.
+7. Tag the reviewed commit and create a GitHub **prerelease** with its limitations and verified installation instructions. A tag is a source checkpoint, not a data-format stability guarantee.
+
+Do not include test fixtures from real accounts or canonical production records in a release archive. Synthetic examples are included under `examples/`.
+
+Before 1.0, remove obsolete prototype compatibility paths rather than carrying them into the release. Migrate canonical formats deliberately when required and rebuild disposable indexes. This does not authorize discarding user content or history. See [macOS installation](docs/install.md).

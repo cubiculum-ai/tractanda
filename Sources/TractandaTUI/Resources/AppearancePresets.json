@@ -1,0 +1,37 @@
+{
+  "defaultPresetID" : "blue",
+  "palettes" : [
+    {
+      "id" : "blue",
+      "name" : "Blue",
+      "roles" : {
+        "activeSelection" : { "foreground" : "brightwhite", "background" : "blue" },
+        "inactiveSelection" : { "foreground" : "white", "background" : "blue", "dim" : true },
+        "titleBar" : { "foreground" : "brightwhite", "background" : "blue" },
+        "heading" : { "foreground" : "default", "background" : "default", "bold" : true },
+        "functionKeyNumber" : { "foreground" : "brightwhite", "background" : "blue" },
+        "functionKeyLabel" : { "foreground" : "black", "background" : "white" },
+        "menuSurface" : { "foreground" : "black", "background" : "white" },
+        "menuSelection" : { "foreground" : "brightwhite", "background" : "blue" },
+        "activePane" : { "foreground" : "default", "background" : "default" },
+        "passivePane" : { "foreground" : "default", "background" : "default", "dim" : true }
+      }
+    },
+    {
+      "id" : "amber",
+      "name" : "Amber",
+      "roles" : {
+        "activeSelection" : { "foreground" : "black", "background" : "brightyellow" },
+        "inactiveSelection" : { "foreground" : "black", "background" : "yellow", "dim" : true },
+        "titleBar" : { "foreground" : "black", "background" : "brightyellow" },
+        "heading" : { "foreground" : "default", "background" : "default", "bold" : true },
+        "functionKeyNumber" : { "foreground" : "black", "background" : "brightyellow" },
+        "functionKeyLabel" : { "foreground" : "black", "background" : "yellow" },
+        "menuSurface" : { "foreground" : "black", "background" : "yellow" },
+        "menuSelection" : { "foreground" : "black", "background" : "brightyellow" },
+        "activePane" : { "foreground" : "default", "background" : "default" },
+        "passivePane" : { "foreground" : "default", "background" : "default", "dim" : true }
+      }
+    }
+  ]
+}

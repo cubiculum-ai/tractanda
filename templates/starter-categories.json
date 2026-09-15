@@ -1,0 +1,2533 @@
+{
+  "identifier": "agenda-starter-v1",
+  "entries": [
+    {
+      "key": "status",
+      "classID": "NoteItem",
+      "parents": [],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Status"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional workflow category. Membership is an ordinary category assignment; rename, reorganize or delete freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == \"\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 100
+        }
+      }
+    },
+    {
+      "key": "status.attention",
+      "classID": "NoteItem",
+      "parents": [
+        "status"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Needs attention"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional workflow category. Membership is an ordinary category assignment; rename, reorganize or delete freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == \"\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 101
+        }
+      }
+    },
+    {
+      "key": "status.ready",
+      "classID": "NoteItem",
+      "parents": [
+        "status.attention"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Ready"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional workflow category. Membership is an ordinary category assignment; rename, reorganize or delete freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == \"\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 102
+        }
+      }
+    },
+    {
+      "key": "status.doing",
+      "classID": "NoteItem",
+      "parents": [
+        "status.attention"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "In progress"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional workflow category. Membership is an ordinary category assignment; rename, reorganize or delete freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == \"\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 103
+        }
+      }
+    },
+    {
+      "key": "status.review",
+      "classID": "NoteItem",
+      "parents": [
+        "status.attention"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "In review"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional workflow category. Membership is an ordinary category assignment; rename, reorganize or delete freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == \"\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 104
+        }
+      }
+    },
+    {
+      "key": "status.planned",
+      "classID": "NoteItem",
+      "parents": [
+        "status"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Planned"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional workflow category. Membership is an ordinary category assignment; rename, reorganize or delete freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == \"\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 105
+        }
+      }
+    },
+    {
+      "key": "status.done",
+      "classID": "NoteItem",
+      "parents": [
+        "status"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Completed"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional workflow category. Membership is an ordinary category assignment; rename, reorganize or delete freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == \"\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 106
+        }
+      }
+    },
+    {
+      "key": "who",
+      "classID": "NoteItem",
+      "parents": [],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Who"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == \"\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 1
+        }
+      }
+    },
+    {
+      "key": "what",
+      "classID": "NoteItem",
+      "parents": [],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "What"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == \"\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 2
+        }
+      }
+    },
+    {
+      "key": "when",
+      "classID": "NoteItem",
+      "parents": [],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "When"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == \"\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 3
+        }
+      }
+    },
+    {
+      "key": "where",
+      "classID": "NoteItem",
+      "parents": [],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Where"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == \"\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 4
+        }
+      }
+    },
+    {
+      "key": "means",
+      "classID": "NoteItem",
+      "parents": [],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Means"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == \"\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 5
+        }
+      }
+    },
+    {
+      "key": "priority",
+      "classID": "NoteItem",
+      "parents": [],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Priority"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == \"\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 6
+        }
+      }
+    },
+    {
+      "key": "urgency",
+      "classID": "NoteItem",
+      "parents": [],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Urgency"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == \"\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 7
+        }
+      }
+    },
+    {
+      "key": "who.family",
+      "classID": "NoteItem",
+      "parents": [
+        "who"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Family"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "context ==[c] \"family\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 8
+        }
+      }
+    },
+    {
+      "key": "who.friends",
+      "classID": "NoteItem",
+      "parents": [
+        "who"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Friends"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "context ==[c] \"friends\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 9
+        }
+      }
+    },
+    {
+      "key": "who.colleagues",
+      "classID": "NoteItem",
+      "parents": [
+        "who"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Colleagues"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "context ==[c] \"work\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 10
+        }
+      }
+    },
+    {
+      "key": "who.people",
+      "classID": "NoteItem",
+      "parents": [
+        "who"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "People"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "kMDItemContentTypeTree == \"NaturalPersonItem\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 11
+        }
+      }
+    },
+    {
+      "key": "who.organizations",
+      "classID": "NoteItem",
+      "parents": [
+        "who"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Organizations"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "classID == \"LegalPersonItem\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 12
+        }
+      }
+    },
+    {
+      "key": "who.roles",
+      "classID": "NoteItem",
+      "parents": [
+        "who"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Roles"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "classID == \"RoleItem\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 13
+        }
+      }
+    },
+    {
+      "key": "what.discuss",
+      "classID": "NoteItem",
+      "parents": [
+        "what"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Discuss"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "selection != * && viewDefinition != * && (subject ==[cd] \"*talk to *\" || body ==[cd] \"*talk to *\" || subject ==[cd] \"*discuss *\" || body ==[cd] \"*discuss *\" || subject ==[cd] \"*call *\" || body ==[cd] \"*call *\")"
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 14
+        }
+      }
+    },
+    {
+      "key": "what.read",
+      "classID": "NoteItem",
+      "parents": [
+        "what"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Read"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "selection != * && viewDefinition != * && (subject ==[cd] \"*read *\" || body ==[cd] \"*read *\" || subject ==[cd] \"*review *\" || body ==[cd] \"*review *\")"
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 15
+        }
+      }
+    },
+    {
+      "key": "what.write",
+      "classID": "NoteItem",
+      "parents": [
+        "what"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Write"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "selection != * && viewDefinition != * && (subject ==[cd] \"*write *\" || body ==[cd] \"*write *\" || subject ==[cd] \"*draft *\" || body ==[cd] \"*draft *\")"
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 16
+        }
+      }
+    },
+    {
+      "key": "what.inspect",
+      "classID": "NoteItem",
+      "parents": [
+        "what"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Inspect"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "selection != * && viewDefinition != * && (subject ==[cd] \"*inspect*\" || body ==[cd] \"*inspect*\")"
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 17
+        }
+      }
+    },
+    {
+      "key": "when.deadlines",
+      "classID": "NoteItem",
+      "parents": [
+        "when"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Deadlines"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "dueAt == * || classID == \"DeadlineItem\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 18
+        }
+      }
+    },
+    {
+      "key": "when.events",
+      "classID": "NoteItem",
+      "parents": [
+        "when"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Events"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "startsAt == * || classID == \"AppointmentItem\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 19
+        }
+      }
+    },
+    {
+      "key": "when.deadlines.today",
+      "classID": "NoteItem",
+      "parents": [
+        "when.deadlines"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Today"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == *"
+            },
+            "timeWindow": {
+              "type": "object",
+              "value": {
+                "startProperty": {
+                  "type": "text",
+                  "value": "dueAt"
+                },
+                "period": {
+                  "type": "text",
+                  "value": "day"
+                },
+                "offset": {
+                  "type": "integer",
+                  "value": 0
+                }
+              }
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 20
+        }
+      }
+    },
+    {
+      "key": "when.deadlines.tomorrow",
+      "classID": "NoteItem",
+      "parents": [
+        "when.deadlines"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Tomorrow"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == *"
+            },
+            "timeWindow": {
+              "type": "object",
+              "value": {
+                "startProperty": {
+                  "type": "text",
+                  "value": "dueAt"
+                },
+                "period": {
+                  "type": "text",
+                  "value": "day"
+                },
+                "offset": {
+                  "type": "integer",
+                  "value": 1
+                }
+              }
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 21
+        }
+      }
+    },
+    {
+      "key": "when.deadlines.week",
+      "classID": "NoteItem",
+      "parents": [
+        "when.deadlines"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "This week"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == *"
+            },
+            "timeWindow": {
+              "type": "object",
+              "value": {
+                "startProperty": {
+                  "type": "text",
+                  "value": "dueAt"
+                },
+                "period": {
+                  "type": "text",
+                  "value": "week"
+                },
+                "offset": {
+                  "type": "integer",
+                  "value": 0
+                }
+              }
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 22
+        }
+      }
+    },
+    {
+      "key": "when.deadlines.month",
+      "classID": "NoteItem",
+      "parents": [
+        "when.deadlines"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "This month"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == *"
+            },
+            "timeWindow": {
+              "type": "object",
+              "value": {
+                "startProperty": {
+                  "type": "text",
+                  "value": "dueAt"
+                },
+                "period": {
+                  "type": "text",
+                  "value": "month"
+                },
+                "offset": {
+                  "type": "integer",
+                  "value": 0
+                }
+              }
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 23
+        }
+      }
+    },
+    {
+      "key": "when.deadlines.quarter",
+      "classID": "NoteItem",
+      "parents": [
+        "when.deadlines"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "This quarter"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == *"
+            },
+            "timeWindow": {
+              "type": "object",
+              "value": {
+                "startProperty": {
+                  "type": "text",
+                  "value": "dueAt"
+                },
+                "period": {
+                  "type": "text",
+                  "value": "quarter"
+                },
+                "offset": {
+                  "type": "integer",
+                  "value": 0
+                }
+              }
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 24
+        }
+      }
+    },
+    {
+      "key": "when.deadlines.next-quarter",
+      "classID": "NoteItem",
+      "parents": [
+        "when.deadlines"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Next quarter"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == *"
+            },
+            "timeWindow": {
+              "type": "object",
+              "value": {
+                "startProperty": {
+                  "type": "text",
+                  "value": "dueAt"
+                },
+                "period": {
+                  "type": "text",
+                  "value": "quarter"
+                },
+                "offset": {
+                  "type": "integer",
+                  "value": 1
+                }
+              }
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 25
+        }
+      }
+    },
+    {
+      "key": "when.deadlines.3-months",
+      "classID": "NoteItem",
+      "parents": [
+        "when.deadlines"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Next 3 months"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == *"
+            },
+            "timeWindow": {
+              "type": "object",
+              "value": {
+                "startProperty": {
+                  "type": "text",
+                  "value": "dueAt"
+                },
+                "period": {
+                  "type": "text",
+                  "value": "rollingMonths"
+                },
+                "offset": {
+                  "type": "integer",
+                  "value": 3
+                }
+              }
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 26
+        }
+      }
+    },
+    {
+      "key": "when.deadlines.6-months",
+      "classID": "NoteItem",
+      "parents": [
+        "when.deadlines"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Next 6 months"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == *"
+            },
+            "timeWindow": {
+              "type": "object",
+              "value": {
+                "startProperty": {
+                  "type": "text",
+                  "value": "dueAt"
+                },
+                "period": {
+                  "type": "text",
+                  "value": "rollingMonths"
+                },
+                "offset": {
+                  "type": "integer",
+                  "value": 6
+                }
+              }
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 27
+        }
+      }
+    },
+    {
+      "key": "when.deadlines.12-months",
+      "classID": "NoteItem",
+      "parents": [
+        "when.deadlines"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Next 12 months"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == *"
+            },
+            "timeWindow": {
+              "type": "object",
+              "value": {
+                "startProperty": {
+                  "type": "text",
+                  "value": "dueAt"
+                },
+                "period": {
+                  "type": "text",
+                  "value": "rollingMonths"
+                },
+                "offset": {
+                  "type": "integer",
+                  "value": 12
+                }
+              }
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 28
+        }
+      }
+    },
+    {
+      "key": "when.events.today",
+      "classID": "NoteItem",
+      "parents": [
+        "when.events"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Today"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == *"
+            },
+            "timeWindow": {
+              "type": "object",
+              "value": {
+                "startProperty": {
+                  "type": "text",
+                  "value": "startsAt"
+                },
+                "period": {
+                  "type": "text",
+                  "value": "day"
+                },
+                "offset": {
+                  "type": "integer",
+                  "value": 0
+                },
+                "endProperty": {
+                  "type": "text",
+                  "value": "endsAt"
+                }
+              }
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 29
+        }
+      }
+    },
+    {
+      "key": "when.events.tomorrow",
+      "classID": "NoteItem",
+      "parents": [
+        "when.events"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Tomorrow"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == *"
+            },
+            "timeWindow": {
+              "type": "object",
+              "value": {
+                "startProperty": {
+                  "type": "text",
+                  "value": "startsAt"
+                },
+                "period": {
+                  "type": "text",
+                  "value": "day"
+                },
+                "offset": {
+                  "type": "integer",
+                  "value": 1
+                },
+                "endProperty": {
+                  "type": "text",
+                  "value": "endsAt"
+                }
+              }
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 30
+        }
+      }
+    },
+    {
+      "key": "when.events.week",
+      "classID": "NoteItem",
+      "parents": [
+        "when.events"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "This week"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == *"
+            },
+            "timeWindow": {
+              "type": "object",
+              "value": {
+                "startProperty": {
+                  "type": "text",
+                  "value": "startsAt"
+                },
+                "period": {
+                  "type": "text",
+                  "value": "week"
+                },
+                "offset": {
+                  "type": "integer",
+                  "value": 0
+                },
+                "endProperty": {
+                  "type": "text",
+                  "value": "endsAt"
+                }
+              }
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 31
+        }
+      }
+    },
+    {
+      "key": "when.events.month",
+      "classID": "NoteItem",
+      "parents": [
+        "when.events"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "This month"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == *"
+            },
+            "timeWindow": {
+              "type": "object",
+              "value": {
+                "startProperty": {
+                  "type": "text",
+                  "value": "startsAt"
+                },
+                "period": {
+                  "type": "text",
+                  "value": "month"
+                },
+                "offset": {
+                  "type": "integer",
+                  "value": 0
+                },
+                "endProperty": {
+                  "type": "text",
+                  "value": "endsAt"
+                }
+              }
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 32
+        }
+      }
+    },
+    {
+      "key": "when.events.quarter",
+      "classID": "NoteItem",
+      "parents": [
+        "when.events"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "This quarter"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == *"
+            },
+            "timeWindow": {
+              "type": "object",
+              "value": {
+                "startProperty": {
+                  "type": "text",
+                  "value": "startsAt"
+                },
+                "period": {
+                  "type": "text",
+                  "value": "quarter"
+                },
+                "offset": {
+                  "type": "integer",
+                  "value": 0
+                },
+                "endProperty": {
+                  "type": "text",
+                  "value": "endsAt"
+                }
+              }
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 33
+        }
+      }
+    },
+    {
+      "key": "when.events.next-quarter",
+      "classID": "NoteItem",
+      "parents": [
+        "when.events"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Next quarter"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == *"
+            },
+            "timeWindow": {
+              "type": "object",
+              "value": {
+                "startProperty": {
+                  "type": "text",
+                  "value": "startsAt"
+                },
+                "period": {
+                  "type": "text",
+                  "value": "quarter"
+                },
+                "offset": {
+                  "type": "integer",
+                  "value": 1
+                },
+                "endProperty": {
+                  "type": "text",
+                  "value": "endsAt"
+                }
+              }
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 34
+        }
+      }
+    },
+    {
+      "key": "when.events.3-months",
+      "classID": "NoteItem",
+      "parents": [
+        "when.events"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Next 3 months"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == *"
+            },
+            "timeWindow": {
+              "type": "object",
+              "value": {
+                "startProperty": {
+                  "type": "text",
+                  "value": "startsAt"
+                },
+                "period": {
+                  "type": "text",
+                  "value": "rollingMonths"
+                },
+                "offset": {
+                  "type": "integer",
+                  "value": 3
+                },
+                "endProperty": {
+                  "type": "text",
+                  "value": "endsAt"
+                }
+              }
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 35
+        }
+      }
+    },
+    {
+      "key": "when.events.6-months",
+      "classID": "NoteItem",
+      "parents": [
+        "when.events"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Next 6 months"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == *"
+            },
+            "timeWindow": {
+              "type": "object",
+              "value": {
+                "startProperty": {
+                  "type": "text",
+                  "value": "startsAt"
+                },
+                "period": {
+                  "type": "text",
+                  "value": "rollingMonths"
+                },
+                "offset": {
+                  "type": "integer",
+                  "value": 6
+                },
+                "endProperty": {
+                  "type": "text",
+                  "value": "endsAt"
+                }
+              }
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 36
+        }
+      }
+    },
+    {
+      "key": "when.events.12-months",
+      "classID": "NoteItem",
+      "parents": [
+        "when.events"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Next 12 months"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == *"
+            },
+            "timeWindow": {
+              "type": "object",
+              "value": {
+                "startProperty": {
+                  "type": "text",
+                  "value": "startsAt"
+                },
+                "period": {
+                  "type": "text",
+                  "value": "rollingMonths"
+                },
+                "offset": {
+                  "type": "integer",
+                  "value": 12
+                },
+                "endProperty": {
+                  "type": "text",
+                  "value": "endsAt"
+                }
+              }
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 37
+        }
+      }
+    },
+    {
+      "key": "when.deadlines.overdue",
+      "classID": "NoteItem",
+      "parents": [
+        "when.deadlines"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Overdue"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely. Apply workflow restrictions by selecting the relevant status categories."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == *"
+            },
+            "timeWindow": {
+              "type": "object",
+              "value": {
+                "startProperty": {
+                  "type": "text",
+                  "value": "dueAt"
+                },
+                "period": {
+                  "type": "text",
+                  "value": "past"
+                }
+              }
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 38
+        }
+      },
+      "excludedCategoryKeys": [
+        "status.done"
+      ]
+    },
+    {
+      "key": "where.anywhere",
+      "classID": "NoteItem",
+      "parents": [
+        "where"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Anywhere"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "location ==[c] \"anywhere\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 39
+        }
+      }
+    },
+    {
+      "key": "where.home",
+      "classID": "NoteItem",
+      "parents": [
+        "where"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Home"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "location ==[c] \"home\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 40
+        }
+      }
+    },
+    {
+      "key": "where.office",
+      "classID": "NoteItem",
+      "parents": [
+        "where"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Office"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "location ==[c] \"office\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 41
+        }
+      }
+    },
+    {
+      "key": "where.site",
+      "classID": "NoteItem",
+      "parents": [
+        "where"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "On site"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "location == * && location !=[c] \"anywhere\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 42
+        }
+      }
+    },
+    {
+      "key": "means.phone",
+      "classID": "NoteItem",
+      "parents": [
+        "means"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Phone"
+        },
+        "body": {
+          "type": "text",
+          "value": "Suggestions for calls: an explicit phone method, or call/talk-to wording without an attached location. Contact details, a duration estimate and a complete action form are not prerequisites. Include or exclude manually to correct suggestions."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "selection != * && viewDefinition != * && (means ==[c] \"phone\" || (location != * && (subject ==[cd] \"*talk to *\" || body ==[cd] \"*talk to *\" || subject ==[cd] \"*call *\" || body ==[cd] \"*call *\" || subject ==[cd] \"*phone *\" || body ==[cd] \"*phone *\" || subject ==[cd] \"*telephone *\" || body ==[cd] \"*telephone *\")))"
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 43
+        }
+      }
+    },
+    {
+      "key": "means.email",
+      "classID": "NoteItem",
+      "parents": [
+        "means"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Email"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "means ==[c] \"email\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 44
+        }
+      }
+    },
+    {
+      "key": "means.video",
+      "classID": "NoteItem",
+      "parents": [
+        "means"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Video"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "means ==[c] \"video\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 45
+        }
+      }
+    },
+    {
+      "key": "means.in-person",
+      "classID": "NoteItem",
+      "parents": [
+        "means"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "In person"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "means ==[c] \"in-person\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 46
+        }
+      }
+    },
+    {
+      "key": "priority.p0",
+      "classID": "NoteItem",
+      "parents": [
+        "priority"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "P0 · Critical"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "priority == \"P0\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 47
+        }
+      }
+    },
+    {
+      "key": "priority.p1",
+      "classID": "NoteItem",
+      "parents": [
+        "priority"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "P1 · High"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "priority == \"P1\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 48
+        }
+      }
+    },
+    {
+      "key": "priority.p2",
+      "classID": "NoteItem",
+      "parents": [
+        "priority"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "P2 · Normal"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "priority == \"P2\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 49
+        }
+      }
+    },
+    {
+      "key": "priority.p3",
+      "classID": "NoteItem",
+      "parents": [
+        "priority"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "P3 · Low"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "priority == \"P3\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 50
+        }
+      }
+    },
+    {
+      "key": "priority.p4",
+      "classID": "NoteItem",
+      "parents": [
+        "priority"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "P4 · Someday"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "priority == \"P4\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 51
+        }
+      }
+    },
+    {
+      "key": "urgency.u0",
+      "classID": "NoteItem",
+      "parents": [
+        "urgency"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "U0 · Immediate"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "urgency == \"U0\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 52
+        }
+      }
+    },
+    {
+      "key": "urgency.u1",
+      "classID": "NoteItem",
+      "parents": [
+        "urgency"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "U1 · Soon"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "urgency == \"U1\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 53
+        }
+      }
+    },
+    {
+      "key": "urgency.u2",
+      "classID": "NoteItem",
+      "parents": [
+        "urgency"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "U2 · Normal"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "urgency == \"U2\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 54
+        }
+      }
+    },
+    {
+      "key": "urgency.u3",
+      "classID": "NoteItem",
+      "parents": [
+        "urgency"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "U3 · Later"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Edit, disable, move or delete this item freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "urgency == \"U3\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 55
+        }
+      }
+    },
+    {
+      "key": "phone-20-minutes",
+      "classID": "SavedViewItem",
+      "parents": [],
+      "viewCategoryKeys": [
+        "means.phone"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Phone · 20 minutes"
+        },
+        "body": {
+          "type": "text",
+          "value": "Short call suggestions, with unknown duration retained. Review suitability yourself; no known contact number is required. Apply workflow restrictions by selecting the relevant status categories."
+        },
+        "viewDefinition": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "(estimatedMinutes != * || estimatedMinutes <= 20)"
+            },
+            "sort": {
+              "type": "list",
+              "value": [
+                {
+                  "type": "object",
+                  "value": {
+                    "property": {
+                      "type": "text",
+                      "value": "urgency"
+                    },
+                    "isAscending": {
+                      "type": "boolean",
+                      "value": true
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "value": {
+                    "property": {
+                      "type": "text",
+                      "value": "priority"
+                    },
+                    "isAscending": {
+                      "type": "boolean",
+                      "value": true
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "value": {
+                    "property": {
+                      "type": "text",
+                      "value": "dueAt"
+                    },
+                    "isAscending": {
+                      "type": "boolean",
+                      "value": true
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "excludedCategoryKeys": [
+        "status.done"
+      ]
+    }
+  ]
+}

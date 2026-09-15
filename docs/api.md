@@ -1,0 +1,57 @@
+# API and agent integration
+
+Use executable help and `TractandaStore/describe` as the operational reference for this experimental API. The local capability is `https://tractanda.ai/ns/local-prototype/2`, not a published network JMAP extension.
+
+## Native API and daemon
+
+The native CLI sends ordered JSON method calls over a Unix socket:
+
+```sh
+tractanda call /tmp/tractanda-demo.sock TractandaItem/query \
+  '{"expression":"subject ==[cd] \"*design*\"","limit":16}'
+tractanda get /tmp/tractanda-demo.sock ITEM_ID
+```
+
+The envelope is `{ "using": [CAPABILITY], "methodCalls": [[METHOD, ARGUMENTS, CALL_ID]] }`; the CLI unwraps one result. Socket peer credentials establish the caller—arguments cannot select another actor. The CLI, TUI and `tractanda-mcp SOCKET` stdio adapter continue to use this Unix route.
+
+The daemon adds optional loopback HTTP in the same process:
+
+```sh
+tractanda daemon STORE SOCKET --index-directory INDEX_DIRECTORY --http-port 48728
+```
+
+`STORE` and `SOCKET` are separate positional arguments. Omit `--index-directory` to retain the compatible `STORE/index` layout; its selected external directory may contain only derived SQLite/FTS, Vec1 and learning-cache files. `--no-http` is native-only. The optional presentation parameters are exactly `--view ID` or `--project-root ID --status-root ID [--project ID]`.
+
+## HTTP authentication and MCP
+
+HTTP `/auth/login` accepts an OS username and password, then `/api` and `/mcp` require its bearer token. On macOS the password path uses OpenDirectory. Linux arbitrary-user verification needs the separate privileged PAM helper deployment; its host installation and real credential tests are pending. Do not run the daemon as root merely for PAM.
+
+`TractandaAuth/createSession` is special only on the native socket: an envelope with that one method and empty arguments issues the peer's **own** session token. It rejects UID selection. The same method over HTTP does not mint a token.
+
+`/mcp` implements Streamable HTTP JSON. A session is bound to the authenticated principal; sessions and in-flight requests are bounded globally and per user, expire when idle, and are re-authorized on each request. There is no SSE endpoint or event replay. Clients initialize with HTTP POST, retain `Mcp-Session-Id`, and may DELETE that session. stdio MCP remains a separate local adapter.
+
+## Permissions and administration
+
+All reads, writes and history requests use current item permissions; changing access affects historical visibility too. OS identity and group membership are refreshed per request. An optional `AccessConfigurationItem` has profile `tractanda.access.v1`; `administration: "system"` recognizes root plus `admin` on macOS or `sudo` on Linux, unless `administratorGroup` overrides the OS group. Without an access configuration, legacy `serviceOwner` administration remains in effect pending migration.
+
+## Guarded changes and compact retrieval
+
+Tagged values include text, integer, real, boolean, date, bytes, reference, list and object. Use a persisted `operationID`; an uncertain mutation is retried with identical arguments and ID. Existing updates also require the current `expectedRevisionID`. Changes replace whole top-level fields, so fetch and merge a map before replacing it.
+
+Get/history support `full`, `content`, `summary`, or explicit top-level `properties`. Get is byte-bounded: follow ordered `remainingIDs`, handle `oversizedIDs` with a narrower projection, and compare state. An omitted projected property is not an unset field.
+
+## Literal and semantic search
+
+`text` is a literal FTS5 phrase, not raw FTS syntax. It searches subject, body, and owned tagged-text metadata: for example `workingNotes`, `checklists`, `labels`, and arbitrary custom text fields. `tractanda.item-text.v3` emits subject/body first, then sorted root fields; object keys sort and list order remains. The following exclusions apply **only at the root**:
+
+`itemID`, `revisionID`, `classID`, `schemaVersion`, `createdAt`, `modifiedAt`, `supersedes`, `actor`, `operationID`, `requestIdentity`, `isDeleted`, `permissions`, `accessConfiguration`, `categoryOverrides`, `personalOverrides`, `categoryParents`, `selection`, `viewDefinition`, `learningFeedback`, `learningSettings`, `developmentUUIDMigration`, `templateKey`.
+
+Empty or whitespace-only text values are omitted together with their field labels. Nonblank values retain their original bytes. A nested ordinary field with one of those names remains owned text. Extraction never traverses references or reads bytes, attachments, or remote content. Named metadata SQL predicates are a separate query mechanism.
+
+Semantic retrieval is optional and uses the same owned-text corpus as FTS5. The single input encoding is `item-text-utf8-v2`; the earlier subject/body-only prototype mode has been removed. The current extraction rules are `tractanda.item-text.v3`. Extraction-rule versions participate in the semantic profile identity, so a rules upgrade rebuilds the disposable vector index without changing the model, canonical records or item history. Before asserting semantic coverage, agents should inspect `TractandaSemantic/status`, especially `inputEncoding`, `itemTextProfile`, coverage and index counts. LSM query behavior is unchanged.
+
+Semantic configuration, rebuild and reset are administrator operations. The embedding endpoint is an operational loopback configuration, not a query-supplied URL. Semantic filtering still applies current permissions and the same category/query constraints.
+
+## UUID node policy
+
+UUIDv1 values intentionally encode a time and node provenance value. Production must use a real eligible host node (or explicitly configure the issuer node where hardware identity is unavailable). CI's synthetic node exists solely for disposable test fixtures and must never be copied into production configuration.

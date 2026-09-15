@@ -1,0 +1,17 @@
+{
+  "name": "tractanda",
+  "owner": {
+    "name": "rcfa - Cubiculum-AI"
+  },
+  "metadata": {
+    "description": "Agent skills for the Tractanda shared knowledge base."
+  },
+  "plugins": [
+    {
+      "name": "tractanda",
+      "source": "./plugins/tractanda",
+      "description": "Query and maintain shared knowledge in Tractanda.",
+      "version": "0.1.0-poc.1"
+    }
+  ]
+}
