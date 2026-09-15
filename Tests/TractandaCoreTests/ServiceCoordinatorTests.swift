@@ -9,6 +9,7 @@ final class ServiceCoordinatorTests: XCTestCase {
         let bob: UInt32 = 51_002
         let administrator: UInt32 = 51_003
         var users: [UInt32: AccountIdentity]
+        var beforeLookup: (@Sendable () -> Void)?
         var groups = ["staff": UInt32(71_001), "operators": UInt32(71_002), "service": UInt32(71_003)]
 
         init() {
@@ -23,6 +24,7 @@ final class ServiceCoordinatorTests: XCTestCase {
             ]
         }
         func user(forUID uid: UInt32) throws -> AccountIdentity {
+            beforeLookup?()
             guard let account = users[uid] else {
                 throw TractandaError("unresolvedPrincipal", "Unknown user")
             }
@@ -227,18 +229,30 @@ final class ServiceCoordinatorTests: XCTestCase {
         }
     }
 
-    func testCloseDrainsAcceptedQueuedRequests() async throws {
+    func testCloseDrainsAnAcceptedRequestBeforeReleasingTheWriter() async throws {
         try await fixture { root, accounts in
             let coordinator = try await ServiceCoordinator(opening: root, makeAccountDirectory: { accounts })
-            let malformed = Data(repeating: 0x20, count: 4 * 1024 * 1024)
-            let requests = (0..<8).map { _ in
-                Task { try await coordinator.handle(malformed, forUID: accounts.service) }
+            let entered = expectation(description: "Accepted work reached the serialized store queue")
+            let release = DispatchSemaphore(value: 0)
+            defer { release.signal() }
+            accounts.beforeLookup = {
+                entered.fulfill()
+                _ = release.wait(timeout: .now() + 10)
             }
-            for _ in 0..<16 { await Task.yield() }
-            await coordinator.close()
-            for request in requests {
-                let response = try await request.value
-                XCTAssertFalse(String(decoding: response, as: UTF8.self).contains("serviceClosed"))
+            let request = Task { try await coordinator.accountIdentity(forUID: accounts.service) }
+            await fulfillment(of: [entered], timeout: 5)
+            // Task.yield is not admission: explicitly observe accepted work before racing close.
+            let closing = Task { await coordinator.close() }
+            XCTAssertThrowsError(try ItemStore(root: root, accounts: accounts))
+            release.signal()
+            let identity = try await request.value
+            XCTAssertEqual(identity.name, "service")
+            await closing.value
+            accounts.beforeLookup = nil
+            let reopened = try ItemStore(root: root, accounts: accounts)
+            _ = reopened
+            await assertCode("serviceClosed") {
+                _ = try await coordinator.accountIdentity(forUID: accounts.service)
             }
         }
     }
