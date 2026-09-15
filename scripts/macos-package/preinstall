@@ -1,0 +1,56 @@
+#!/bin/sh
+# Protect the real payload destination before Apple's Installer writes any files.
+set -eu
+umask 077
+[ "${3:-/}" = / ] || { echo 'Install on the running system volume.' >&2; exit 1; }
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+IFS= read -r release < "$script_dir/release-path"
+base='/Users/Shared/Library/Application Support/Tractanda'
+case "$release" in "$base/releases/"*) ;; *) echo 'Invalid release destination.' >&2; exit 1;; esac
+
+for directory in /Users /Users/Shared /Users/Shared/Library "/Users/Shared/Library/Application Support" "$base" "$base/releases" "$release"; do
+    if [ -e "$directory" ] || [ -L "$directory" ]; then
+        [ -d "$directory" ] && [ ! -L "$directory" ] && [ "$(/usr/bin/stat -f %u "$directory")" = 0 ] || {
+            echo "Untrusted package destination: $directory" >&2; exit 1;
+        }
+        # Full octal mode includes the sticky bit; %Lp contains only rwx bits.
+        mode=$(/usr/bin/stat -f %Op "$directory")
+        if [ $((0$mode & 0022)) -ne 0 ]; then
+            case "$directory" in /Users/Shared|/Users/Shared/Library|"/Users/Shared/Library/Application Support")
+                [ $((0$mode & 01000)) -ne 0 ] || { echo "Protect shared parent: $directory" >&2; exit 1; };;
+                *) echo "Writable package destination: $directory" >&2; exit 1;;
+            esac
+        fi
+    fi
+done
+
+: > "$script_dir/stopped-instances"
+# New releases have new paths and do not overwrite running binaries. When
+# reinstalling an existing release, verify it before pausing its registered peers.
+if [ -d "$release" ]; then
+    IFS= read -r expected < "$script_dir/setup-sha256"
+    actual=$(/usr/bin/shasum -a 256 "$release/bin/tractanda-setup" | /usr/bin/awk '{print $1}')
+    [ "$actual" = "$expected" ] || { echo 'Existing release differs; use a fresh verified release.' >&2; exit 1; }
+    "$release/bin/tractanda-setup" plan --bundle "$release" > /dev/null
+    resume_on_failure() {
+        preinstall_status=$?
+        trap - EXIT
+        if [ "$preinstall_status" -ne 0 ]; then
+            while IFS= read -r peer; do "$release/bin/tractanda-setup" start --name "$peer" || true; done < "$script_dir/stopped-instances"
+        fi
+        exit "$preinstall_status"
+    }
+    trap resume_on_failure EXIT
+    for receipt in "$base"/receipts/*.json; do
+        [ -f "$receipt" ] || continue
+        [ ! -L "$receipt" ] && [ "$(/usr/bin/stat -f %u "$receipt")" = 0 ] || exit 1
+        peer_release=$(/usr/bin/plutil -extract release raw -o - "$receipt")
+        peer_state=$(/usr/bin/plutil -extract state raw -o - "$receipt")
+        if [ "$peer_release" = "$release" ] && [ "$peer_state" = active ]; then
+            peer=$(/usr/bin/plutil -extract instance raw -o - "$receipt")
+            case "$peer" in ''|*[!a-z0-9-]*) exit 1;; esac
+            printf '%s\n' "$peer" >> "$script_dir/stopped-instances"
+            "$release/bin/tractanda-setup" stop --name "$peer"
+        fi
+    done
+fi

@@ -1,12 +1,24 @@
 #!/bin/sh
-# Installer's private script directory contains the verified, signed release bundle.
+# The standard package payload installs the immutable release at its final location.
 set -eu
 [ "${3:-/}" = / ] || { echo 'Install Tractanda on the running system volume.' >&2; exit 1; }
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-bundle="$script_dir/bundle"
+IFS= read -r bundle < "$script_dir/release-path"
 base='/Users/Shared/Library/Application Support/Tractanda'
 registry="$base/connections.json"
 instance=default
+
+# A reinstall may have paused peers using this exact release. Always resume them,
+# even if the default database's setup reports an error.
+resume_peers() {
+    [ -f "$script_dir/stopped-instances" ] || return 0
+    resume_result=0
+    while IFS= read -r peer; do
+        "$bundle/bin/tractanda-setup" start --name "$peer" || resume_result=1
+    done < "$script_dir/stopped-instances"
+    return "$resume_result"
+}
+trap 'install_status=$?; trap - EXIT; resume_peers || install_status=1; exit "$install_status"' EXIT
 
 if [ -e "$registry" ]; then
     [ ! -L "$registry" ] && [ "$(/usr/bin/stat -f %u "$registry")" = 0 ] || {
@@ -20,7 +32,8 @@ case "$instance" in ''|*[!a-z0-9-]*) echo 'Invalid default database name.' >&2; 
 
 if [ -f "$base/receipts/$instance.json" ]; then
     # Existing owner, data locations, model configuration and port are preserved.
-    exec "$bundle/bin/tractanda-setup" upgrade --bundle "$bundle" --name "$instance"
+    "$bundle/bin/tractanda-setup" upgrade --bundle "$bundle" --name "$instance"
+    exit 0
 fi
 
 owner=$(/usr/bin/stat -f %Su /dev/console)
@@ -28,4 +41,4 @@ case "$owner" in ''|root|loginwindow|_mbsetupuser)
     echo 'Log in as the intended owner before installing, or use install.sh with an explicit --owner.' >&2
     exit 1;;
 esac
-exec "$bundle/bin/tractanda-setup" install --bundle "$bundle" --name "$instance" --owner "$owner" --sample
+"$bundle/bin/tractanda-setup" install --bundle "$bundle" --name "$instance" --owner "$owner" --sample
