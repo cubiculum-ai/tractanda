@@ -215,7 +215,7 @@ final class CategoryLearningTests: XCTestCase {
 
     func testEmptyEvidenceLimitsCacheCorruptionAndSettingsValidation() throws {
         let root = temporaryRoot()
-        let externalIndex = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+        let externalIndex = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
             .appendingPathComponent("tractanda-learning-index-\(Identifier.make())")
         defer {
             try? FileManager.default.removeItem(at: root)

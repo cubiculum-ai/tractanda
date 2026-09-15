@@ -5,7 +5,7 @@ import XCTest
 
 final class ExternalIndexDirectoryTests: XCTestCase {
     private func directory(_ name: String = "external-index") -> URL {
-        URL(fileURLWithPath: "/private/tmp", isDirectory: true).appendingPathComponent(
+        FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent(
             "\(name)-\(Identifier.make())")
     }
 

@@ -147,7 +147,7 @@ final class SemanticServiceTests: XCTestCase {
     func testExternalIndexDirectoryHoldsVec1Files() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
             "semantic-root-\(Identifier.make())")
-        let index = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+        let index = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
             .appendingPathComponent("semantic-index-\(Identifier.make())")
         defer {
             try? FileManager.default.removeItem(at: root)
