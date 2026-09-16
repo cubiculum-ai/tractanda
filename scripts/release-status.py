@@ -219,6 +219,19 @@ class Observer:
         return data
 
 
+def failure_summary(state, control):
+    """Expose only an explicit, non-sensitive category from the matching release."""
+    if state.get('status') != 'failed' or state.get('activeStep') != 'notarization':
+        return None
+    directory = Path(state.get('directory', ''))
+    if directory.resolve().parent != Path(control).resolve() or directory.name != state.get('version'):
+        return None
+    receipt, _ = read_object(directory / 'notarization/notarization.json')
+    if receipt and not receipt.get('notarized') and receipt.get('failureCategory') == 'accountDiscovery':
+        return 'Xcode CLI could not discover the configured developer account before upload. The bounded recovery stopped.'
+    return None
+
+
 def snapshot(control=DEFAULT_CONTROL, runner=subprocess.run, now=None, observer=None):
     """Return filtered observer state without reading configuration, notes, or log bodies."""
     control, now = Path(control), now or utc_now()
@@ -291,7 +304,8 @@ def snapshot(control=DEFAULT_CONTROL, runner=subprocess.run, now=None, observer=
             'overallElapsedSeconds': max(0, int((end - parse_time(state['createdAt'])).total_seconds())) if parse_time(state.get('createdAt')) else None,
             'stepElapsedSeconds': age_seconds(state.get('activeStepStartedAt'), end) if active else None,
             'lastLogActivityAgeSeconds': log_age, 'lastLogActivityAt': log_at, 'runner': runner_view, 'child': child,
-            'uploadReadProgress': progress, 'progress': progress or 'unavailable', 'observation': observation}
+            'uploadReadProgress': progress, 'progress': progress or 'unavailable', 'observation': observation,
+            'failureSummary': failure_summary(state, control)}
     return observer.observe(data) if observer else data
 
 
@@ -300,6 +314,8 @@ def readable(data):
              f"Stage: {data.get('stage') or 'none'}; completed steps: {data.get('completedStepCount', 0)} of {data.get('totalStepCount') or 'unknown'}",
              'Observer: ' + data.get('observation', 'unknown')]
     runner = data.get('runner', {})
+    if data.get('failureSummary'):
+        lines.insert(2, 'Failure: ' + data['failureSummary'])
     lines.append('Runner: ' + runner.get('identity', 'unknown') +
                  (f" (PID {runner['pid']})" if runner.get('pid') else ''))
     if data.get('child'):
@@ -323,7 +339,7 @@ def readable(data):
 
 PAGE = '''<!doctype html><meta charset="utf-8"><title>Tractanda release status</title>
 <style>body{margin:0;background:#07182d;color:#dce9fa;font:16px -apple-system,sans-serif}main{max-width:760px;margin:48px auto;padding:24px;background:#0d2745;border-radius:12px}pre{white-space:pre-wrap;color:#b8d4f1}</style>
-<main><h1>Release observer</h1><pre id="status">Loading…</pre></main><script>let busy=false;async function load(){if(busy)return;busy=true;let out=document.querySelector('#status');try{let r=await fetch('/status.json',{cache:'no-store'});if(!r.ok)throw Error('status unavailable');let x=await r.json();out.textContent=[`Release ${x.version||'unknown'}: ${x.status}`,`Stage: ${x.stage||'none'}; completed steps: ${x.completedStepCount||0} of ${x.totalStepCount??'unknown'}`,`Observer: ${x.observation}`,`Advancement: ${x.advancement||'unknown'}`,`Overall elapsed: ${x.overallElapsedSeconds??'unavailable'}s`,x.stepElapsedSeconds!=null?`Step elapsed: ${x.stepElapsedSeconds}s`:'Step elapsed: unavailable',x.lastLogActivityAgeSeconds!=null?`Last activity: ${x.lastLogActivityAgeSeconds}s ago`:'Last activity: unavailable',x.uploadReadProgress?`Local stream read: ${x.uploadReadProgress.file} ${x.uploadReadProgress.percent}% (remote acceptance unknown)`:x.status==='complete'?'Progress: finished.':'Progress: unavailable; quiet is not proof of a stall.'].join('\\n')}catch(e){out.textContent='Status refresh failed; displayed state is unavailable.'}finally{busy=false}}load();setInterval(load,2000)</script>'''
+<main><h1>Release observer</h1><pre id="status">Loading…</pre></main><script>let busy=false;async function load(){if(busy)return;busy=true;let out=document.querySelector('#status');try{let r=await fetch('/status.json',{cache:'no-store'});if(!r.ok)throw Error('status unavailable');let x=await r.json();out.textContent=[`Release ${x.version||'unknown'}: ${x.status}`,`Stage: ${x.stage||'none'}; completed steps: ${x.completedStepCount||0} of ${x.totalStepCount??'unknown'}`,...(x.failureSummary?[`Failure: ${x.failureSummary}`]:[]),`Observer: ${x.observation}`,`Advancement: ${x.advancement||'unknown'}`,`Overall elapsed: ${x.overallElapsedSeconds??'unavailable'}s`,x.stepElapsedSeconds!=null?`Step elapsed: ${x.stepElapsedSeconds}s`:'Step elapsed: unavailable',x.lastLogActivityAgeSeconds!=null?`Last activity: ${x.lastLogActivityAgeSeconds}s ago`:'Last activity: unavailable',x.uploadReadProgress?`Local stream read: ${x.uploadReadProgress.file} ${x.uploadReadProgress.percent}% (remote acceptance unknown)`:x.status==='complete'?'Progress: finished.':'Progress: unavailable; quiet is not proof of a stall.'].join('\\n')}catch(e){out.textContent='Status refresh failed; displayed state is unavailable.'}finally{busy=false}}load();setInterval(load,2000)</script>'''
 
 
 def make_server(control, port):

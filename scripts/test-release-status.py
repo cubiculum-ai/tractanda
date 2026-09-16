@@ -12,6 +12,26 @@ spec = importlib.util.spec_from_file_location('status', Path(__file__).with_name
 status = importlib.util.module_from_spec(spec); spec.loader.exec_module(status)
 
 class StatusTests(unittest.TestCase):
+    def test_failure_summary_only_exposes_verified_category_for_current_phase(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            release = root / 'v'
+            evidence = release / 'notarization'
+            evidence.mkdir(parents=True)
+            receipt = {'notarized': False, 'failureCategory': 'accountDiscovery',
+                       'lastFailure': {'message': 'private path and secret details'}}
+            (evidence / 'notarization.json').write_text(json.dumps(receipt))
+            state = {'version': 'v', 'status': 'failed', 'activeStep': 'notarization',
+                     'directory': str(release), 'steps': {}}
+            self.fixture(root, state)
+            data = status.snapshot(root, runner=lambda *a, **k: None)
+            self.assertIn('before upload', data['failureSummary'])
+            self.assertNotIn('secret', json.dumps(data))
+            self.assertIn('Failure: Xcode CLI', status.readable(data))
+            for override in ({'status': 'running'}, {'activeStep': 'package'},
+                             {'version': 'another'}, {'directory': str(root.parent / 'v')}):
+                self.assertIsNone(status.failure_summary({**state, **override}, root))
+
     def test_relative_cli_launch_uses_its_observed_working_directory(self):
         controller = Path('/tmp/project/scripts/release-macos.py')
         command = '/usr/bin/python3 scripts/release-macos.py run'

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", re.I)
+LOG_BUNDLE = re.compile(r'Created bundle at path "([^"\n]+\.xcdistributionlogs)"')
 
 
 def now():
@@ -87,6 +88,18 @@ def distribution(archive, team):
     return matches[0] if len(matches) == 1 else None
 
 
+def no_distributions(archive):
+    info = plistlib.loads((Path(archive) / "Info.plist").read_bytes())
+    return "Distributions" not in info or info["Distributions"] == []
+
+
+def only_distribution(archive, team, identifier):
+    info = plistlib.loads((Path(archive) / "Info.plist").read_bytes())
+    entries = info.get("Distributions")
+    found = distribution(archive, team)
+    return isinstance(entries, list) and len(entries) == 1 and found and found["identifier"] == identifier
+
+
 def private_stage(archive):
     archive = Path(archive)
     stage = archive.parent
@@ -106,6 +119,110 @@ def private_stage(archive):
             "Recorded private notarization archive is unsafe or missing; manual reconciliation is required."
         )
     return stage.resolve()
+
+
+def private_log(path):
+    """Return trusted Xcode distribution logs, without exposing their contents."""
+    path = Path(path)
+    root = Path(tempfile.gettempdir()).resolve()
+    if (
+        not path.is_absolute()
+        or path.parent.resolve() != root
+        or not path.name.startswith("NotarizationWrapper_")
+        or path.suffix != ".xcdistributionlogs"
+        or path.is_symlink()
+        or not path.is_dir()
+        or path.stat().st_uid != os.geteuid()
+        or stat.S_IMODE(path.stat().st_mode) & 0o022
+    ):
+        raise RuntimeError("Xcode account-discovery logs are unsafe or unavailable.")
+    logs = []
+    for name in ("IDEDistribution.standard.log", "IDEDistribution.verbose.log"):
+        candidate = path / name
+        if (
+            candidate.is_symlink()
+            or not candidate.is_file()
+            or candidate.resolve().parent != path.resolve()
+            or candidate.stat().st_uid != os.geteuid()
+            or stat.S_IMODE(candidate.stat().st_mode) & 0o022
+        ):
+            raise RuntimeError("Xcode account-discovery logs are unsafe or unavailable.")
+        logs.append(candidate)
+    return path, logs
+
+
+def account_discovery_failure(error, archive):
+    """Prove the narrow failure mode in Xcode's private, pre-upload logs.
+
+    This intentionally does not treat an exit code, a missing ID, or an error
+    string as evidence that Apple received no submission.
+    """
+    text = "\n".join(
+        str(value)
+        for value in (getattr(error, "stdout", ""), getattr(error, "stderr", ""), str(error))
+        if isinstance(value, str)
+    )
+    return account_discovery_failure_text(text, archive)
+
+
+def account_discovery_failure_text(text, archive):
+    matches = LOG_BUNDLE.findall(text)
+    if len(matches) != 1 or not no_distributions(archive):
+        return None
+    try:
+        bundle, (standard_path, verbose_path) = private_log(matches[0])
+        standard = standard_path.read_text(errors="replace")
+        verbose = verbose_path.read_text(errors="replace")
+    except (OSError, RuntimeError):
+        return None
+    failure_line = re.compile(
+        r"Step failed.*IDEDistributionUploadAccountStep.*IDEProvisioningErrorDomain\s+Code[= ]23.*No Accounts"
+    )
+    standard_steps = [line for line in standard.splitlines() if "Step" in line]
+    if (
+        not any(failure_line.search(line) for line in standard.splitlines() + verbose.splitlines())
+        or not standard_steps
+        or "IDEDistributionUploadAccountStep" not in standard_steps[-1]
+        or "IDEDistributionUploadStep" in standard
+        or "IDEDistributionUploadStep" in verbose
+    ):
+        return None
+    return {
+        "kind": "xcodeAccountDiscovery",
+        "logBundle": str(bundle),
+        "standardSHA256": sha256(standard_path),
+        "verboseSHA256": sha256(verbose_path),
+        "verifiedAt": now(),
+    }
+
+
+def verified_pre_submission_failure(receipt, archive):
+    proof = receipt.get("preSubmissionFailure")
+    if not isinstance(proof, dict) or proof.get("kind") != "xcodeAccountDiscovery":
+        return False
+    if receipt.get("submissionID") or not no_distributions(archive):
+        return False
+    try:
+        bundle, (standard_path, verbose_path) = private_log(proof.get("logBundle", ""))
+    except (TypeError, OSError, RuntimeError):
+        return False
+    if str(bundle) != proof.get("logBundle"):
+        return False
+    if proof.get("standardSHA256") != sha256(standard_path) or proof.get("verboseSHA256") != sha256(verbose_path):
+        return False
+    standard = standard_path.read_text(errors="replace")
+    verbose = verbose_path.read_text(errors="replace")
+    failure_line = re.compile(
+        r"Step failed.*IDEDistributionUploadAccountStep.*IDEProvisioningErrorDomain\s+Code[= ]23.*No Accounts"
+    )
+    standard_steps = [line for line in standard.splitlines() if "Step" in line]
+    return (
+        any(failure_line.search(line) for line in standard.splitlines() + verbose.splitlines())
+        and bool(standard_steps)
+        and "IDEDistributionUploadAccountStep" in standard_steps[-1]
+        and "IDEDistributionUploadStep" not in standard
+        and "IDEDistributionUploadStep" not in verbose
+    )
 
 
 def make_archive(stage, package, executable, identity, team, runner):
@@ -225,18 +342,19 @@ def notarize(
         runner(["xcrun", "stapler", "validate", str(output)])
         assessment(output, runner)
         return receipt
+    receipt.pop("failureCategory", None)
     write_json(receipt_path, receipt)
 
     def observed(args):
         try:
             return runner(args)
         except Exception as error:
+            receipt.pop("failureCategory", None)
             receipt.update(lastFailure=diagnostics(error), failedAt=now())
             write_json(receipt_path, receipt)
             raise
 
     package_signature(package, expected_team_id, observed)
-    created = False
     if receipt.get("archive"):
         archive = Path(receipt["archive"])
         options = archive.parent / "ExportOptions.plist"
@@ -250,13 +368,16 @@ def notarize(
         except BaseException:
             shutil.rmtree(stage)
             raise
-        receipt.update(archive=str(archive), submissionState="uploading", submissionIntentAt=now())
+        receipt.update(archive=str(archive), submissionState="created")
         write_json(receipt_path, receipt)
-        created = True
     recorded = receipt.get("submissionID")
     found = distribution(archive, expected_team_id)
     if recorded and (not found or found["identifier"] != recorded):
         raise RuntimeError("Recorded Xcode distribution does not match the private archive.")
+    if not recorded and not no_distributions(archive) and (
+        not found or not only_distribution(archive, expected_team_id, found["identifier"])
+    ):
+        raise RuntimeError("Private archive contains unrecognized Xcode distribution metadata; manual reconciliation is required.")
     if not recorded and found:
         receipt.update(
             submissionID=found["identifier"],
@@ -267,7 +388,33 @@ def notarize(
         write_json(receipt_path, receipt)
         recorded = receipt["submissionID"]
     if not recorded:
-        if receipt.get("submissionState") == "uploading" and not created:
+        # An interrupted prior version may have persisted only its conservative
+        # uploading intent. It can be released from reconciliation only by the
+        # same independent, on-disk proof used for a new failure.
+        if receipt.get("submissionState") == "uploading":
+            attempts = receipt.get("uploadAttempts")
+            latest = attempts[-1] if isinstance(attempts, list) and attempts else None
+            failure = (
+                latest.get("failure") if isinstance(latest, dict) and latest.get("state") == "failed" else None
+            )
+            if latest is None:
+                failure = receipt.get("lastFailure")
+            prior_text = failure.get("message") if isinstance(failure, dict) else None
+            proof = account_discovery_failure_text(prior_text, archive) if isinstance(prior_text, str) else None
+            if proof:
+                receipt.update(
+                    submissionState="notSubmitted",
+                    preSubmissionFailure=proof,
+                    failureCategory="accountDiscovery",
+                    reconciledAt=now(),
+                )
+                write_json(receipt_path, receipt)
+        resumable = receipt.get("submissionState") == "notSubmitted" and verified_pre_submission_failure(
+            receipt, archive
+        )
+        if receipt.get("submissionState") not in ("created", "notSubmitted") or (
+            receipt.get("submissionState") == "notSubmitted" and not resumable
+        ):
             raise RuntimeError(
                 "Previous Xcode upload has no recorded distribution; manual reconciliation is required before retrying."
             )
@@ -279,19 +426,69 @@ def notarize(
         ):
             raise RuntimeError("Notarization inputs changed before upload.")
         observed(["/usr/bin/codesign", "--verify", "--strict", str(app)])
-        observed(
-            [
-                "xcodebuild",
-                "-exportArchive",
-                "-archivePath",
-                str(archive),
-                "-exportOptionsPlist",
-                str(options),
-                "-exportPath",
-                str(archive.parent / "upload"),
-                "-allowProvisioningUpdates",
-            ]
-        )
+        export_args = [
+            "xcodebuild",
+            "-exportArchive",
+            "-archivePath",
+            str(archive),
+            "-exportOptionsPlist",
+            str(options),
+            "-exportPath",
+            str(archive.parent / "upload"),
+            "-allowProvisioningUpdates",
+        ]
+
+        def export_once():
+            attempt = {"intentAt": now(), "state": "uploading"}
+            receipt.setdefault("uploadAttempts", []).append(attempt)
+            receipt.pop("failureCategory", None)
+            receipt.pop("preSubmissionFailure", None)
+            receipt.pop("lastFailure", None)
+            receipt.pop("failedAt", None)
+            receipt.update(submissionState="uploading", submissionIntentAt=attempt["intentAt"])
+            write_json(receipt_path, receipt)
+            try:
+                runner(export_args)
+            except Exception as error:
+                attempt.update(state="failed", failedAt=now(), failure=diagnostics(error))
+                proof = account_discovery_failure(error, archive)
+                if proof:
+                    receipt.update(
+                        submissionState="notSubmitted",
+                        preSubmissionFailure=proof,
+                        lastFailure={
+                            "type": "XcodeAccountDiscovery",
+                            "message": "Xcode could not discover an account before starting upload.",
+                        },
+                        failureCategory="accountDiscovery",
+                        failedAt=now(),
+                    )
+                    attempt.update(state="accountDiscoveryFailed", proof=proof)
+                else:
+                    receipt.pop("failureCategory", None)
+                    receipt.update(submissionState="uploading", lastFailure=diagnostics(error), failedAt=now())
+                write_json(receipt_path, receipt)
+                raise
+            return attempt
+
+        try:
+            uploaded_attempt = export_once()
+        except Exception as error:
+            # Xcode has demonstrated that this failure happens before its upload
+            # step. One fresh CLI invocation is safe; all other errors retain the
+            # conservative uploading intent for explicit reconciliation.
+            if receipt.get("submissionState") != "notSubmitted" or not verified_pre_submission_failure(receipt, archive):
+                raise
+            sleeper(2)
+            try:
+                uploaded_attempt = export_once()
+            except Exception as retry_error:
+                if receipt.get("submissionState") == "notSubmitted" and verified_pre_submission_failure(receipt, archive):
+                    raise RuntimeError(
+                        "Xcode account discovery failed before upload twice; no submission was recorded. "
+                        "Retry this notarization command later after account discovery recovers."
+                    ) from retry_error
+                raise
         found = distribution(archive, expected_team_id)
         if not found:
             raise RuntimeError(
@@ -300,6 +497,7 @@ def notarize(
         receipt.update(
             submissionID=found["identifier"], distribution=found, submissionState="uploaded", uploadedAt=now()
         )
+        uploaded_attempt.update(state="uploaded", submissionID=found["identifier"], uploadedAt=receipt["uploadedAt"])
         write_json(receipt_path, receipt)
         recorded = receipt["submissionID"]
     if not valid_uuid(recorded):
@@ -373,6 +571,7 @@ def notarize(
     receipt.update(
         notarized=True, outputSHA256=digest, output=str(output), team=expected_team_id, completedAt=now()
     )
+    receipt.pop("failureCategory", None)
     write_json(receipt_path, receipt)
     shutil.rmtree(private_stage(archive))
     return receipt
