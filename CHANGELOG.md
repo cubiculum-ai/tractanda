@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.0-poc.4
+
+The property catalogue and agent guidance now describe timestamp tags explicitly, including activity-entry dates and original source creation/modification times. Nested element descriptions document field conventions without implying nested-array query support.
+
 ## 0.1.0-poc.3
 
 Ordinary actions use notes and category assignments for to-do and waiting states. The redundant action subclasses are removed from the type catalog and terminal editor. `waitingOn` remains available on any item; the served API guidance and shared agent skill explain the category-based workflow.

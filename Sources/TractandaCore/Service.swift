@@ -200,6 +200,13 @@ public final class ItemService {
                 },
             ]
         case "properties":
+            let activityElement: [String: Any] = [
+                "kind": "object",
+                "properties": [
+                    ["name": "at", "kind": "date"],
+                    ["name": "text", "kind": "text"],
+                ],
+            ]
             return [
                 "topic": topic,
                 "nonExhaustive": true,
@@ -207,6 +214,16 @@ public final class ItemService {
                     ["name": "subject", "kind": "text", "editing": "ordinary"],
                     ["name": "body", "kind": "text", "editing": "ordinary"],
                     ["name": "waitingOn", "kind": "reference or text", "editing": "ordinary"],
+                    ["name": "originalCreatedAt", "kind": "date", "editing": "ordinary source provenance"],
+                    ["name": "originalModifiedAt", "kind": "date", "editing": "ordinary source provenance"],
+                    [
+                        "name": "activityNotes", "kind": "list", "editing": "ordinary",
+                        "element": activityElement,
+                    ],
+                    [
+                        "name": "activity", "kind": "list", "editing": "ordinary",
+                        "element": activityElement,
+                    ],
                     ["name": "referenceLabels", "kind": "list", "editing": "ordinary"],
                     ["name": "categoryParents", "kind": "list of current references", "editing": "ordinary"],
                     ["name": "selection", "kind": "object", "editing": "ordinary category criterion"],
@@ -234,7 +251,10 @@ public final class ItemService {
                         "editing": "server-owned and withheld by content projection",
                     ],
                 ],
-                "note": "Arbitrary top-level keys and tagged values remain supported.",
+                "note":
+                    "These are field conventions; arbitrary top-level keys and tagged values remain supported. "
+                    + "Use date tags for timestamps, with an ISO 8601 timezone. Nested element descriptions "
+                    + "do not imply nested-array query support.",
             ]
         default: throw TractandaError("invalidArguments", "topic must be overview, types, or properties.")
         }

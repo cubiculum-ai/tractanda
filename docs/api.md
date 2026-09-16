@@ -48,6 +48,10 @@ Ordinary actions use `NoteItem` and category assignments for to-do, waiting and 
 
 Tagged values include text, integer, real, boolean, date, bytes, reference, list and object. Use a persisted `operationID`; an uncertain mutation is retried with identical arguments and ID. Existing updates also require the current `expectedRevisionID`. Changes replace whole top-level fields, so fetch and merge a map before replacing it.
 
+Use `date` for timestamps, even though both date and text values are serialized as strings. For `activityNotes` and `activity`, each list element is a tagged object with `at` as a tagged date and `text` as tagged text. For example, `at` can be `{"type":"date","value":"2026-09-08T14:15:34.048628+00:00"}`. The property catalogue returned by `TractandaStore/describe` documents the nested element types as conventions; arbitrary additional fields remain supported.
+
+Imported source times belong in ordinary `originalCreatedAt` and `originalModifiedAt` date fields when known. The service-managed `createdAt` and `modifiedAt` describe the Tractanda item itself. Leave unknown times unset. Dates require an ISO 8601 timestamp with a timezone: do not invent a time or zone for an imprecise source date. Date-tagged values support date comparisons and are omitted from full-text extraction. The current query grammar addresses top-level fields and scalar lists, not nested activity object arrays.
+
 Get/history support `full`, `content`, `summary`, or explicit top-level `properties`. Get is byte-bounded: follow ordered `remainingIDs`, handle `oversizedIDs` with a narrower projection, and compare state. An omitted projected property is not an unset field.
 
 `tractanda_get` and `TractandaItem/get` take an `ids` array, even for one item. Single-item explain/history/revision/resolve calls take `itemID`; `itemIDs` is not an alias.

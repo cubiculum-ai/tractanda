@@ -47,6 +47,8 @@ Return relevant item names/reference labels and IDs when useful, with a short ac
 
 Read `tractanda://reference/items` before the first write; it also defines category criteria and membership overrides. Use the server's registered type catalog for create/retype; preserve existing types unless a semantic change is intended.
 
+Use tagged `date` values for known timestamps, including `activityNotes[].at` and `activity[].at`; each activity entry's `text` is tagged text. Preserve imported chronology in ordinary `originalCreatedAt`/`originalModifiedAt` date fields when known, leaving unknown times unset. Discover field conventions through `tractanda_describe` with `topic: "properties"`. A date tag supplies timestamp semantics; it does not make nested object arrays queryable in the current query grammar.
+
 1. Read the current revision and all fields/maps that the edit will affect. `changes` replaces whole top-level fields, so merge nested maps locally and preserve unknown entries.
 2. Form one complete edit with native tagged values. `unset` removes named keys; omitting a key leaves it unchanged. A role's office telephone and its holder's personal telephone belong to different items and have separate revision histories.
 3. Persist a unique `operationID` and the exact write arguments in the task's durable working state before sending. Use `expectedRevisionID` for revise, retype or copy.
