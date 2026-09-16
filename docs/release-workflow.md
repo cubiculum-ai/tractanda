@@ -7,6 +7,10 @@ python3 scripts/release-macos.py release --notes 'Describe the completed change'
 python3 scripts/release-macos.py status
 ```
 
+For a live display, open `http://127.0.0.1:48730/` on the signing Mac. Background releases start or reuse this local observer. Start it independently with `python3 scripts/release-macos.py dashboard`; `status --watch` follows the same state in Terminal and `status --json` returns a concise machine-readable observation. The dashboard shows stages, elapsed time, controller/child presence, recent log activity and upload stream-read progress when the OS exposes it. A live process is not proof of progress; unavailable observations are labelled accordingly. Upload percentages describe local file consumption, with remote acceptance established only when publication verifies the assets. Quiet CI/notarization waits do not by themselves mean a stall. A confirmed missing/reused controller PID is reported as interrupted.
+
+The observer binds only to loopback and exposes filtered status rather than configuration, notes, credentials or raw log contents. It is a native local utility with no model or scheduled agent. Closing the page does not stop a release. A changed observer script takes effect after restarting that observer process; it never requires interrupting the release controller.
+
 `release` prepares and runs the entire workflow. `--background` starts a detached local process writing `work/release-pipeline/runner.log`; it uses no agent, tokens, or scheduler. Omit it to run in the foreground. Resume an interrupted candidate with `run --background`. The separate `prepare` command remains available when a review pause is useful.
 
 `prepare` audits public files, increments `VERSION` and the shared plugin versions, stages and commits the audited source, and creates an isolated checkout for that commit. It refuses another pending release. Finish unrelated or incomplete changes before preparing: this is an explicit completion boundary, not a watcher that publishes keystrokes.

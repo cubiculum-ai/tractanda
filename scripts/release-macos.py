@@ -21,6 +21,8 @@ import subprocess
 import sys
 import tempfile
 import time
+from urllib.error import HTTPError, URLError
+from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTROL = ROOT / 'work/release-pipeline'
@@ -227,6 +229,7 @@ class Pipeline:
 
     def run_command(self, name, args, cwd=None):
         self.state['activeStep'] = name
+        self.state['activeStepStartedAt'] = now()
         self.state['status'] = 'running'
         self.save()
         print(name, flush=True)
@@ -348,6 +351,8 @@ class Pipeline:
             '--workflow', 'verify.yml', '--commit', self.state['commit'], '--event', 'push',
             '--json', 'databaseId,status,conclusion,headSha']))
         if not runs or runs[0]['status'] != 'completed':
+            if self.state.get('activeStep') != 'ci':
+                self.state['activeStepStartedAt'] = now()
             self.state['status'] = 'waitingForCI'
             self.state['activeStep'] = 'ci'
             self.save()
@@ -457,8 +462,38 @@ class Pipeline:
         self.step('cleanup', self.cleanup)
         self.state['status'] = 'complete'
         self.state.pop('activeStep', None)
+        self.state.pop('activeStepStartedAt', None)
         self.state.pop('error', None)
         self.save()
+
+
+def ensure_dashboard(port=48730):
+    """Best-effort developer UI; a busy or unavailable port never blocks release work."""
+    url = f'http://127.0.0.1:{port}/'
+    expected = hashlib.sha256(str(CONTROL.resolve()).encode()).hexdigest()
+    def probe():
+        try:
+            with urlopen(url + 'status.json', timeout=1) as response:
+                return response.headers.get('X-Tractanda-Release-Observer') == expected
+        except HTTPError:
+            return False
+        except (URLError, OSError):
+            return None
+    existing = probe()
+    if existing is not None:
+        return url if existing else None
+    with (CONTROL / 'dashboard.log').open('a') as log:
+        process = subprocess.Popen(
+            [sys.executable, str(ROOT / 'scripts/release-status.py'), '--control', str(CONTROL),
+             'serve', '--port', str(port)], cwd=ROOT, stdin=subprocess.DEVNULL,
+            stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    for _ in range(15):
+        if process.poll() is not None:
+            return None
+        if probe() is True:
+            return url
+        time.sleep(0.1)
+    return None
 
 
 def start_runner(ci_timeout):
@@ -469,24 +504,39 @@ def start_runner(ci_timeout):
             [sys.executable, str(Path(__file__).resolve()), 'run', '--ci-timeout', str(ci_timeout)],
             cwd=ROOT, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
             start_new_session=True)
-    return {'status': 'launched', 'pid': process.pid, 'log': str(log_path)}
+    return {'status': 'launched', 'pid': process.pid, 'log': str(log_path),
+            'dashboard': ensure_dashboard()}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['prepare', 'revise', 'release', 'run', 'status'])
+    parser.add_argument('action', choices=['prepare', 'revise', 'release', 'run', 'status', 'dashboard'])
     parser.add_argument('--config', type=Path, default=DEFAULT_CONFIG)
     parser.add_argument('--notes', help='Concise description of this completed changeset')
     parser.add_argument('--background', action='store_true', help='Run in a detached local process; no agent or scheduler is used')
     parser.add_argument('--ci-timeout', type=int, default=3600, help='Maximum CI wait in seconds (default: 3600)')
+    parser.add_argument('--json', action='store_true', help='Filtered live JSON status (status only)')
+    parser.add_argument('--watch', action='store_true', help='Continuously observe the release (status only)')
+    parser.add_argument('--port', type=int, default=48730, help='Loopback dashboard port (dashboard only)')
     args = parser.parse_args()
     if args.ci_timeout <= 0:
         parser.error('--ci-timeout must be positive')
     if args.background and args.action not in ('run', 'release'):
         parser.error('--background applies to run or release')
+    if (args.json or args.watch) and args.action != 'status':
+        parser.error('--json/--watch apply only to status')
+    if not 1 <= args.port <= 65535:
+        parser.error('--port must be between 1 and 65535')
+    if args.action == 'dashboard':
+        CONTROL.mkdir(parents=True, exist_ok=True)
+        url = ensure_dashboard(args.port)
+        print(url or 'Dashboard could not start; inspect work/release-pipeline/dashboard.log.')
+        return
     if args.action == 'status':
-        path = CONTROL / 'current.json'
-        print(json.dumps(read(path) if path.exists() else {'status': 'notPrepared'}, indent=2))
+        arguments = [sys.executable, str(ROOT / 'scripts/release-status.py'), '--control', str(CONTROL)]
+        if args.json: arguments.append('--json')
+        if args.watch: arguments.append('--watch')
+        subprocess.run(arguments, check=True)
         return
     with lock():
         if args.action in ('prepare', 'revise', 'release'):

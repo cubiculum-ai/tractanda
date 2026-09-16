@@ -29,6 +29,8 @@ For example, combine the existing project category with the existing unfinished-
 
 Kanban eligibility comes from project and status category membership. Do not require an IssueItem class or a board identifier. Discover the actual project's status organization and any saved presentation before editing it.
 
+Saved views are ordinary items carrying `viewDefinition`; use a supported class such as `NoteItem` for a new one. Their ordered `viewDefinition.presentation.sections` references define section order. An implicit project board uses that as a preferred order, then appends other status leaves; without it, sibling `categoryOrder` values and names determine traversal order. Set integer `categoryOrder` values deliberately when extending an ordered status taxonomy. None of the status names is built into the client.
+
 Represent ordinary actions as `NoteItem` with the instance's relevant category assignments. To-do and waiting states are categories; moving between them does not require retyping. Any item may carry `waitingOn` as a person/event reference or explanatory text. That field alone does not assign a category unless an existing category rule selects it.
 
 ## Retrieve economically and accurately
@@ -56,6 +58,8 @@ Use tagged `date` values for known timestamps, including `activityNotes[].at` an
 5. On conflict, read the new revision and merge deliberately. A changed edit is a new operation. Verify the returned state and report any unconfirmed write as unconfirmed.
 
 Category assignment is metadata on an item, not moving its content into a folder. Read the items reference for shared versus personal overrides. Accepting/rejecting a learned suggestion changes recorded feedback and potentially membership; use the learning API's documented action, revision guard and operation ID. Read `tractanda://reference/learning` before doing so.
+
+For a category with no direct rule matches, the current idiom is `selection.expression: "itemID == \"\""` with the normal language tag; manual assignments and inherited child membership still apply. Shared `categoryOverrides` live on the item. Caller-owned `PersonalStateItem` records instead carry an unpinned `target` reference and `personalOverrides`; these take precedence only for their owner. Removing a personal override returns to shared decisions and rules. Preserve unrelated entries when updating either map.
 
 Current permissions govern the whole item history. A share-copy creates a new history; a category change does not share the original. Missing or denied references are not vacant references. Do not infer permission to reveal an unreadable person from permission to read their public role.
 

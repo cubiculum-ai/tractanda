@@ -8,6 +8,7 @@ mkdir -p work/verification
 sh scripts/check-style.sh
 python3 scripts/test-release-pipeline.py
 python3 scripts/test-notarize-macos.py
+python3 scripts/test-release-status.py
 run_tests() (
     log=$1; scratch=$2; shift 2
     result=0

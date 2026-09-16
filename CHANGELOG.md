@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.0-poc.5
+
+Release progress is visible through a local dashboard and live status/watch commands, distinguishing verified controller presence from measurable activity. Agent guidance clarifies saved-view ordering, manual category criteria and shared/personal assignments; the property catalogue exposes categoryOrder.
+
 ## 0.1.0-poc.4
 
 The property catalogue and agent guidance now describe timestamp tags explicitly, including activity-entry dates and original source creation/modification times. Nested element descriptions document field conventions without implying nested-array query support.

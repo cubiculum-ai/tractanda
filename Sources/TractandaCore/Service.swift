@@ -226,6 +226,10 @@ public final class ItemService {
                     ],
                     ["name": "referenceLabels", "kind": "list", "editing": "ordinary"],
                     ["name": "categoryParents", "kind": "list of current references", "editing": "ordinary"],
+                    [
+                        "name": "categoryOrder", "kind": "integer",
+                        "editing": "ordinary sibling presentation order",
+                    ],
                     ["name": "selection", "kind": "object", "editing": "ordinary category criterion"],
                     ["name": "categoryOverrides", "kind": "object", "editing": "ordinary include/exclude"],
                     ["name": "viewDefinition", "kind": "object", "editing": "ordinary saved view"],

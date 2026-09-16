@@ -79,6 +79,7 @@ class ReleaseTests(unittest.TestCase):
     def test_background_runner_is_detached_and_does_not_recurse(self):
         with tempfile.TemporaryDirectory() as temporary, \
                 patch.object(release, 'CONTROL', Path(temporary)), \
+                patch.object(release, 'ensure_dashboard', return_value='http://127.0.0.1:48730/'), \
                 patch.object(release.subprocess, 'Popen') as popen:
             popen.return_value.pid = 123
             result = release.start_runner(900)
