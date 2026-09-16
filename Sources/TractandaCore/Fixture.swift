@@ -67,7 +67,7 @@ public enum DemoFixture {
                 "associatedPerson": .text("alice"), "context": .text("work"),
             ])
         let todo = try create(
-            "todo", "TodoItem",
+            "todo", "NoteItem",
             [
                 "subject": .text("Arrange the next general assembly"),
                 "body": .text("Confirm a date with the president."),

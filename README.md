@@ -15,7 +15,7 @@ This is source-available evaluation software. Formats and APIs are experimental;
 - Categories, saved/transient views, terminal and JSON clients, stdio MCP, and an example browser Kanban.
 - A shared daemon with a Unix API and optional loopback HTTP, including authenticated Streamable HTTP MCP.
 
-Synchronization, attachment workflows, a native GUI, general internet deployment, full agent accounts/homes, and Linux installation remain incomplete. The macOS installer has passed isolated launchd install/restart/rollback/uninstall tests; actual reboot validation remains open. No notarized release binary is claimed.
+Synchronization, attachment workflows, a native GUI, general internet deployment, full agent accounts/homes, and Linux installation remain incomplete. The macOS installer has passed isolated launchd install/restart/rollback/uninstall tests; actual reboot validation remains open. The first two previews were signed without notarization. The current release workflow requires Apple acceptance, ticket stapling and Gatekeeper verification before publishing a new installer; each release records its actual results.
 
 ## Start locally
 

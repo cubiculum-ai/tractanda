@@ -438,6 +438,9 @@ final class CoreTests: XCTestCase {
             (description["types"] as? [[String: Any]])?.contains {
                 $0["classID"] as? String == "NoteItem"
             } == true)
+        let classIDs = try XCTUnwrap(description["types"] as? [[String: Any]])
+            .compactMap { $0["classID"] as? String }
+        XCTAssertTrue(Set(classIDs).isDisjoint(with: ["TodoItem", "PendencyItem", "ActionItem"]))
         let overview = try response("TractandaStore/describe", [:])
         XCTAssertEqual(overview["currentUID"] as? UInt32, store.ownerUID)
         XCTAssertEqual(overview["ownerUID"] as? UInt32, store.ownerUID)
@@ -471,6 +474,53 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(witness.sourceReason, "selection rule")
     }
 
+    func testActionAndWaitingCategoriesDoNotChangeItemType() throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try ItemStore(root: root)
+        func create(_ subject: String, fields: [String: ItemValue] = [:]) throws -> Revision {
+            try store.commit(
+                CommitRequest(
+                    classID: "NoteItem",
+                    changes: fields.merging(["subject": .text(subject)]) { _, new in new },
+                    operationID: Identifier.make())
+            ).revision
+        }
+        let selection: ItemValue = .object([
+            "language": .text(SpotlightQuery.profile), "expression": .text("itemID == \"\""),
+        ])
+        let todo = try create("To do", fields: ["selection": selection])
+        let waiting = try create("Waiting", fields: ["selection": selection])
+        let first = try create(
+            "Ask for a date",
+            fields: ["categoryOverrides": .object([todo.itemID: .text("include")])])
+        XCTAssertTrue(try Categories.explain(first, category: todo, store: store).isIncluded)
+        let second = try edit(
+            store, first,
+            [
+                "waitingOn": .text("Waiting for the chair to respond"),
+                "categoryOverrides": .object([
+                    todo.itemID: .text("exclude"), waiting.itemID: .text("include"),
+                ]),
+            ])
+        XCTAssertEqual(second.itemID, first.itemID)
+        XCTAssertEqual(second.classID, "NoteItem")
+        XCTAssertFalse(try Categories.explain(second, category: todo, store: store).isIncluded)
+        XCTAssertTrue(try Categories.explain(second, category: waiting, store: store).isIncluded)
+        XCTAssertNil(first.fields["waitingOn"])
+        XCTAssertEqual(try store.history(first.itemID).count, 2)
+        assertCode("invalidWaitingOn") {
+            _ = try edit(store, second, ["waitingOn": .integer(42)])
+        }
+        let event = try create("The chair's reply")
+        let referenced = try edit(
+            store, second, ["waitingOn": .reference(ItemReference(event.itemID))])
+        XCTAssertEqual(referenced.fields["waitingOn"]?.link?.itemID, event.itemID)
+        let ready = try edit(store, referenced, [:], unset: ["waitingOn"])
+        XCTAssertNil(ready.fields["waitingOn"])
+        XCTAssertEqual(ready.classID, "NoteItem")
+    }
+
     func testRetypeCopyTombstoneAndPreserveUnknownValues() throws {
         let root = root()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -478,7 +528,7 @@ final class CoreTests: XCTestCase {
         let sourceBytes = Data("X-ACL: everyone\r\nFrom: example@example.invalid\r\n\r\nOriginal\0bytes".utf8)
         let first = try store.commit(
             CommitRequest(
-                classID: "TodoItem",
+                classID: "NoteItem",
                 changes: [
                     "subject": .text("Ask for date"),
                     "source": .bytes(sourceBytes), "custom.key": .object(["one": .integer(1)]),
@@ -488,11 +538,11 @@ final class CoreTests: XCTestCase {
         let retyped = try store.commit(
             CommitRequest(
                 action: .retype, itemID: first.itemID, expectedRevisionID: first.revisionID,
-                classID: "PendencyItem", changes: ["waitingOn": .text("Waiting for the chair to respond")],
+                classID: "AppointmentItem", changes: ["subject": .text("Meeting with the chair")],
                 operationID: "retype")
         ).revision
         XCTAssertEqual(first.itemID, retyped.itemID)
-        XCTAssertTrue(ItemTypes.makeItem(from: retyped) is PendencyItem)
+        XCTAssertTrue(ItemTypes.makeItem(from: retyped) is AppointmentItem)
         XCTAssertEqual(retyped.fields["custom.key"], first.fields["custom.key"])
         XCTAssertEqual(try ItemPath.parse("custom\\.key.one"), ["custom.key", "one"])
         let value = ItemPath.resolve(ItemReference(first.itemID), segments: ["custom.key", "one"]) {

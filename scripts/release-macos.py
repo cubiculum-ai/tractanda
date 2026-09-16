@@ -86,16 +86,36 @@ def lock():
 def config(path):
     value = read(path)
     required = ('repository', 'branch', 'instance', 'softwareRoot', 'applicationIdentity',
-                'installerIdentity', 'embeddingHost', 'modelDirectory', 'modelNotices')
-    if any(not isinstance(value.get(k), str) or not value[k] for k in required):
-        raise ValueError('Incomplete local release configuration.')
+                'installerIdentity', 'embeddingHost', 'modelDirectory', 'modelNotices',
+                'developerTeamID')
+    missing = [k for k in required if not isinstance(value.get(k), str) or not value[k]]
+    if missing:
+        raise ValueError('Missing local release configuration: ' + ', '.join(missing))
     if not re.fullmatch(r'[\w.-]+/[\w.-]+', value['repository']):
         raise ValueError('Invalid repository.')
     if not re.fullmatch(r'[a-z0-9-]+', value['instance']):
         raise ValueError('Invalid installation name.')
     if value['applicationIdentity'] == '-' or value['installerIdentity'] == '-':
         raise ValueError('Published releases require persistent Developer ID identities.')
+    if not re.fullmatch(r'[A-Z0-9]{10}', value['developerTeamID']):
+        raise ValueError('developerTeamID must identify the expected Apple Developer team.')
     return value
+
+
+def validate_signing_environment(settings):
+    # Inspect certificate identity metadata only. Xcode owns account authentication
+    # during export; no password, API key or separate notarytool profile is needed.
+    command(['xcodebuild', '-version'])
+    identities = command(['/usr/bin/security', 'find-identity', '-v'])
+    for key, kind in (('applicationIdentity', 'Application'), ('installerIdentity', 'Installer')):
+        matches = re.findall(r'([A-Fa-f0-9]{40}) "(Developer ID ' + kind + r': [^"\n]+)"', identities)
+        valid = [identity for identity in matches if
+                 identity[1].endswith('(' + settings['developerTeamID'] + ')') and
+                 settings[key] in identity]
+        if not valid:
+            raise RuntimeError('The configured Developer ID ' + kind +
+                               ' identity is unavailable for this team. Check certificates in Xcode. '
+                               'No release has been prepared.')
 
 
 def significant(paths):
@@ -121,6 +141,7 @@ def prepare(settings, notes):
     origins = {f'https://github.com/{settings["repository"]}.git', f'git@github.com:{settings["repository"]}.git'}
     if git('remote', 'get-url', 'origin') not in origins:
         raise RuntimeError('origin does not match the configured publication repository.')
+    validate_signing_environment(settings)
     audit_path = CONTROL / 'candidate-audit.json'
     command([sys.executable, 'scripts/audit-release.py', '--output', audit_path])
     audited = read(audit_path)
@@ -195,6 +216,7 @@ class Pipeline:
         self.settings = state['configuration']
         self.bundle = self.directory / f'tractanda-{state["version"]}-macos-arm64'
         self.package = self.directory / f'Tractanda-{state["version"]}-arm64.pkg'
+        self.signed_package = self.directory / 'signed' / self.package.name
         self.archive = self.directory / (self.bundle.name + '.tar.gz')
         self.environment = {**os.environ, 'CLANG_MODULE_CACHE_PATH': str(self.source / '.build/module-cache')}
 
@@ -236,17 +258,47 @@ class Pipeline:
             '--model-notices', s['modelNotices']])
         return {'manifestSHA256': sha(self.bundle / 'bundle-manifest.json')}
 
-    def package_artifacts(self):
-        for path in (self.package, self.archive):
-            if path.exists():
-                path.rename(path.with_name(path.name + '.incomplete-' + str(os.getpid())))
+    def build_package(self):
+        self.signed_package.parent.mkdir(parents=True, exist_ok=True)
+        if self.signed_package.exists():
+            self.signed_package.rename(self.signed_package.with_name(
+                self.signed_package.name + '.incomplete-' + str(os.getpid())))
         self.run_command('package', [sys.executable, 'scripts/build-macos-pkg.py', '--bundle', self.bundle,
-                                    '--output', self.package, '--sign-identity', self.settings['installerIdentity']])
+                                    '--output', self.signed_package, '--sign-identity', self.settings['installerIdentity']])
+        return {'sha256': sha(self.signed_package)}
+
+    def notarize_package(self):
+        if sha(self.signed_package) != self.state['steps']['package']['result']['sha256']:
+            raise RuntimeError('The signed package changed before notarization.')
+        evidence = self.directory / 'notarization'
+        self.run_command('notarization', [sys.executable, 'scripts/notarize-macos.py',
+            '--package', self.signed_package, '--output', self.package,
+            '--application-identity', self.settings['applicationIdentity'],
+            '--wrapper-executable', self.bundle / 'bin' / 'tractanda',
+            '--expected-team-id', self.settings['developerTeamID'],
+            '--evidence-directory', evidence])
+        receipt = read(evidence / 'notarization.json')
+        if not receipt.get('notarized') or receipt.get('outputSHA256') != sha(self.package):
+            raise RuntimeError('Notarization did not produce a verified final package.')
+        return {'submissionID': receipt['submissionID'], 'sha256': receipt['outputSHA256'],
+                'notarized': True, 'teamID': receipt['teamID']}
+
+    def package_artifacts(self):
+        self.verify_notarization()
+        if self.archive.exists():
+            self.archive.rename(self.archive.with_name(self.archive.name + '.incomplete-' + str(os.getpid())))
         self.run_command('archive', ['/usr/bin/tar', '--no-xattrs', '--no-acls', '--no-fflags', '--no-mac-metadata',
                                     '-czf', self.archive, '-C', self.directory, self.bundle.name])
         checksums = {p.name: sha(p) for p in (self.archive, self.package)}
         (self.directory / 'SHA256SUMS').write_text(''.join(f'{digest}  {name}\n' for name, digest in checksums.items()))
         return checksums
+
+    def verify_notarization(self):
+        receipt = self.state['steps'].get('notarization', {}).get('result', {})
+        if receipt.get('notarized') is not True or receipt.get('sha256') != sha(self.package):
+            raise RuntimeError('A verified notarized package is required before installation or publication.')
+        self.run_command('gatekeeper', ['xcrun', 'stapler', 'validate', self.package])
+        self.run_command('gatekeeper', ['/usr/sbin/spctl', '--assess', '--type', 'install', '--verbose=4', self.package])
 
     def verify_artifacts(self):
         if sha(self.bundle / 'bundle-manifest.json') != self.state['steps']['bundle']['result']['manifestSHA256']:
@@ -256,6 +308,7 @@ class Pipeline:
                 raise RuntimeError('The prepared release artifact changed: ' + name)
 
     def install(self):
+        self.verify_notarization()
         # Root authorization does not bypass macOS privacy protection for Documents.
         # Give the administrator process a private, verified temporary payload and cwd.
         with tempfile.TemporaryDirectory(prefix='tractanda-release-', dir='/private/tmp') as staging:
@@ -315,12 +368,15 @@ class Pipeline:
 
     def publish(self):
         self.verify_artifacts()
+        self.verify_notarization()
         repo, version = self.settings['repository'], self.state['version']
         tag = 'v' + version
         notes = self.directory / 'release-notes.md'
         notes.write_text(f'Tractanda {version}\n\n{self.state["notes"]}\n\n'
             f'Source commit: `{self.state["commit"]}`. The signed macOS package and archive include the pinned Qwen3 '
-            'embedding runtime/model. Linux installation remains in development. Developer ID-signed, not notarized. '
+            'embedding runtime/model. Linux installation remains in development. Developer ID-signed; '
+            'the native package is notarized, stapled and verified by Gatekeeper. Standalone binaries in '
+            'the archive rely on Apple’s online notarization lookup because tickets cannot be stapled to bare executables. '
             'The preview is experimental and uses the PolyForm Noncommercial license.\n\n'
             'The local macOS source suite, signed package checks, managed upgrade, canonical-file preservation and '
             'running-build identity checks passed. GitHub source CI passed.\n\n'
@@ -363,14 +419,18 @@ class Pipeline:
 
     def cleanup(self):
         removed = []
-        for path in self.directory.glob('*.incomplete-*'):
+        stale = list(self.directory.glob('*.incomplete-*'))
+        stale += list(self.signed_package.parent.glob('*.incomplete-*'))
+        if self.signed_package.exists():
+            stale.append(self.signed_package)
+        for path in stale:
             if path.is_symlink():
                 path.unlink()
             elif path.is_dir():
                 shutil.rmtree(path)
             else:
                 path.unlink()
-            removed.append(path.name)
+            removed.append(path.relative_to(self.directory).as_posix())
         return {'removedStagingArtifacts': removed, 'installedRetention': 'active and one previous; other databases retain their pins'}
 
     def run(self, ci_timeout=3600):
@@ -382,6 +442,8 @@ class Pipeline:
         self.step('verify', lambda: self.run_command('verify', ['sh', 'scripts/test.sh']))
         self.step('release-build', self.build)
         self.step('bundle', self.assemble)
+        self.step('package', self.build_package)
+        self.step('notarization', self.notarize_package)
         self.step('artifacts', self.package_artifacts)
         self.verify_artifacts()
         self.step('install', self.install)

@@ -32,9 +32,6 @@ public final class NaturalPersonItem: PersonItem {}
 public final class LegalPersonItem: PersonItem {}
 public final class RoleItem: PersonItem {}
 open class CalendarItem: Item {}
-open class ActionItem: CalendarItem {}
-public final class TodoItem: ActionItem {}
-public final class PendencyItem: ActionItem {}
 public final class DeadlineItem: CalendarItem {}
 public final class AppointmentItem: CalendarItem {}
 open class MetaItem: Item {}
@@ -47,15 +44,14 @@ public enum ItemTypes {
         "EmailMessageItem": "InternetMessageItem", "NetnewsMessageItem": "InternetMessageItem",
         "XMPPMessageItem": "MessageItem",
         "PersonItem": "Item", "NaturalPersonItem": "PersonItem", "LegalPersonItem": "PersonItem",
-        "RoleItem": "PersonItem", "CalendarItem": "Item", "ActionItem": "CalendarItem",
-        "TodoItem": "ActionItem", "PendencyItem": "ActionItem", "DeadlineItem": "CalendarItem",
+        "RoleItem": "PersonItem", "CalendarItem": "Item", "DeadlineItem": "CalendarItem",
         "AppointmentItem": "CalendarItem", "MetaItem": "Item",
         "PersonalStateItem": "MetaItem",
         "AccessConfigurationItem": "MetaItem",
     ]
     public static let abstract: Set<String> = [
         "Item", "MessageItem", "InternetMessageItem", "PersonItem",
-        "CalendarItem", "ActionItem", "MetaItem",
+        "CalendarItem", "MetaItem",
     ]
     public static func ancestry(_ name: String) -> [String] {
         var result = [name]
@@ -73,8 +69,6 @@ public enum ItemTypes {
         case "NaturalPersonItem": type = NaturalPersonItem.self
         case "LegalPersonItem": type = LegalPersonItem.self
         case "RoleItem": type = RoleItem.self
-        case "TodoItem": type = TodoItem.self
-        case "PendencyItem": type = PendencyItem.self
         case "DeadlineItem": type = DeadlineItem.self
         case "AppointmentItem": type = AppointmentItem.self
         case "PersonalStateItem": type = PersonalStateItem.self

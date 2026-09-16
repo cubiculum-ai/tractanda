@@ -44,6 +44,8 @@ All reads, writes and history requests use current item permissions; changing ac
 
 ## Guarded changes and compact retrieval
 
+Ordinary actions use `NoteItem` and category assignments for to-do, waiting and other workflow states. Change membership to change those states; no class transition is needed. Every item may carry `waitingOn` as a tagged reference to a person/event or explanatory text, or leave it unset. Category rules and manual overrides determine membership independently of that property. Discover supported concrete types with `TractandaStore/describe` (`topic: "types"`).
+
 Tagged values include text, integer, real, boolean, date, bytes, reference, list and object. Use a persisted `operationID`; an uncertain mutation is retried with identical arguments and ID. Existing updates also require the current `expectedRevisionID`. Changes replace whole top-level fields, so fetch and merge a map before replacing it.
 
 Get/history support `full`, `content`, `summary`, or explicit top-level `properties`. Get is byte-bounded: follow ordered `remainingIDs`, handle `oversizedIDs` with a narrower projection, and compare state. An omitted projected property is not an unset field.

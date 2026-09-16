@@ -163,10 +163,10 @@ def exercise(client, fixture):
     assert client.call("TractandaItem/history", {"itemID": item_id(copied)})["total"] == 1
     assert copied["fields"]["holdings"] == committed["fields"]["holdings"]
     todo = client.get(fixture["todo"])
-    pendency = client.commit(intent("retype", "ipc-retype", item_id(todo), revision_id(todo), "PendencyItem",
-                                   {"waitingOn": text("Waiting for the president")}))["revision"]
-    assert item_id(pendency) == item_id(todo)
-    assert pendency["fields"]["classID"] == text("PendencyItem")
+    appointment = client.commit(intent("retype", "ipc-retype", item_id(todo), revision_id(todo), "AppointmentItem",
+                                       {"subject": text("Meet with the president")}))["revision"]
+    assert item_id(appointment) == item_id(todo)
+    assert appointment["fields"]["classID"] == text("AppointmentItem")
     note = client.commit(intent("create", "ipc-unicode", class_id="NoteItem", changes={
         "subject": text("Frédéric's notes"), "body": text("Quotes: \"hello\"; slash /; newline\n"),
         "custom.key": {"type": "integer", "value": 9223372036854775807}}))["revision"]

@@ -127,10 +127,10 @@ public enum ItemSemantics {
                 }
             }
         }
-        if revision.classID == "PendencyItem", let waiting = revision.fields["waitingOn"] {
+        if let waiting = revision.fields["waitingOn"] {
             guard waiting.link != nil || waiting.string != nil else {
                 throw TractandaError(
-                    "invalidPendency", "waitingOn is a person/event reference or explanatory text.")
+                    "invalidWaitingOn", "waitingOn is a person/event reference or explanatory text.")
             }
         }
     }
@@ -145,10 +145,6 @@ extension RoleItem {
         try RoleSemantics.holder(revision, at: date)
     }
 }
-extension PendencyItem {
-    public var waitingOn: ItemValue? { self["waitingOn"] }
-}
-
 public struct Resolution: Codable, Equatable, Sendable {
     public enum Status: String, Codable, Sendable {
         case value, unsetField, unsetReference, accessDenied, resolutionError

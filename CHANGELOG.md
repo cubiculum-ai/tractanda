@@ -1,6 +1,12 @@
 # Changelog
 
-## 0.1.0-poc.1 — unreleased
+## 0.1.0-poc.3
+
+Ordinary actions use notes and category assignments for to-do and waiting states. The redundant action subclasses are removed from the type catalog and terminal editor. `waitingOn` remains available on any item; the served API guidance and shared agent skill explain the category-based workflow.
+
+The macOS release script uses Xcode's signed-in developer account for automatic notarization, with resumable uploads, package ticket stapling and Gatekeeper verification before installation or publication. A separate notarytool credential profile is unnecessary.
+
+## 0.1.0-poc.1
 
 Initial source-available proof of concept: immutable item revisions, rebuildable SQLite/FTS5 indexes, overlapping categories and views, terminal/JSON clients, stdio MCP, optional semantic retrieval, and an example browser client.
 

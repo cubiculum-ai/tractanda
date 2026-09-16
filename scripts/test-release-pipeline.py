@@ -19,6 +19,63 @@ activate = load('activate', 'activate-release.py')
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_release_configuration_does_not_require_a_notary_profile(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'config.json'
+            settings = {key: 'configured' for key in (
+                'branch', 'softwareRoot', 'applicationIdentity', 'installerIdentity',
+                'embeddingHost', 'modelDirectory', 'modelNotices')}
+            settings.update(repository='owner/repo', instance='production', developerTeamID='ABCDE12345')
+            release.write(path, settings)
+            self.assertEqual(release.config(path), settings)
+
+    def test_signing_preflight_requires_both_valid_identities_for_expected_team(self):
+        settings = {'applicationIdentity': 'A' * 40, 'installerIdentity': 'B' * 40,
+                    'developerTeamID': 'ABCDE12345'}
+        identities = '\n'.join([
+            '1) ' + 'A' * 40 + ' "Developer ID Application: Test (ABCDE12345)"',
+            '2) ' + 'B' * 40 + ' "Developer ID Installer: Test (ABCDE12345)"'])
+        with patch.object(release, 'command', side_effect=['Xcode 27.0', identities]):
+            release.validate_signing_environment(settings)
+        with patch.object(release, 'command', side_effect=['Xcode 27.0', identities.splitlines()[0]]):
+            with self.assertRaisesRegex(RuntimeError, 'Installer'):
+                release.validate_signing_environment(settings)
+        with patch.object(release, 'command', side_effect=['Xcode 27.0', identities]):
+            with self.assertRaisesRegex(RuntimeError, 'Application'):
+                release.validate_signing_environment({**settings, 'developerTeamID': 'OTHER12345'})
+
+    def test_missing_or_changed_notarization_blocks_installation_and_publication(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = {'directory': temporary, 'configuration': {}, 'version': 'test', 'steps': {}}
+            pipeline = release.Pipeline(state)
+            pipeline.package.write_bytes(b'signed, not yet notarized')
+            with patch.object(pipeline, 'run_command') as run:
+                with self.assertRaisesRegex(RuntimeError, 'notarized package'):
+                    pipeline.verify_notarization()
+                run.assert_not_called()
+                state['steps']['notarization'] = {'result': {'notarized': True, 'sha256': 'wrong'}}
+                with self.assertRaises(RuntimeError):
+                    pipeline.verify_notarization()
+                run.assert_not_called()
+                state['steps']['notarization']['result']['sha256'] = release.sha(pipeline.package)
+                pipeline.verify_notarization()
+                self.assertEqual(run.call_args_list[0].args[1][:3], ['xcrun', 'stapler', 'validate'])
+                self.assertEqual(run.call_args_list[1].args[1][0], '/usr/sbin/spctl')
+
+    def test_checksums_cover_stapled_package_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(release, 'CONTROL', Path(temporary) / 'control'):
+            state = {'directory': temporary, 'configuration': {}, 'version': 'test', 'steps': {}}
+            pipeline = release.Pipeline(state)
+            pipeline.package.write_bytes(b'signed package plus notarization ticket')
+            pipeline.signed_package.parent.mkdir()
+            pipeline.signed_package.write_bytes(b'signed package')
+            with patch.object(pipeline, 'verify_notarization') as check, \
+                    patch.object(pipeline, 'run_command', side_effect=lambda *_: pipeline.archive.write_bytes(b'archive')):
+                checksums = pipeline.package_artifacts()
+            check.assert_called_once()
+            self.assertEqual(checksums[pipeline.package.name], release.sha(pipeline.package))
+            self.assertNotEqual(checksums[pipeline.package.name], release.sha(pipeline.signed_package))
+
     def test_background_runner_is_detached_and_does_not_recurse(self):
         with tempfile.TemporaryDirectory() as temporary, \
                 patch.object(release, 'CONTROL', Path(temporary)), \

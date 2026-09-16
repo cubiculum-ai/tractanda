@@ -176,6 +176,7 @@ public final class ItemService {
                 "overview": [
                     "Every record is a universal item; item types form an inheritance hierarchy.",
                     "Categories are overlapping dimensions, not item types; All items is implicit.",
+                    "To-do and waiting states are category assignments on ordinary items such as NoteItem.",
                     "Views are transient queries or saved view definitions.",
                     "Permissions apply to every read. Use one guarded edit and retry the exact request after uncertainty.",
                     "Use content, summary, or properties projections and constrain query scope before retrieving bodies.",
@@ -205,6 +206,7 @@ public final class ItemService {
                 "properties": [
                     ["name": "subject", "kind": "text", "editing": "ordinary"],
                     ["name": "body", "kind": "text", "editing": "ordinary"],
+                    ["name": "waitingOn", "kind": "reference or text", "editing": "ordinary"],
                     ["name": "referenceLabels", "kind": "list", "editing": "ordinary"],
                     ["name": "categoryParents", "kind": "list of current references", "editing": "ordinary"],
                     ["name": "selection", "kind": "object", "editing": "ordinary category criterion"],

@@ -243,7 +243,7 @@ def exercise(binary, adapter, root, checks):
             client.tool("tractanda_query", {"limit": True}, error="invalidArguments")
             client.tool("tractanda_get", {"ids": [str(uuid.uuid4())] * 65}, error="invalidArguments")
             client.tool("tractanda_query", {"expression": "NOT subject == 'x'"}, error="unsupportedQuery")
-            request = wire.intent("create", "mcp-create", class_id="TodoItem", changes={
+            request = wire.intent("create", "mcp-create", class_id="NoteItem", changes={
                 "subject": wire.text("MCP task"), "body": wire.text("Line one\nLine two ☃"),
                 "max": tagged("integer", 9223372036854775807), "min": tagged("integer", -9223372036854775808),
                 "unknown.key": obj({"x": wire.text("preserved")})})
@@ -263,17 +263,17 @@ def exercise(binary, adapter, root, checks):
                 "TractandaItem/get", {"ids": [item_id], "projection": "content"})["list"]
             assert client.tool("tractanda_get", {"ids": [item_id], "projection": "full"})["list"] == [native_full]
             assert client.tool("tractanda_resolve", {"itemID": item_id, "segments": ["unknown.key", "x"]})["value"] == wire.text("preserved")
-            query = {"expression": 'classID == "TodoItem"', "text": "MCP task", "categoryPath": [], "limit": 32,
+            query = {"expression": 'classID == "NoteItem"', "text": "MCP task", "categoryPath": [], "limit": 32,
                      "at": "2026-09-09T12:00:00Z", "timeZone": "UTC"}
             assert client.tool("tractanda_query", query) == native.call("TractandaItem/query", query)
-            sorted_query = {"expression": 'classID == "TodoItem"', "sort": [
+            sorted_query = {"expression": 'classID == "NoteItem"', "sort": [
                 {"property": "subject", "isAscending": True}], "limit": 32,
                 "at": "2026-09-09T12:00:00Z", "timeZone": "UTC"}
             assert client.tool("tractanda_query", sorted_query) == native.call("TractandaItem/query", sorted_query)
-            revise = wire.intent("retype", "mcp-retype", item_id, wire.revision_id(first), "PendencyItem",
-                changes={"body": wire.text("Waiting for a person")}, unset=["min"])
+            revise = wire.intent("retype", "mcp-retype", item_id, wire.revision_id(first), "AppointmentItem",
+                changes={"body": wire.text("Meeting with a person")}, unset=["min"])
             second = client.tool("tractanda_commit", revise)["revision"]
-            assert wire.item_id(second) == item_id and second["fields"]["classID"] == wire.text("PendencyItem")
+            assert wire.item_id(second) == item_id and second["fields"]["classID"] == wire.text("AppointmentItem")
             assert "min" not in second["fields"] and second["fields"]["unknown.key"] == first["fields"]["unknown.key"]
             assert client.tool("tractanda_commit", revise)["replayed"] is True
             client.tool("tractanda_commit", dict(revise, operationID="stale"), error="revisionConflict")

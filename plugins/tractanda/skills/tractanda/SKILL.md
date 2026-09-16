@@ -29,6 +29,8 @@ For example, combine the existing project category with the existing unfinished-
 
 Kanban eligibility comes from project and status category membership. Do not require an IssueItem class or a board identifier. Discover the actual project's status organization and any saved presentation before editing it.
 
+Represent ordinary actions as `NoteItem` with the instance's relevant category assignments. To-do and waiting states are categories; moving between them does not require retyping. Any item may carry `waitingOn` as a person/event reference or explanatory text. That field alone does not assign a category unless an existing category rule selects it.
+
 ## Retrieve economically and accurately
 
 - Use `tractanda_query` for metadata predicates, literal FTS text, category intersections and exclusions. Read `tractanda://reference/query` for the portable Spotlight grammar. It is not arbitrary SQL or a promise of every native Spotlight feature.
