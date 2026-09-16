@@ -25,6 +25,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
+RELEASE_STEPS = tuple(json.loads(Path(__file__).with_name('release-steps.json').read_text()))
 CONTROL = ROOT / 'work/release-pipeline'
 DEFAULT_CONFIG = CONTROL / 'config.json'
 VERSION_FILES = ['plugins/tractanda/.codex-plugin/plugin.json',
@@ -175,7 +176,7 @@ def prepare(settings, notes):
     git('worktree', 'add', '--detach', str(source), commit)
     state = {'version': version, 'commit': commit, 'tree': git('rev-parse', 'HEAD^{tree}'),
              'status': 'ready', 'createdAt': now(), 'steps': {}, 'directory': str(destination),
-             'notes': notes, 'configuration': settings}
+             'notes': notes, 'configuration': settings, 'plannedSteps': list(RELEASE_STEPS)}
     write(destination / 'state.json', state)
     write(current_path, state)
     return state
@@ -202,7 +203,8 @@ def revise(state, notes):
     git('checkout', '--detach', commit, cwd=source)
     state.setdefault('previousCandidates', []).append({
         'commit': state['commit'], 'steps': state['steps'], 'error': state.get('error')})
-    state.update(commit=commit, tree=git('rev-parse', 'HEAD^{tree}'), steps={}, status='ready')
+    state.update(commit=commit, tree=git('rev-parse', 'HEAD^{tree}'), steps={}, status='ready',
+                 plannedSteps=list(RELEASE_STEPS))
     state.pop('error', None)
     state.pop('activeStep', None)
     write(Path(state['directory']) / 'state.json', state)
@@ -444,6 +446,8 @@ class Pipeline:
         self.state.pop('error', None)
         if git('rev-parse', 'HEAD', cwd=self.source) != self.state['commit'] or git('status', '--porcelain', cwd=self.source):
             raise RuntimeError('The sealed source checkout changed; refusing to release an unverified tree.')
+        self.state['plannedSteps'] = list(RELEASE_STEPS)
+        self.save()
         self.step('verify', lambda: self.run_command('verify', ['sh', 'scripts/test.sh']))
         self.step('release-build', self.build)
         self.step('bundle', self.assemble)
@@ -460,6 +464,8 @@ class Pipeline:
             self.wait_for_ci(ci_timeout)
         self.step('publish', self.publish)
         self.step('cleanup', self.cleanup)
+        if set(self.state['steps']) != set(RELEASE_STEPS):
+            raise RuntimeError('Completed stages do not match the declared release plan.')
         self.state['status'] = 'complete'
         self.state.pop('activeStep', None)
         self.state.pop('activeStepStartedAt', None)

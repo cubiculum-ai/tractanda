@@ -11,6 +11,13 @@
   const typedText = value => ({type:'text',value});
   const fieldText = (fields, key) => fields[key]?.type === 'text' ? fields[key].value : '';
 
+  function showServerVersion(value) {
+    const version=typeof value==='string'?value.trim():'';
+    const label=$('server-version');
+    label.textContent=version?'Server '+version:'';
+    label.hidden=!version;
+  }
+
   function referenceElement(link) {
     const address = String(link.href || '');
     if (/^(javascript|data|vbscript):/i.test(address)) return element('span',{text:link.label});
@@ -106,6 +113,7 @@
 
   function showSignIn(message = '') {
     isConnected=false;
+    showServerVersion();
     if ($('task-dialog').open && !pendingWrite) resumeEditorAfterSignIn=true;
     for (const dialog of document.querySelectorAll('dialog[open]')) dialog.close();
     document.body.classList.add('needs-login');
@@ -189,6 +197,7 @@
     if (!call || call[2] !== 'web') throw apiError('invalidResponse','The server response could not be matched to this request.');
     if (call[0] === 'error') throw apiError(call[1].type,call[1].description,true);
     if (call[0] !== method) throw apiError('invalidResponse','The server returned an unexpected method.');
+    if (method==='TractandaStore/info') showServerVersion(call[1]?.server?.version);
     return call[1];
   }
 

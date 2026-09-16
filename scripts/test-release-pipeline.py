@@ -19,6 +19,23 @@ activate = load('activate', 'activate-release.py')
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_declared_plan_matches_every_executed_stage(self):
+        # Run the actual orchestration with side effects replaced, so adding a
+        # stage without updating the plan cannot silently misstate progress.
+        pipeline = object.__new__(release.Pipeline)
+        pipeline.state = {'status': 'ready', 'commit': 'test', 'steps': {}}
+        pipeline.source = Path('/unused')
+        pipeline.save = lambda: None
+        pipeline.step = lambda name, action: pipeline.state['steps'].update({name: {}})
+        pipeline.verify_artifacts = lambda: None
+        pipeline.health = lambda: {}
+        pipeline.wait_for_ci = lambda timeout: pipeline.state['steps'].update({'ci': {}})
+        with patch.object(release, 'git', side_effect=['test', '']):
+            pipeline.run()
+        self.assertEqual(pipeline.state['plannedSteps'], list(release.RELEASE_STEPS))
+        self.assertEqual(list(pipeline.state['steps']), list(release.RELEASE_STEPS))
+        self.assertEqual(pipeline.state['status'], 'complete')
+
     def test_release_configuration_does_not_require_a_notary_profile(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / 'config.json'

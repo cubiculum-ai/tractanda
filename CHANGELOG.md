@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.0-poc.7
+
+The release dashboard and CLI show completed stages out of the planned total. The workflow and observer share one stage definition, and each prepared candidate records its plan. Upload substeps do not inflate the count. Foreground CLI releases launched with a relative script path are recognized using their verified working directory.
+
+The Kanban sidebar displays the connected server's reported version beneath the Tractanda name and above Workspace.
+
 ## 0.1.0-poc.6
 
 `Item` is now the concrete generic root. The empty `NoteItem` subclass is removed from the registry, client defaults, templates, examples and agent guidance. Specialized subclasses remain. The experimental native API advances to capability `/3`; older clients must be updated and reconnected.

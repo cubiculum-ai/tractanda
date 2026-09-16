@@ -12,6 +12,50 @@ spec = importlib.util.spec_from_file_location('status', Path(__file__).with_name
 status = importlib.util.module_from_spec(spec); spec.loader.exec_module(status)
 
 class StatusTests(unittest.TestCase):
+    def test_relative_cli_launch_uses_its_observed_working_directory(self):
+        controller = Path('/tmp/project/scripts/release-macos.py')
+        command = '/usr/bin/python3 scripts/release-macos.py run'
+        self.assertFalse(status.is_controller_command(command, controller))
+        self.assertTrue(status.is_controller_command(command, controller, '/tmp/project'))
+        self.assertFalse(status.is_controller_command(command, controller, '/tmp/different-project'))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root, {'version': 'v', 'status': 'running', 'steps': {}})
+            def run(args, **kwargs):
+                class Result: returncode = 0; stderr = ''
+                result = Result()
+                result.stdout = (f'fcwd\nn{status.ROOT}\n' if args[0] == 'lsof'
+                                 else '44 1 00:01 ' + command + '\n')
+                return result
+            data = status.snapshot(root, runner=run)
+            self.assertEqual(data['status'], 'running')
+            self.assertEqual(data['runner']['identity'], 'matched')
+
+    def test_completed_count_uses_the_release_plan_not_upload_substeps(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root, {'version': 'v', 'status': 'running',
+                                'plannedSteps': ['verify', 'publish'],
+                                'steps': {'verify': {}, 'upload-a.pkg': {}}})
+            data = status.snapshot(root, runner=lambda *a, **k: None)
+            self.assertEqual(data['completedStepCount'], 1)
+            self.assertEqual(data['totalStepCount'], 2)
+            self.assertIn('completed steps: 1 of 2', status.readable(data))
+
+    def test_complete_plan_and_unknown_total(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root, {'version': 'v', 'status': 'complete',
+                                'steps': {name: {} for name in status.RELEASE_STEPS}})
+            data = status.snapshot(root, runner=lambda *a, **k: None)
+            self.assertEqual(data['completedStepCount'], len(status.RELEASE_STEPS))
+            self.assertEqual(data['totalStepCount'], len(status.RELEASE_STEPS))
+            self.fixture(root, {'version': 'v', 'status': 'running', 'steps': {},
+                                'plannedSteps': ['verify', 'verify']})
+            data = status.snapshot(root, runner=lambda *a, **k: None)
+            self.assertIsNone(data['totalStepCount'])
+            self.assertIn('completed steps: 0 of unknown', status.readable(data))
+
     def test_failed_duration_stops_when_runner_stopped(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

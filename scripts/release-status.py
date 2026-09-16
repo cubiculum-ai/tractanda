@@ -4,6 +4,7 @@ import argparse
 from datetime import datetime, timezone
 import json
 import hashlib
+import os
 import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -13,6 +14,7 @@ import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
+RELEASE_STEPS = tuple(json.loads(Path(__file__).with_name('release-steps.json').read_text()))
 DEFAULT_CONTROL = ROOT / 'work' / 'release-pipeline'
 CONTROLLER = (ROOT / 'scripts' / 'release-macos.py').resolve()
 TERMINAL = {'complete', 'failed'}
@@ -72,10 +74,14 @@ def command_for_pid(pid, runner=subprocess.run):
             'elapsed': fields[2], 'command': fields[3]}
 
 
-def is_controller_command(command, controller=CONTROLLER):
+def is_controller_command(command, controller=CONTROLLER, working_directory=None):
     # ps does not reliably quote argv paths containing spaces. The launcher uses
-    # an absolute Python executable followed directly by this controller.
+    # an absolute Python executable followed directly by this controller; a
+    # relative controller path additionally requires the observed process cwd.
     paths = {str(Path(controller)), str(Path(controller).resolve())}
+    if working_directory:
+        relative = os.path.relpath(Path(controller).resolve(), Path(working_directory).resolve())
+        paths.update((relative, './' + relative))
     choices = [printed for path in paths for printed in (path, shlex.quote(path), '"' + path + '"')]
     for printed in choices:
         match = re.search(r'\s' + re.escape(printed) + r'\s+run(?:\s|$)', command)
@@ -83,6 +89,21 @@ def is_controller_command(command, controller=CONTROLLER):
             executable = command[:match.start()].strip().strip('"\'')
             return Path(executable).name.lower().startswith('python')
     return False
+
+
+def working_directory_for_pid(pid, runner=subprocess.run):
+    """Resolve a relative launch path against that process's cwd, not ours."""
+    try:
+        result = runner(['lsof', '-a', '-p', str(pid), '-d', 'cwd', '-F', 'fn'],
+                        capture_output=True, text=True, timeout=1, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result is None or result.returncode:
+        return None
+    for entry in parse_lsof_records(result.stdout):
+        if entry.get('fd') == 'cwd' and entry.get('name', '').startswith('/'):
+            return entry['name']
+    return None
 
 
 def child_for_pid(pid, runner=subprocess.run):
@@ -206,11 +227,15 @@ def snapshot(control=DEFAULT_CONTROL, runner=subprocess.run, now=None, observer=
     if state is None:
         data = {'status': 'unknown', 'observedAt': now.isoformat(), 'observation': 'release state unavailable',
                 'runner': {'state': 'unknown', 'identity': 'unavailable'}, 'completedSteps': [],
-                'completedStepCount': 0, 'progress': 'unavailable'}
+                'completedStepCount': 0, 'totalStepCount': None, 'progress': 'unavailable'}
         return observer.observe(data) if observer else data
     status = state.get('status') if isinstance(state.get('status'), str) else 'unknown'
     active = state.get('activeStep') if isinstance(state.get('activeStep'), str) else None
     steps = state.get('steps') if isinstance(state.get('steps'), dict) else {}
+    planned = state.get('plannedSteps', list(RELEASE_STEPS))
+    valid_plan = (isinstance(planned, list) and bool(planned)
+                  and all(isinstance(name, str) and name for name in planned)
+                  and len(set(planned)) == len(planned))
     completed = [{'name': name, 'completedAt': item.get('completedAt') if isinstance(item, dict) else None}
                  for name, item in steps.items()]
     valid_pid = isinstance(runner_state, dict) and type(runner_state.get('pid')) is int and runner_state['pid'] > 0
@@ -218,6 +243,9 @@ def snapshot(control=DEFAULT_CONTROL, runner=subprocess.run, now=None, observer=
     pid = runner_state['pid'] if valid_pid and version_matches else None
     process = command_for_pid(pid, runner) if pid else {'presence': 'unobservable'}
     matches = process.get('presence') == 'present' and is_controller_command(process['command'])
+    if process.get('presence') == 'present' and not matches:
+        matches = is_controller_command(process['command'],
+                                        working_directory=working_directory_for_pid(pid, runner))
     runner_view = {'state': 'missing' if runner_state is None else 'recorded', 'pid': pid,
                    'alive': matches, 'identity': 'matched' if matches else
                    ('versionMismatch' if valid_pid and not version_matches else
@@ -256,7 +284,9 @@ def snapshot(control=DEFAULT_CONTROL, runner=subprocess.run, now=None, observer=
     end = parse_time(runner_state.get('stoppedAt')) if terminal and version_matches else None
     end = end or (parse_time(state.get('updatedAt')) if terminal else now) or now
     data = {'status': status, 'version': state.get('version'), 'stage': active, 'observedAt': now.isoformat(),
-            'completedSteps': completed, 'completedStepCount': len(completed),
+            'completedSteps': completed,
+            'completedStepCount': sum(name in steps for name in planned) if valid_plan else len(completed),
+            'totalStepCount': len(planned) if valid_plan else None,
             'latestObservedProgress': latest or active or 'none',
             'overallElapsedSeconds': max(0, int((end - parse_time(state['createdAt'])).total_seconds())) if parse_time(state.get('createdAt')) else None,
             'stepElapsedSeconds': age_seconds(state.get('activeStepStartedAt'), end) if active else None,
@@ -267,7 +297,7 @@ def snapshot(control=DEFAULT_CONTROL, runner=subprocess.run, now=None, observer=
 
 def readable(data):
     lines = [f"Release {data.get('version') or 'unknown'}: {data['status']}",
-             f"Stage: {data.get('stage') or 'none'}; completed steps: {data.get('completedStepCount', 0)}",
+             f"Stage: {data.get('stage') or 'none'}; completed steps: {data.get('completedStepCount', 0)} of {data.get('totalStepCount') or 'unknown'}",
              'Observer: ' + data.get('observation', 'unknown')]
     runner = data.get('runner', {})
     lines.append('Runner: ' + runner.get('identity', 'unknown') +
@@ -293,7 +323,7 @@ def readable(data):
 
 PAGE = '''<!doctype html><meta charset="utf-8"><title>Tractanda release status</title>
 <style>body{margin:0;background:#07182d;color:#dce9fa;font:16px -apple-system,sans-serif}main{max-width:760px;margin:48px auto;padding:24px;background:#0d2745;border-radius:12px}pre{white-space:pre-wrap;color:#b8d4f1}</style>
-<main><h1>Release observer</h1><pre id="status">Loading…</pre></main><script>let busy=false;async function load(){if(busy)return;busy=true;let out=document.querySelector('#status');try{let r=await fetch('/status.json',{cache:'no-store'});if(!r.ok)throw Error('status unavailable');let x=await r.json();out.textContent=[`Release ${x.version||'unknown'}: ${x.status}`,`Stage: ${x.stage||'none'}; completed steps: ${x.completedStepCount||0}`,`Observer: ${x.observation}`,`Advancement: ${x.advancement||'unknown'}`,`Overall elapsed: ${x.overallElapsedSeconds??'unavailable'}s`,x.stepElapsedSeconds!=null?`Step elapsed: ${x.stepElapsedSeconds}s`:'Step elapsed: unavailable',x.lastLogActivityAgeSeconds!=null?`Last activity: ${x.lastLogActivityAgeSeconds}s ago`:'Last activity: unavailable',x.uploadReadProgress?`Local stream read: ${x.uploadReadProgress.file} ${x.uploadReadProgress.percent}% (remote acceptance unknown)`:x.status==='complete'?'Progress: finished.':'Progress: unavailable; quiet is not proof of a stall.'].join('\\n')}catch(e){out.textContent='Status refresh failed; displayed state is unavailable.'}finally{busy=false}}load();setInterval(load,2000)</script>'''
+<main><h1>Release observer</h1><pre id="status">Loading…</pre></main><script>let busy=false;async function load(){if(busy)return;busy=true;let out=document.querySelector('#status');try{let r=await fetch('/status.json',{cache:'no-store'});if(!r.ok)throw Error('status unavailable');let x=await r.json();out.textContent=[`Release ${x.version||'unknown'}: ${x.status}`,`Stage: ${x.stage||'none'}; completed steps: ${x.completedStepCount||0} of ${x.totalStepCount??'unknown'}`,`Observer: ${x.observation}`,`Advancement: ${x.advancement||'unknown'}`,`Overall elapsed: ${x.overallElapsedSeconds??'unavailable'}s`,x.stepElapsedSeconds!=null?`Step elapsed: ${x.stepElapsedSeconds}s`:'Step elapsed: unavailable',x.lastLogActivityAgeSeconds!=null?`Last activity: ${x.lastLogActivityAgeSeconds}s ago`:'Last activity: unavailable',x.uploadReadProgress?`Local stream read: ${x.uploadReadProgress.file} ${x.uploadReadProgress.percent}% (remote acceptance unknown)`:x.status==='complete'?'Progress: finished.':'Progress: unavailable; quiet is not proof of a stall.'].join('\\n')}catch(e){out.textContent='Status refresh failed; displayed state is unavailable.'}finally{busy=false}}load();setInterval(load,2000)</script>'''
 
 
 def make_server(control, port):
