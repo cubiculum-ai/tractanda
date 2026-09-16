@@ -4,7 +4,7 @@ import XCTest
 
 final class CategoryHierarchyTests: XCTestCase {
     private func create(_ store: ItemStore, _ fields: [String: ItemValue] = [:]) throws -> Revision {
-        try store.commit(CommitRequest(classID: "NoteItem", changes: fields, operationID: Identifier.make()))
+        try store.commit(CommitRequest(classID: "Item", changes: fields, operationID: Identifier.make()))
             .revision
     }
     private func edit(

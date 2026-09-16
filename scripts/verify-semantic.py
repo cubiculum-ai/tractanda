@@ -152,14 +152,14 @@ def main():
             'inputEncoding':'item-text-utf8-v2'}
         with wire.server(binary,store,path) as client:
             assert client.call('TractandaSemantic/status')['enabled'] is False
-            note=client.commit(wire.intent('create','first',class_id='NoteItem',changes={
+            note=client.commit(wire.intent('create','first',class_id='Item',changes={
                 'subject':wire.text('Schach und Kalender'),'body':wire.text('Frédéric ☃ discusses the chess club. '*30)}))['revision']
             before=wire.manifest(store)
             configured=client.call('TractandaSemantic/configure',{'configuration':config})
             assert configured['configurationID']==config['configurationID']
             assert provider.entered.wait(3),'Background provider did not start'
             start=time.monotonic()
-            empty=client.commit(wire.intent('create','empty-body',class_id='NoteItem',changes={
+            empty=client.commit(wire.intent('create','empty-body',class_id='Item',changes={
                 'subject':wire.text('Only a subject')}))['revision']
             elapsed=time.monotonic()-start
             assert elapsed<2,'Commit waited for held embedding request'

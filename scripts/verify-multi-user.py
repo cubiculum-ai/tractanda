@@ -108,7 +108,7 @@ class Fixture:
     def commit(self, key, fields=None, base=None, action=None, class_id=None, operation=None, error=None):
         request = wire_module.intent(action or ("revise" if base else "create"), operation or str(uuid.uuid4()),
             item=identity(base) if base else None, base=identity(base, "revisionID") if base else None,
-            class_id=class_id or ("NoteItem" if base is None else None), changes=fields)
+            class_id=class_id or ("Item" if base is None else None), changes=fields)
         return self.call(key, "TractandaItem/commit", request, error=error)
 
     def permissions(self, mode=0o600, acl=None, owner=None, group=None):

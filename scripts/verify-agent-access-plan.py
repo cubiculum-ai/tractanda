@@ -35,7 +35,7 @@ def _text(value):
     return {"type": "text", "value": value}
 
 
-def _item(item_id, revision_id, subject=None, include_permissions=False, class_id="NoteItem"):
+def _item(item_id, revision_id, subject=None, include_permissions=False, class_id="Item"):
     fields = {
         "itemID": _text(item_id),
         "revisionID": _text(revision_id),
@@ -196,7 +196,7 @@ def _native_verify(binary):
                 request = WIRE.intent(
                     "create",
                     f"native-note-{index + 1}",
-                    class_id="NoteItem",
+                    class_id="Item",
                     changes={
                         "subject": WIRE.text(f"Native note #{index + 1}"),
                         "body": WIRE.text(f"Body {index + 1}"),
@@ -216,8 +216,8 @@ def _native_verify(binary):
                 changes={"isDeleted": {"type": "boolean", "value": True}},
             ))
 
-            query = client.call("TractandaItem/query", {"expression": 'classID == "NoteItem"'})
-            _assert(query["total"] == 3, "native fixture must create exactly three NoteItems")
+            query = client.call("TractandaItem/query", {"expression": 'classID == "Item"'})
+            _assert(query["total"] == 3, "native fixture must create exactly three Items")
             query_ids = query["ids"]
             responses = client.batch([["TractandaItem/get", {"ids": query_ids}, "notes"]])[0]
             _assert(responses[0] == "TractandaItem/get", responses)

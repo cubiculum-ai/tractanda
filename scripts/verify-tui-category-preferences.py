@@ -22,7 +22,7 @@ def main():
  with tempfile.TemporaryDirectory(prefix='trac-category-prefs-',dir='/tmp') as tmp:
   root=Path(tmp);r=root/'r.json';views=root/'r.views.json';appearance=root/'r.appearance.json'
   with wire.server(str(a.native_binary.resolve()),root/'store',root/'s') as client:
-   def create(name,extra=None):return client.commit(wire.intent('create','seed-'+name,class_id='NoteItem',changes={'subject':wire.text(name),**(extra or {})}))['revision']
+   def create(name,extra=None):return client.commit(wire.intent('create','seed-'+name,class_id='Item',changes={'subject':wire.text(name),**(extra or {})}))['revision']
    rule=tagged('object',{'language':wire.text('tractanda.spotlight.v0'),'expression':wire.text('itemID == ""')})
    parent=create('Presentation root',{'selection':rule,'body':wire.text('Category description')})
    create('Presentation child',{'selection':rule,'categoryParents':tagged('list',[tagged('reference',{'itemID':wire.item_id(parent)})])})

@@ -107,7 +107,7 @@ final class SemanticServiceTests: XCTestCase {
     {
         try store.commit(
             CommitRequest(
-                classID: "NoteItem",
+                classID: "Item",
                 changes: ["subject": .text(subject), "body": .text(body)],
                 operationID: operation)
         ).revision
@@ -205,7 +205,7 @@ final class SemanticServiceTests: XCTestCase {
             let expression = "dueAt >= $time.today && dueAt < $time.today(1)"
             let view = try store.commit(
                 CommitRequest(
-                    classID: "SavedViewItem",
+                    classID: "Item",
                     changes: [
                         "viewDefinition": .object([
                             "language": .text(SpotlightQuery.profile), "expression": .text(expression),
@@ -215,7 +215,7 @@ final class SemanticServiceTests: XCTestCase {
             ).revision
             let utc = try store.commit(
                 CommitRequest(
-                    classID: "NoteItem",
+                    classID: "Item",
                     changes: [
                         "subject": .text("UTC day"), "body": .text("calendar evidence"),
                         "dueAt": .date("2026-01-01T12:00:00Z"),
@@ -223,7 +223,7 @@ final class SemanticServiceTests: XCTestCase {
             ).revision
             let newYork = try store.commit(
                 CommitRequest(
-                    classID: "NoteItem",
+                    classID: "Item",
                     changes: [
                         "subject": .text("New York day"), "body": .text("calendar evidence"),
                         "dueAt": .date("2025-12-31T12:00:00Z"),
@@ -461,7 +461,7 @@ final class SemanticServiceTests: XCTestCase {
             }
             let original = try store.commit(
                 CommitRequest(
-                    classID: "NoteItem",
+                    classID: "Item",
                     changes: [
                         "workingNotes": .text("metadata passage é needle"),
                         "developmentUUIDMigration": .object(["note": .text("original issuer unknown")]),
@@ -534,7 +534,7 @@ final class SemanticServiceTests: XCTestCase {
             let visible = try store.withAccess(forUID: accounts.alice) {
                 try store.commit(
                     CommitRequest(
-                        classID: "NoteItem",
+                        classID: "Item",
                         changes: [
                             "subject": .text("public"), "body": .text("visible"),
                             "permissions": permissions(owner: "alice", mode: 0o640),
@@ -544,7 +544,7 @@ final class SemanticServiceTests: XCTestCase {
             _ = try store.withAccess(forUID: accounts.alice) {
                 try store.commit(
                     CommitRequest(
-                        classID: "NoteItem",
+                        classID: "Item",
                         changes: [
                             "subject": .text("private"), "body": .text("hidden"),
                             "permissions": permissions(owner: "alice", mode: 0o600),

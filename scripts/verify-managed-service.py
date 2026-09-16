@@ -143,7 +143,7 @@ def main():
             assert 'forbidden' in command('info',succeeds=False,extra_environment={'TRACTANDA_SERVER_USER':'root'})
             checks.append('Prepared a shared daemon with explicit daemon arguments, copied full sibling resource bundles, and started it after the staged source bundles were unavailable; native info and HTTP manual work')
 
-            created = command('--default','create','NoteItem','Profile-selected note','profile-capture','Body')
+            created = command('--default','create','Item','Profile-selected note','profile-capture','Body')
             item = created['revision']; identity = wire.item_id(item)
             session = tui.Terminal(terminal_binary,endpoint,root/'recovery/pending.json',arguments=[],environment=environment)
             try:
@@ -156,7 +156,7 @@ def main():
             # A pending edit from the earlier explicit-socket client used nil for
             # its same-user daemon identity. A named profile must still recover it.
             pending = {'socket':str(endpoint),'serviceUser':None,'request':wire.intent(
-                'create','profile-capture',class_id='NoteItem',
+                'create','profile-capture',class_id='Item',
                 changes={'subject':wire.text('Profile-selected note'),'body':wire.text('Body')})}
             recovery = root/'recovery/pending.json'
             recovery.write_text(json.dumps(pending)); recovery.chmod(0o600)

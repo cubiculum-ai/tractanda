@@ -45,7 +45,7 @@ def main():
         store, socket = root / "store", root / "s"
         recovery, appearance = root / "r.json", root / "appearance.json"
         with tui.wire.server(str(args.native_binary.resolve()), store, socket) as client:
-            client.commit(tui.wire.intent("create", "focus-item", class_id="NoteItem", changes={
+            client.commit(tui.wire.intent("create", "focus-item", class_id="Item", changes={
                 "subject": tui.wire.text("Wide 文🙂 selection"), "body": tui.wire.text("Preview remains unselected"),
             }))
             manifest = tui.wire.manifest(store)

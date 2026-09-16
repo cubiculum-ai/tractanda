@@ -16,7 +16,7 @@ import time
 from urllib.parse import urlsplit, parse_qs
 import uuid
 
-CAPABILITY = 'https://tractanda.ai/ns/local-prototype/2'
+CAPABILITY = 'https://tractanda.ai/ns/local-prototype/3'
 
 
 

@@ -19,11 +19,11 @@ def create(client, subject, category=None, label=None):
               "foreign.metadata": wire.text("preserve")}
     if label:
         fields["categoryOverrides"] = {"type": "object", "value": {category: wire.text(label)}}
-    return client.commit(wire.intent("create", "seed-" + subject, class_id="NoteItem", changes=fields))["revision"]
+    return client.commit(wire.intent("create", "seed-" + subject, class_id="Item", changes=fields))["revision"]
 
 
 def seed(client, candidates=1):
-    category = client.commit(wire.intent("create", "category", class_id="NoteItem", changes={
+    category = client.commit(wire.intent("create", "category", class_id="Item", changes={
         "subject": wire.text("Club café 文"), "foreign.category": wire.text("preserve"),
         "selection": {"type": "object", "value": {"language": wire.text("tractanda.spotlight.v0"),
                                                      "expression": wire.text('itemID == ""')}},

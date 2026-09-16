@@ -7,7 +7,7 @@ final class ItemPreviewPresentationTests: XCTestCase {
     func testLongPreviewClampsScrollingAndKeepsEveryRowFocusable() throws {
         let item = try Revision(fields: [
             "itemID": .text(Identifier.make()), "revisionID": .text(Identifier.make()),
-            "classID": .text("NoteItem"), "schemaVersion": .integer(1),
+            "classID": .text("Item"), "schemaVersion": .integer(1),
             "actor": .text("fixture"), "operationID": .text("fixture-preview"),
             "requestIdentity": .text("fixture"), "createdAt": .date("2026-09-13T00:00:00Z"),
             "modifiedAt": .date("2026-09-13T00:00:00Z"),

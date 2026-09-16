@@ -55,7 +55,7 @@ def main():
         root = Path(directory)
         with wire.server(str(args.native_binary.resolve()), root / "store", root / "s") as client:
             background = client.commit(wire.intent(
-                "create", str(uuid.uuid4()), class_id="NoteItem",
+                "create", str(uuid.uuid4()), class_id="Item",
                 changes={"subject": wire.text("Overlay background"), "body": wire.text("context remains visible")},
             ))["revision"]
             with tui.terminal(str(args.tui_binary.resolve()), root / "s", root / "pending.json", items_only=False) as ui:

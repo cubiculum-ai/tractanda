@@ -21,7 +21,7 @@ final class CategoryWorkspaceTests: XCTestCase {
         func category(_ name: String, parents: [Revision] = []) throws -> Revision {
             try client.commit(
                 CommitRequest(
-                    classID: "NoteItem",
+                    classID: "Item",
                     changes: [
                         "subject": .text(name),
                         "selection": .object([
@@ -34,7 +34,7 @@ final class CategoryWorkspaceTests: XCTestCase {
         func item(_ subject: String, categories: [Revision] = []) throws -> Revision {
             try client.commit(
                 CommitRequest(
-                    classID: "NoteItem",
+                    classID: "Item",
                     changes: [
                         "subject": .text(subject),
                         "categories": .list(categories.map { .reference(ItemReference($0.itemID)) }),

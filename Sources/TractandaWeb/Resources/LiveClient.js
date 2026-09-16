@@ -7,7 +7,7 @@
   const sessionStorageKey = 'tractanda.web-session';
   const browserStorageKey = 'tractanda.browser-session';
   var isSigningIn = false, resumeEditorAfterSignIn = false;
-  const nativeCapability = 'https://tractanda.ai/ns/local-prototype/2';
+  const nativeCapability = 'https://tractanda.ai/ns/local-prototype/3';
   const typedText = value => ({type:'text',value});
   const fieldText = (fields, key) => fields[key]?.type === 'text' ? fields[key].value : '';
 
@@ -472,7 +472,7 @@
     if (!Object.keys(changes).length) {$('task-dialog').close();toast('No changes to save.');return;}
     const request={action:baseRevision?'revise':'create',changes,unset:[],operationID:'web:'+crypto.randomUUID()};
     if (baseRevision) {request.itemID=fieldText(baseRevision.fields,'itemID');request.expectedRevisionID=fieldText(baseRevision.fields,'revisionID');}
-    else request.classID='NoteItem';
+    else request.classID='Item';
     try {retainPendingWrite({viewItemID:selectedViewID,request,candidate});}
     catch {toast('This browser could not retain the retry record. The edit has not been sent.',true);return;}
     await sendPendingWrite();

@@ -23,7 +23,7 @@ final class KeymapTests: XCTestCase {
         func item(_ name: String, fields: [String: ItemValue] = [:]) throws -> Revision {
             try client.commit(
                 CommitRequest(
-                    classID: "NoteItem", changes: fields.merging(["subject": .text(name)]) { _, new in new },
+                    classID: "Item", changes: fields.merging(["subject": .text(name)]) { _, new in new },
                     operationID: Identifier.make())
             ).revision
         }

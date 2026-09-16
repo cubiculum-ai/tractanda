@@ -31,7 +31,7 @@ def main():
         root = Path(directory)
         with wire.server(native, root / "store", root / "s") as client:
             def create(fields):
-                return client.commit(wire.intent("create", str(uuid.uuid4()), class_id="NoteItem", changes=fields))["revision"]
+                return client.commit(wire.intent("create", str(uuid.uuid4()), class_id="Item", changes=fields))["revision"]
 
             included = create({"subject": wire.text("Direct include"), "selection": tagged("object", {
                 "language": wire.text("tractanda.spotlight.v0"), "expression": wire.text('itemID == ""'),

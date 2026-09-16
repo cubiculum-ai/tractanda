@@ -17,7 +17,7 @@ final class KanbanTests: XCTestCase {
             client = ItemClient(transport: { service.handle($0, peerUID: uid) })
         }
         deinit { try? FileManager.default.removeItem(at: root) }
-        func item(_ name: String, type: String = "NoteItem", fields: [String: ItemValue] = [:]) throws
+        func item(_ name: String, type: String = "Item", fields: [String: ItemValue] = [:]) throws
             -> Revision
         {
             try client.commit(
@@ -51,7 +51,7 @@ final class KanbanTests: XCTestCase {
                 ])
         }
         func assigned(
-            _ name: String, type: String = "NoteItem", categories: [Revision],
+            _ name: String, type: String = "Item", categories: [Revision],
             extra: [String: ItemValue] = [:]
         ) throws -> Revision {
             try item(

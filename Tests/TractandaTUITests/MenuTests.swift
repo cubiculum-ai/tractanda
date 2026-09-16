@@ -23,7 +23,7 @@ final class MenuTests: XCTestCase {
         func item(_ subject: String, fields: [String: ItemValue] = [:]) throws -> Revision {
             try client.commit(
                 CommitRequest(
-                    classID: "NoteItem",
+                    classID: "Item",
                     changes: fields.merging(["subject": .text(subject)]) { _, new in new },
                     operationID: Identifier.make())
             ).revision

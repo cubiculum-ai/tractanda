@@ -85,7 +85,7 @@ def main():
             recovery = root / "recovery" / "pending.json"
             preferences = recovery.with_suffix(".views.json")
             with wire.server(native, store, socket_path) as client:
-                def create(name, fields=None, class_id="NoteItem"):
+                def create(name, fields=None, class_id="Item"):
                     return client.commit(wire.intent(
                         "create", "view-workspace-" + uuid.uuid4().hex, class_id=class_id,
                         changes={"subject": wire.text(name), **(fields or {})})) ["revision"]
@@ -187,7 +187,7 @@ def main():
                     ui.send(F8); ui.wait("Saved one revision")
                     saved = tui.wait_item(client, 'subject == "Workspace QA report"', ui)
                     saved_id = wire.item_id(saved)
-                    assert saved["fields"]["classID"] == wire.text("NoteItem")
+                    assert saved["fields"]["classID"] == wire.text("Item")
                     edited = client.get(saved_id)
                     assert client.call("TractandaItem/history", {"itemID": saved_id})["total"] == 1
                     definition = edited["fields"]["viewDefinition"]["value"]
@@ -203,7 +203,7 @@ def main():
                     ui.send(DOWN * 65)
                     wait_selected(ui, "Next page"); ui.send(b"\r"); ui.wait("Report row 05")
                     snapshot(snapshots, ui, "saved-staged-definition-second-page")
-                    checks.append("New ordinary NoteItem view stages query, named category sections and a Rank column before one guarded save; its selected report remains reachable past the native 64-row page boundary")
+                    checks.append("New ordinary Item view stages query, named category sections and a Rank column before one guarded save; its selected report remains reachable past the native 64-row page boundary")
 
                     # Cancel leaves the revision untouched; a stale guard is rejected and leaves the text draft visible.
                     baseline = client.get(saved_id)

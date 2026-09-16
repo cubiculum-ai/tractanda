@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 import time
 
-CAPABILITY = "https://tractanda.ai/ns/local-prototype/2"
+CAPABILITY = "https://tractanda.ai/ns/local-prototype/3"
 
 
 def text(value):
@@ -137,7 +137,7 @@ def snapshot(client, fixture):
 
 
 def exercise(client, fixture):
-    view = client.commit(intent("create", "ipc-saved-view", class_id="SavedViewItem", changes={
+    view = client.commit(intent("create", "ipc-saved-view", class_id="Item", changes={
         "subject": text("Family and Alice"),
         "viewDefinition": {"type": "object", "value": {"language": text("tractanda.spotlight.v0"),
             "categoryPath": {"type": "list", "value": [{"type": "reference", "value": {"itemID": fixture[k]}}
@@ -167,12 +167,12 @@ def exercise(client, fixture):
                                        {"subject": text("Meet with the president")}))["revision"]
     assert item_id(appointment) == item_id(todo)
     assert appointment["fields"]["classID"] == text("AppointmentItem")
-    note = client.commit(intent("create", "ipc-unicode", class_id="NoteItem", changes={
+    note = client.commit(intent("create", "ipc-unicode", class_id="Item", changes={
         "subject": text("Frédéric's notes"), "body": text("Quotes: \"hello\"; slash /; newline\n"),
         "custom.key": {"type": "integer", "value": 9223372036854775807}}))["revision"]
     assert note["fields"]["custom.key"]["value"] == 9223372036854775807
     responses = client.batch([
-        ["TractandaItem/query", {"expression": 'classID == "NoteItem" && subject == "Newsletter delivery issue"'}, "q"],
+        ["TractandaItem/query", {"expression": 'classID == "Item" && subject == "Newsletter delivery issue"'}, "q"],
         ["TractandaItem/get", {"#ids": {"resultOf": "q", "name": "TractandaItem/query", "path": "/ids"}}, "g"],
     ])
     assert len(responses[1][1]["list"]) == 1
@@ -214,7 +214,7 @@ def main():
             else:
                 request = exercise(client, fixture)
             if args.append_note:
-                request = intent("create", "debian-transfer-note", class_id="NoteItem", changes={"subject": text("Created on Debian"), "body": text("Return this immutable revision to the Mac.")})
+                request = intent("create", "debian-transfer-note", class_id="Item", changes={"subject": text("Created on Debian"), "body": text("Return this immutable revision to the Mac.")})
                 client.commit(request)
             before = snapshot(client, fixture)
             previous_state = client.call("TractandaStore/info")["state"]

@@ -21,7 +21,7 @@ final class NavigationHistoryTests: XCTestCase {
         func item(_ name: String, _ fields: [String: ItemValue] = [:]) throws -> Revision {
             try client.commit(
                 CommitRequest(
-                    classID: "NoteItem", changes: fields.merging(["subject": .text(name)]) { _, b in b },
+                    classID: "Item", changes: fields.merging(["subject": .text(name)]) { _, b in b },
                     operationID: Identifier.make())
             ).revision
         }

@@ -42,12 +42,12 @@ final class Version1UUIDTests: XCTestCase {
             "trac-uuid-collision-" + Identifier.make())
         defer { try? FileManager.default.removeItem(at: root) }
         let store = try ItemStore(root: root)
-        let first = try store.commit(CommitRequest(classID: "NoteItem", changes: [:], operationID: "first"))
+        let first = try store.commit(CommitRequest(classID: "Item", changes: [:], operationID: "first"))
             .revision
         let state = store.state
         store.makePersistentUUID = { UUID(uuidString: first.itemID)! }
         XCTAssertThrowsError(
-            try store.commit(CommitRequest(classID: "NoteItem", changes: [:], operationID: "collision"))
+            try store.commit(CommitRequest(classID: "Item", changes: [:], operationID: "collision"))
         ) {
             XCTAssertEqual(($0 as? TractandaError)?.code, "identifierCollision")
         }
@@ -122,9 +122,9 @@ final class Version1UUIDTests: XCTestCase {
         let oldRevisionID = Identifier.make()
         let now = Timestamp.now()
         let intent = CommitRequest(
-            classID: "NoteItem", changes: ["subject": .text("Legacy v4")], operationID: "legacy-v4-fixture")
+            classID: "Item", changes: ["subject": .text("Legacy v4")], operationID: "legacy-v4-fixture")
         let legacy = try Revision(fields: [
-            "itemID": .text(oldItemID), "revisionID": .text(oldRevisionID), "classID": .text("NoteItem"),
+            "itemID": .text(oldItemID), "revisionID": .text(oldRevisionID), "classID": .text("Item"),
             "schemaVersion": .integer(1), "createdAt": .date(now), "modifiedAt": .date(now),
             "subject": .text("Legacy v4"), "actor": .text("legacy"), "operationID": .text(intent.operationID),
             "requestIdentity": .text(try JSON.encode(intent).base64EncodedString()),
@@ -151,7 +151,7 @@ final class Version1UUIDTests: XCTestCase {
         XCTAssertNotNil(UUID(uuidString: copy.revisionID)?.version1Components)
         XCTAssertNotEqual(copy.itemID, copy.revisionID)
         let fresh = try store!.commit(
-            CommitRequest(classID: "NoteItem", changes: [:], operationID: "create-v1")
+            CommitRequest(classID: "Item", changes: [:], operationID: "create-v1")
         ).revision
         XCTAssertNotNil(UUID(uuidString: fresh.itemID)?.version1Components)
         XCTAssertNotNil(UUID(uuidString: fresh.revisionID)?.version1Components)

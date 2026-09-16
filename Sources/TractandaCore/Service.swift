@@ -174,9 +174,9 @@ public final class ItemService {
                 "currentPermission": store.isAdministrator ? "administrator" : "read/edit by item permission",
                 "callerIsAdministrator": store.isAdministrator,
                 "overview": [
-                    "Every record is a universal item; item types form an inheritance hierarchy.",
+                    "Item is the concrete generic root; specialized item types form an inheritance hierarchy.",
                     "Categories are overlapping dimensions, not item types; All items is implicit.",
-                    "To-do and waiting states are category assignments on ordinary items such as NoteItem.",
+                    "To-do and waiting states are category assignments on ordinary items such as Item.",
                     "Views are transient queries or saved view definitions.",
                     "Permissions apply to every read. Use one guarded edit and retry the exact request after uncertainty.",
                     "Use content, summary, or properties projections and constrain query scope before retrieving bodies.",
@@ -600,7 +600,9 @@ public final class ItemService {
             let calls = request["methodCalls"] as? [[Any]], calls.count <= 32
         else {
             throw TractandaError(
-                "invalidRequest", "Declare the local capability and supply at most 32 method calls.")
+                "invalidRequest",
+                "Declare \(Self.capability) and supply at most 32 method calls. Update older clients to this prototype API version."
+            )
         }
         var ids: Set<String> = []
         for call in calls {

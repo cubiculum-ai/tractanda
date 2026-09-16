@@ -9,7 +9,7 @@ final class ReferenceLabelTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let store = try ItemStore(root: root)
         let scope = try store.commit(
-            CommitRequest(classID: "NoteItem", changes: ["subject": .text("Project")], operationID: "scope")
+            CommitRequest(classID: "Item", changes: ["subject": .text("Project")], operationID: "scope")
         ).revision
         let labels = ItemValue.list([
             .object(["label": .text("A freely chosen label")]),
@@ -19,7 +19,7 @@ final class ReferenceLabelTests: XCTestCase {
             ]),
         ])
         let item = try store.commit(
-            CommitRequest(classID: "NoteItem", changes: ["referenceLabels": labels], operationID: "labels")
+            CommitRequest(classID: "Item", changes: ["referenceLabels": labels], operationID: "labels")
         ).revision
         XCTAssertEqual(ItemReferenceLabel.display(in: item), "A freely chosen label")
         XCTAssertEqual(ItemReferenceLabel.display(in: item, preferredScopes: [scope.itemID]), "TRAC-040")

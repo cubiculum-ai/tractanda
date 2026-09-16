@@ -26,7 +26,7 @@ final class ExternalIndexDirectoryTests: XCTestCase {
         }
         var store: ItemStore? = try ItemStore(root: root, indexDirectory: external)
         let revision = try store!.commit(
-            CommitRequest(classID: "NoteItem", changes: ["subject": .text("retained")], operationID: "note")
+            CommitRequest(classID: "Item", changes: ["subject": .text("retained")], operationID: "note")
         )
         .revision
         let configuration = SemanticConfiguration(
@@ -66,7 +66,7 @@ final class ExternalIndexDirectoryTests: XCTestCase {
         var first: ItemStore? = try ItemStore(root: root, indexDirectory: external)
         assertCode("storeBusy") { _ = try ItemStore(root: root) }
         assertCode("indexBusy") { _ = try ItemStore(root: otherRoot, indexDirectory: external) }
-        XCTAssertNotNil(try first?.commit(CommitRequest(classID: "NoteItem", operationID: "still-usable")))
+        XCTAssertNotNil(try first?.commit(CommitRequest(classID: "Item", operationID: "still-usable")))
         first = nil
 
         assertCode("indexBindingMismatch") { _ = try ItemStore(root: otherRoot, indexDirectory: external) }
@@ -87,7 +87,7 @@ final class ExternalIndexDirectoryTests: XCTestCase {
         }
         var original: ItemStore? = try ItemStore(root: originalRoot)
         let record = try original!.commit(
-            CommitRequest(classID: "NoteItem", changes: ["subject": .text("safe")], operationID: "safe")
+            CommitRequest(classID: "Item", changes: ["subject": .text("safe")], operationID: "safe")
         )
         .revision
 

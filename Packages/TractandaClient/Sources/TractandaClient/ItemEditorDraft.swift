@@ -15,7 +15,7 @@ public struct ItemEditorDraft: Codable, Equatable, Sendable {
         self.assignedCategories = assignedCategories
         subject = base?.fields["subject"]?.string ?? ""
         body = base?.fields["body"]?.string ?? ""
-        className = base?.classID ?? "NoteItem"
+        className = base?.classID ?? "Item"
         rule = base?.fields["selection"]?.map?["expression"]?.string ?? ""
         try validate()
     }

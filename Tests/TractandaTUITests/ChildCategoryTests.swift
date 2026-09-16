@@ -27,7 +27,7 @@ final class ChildCategoryTests: XCTestCase {
         func category(_ name: String, parents: [Revision] = [], order: Int64 = 0) throws -> Revision {
             try client.commit(
                 CommitRequest(
-                    classID: "NoteItem",
+                    classID: "Item",
                     changes: [
                         "subject": .text(name),
                         "selection": .object([
@@ -75,7 +75,7 @@ final class ChildCategoryTests: XCTestCase {
         for index in 0..<70 {
             _ = try f.client.commit(
                 CommitRequest(
-                    classID: "NoteItem", changes: ["subject": .text("Item \(index)")],
+                    classID: "Item", changes: ["subject": .text("Item \(index)")],
                     operationID: Identifier.make()))
         }
         var calls: [(String, [String: Any])] = []
@@ -362,7 +362,7 @@ final class ChildCategoryTests: XCTestCase {
             try store.withAccess(forUID: 51001) {
                 try store.commit(
                     CommitRequest(
-                        classID: "NoteItem",
+                        classID: "Item",
                         changes: [
                             "subject": .text(title), "permissions": permissions(mode),
                             "selection": .object([

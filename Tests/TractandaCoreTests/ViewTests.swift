@@ -4,7 +4,7 @@ import XCTest
 
 final class ViewTests: XCTestCase {
     private func create(_ store: ItemStore, _ fields: [String: ItemValue]) throws -> Revision {
-        try store.commit(CommitRequest(classID: "NoteItem", changes: fields, operationID: Identifier.make()))
+        try store.commit(CommitRequest(classID: "Item", changes: fields, operationID: Identifier.make()))
             .revision
     }
 
@@ -12,7 +12,7 @@ final class ViewTests: XCTestCase {
         func item(_ suffix: String, modified: String, created: String) throws -> Revision {
             let fields: [String: ItemValue] = [
                 "itemID": .text("00000000-0000-4000-8000-00000000000" + suffix),
-                "revisionID": .text(Identifier.make()), "classID": .text("NoteItem"),
+                "revisionID": .text(Identifier.make()), "classID": .text("Item"),
                 "actor": .text("test"), "operationID": .text("test"), "requestIdentity": .text("test"),
                 "schemaVersion": .integer(1), "createdAt": .date(created), "modifiedAt": .date(modified),
             ]

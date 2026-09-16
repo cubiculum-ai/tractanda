@@ -115,7 +115,7 @@ def main():
         os.chmod(prefs, 0o600)
         with wire.server(str(args.native_binary.resolve()), root / 'store', root / 's') as client:
             def create(name, fields):
-                return client.commit(wire.intent('create', str(uuid.uuid4()), class_id='NoteItem',
+                return client.commit(wire.intent('create', str(uuid.uuid4()), class_id='Item',
                                                 changes={'subject': wire.text(name), **fields}))['revision']
             category = create('Border root', {'selection': {'type': 'object', 'value': {
                 'language': wire.text('tractanda.spotlight.v0'), 'expression': wire.text('itemID == *')}}})

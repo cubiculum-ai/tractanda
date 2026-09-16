@@ -23,22 +23,22 @@ final class SavedViewCapabilityTests: XCTestCase {
         let store = try ItemStore(root: directory)
 
         let note = try store.commit(
-            CommitRequest(classID: "NoteItem", changes: ["subject": .text("Note")], operationID: "note")
+            CommitRequest(classID: "Item", changes: ["subject": .text("Note")], operationID: "note")
         ).revision
         let plainNote = ItemTypes.makeItem(from: note)
-        XCTAssertTrue(plainNote is NoteItem)
+        XCTAssertTrue(type(of: plainNote) == Item.self)
         XCTAssertNil(try plainNote.viewDefinition)
 
         let viewNote = try revise(store, note, changes: ["viewDefinition": definition()])
         let typedNote = ItemTypes.makeItem(from: viewNote)
-        XCTAssertTrue(typedNote is NoteItem)
+        XCTAssertTrue(type(of: typedNote) == Item.self)
         XCTAssertEqual(typedNote.revision.itemID, note.itemID)
-        XCTAssertEqual(typedNote.revision.classID, "NoteItem")
+        XCTAssertEqual(typedNote.revision.classID, "Item")
         XCTAssertEqual(try typedNote.viewDefinition?.presentation.columns, ViewPresentation.defaultColumns)
 
         let restoredNote = try revise(store, viewNote, unset: ["viewDefinition"])
         XCTAssertEqual(restoredNote.itemID, note.itemID)
-        XCTAssertEqual(restoredNote.classID, "NoteItem")
+        XCTAssertEqual(restoredNote.classID, "Item")
         XCTAssertNil(try ItemTypes.makeItem(from: restoredNote).viewDefinition)
 
         let role = try store.commit(

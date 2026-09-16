@@ -56,7 +56,7 @@ final class LearningWorkflowTests: XCTestCase {
             settings.configuration.dimensions = 3
             category = try store.commit(
                 CommitRequest(
-                    classID: "NoteItem",
+                    classID: "Item",
                     changes: [
                         "subject": .text("Club café 文"),
                         "selection": .object([
@@ -81,7 +81,7 @@ final class LearningWorkflowTests: XCTestCase {
             ]
             if let label { fields["categoryOverrides"] = .object([category.itemID: .text(label)]) }
             return try store.commit(
-                CommitRequest(classID: "NoteItem", changes: fields, operationID: Identifier.make())
+                CommitRequest(classID: "Item", changes: fields, operationID: Identifier.make())
             ).revision
         }
         func revise(_ item: Revision, _ fields: [String: ItemValue]) throws -> Revision {
@@ -438,7 +438,7 @@ final class LearningWorkflowTests: XCTestCase {
         func create(_ fields: [String: ItemValue]) throws -> Revision {
             try store.withAccess(forUID: accounts.alice) {
                 try store.commit(
-                    CommitRequest(classID: "NoteItem", changes: fields, operationID: Identifier.make())
+                    CommitRequest(classID: "Item", changes: fields, operationID: Identifier.make())
                 ).revision
             }
         }

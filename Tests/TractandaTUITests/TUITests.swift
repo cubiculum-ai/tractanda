@@ -495,7 +495,7 @@ final class TUITests: XCTestCase {
         let store = try ItemStore(root: directory.appendingPathComponent("store"))
         let original = try store.commit(
             CommitRequest(
-                classID: "NoteItem", changes: ["subject": .text("Background item")], operationID: "seed")
+                classID: "Item", changes: ["subject": .text("Background item")], operationID: "seed")
         )
         .revision
         let service = ItemService(store: store)
@@ -526,7 +526,7 @@ final class TUITests: XCTestCase {
         let store = try ItemStore(root: directory.appendingPathComponent("store"))
         _ = try store.commit(
             CommitRequest(
-                classID: "NoteItem",
+                classID: "Item",
                 changes: [
                     "subject": .text("Long note"),
                     "body": .text((0..<50).map { "Line \($0)" }.joined(separator: "\n")),
@@ -645,7 +645,7 @@ final class TUITests: XCTestCase {
         let store = try ItemStore(root: directory.appendingPathComponent("store"))
         let original = try store.commit(
             CommitRequest(
-                classID: "NoteItem",
+                classID: "Item",
                 changes: ["subject": .text("Original"), "foreign.metadata": .integer(Int64.max)],
                 operationID: "seed")
         ).revision
@@ -671,10 +671,10 @@ final class TUITests: XCTestCase {
     }
 
     func testClassPickerOnlyOffersConcretePublicTypesAndPreservesUnknownExistingClass() throws {
-        XCTAssertFalse(ItemDraft.supportedClassIDs.contains("Item"))
+        XCTAssertTrue(ItemDraft.supportedClassIDs.contains("Item"))
         XCTAssertFalse(ItemDraft.supportedClassIDs.contains("PersonalStateItem"))
         XCTAssertFalse(ItemDraft.supportedClassIDs.contains("AccessConfigurationItem"))
-        XCTAssertTrue(ItemDraft.supportedClassIDs.contains("NoteItem"))
+        XCTAssertFalse(ItemDraft.supportedClassIDs.contains("NoteItem"))
         let directory = try root()
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = try ItemStore(root: directory.appendingPathComponent("store"))
@@ -691,7 +691,7 @@ final class TUITests: XCTestCase {
         XCTAssertEqual(draft.request()?.action, .retype)
         var category = try ItemDraft(isCategory: true)
         category.cycleClass(forward: true)
-        XCTAssertEqual(category.className.text, "NoteItem")
+        XCTAssertEqual(category.className.text, "Item")
     }
 
     func testResizingPreservesDraftFocusSelectionAndNativeWorkflow() throws {
@@ -782,7 +782,7 @@ final class TUITests: XCTestCase {
             url: directory.appendingPathComponent("separate.json"), socket: "/fixture")
         XCTAssertNil(try separate.load())
         let request = CommitRequest(
-            classID: "NoteItem", changes: ["subject": .text("Recover me")], operationID: "recover")
+            classID: "Item", changes: ["subject": .text("Recover me")], operationID: "recover")
         try first!.save(request)
         XCTAssertThrowsError(try second.save(request))
         XCTAssertEqual(try first!.load(), request)
@@ -810,7 +810,7 @@ final class TUITests: XCTestCase {
         XCTAssertNotEqual(alternate!.url, primary)
         XCTAssertEqual(alternate!.url.lastPathComponent, "2f66697874757265.slot-1.json")
         let request = CommitRequest(
-            classID: "NoteItem", changes: ["subject": .text("Recover alternate")], operationID: "alternate")
+            classID: "Item", changes: ["subject": .text("Recover alternate")], operationID: "alternate")
         try alternate!.save(request)
         alternate = nil
 
@@ -845,7 +845,7 @@ final class TUITests: XCTestCase {
         let mismatched = RecoveryJournal(url: alternate, socket: "/different")
         try mismatched.save(
             CommitRequest(
-                classID: "NoteItem", changes: ["subject": .text("Wrong connection")], operationID: "mismatch")
+                classID: "Item", changes: ["subject": .text("Wrong connection")], operationID: "mismatch")
         )
         mismatched.releaseLock()
 
@@ -863,7 +863,7 @@ final class TUITests: XCTestCase {
         func category(_ name: String, _ rule: String) throws -> Revision {
             try store.commit(
                 CommitRequest(
-                    classID: "NoteItem",
+                    classID: "Item",
                     changes: [
                         "subject": .text(name),
                         "selection": .object([

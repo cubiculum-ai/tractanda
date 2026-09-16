@@ -1,9 +1,9 @@
 {
-  "using": ["https://tractanda.ai/ns/local-prototype/2"],
+  "using": ["https://tractanda.ai/ns/local-prototype/3"],
   "methodCalls": [
     ["TractandaItem/commit", {
       "action": "create",
-      "classID": "NoteItem",
+      "classID": "Item",
       "changes": {
         "subject": {"type": "text", "value": "An unstructured thought"},
         "body": {"type": "text", "value": "Organize this later."}

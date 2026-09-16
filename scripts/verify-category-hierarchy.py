@@ -62,7 +62,7 @@ def main():
                 for key in ['who','what','when','where','means','priority','urgency']:
                     assert client.get(ids[key])['fields']['categoryParents']['value'] == []
                 def create(key, fields):
-                    result = client.commit(wire.intent('create', str(uuid.uuid4()), class_id='NoteItem', changes=fields))
+                    result = client.commit(wire.intent('create', str(uuid.uuid4()), class_id='Item', changes=fields))
                     ids[key] = wire.item_id(result['revision'])
                 create('call-note', {'subject': wire.text('Talk to Pat about chess')})
                 create('site-note', {'subject': wire.text('Talk to Alex about an inspection'), 'location': wire.text('building')})

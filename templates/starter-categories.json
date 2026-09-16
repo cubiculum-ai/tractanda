@@ -3,7 +3,7 @@
   "entries": [
     {
       "key": "status",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [],
       "fields": {
         "subject": {
@@ -35,7 +35,7 @@
     },
     {
       "key": "status.attention",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "status"
       ],
@@ -69,7 +69,7 @@
     },
     {
       "key": "status.ready",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "status.attention"
       ],
@@ -103,7 +103,7 @@
     },
     {
       "key": "status.doing",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "status.attention"
       ],
@@ -137,7 +137,7 @@
     },
     {
       "key": "status.review",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "status.attention"
       ],
@@ -171,7 +171,7 @@
     },
     {
       "key": "status.planned",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "status"
       ],
@@ -205,7 +205,7 @@
     },
     {
       "key": "status.done",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "status"
       ],
@@ -239,7 +239,7 @@
     },
     {
       "key": "who",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [],
       "fields": {
         "subject": {
@@ -271,7 +271,7 @@
     },
     {
       "key": "what",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [],
       "fields": {
         "subject": {
@@ -303,7 +303,7 @@
     },
     {
       "key": "when",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [],
       "fields": {
         "subject": {
@@ -335,7 +335,7 @@
     },
     {
       "key": "where",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [],
       "fields": {
         "subject": {
@@ -367,7 +367,7 @@
     },
     {
       "key": "means",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [],
       "fields": {
         "subject": {
@@ -399,7 +399,7 @@
     },
     {
       "key": "priority",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [],
       "fields": {
         "subject": {
@@ -431,7 +431,7 @@
     },
     {
       "key": "urgency",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [],
       "fields": {
         "subject": {
@@ -463,7 +463,7 @@
     },
     {
       "key": "who.family",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "who"
       ],
@@ -497,7 +497,7 @@
     },
     {
       "key": "who.friends",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "who"
       ],
@@ -531,7 +531,7 @@
     },
     {
       "key": "who.colleagues",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "who"
       ],
@@ -565,7 +565,7 @@
     },
     {
       "key": "who.people",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "who"
       ],
@@ -599,7 +599,7 @@
     },
     {
       "key": "who.organizations",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "who"
       ],
@@ -633,7 +633,7 @@
     },
     {
       "key": "who.roles",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "who"
       ],
@@ -667,7 +667,7 @@
     },
     {
       "key": "what.discuss",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "what"
       ],
@@ -701,7 +701,7 @@
     },
     {
       "key": "what.read",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "what"
       ],
@@ -735,7 +735,7 @@
     },
     {
       "key": "what.write",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "what"
       ],
@@ -769,7 +769,7 @@
     },
     {
       "key": "what.inspect",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "what"
       ],
@@ -803,7 +803,7 @@
     },
     {
       "key": "when.deadlines",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "when"
       ],
@@ -837,7 +837,7 @@
     },
     {
       "key": "when.events",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "when"
       ],
@@ -871,7 +871,7 @@
     },
     {
       "key": "when.deadlines.today",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "when.deadlines"
       ],
@@ -922,7 +922,7 @@
     },
     {
       "key": "when.deadlines.tomorrow",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "when.deadlines"
       ],
@@ -973,7 +973,7 @@
     },
     {
       "key": "when.deadlines.week",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "when.deadlines"
       ],
@@ -1024,7 +1024,7 @@
     },
     {
       "key": "when.deadlines.month",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "when.deadlines"
       ],
@@ -1075,7 +1075,7 @@
     },
     {
       "key": "when.deadlines.quarter",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "when.deadlines"
       ],
@@ -1126,7 +1126,7 @@
     },
     {
       "key": "when.deadlines.next-quarter",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "when.deadlines"
       ],
@@ -1177,7 +1177,7 @@
     },
     {
       "key": "when.deadlines.3-months",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "when.deadlines"
       ],
@@ -1228,7 +1228,7 @@
     },
     {
       "key": "when.deadlines.6-months",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "when.deadlines"
       ],
@@ -1279,7 +1279,7 @@
     },
     {
       "key": "when.deadlines.12-months",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "when.deadlines"
       ],
@@ -1330,7 +1330,7 @@
     },
     {
       "key": "when.events.today",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "when.events"
       ],
@@ -1385,7 +1385,7 @@
     },
     {
       "key": "when.events.tomorrow",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "when.events"
       ],
@@ -1440,7 +1440,7 @@
     },
     {
       "key": "when.events.week",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "when.events"
       ],
@@ -1495,7 +1495,7 @@
     },
     {
       "key": "when.events.month",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "when.events"
       ],
@@ -1550,7 +1550,7 @@
     },
     {
       "key": "when.events.quarter",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "when.events"
       ],
@@ -1605,7 +1605,7 @@
     },
     {
       "key": "when.events.next-quarter",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "when.events"
       ],
@@ -1660,7 +1660,7 @@
     },
     {
       "key": "when.events.3-months",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "when.events"
       ],
@@ -1715,7 +1715,7 @@
     },
     {
       "key": "when.events.6-months",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "when.events"
       ],
@@ -1770,7 +1770,7 @@
     },
     {
       "key": "when.events.12-months",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "when.events"
       ],
@@ -1825,7 +1825,7 @@
     },
     {
       "key": "when.deadlines.overdue",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "when.deadlines"
       ],
@@ -1875,7 +1875,7 @@
     },
     {
       "key": "where.anywhere",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "where"
       ],
@@ -1909,7 +1909,7 @@
     },
     {
       "key": "where.home",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "where"
       ],
@@ -1943,7 +1943,7 @@
     },
     {
       "key": "where.office",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "where"
       ],
@@ -1977,7 +1977,7 @@
     },
     {
       "key": "where.site",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "where"
       ],
@@ -2011,7 +2011,7 @@
     },
     {
       "key": "means.phone",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "means"
       ],
@@ -2045,7 +2045,7 @@
     },
     {
       "key": "means.email",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "means"
       ],
@@ -2079,7 +2079,7 @@
     },
     {
       "key": "means.video",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "means"
       ],
@@ -2113,7 +2113,7 @@
     },
     {
       "key": "means.in-person",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "means"
       ],
@@ -2147,7 +2147,7 @@
     },
     {
       "key": "priority.p0",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "priority"
       ],
@@ -2181,7 +2181,7 @@
     },
     {
       "key": "priority.p1",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "priority"
       ],
@@ -2215,7 +2215,7 @@
     },
     {
       "key": "priority.p2",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "priority"
       ],
@@ -2249,7 +2249,7 @@
     },
     {
       "key": "priority.p3",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "priority"
       ],
@@ -2283,7 +2283,7 @@
     },
     {
       "key": "priority.p4",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "priority"
       ],
@@ -2317,7 +2317,7 @@
     },
     {
       "key": "urgency.u0",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "urgency"
       ],
@@ -2351,7 +2351,7 @@
     },
     {
       "key": "urgency.u1",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "urgency"
       ],
@@ -2385,7 +2385,7 @@
     },
     {
       "key": "urgency.u2",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "urgency"
       ],
@@ -2419,7 +2419,7 @@
     },
     {
       "key": "urgency.u3",
-      "classID": "NoteItem",
+      "classID": "Item",
       "parents": [
         "urgency"
       ],
@@ -2453,7 +2453,7 @@
     },
     {
       "key": "phone-20-minutes",
-      "classID": "SavedViewItem",
+      "classID": "Item",
       "parents": [],
       "viewCategoryKeys": [
         "means.phone"

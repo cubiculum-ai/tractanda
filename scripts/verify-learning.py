@@ -43,10 +43,10 @@ def main():
                 fields = {'subject': ipc.text(text)}
                 if label:
                     fields['categoryOverrides'] = {'type':'object','value':{category:ipc.text(label)}}
-                return client.commit(ipc.intent('create', 'create-'+text, class_id='NoteItem', changes=fields))['revision']
+                return client.commit(ipc.intent('create', 'create-'+text, class_id='Item', changes=fields))['revision']
 
             if not args.import_from:
-                category_revision = client.commit(ipc.intent('create', 'category', class_id='NoteItem', changes={
+                category_revision = client.commit(ipc.intent('create', 'category', class_id='Item', changes={
                     'subject':ipc.text('Chess'),
                     'selection':{'type':'object','value':{'language':ipc.text('tractanda.spotlight.v0'),
                                                           'expression':ipc.text('subject == "no matching example"')}}

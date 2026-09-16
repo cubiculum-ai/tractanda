@@ -21,7 +21,7 @@ async (page) => {
   const profile = await (await page.request.get(origin + '/auth/session')).json();
   const headers = {'Content-Type':'application/json', Authorization:'Bearer '+token};
   async function rpc(method, values) {
-    const response = await page.request.post(origin+'/api', {headers, data:{using:['https://tractanda.ai/ns/local-prototype/2'],methodCalls:[[method, values, 'ui-test']]}});
+    const response = await page.request.post(origin+'/api', {headers, data:{using:['https://tractanda.ai/ns/local-prototype/3'],methodCalls:[[method, values, 'ui-test']]}});
     if (response.status() !== 200) throw new Error('Native API failed: '+response.status());
     const call = (await response.json()).methodResponses[0];
     if (call[0] !== method) throw new Error('Native method failed: '+JSON.stringify(call));
@@ -115,7 +115,7 @@ async (page) => {
   await second.locator('#login-password').waitFor({state:'visible'});
   check(!await page.evaluate(() => localStorage.getItem('tractanda.browser-session') || sessionStorage.getItem('tractanda.web-session')), 'Sign-out removes stored browser credentials');
   check(await second.locator('#login-password').isVisible(), 'Other tabs sharing that browser session return to sign-in');
-  const revoked = await page.request.post(origin+'/api',{headers,data:{using:['https://tractanda.ai/ns/local-prototype/2'],methodCalls:[['TractandaStore/info',{},'revoked']]}});
+  const revoked = await page.request.post(origin+'/api',{headers,data:{using:['https://tractanda.ai/ns/local-prototype/3'],methodCalls:[['TractandaStore/info',{},'revoked']]}});
   check(revoked.status() === 401, 'Actual server logout rejects subsequent use of the old token');
   check(errors.length === 0, 'No browser JavaScript errors');
   await second.close();

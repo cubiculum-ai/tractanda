@@ -38,7 +38,7 @@ def click_text(ui, label, row=None):
 
 
 def create(client, name, fields=None):
-    return client.commit(wire.intent('create','seed-'+name,class_id='NoteItem',
+    return client.commit(wire.intent('create','seed-'+name,class_id='Item',
         changes={'subject':wire.text(name), **(fields or {})}))['revision']
 
 

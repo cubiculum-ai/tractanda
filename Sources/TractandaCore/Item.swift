@@ -26,7 +26,6 @@ open class InternetMessageItem: MessageItem {}
 public final class EmailMessageItem: InternetMessageItem {}
 public final class NetnewsMessageItem: InternetMessageItem {}
 public final class XMPPMessageItem: MessageItem {}
-public final class NoteItem: Item {}
 open class PersonItem: Item {}
 public final class NaturalPersonItem: PersonItem {}
 public final class LegalPersonItem: PersonItem {}
@@ -40,7 +39,7 @@ public final class AccessConfigurationItem: MetaItem {}
 
 public enum ItemTypes {
     public static let parents: [String: String] = [
-        "NoteItem": "Item", "MessageItem": "Item", "InternetMessageItem": "MessageItem",
+        "MessageItem": "Item", "InternetMessageItem": "MessageItem",
         "EmailMessageItem": "InternetMessageItem", "NetnewsMessageItem": "InternetMessageItem",
         "XMPPMessageItem": "MessageItem",
         "PersonItem": "Item", "NaturalPersonItem": "PersonItem", "LegalPersonItem": "PersonItem",
@@ -50,7 +49,7 @@ public enum ItemTypes {
         "AccessConfigurationItem": "MetaItem",
     ]
     public static let abstract: Set<String> = [
-        "Item", "MessageItem", "InternetMessageItem", "PersonItem",
+        "MessageItem", "InternetMessageItem", "PersonItem",
         "CalendarItem", "MetaItem",
     ]
     public static func ancestry(_ name: String) -> [String] {
@@ -62,7 +61,7 @@ public enum ItemTypes {
     public static func makeItem(from revision: Revision) -> Item {
         let type: Item.Type
         switch revision.classID {
-        case "NoteItem": type = NoteItem.self
+        case "Item": type = Item.self
         case "EmailMessageItem": type = EmailMessageItem.self
         case "NetnewsMessageItem": type = NetnewsMessageItem.self
         case "XMPPMessageItem": type = XMPPMessageItem.self

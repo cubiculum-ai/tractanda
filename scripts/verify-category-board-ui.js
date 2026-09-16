@@ -8,7 +8,7 @@ async (page) => {
   await page.locator('.card-title').first().waitFor();
   const origin=await page.evaluate(()=>location.origin);
   async function rpc(method,args) {
-    const response=await page.request.post(origin+'/api',{headers:{Authorization:'Bearer '+token,'Content-Type':'application/json',Origin:origin},data:{using:['https://tractanda.ai/ns/local-prototype/2'],methodCalls:[[method,args,'ui']]}});
+    const response=await page.request.post(origin+'/api',{headers:{Authorization:'Bearer '+token,'Content-Type':'application/json',Origin:origin},data:{using:['https://tractanda.ai/ns/local-prototype/3'],methodCalls:[[method,args,'ui']]}});
     const data=await response.json();const result=data.methodResponses[0];if(result[0]!==method)throw new Error(JSON.stringify(result));return result[1];
   }
   async function item(id){return (await rpc('TractandaItem/get',{ids:[id]})).list[0];}
@@ -52,7 +52,7 @@ async (page) => {
   const createdIDs=(await rpc('TractandaItem/query',{expression:'subject == "Plain note from category view"'})).ids;
   check(createdIDs.length===1,'Web capture creates exactly one ordinary item');
   const created=await item(createdIDs[0]);
-  check(created.fields.classID.value==='NoteItem'&&createdIDs[0][14]==='1'&&!created.fields.status&&!created.fields.externalItemID&&!created.fields.kanbanBoardID,'New items use UUIDv1 and no bootstrap identity or special task class');
+  check(created.fields.classID.value==='Item'&&createdIDs[0][14]==='1'&&!created.fields.status&&!created.fields.externalItemID&&!created.fields.kanbanBoardID,'New items use UUIDv1 and no bootstrap identity or special task class');
   check(created.fields.categoryOverrides.value[mapping.projectID].value==='include'&&created.fields.categoryOverrides.value[c.planned].value==='include','View capture uses its configured project and default category');
   await page.locator('#track-filter').selectOption(mapping.groupID);
   check(await page.locator('article[data-task-id="'+createdIDs[0]+'"]').count()===0,'Additional category filters apply independently');

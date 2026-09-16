@@ -73,7 +73,7 @@ def main():
         root=Path(temporary)
         with wire.server(str(args.native_binary.resolve()),root/'store',root/'s') as client:
             def create(name, fields=None):
-                return client.commit(wire.intent('create','seed-'+name,class_id='NoteItem',
+                return client.commit(wire.intent('create','seed-'+name,class_id='Item',
                     changes={'subject':wire.text(name),**(fields or {})}))['revision']
             def category(name, bucket):
                 return create(name,{'selection':value('object',{

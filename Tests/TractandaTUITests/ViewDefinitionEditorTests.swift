@@ -24,7 +24,7 @@ final class ViewDefinitionEditorTests: XCTestCase {
 
         func item(_ fields: [String: ItemValue]) throws -> Revision {
             try client.commit(
-                CommitRequest(classID: "NoteItem", changes: fields, operationID: Identifier.make())
+                CommitRequest(classID: "Item", changes: fields, operationID: Identifier.make())
             ).revision
         }
 

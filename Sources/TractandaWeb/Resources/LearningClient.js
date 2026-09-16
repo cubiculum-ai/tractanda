@@ -131,7 +131,7 @@
         element('details',{},[element('summary',{text:'Create a category'}),element('div',{class:'learning-actions'},[categoryName,
           learningButton('Create category',()=>{
             const name=categoryName.value.trim();if(!name){categoryName.focus();return;}
-            void saveLearningEdit('TractandaItem/commit',{action:'create',classID:'NoteItem',unset:[],changes:{subject:typedText(name),
+            void saveLearningEdit('TractandaItem/commit',{action:'create',classID:'Item',unset:[],changes:{subject:typedText(name),
               selection:{type:'object',value:{language:typedText('tractanda.spotlight.v0'),expression:typedText('itemID == ""')}}}},'');
           })])]),
         learningButton('Refresh learning',()=>void refreshLearningPanel()));

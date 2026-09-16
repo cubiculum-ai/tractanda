@@ -1,6 +1,8 @@
 # API and agent integration
 
-Use executable help and `TractandaStore/describe` as the operational reference for this experimental API. The local capability is `https://tractanda.ai/ns/local-prototype/2`, not a published network JMAP extension.
+Use executable help and `TractandaStore/describe` as the operational reference for this experimental API. The local capability is `https://tractanda.ai/ns/local-prototype/3`, not a published network JMAP extension.
+
+`Item` is the concrete generic class and the superclass of the specialized families. `classID == "Item"` selects generic items; `kMDItemContentTypeTree == "Item"` includes all classes. Older prototype clients using capability `/2` must be updated and reconnected before using this server.
 
 ## Native API and daemon
 
@@ -48,7 +50,7 @@ Saved views are a capability of ordinary items carrying `viewDefinition`; no ded
 
 A category with the valid selection expression `itemID == ""` has no direct rule matches, allowing shared/manual or personal assignments to determine membership; child categories can still contribute inherited members. Shared `categoryOverrides` live on the target item. A caller-owned `PersonalStateItem` has an unpinned `target` reference and `personalOverrides`, taking precedence for that caller. Removing a personal override falls back to shared decisions/rules. These operations change categorization, never access rights.
 
-Ordinary actions use `NoteItem` and category assignments for to-do, waiting and other workflow states. Change membership to change those states; no class transition is needed. Every item may carry `waitingOn` as a tagged reference to a person/event or explanatory text, or leave it unset. Category rules and manual overrides determine membership independently of that property. Discover supported concrete types with `TractandaStore/describe` (`topic: "types"`).
+Ordinary actions use `Item` and category assignments for to-do, waiting and other workflow states. Change membership to change those states; no class transition is needed. Every item may carry `waitingOn` as a tagged reference to a person/event or explanatory text, or leave it unset. Category rules and manual overrides determine membership independently of that property. Discover supported concrete types with `TractandaStore/describe` (`topic: "types"`).
 
 Tagged values include text, integer, real, boolean, date, bytes, reference, list and object. Use a persisted `operationID`; an uncertain mutation is retried with identical arguments and ID. Existing updates also require the current `expectedRevisionID`. Changes replace whole top-level fields, so fetch and merge a map before replacing it.
 

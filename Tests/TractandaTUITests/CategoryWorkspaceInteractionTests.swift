@@ -21,7 +21,7 @@ final class CategoryWorkspaceInteractionTests: XCTestCase {
         func category(_ subject: String, body: String = "") throws -> Revision {
             try client.commit(
                 CommitRequest(
-                    classID: "NoteItem",
+                    classID: "Item",
                     changes: [
                         "subject": .text(subject), "body": .text(body),
                         "selection": .object([
@@ -105,7 +105,7 @@ final class CategoryWorkspaceInteractionTests: XCTestCase {
         app.handle(.function(8))
         let saved = try fixture.store.get(alpha.itemID)
         XCTAssertEqual(saved.fields["subject"], .text("Alpha saved"))
-        XCTAssertEqual(saved.classID, "NoteItem")
+        XCTAssertEqual(saved.classID, "Item")
         XCTAssertEqual(saved.fields["unrecognized"], alpha.fields["unrecognized"])
         XCTAssertEqual(try fixture.store.history(alpha.itemID).count, 2)
     }

@@ -13,7 +13,7 @@ final class CategoryLearningTests: XCTestCase {
         var fields: [String: ItemValue] = ["subject": .text(text)]
         if let category, let label { fields["categoryOverrides"] = .object([category: .text(label)]) }
         return try store.commit(
-            CommitRequest(classID: "NoteItem", changes: fields, operationID: Identifier.make())
+            CommitRequest(classID: "Item", changes: fields, operationID: Identifier.make())
         ).revision
     }
     private func edit(_ store: ItemStore, _ item: Revision, _ fields: [String: ItemValue]) throws -> Revision
@@ -29,7 +29,7 @@ final class CategoryLearningTests: XCTestCase {
     ) {
         let category = try store.commit(
             CommitRequest(
-                classID: "NoteItem",
+                classID: "Item",
                 changes: [
                     "subject": .text("Club"),
                     "selection": .object([

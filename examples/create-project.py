@@ -63,7 +63,7 @@ def main():
             'subject': text(title), 'selection': selection,
             'categoryParents': tagged('list', [reference(i) for i in parents]),
             'categoryOrder': tagged('integer', order),
-        }, classID='NoteItem')
+        }, classID='Item')
 
     if args.project_root:
         roots = call('TractandaItem/get', {'ids': [args.project_root, args.status_root]})
@@ -128,7 +128,7 @@ def main():
             'categoryOverrides': tagged('object', {
                 project_id: text('include'), default: text('include'),
             }),
-        }, classID='NoteItem')
+        }, classID='Item')
     print(json.dumps({'projectID': project_id, 'projectRootID': project_root,
                      'statusRootID': status_root, 'columnIDs': columns, 'name': name}, indent=2))
 

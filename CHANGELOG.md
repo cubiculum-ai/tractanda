@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.0-poc.6
+
+`Item` is now the concrete generic root. The empty `NoteItem` subclass is removed from the registry, client defaults, templates, examples and agent guidance. Specialized subclasses remain. The experimental native API advances to capability `/3`; older clients must be updated and reconnected.
+
+Fresh samples and saved-view templates use ordinary `Item` records. Release checks now load the shipped examples and category template, verify exact retries, then rebuild the sample database from canonical files and compare records and views.
+
 ## 0.1.0-poc.5
 
 Release progress is visible through a local dashboard and live status/watch commands, distinguishing verified controller presence from measurable activity. Agent guidance clarifies saved-view ordering, manual category criteria and shared/personal assignments; the property catalogue exposes categoryOrder.

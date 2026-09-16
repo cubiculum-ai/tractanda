@@ -39,7 +39,7 @@ public struct ItemPage: Sendable, Equatable {
 
 /// Typed, asynchronous access to the existing native protocol. No database or OS-account dependency.
 public struct ItemClient: Sendable {
-    public static let capability = "https://tractanda.ai/ns/local-prototype/2"
+    public static let capability = "https://tractanda.ai/ns/local-prototype/3"
     public static let queryProfile = "tractanda.spotlight.v0"
     public static let maximumMessageBytes = 8 * 1024 * 1024
     private let transport: any ItemTransport

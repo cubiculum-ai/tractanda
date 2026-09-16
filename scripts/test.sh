@@ -31,6 +31,7 @@ run_tests work/verification/client-tests.log .build/client-tests --package-path 
 binary_dir=$(swift build --show-bin-path --scratch-path .build --cache-path .build/cache \
     --config-path .build/config --security-path .build/security --disable-sandbox)
 python3 scripts/verify-ipc.py "$binary_dir/tractanda"
+python3 scripts/verify-samples.py "$binary_dir/tractanda"
 python3 scripts/verify-agent-access-plan.py --binary "$binary_dir/tractanda" \
     --report work/verification/agent-access-plan.json
 python3 scripts/verify-kanban.py "$binary_dir/tractanda"

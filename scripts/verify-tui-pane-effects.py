@@ -97,7 +97,7 @@ def main():
         os.chmod(settings, 0o600)
         with wire.server(str(args.native_binary.resolve()), root / 'store', root / 's') as client:
             for name, body in [('Ordinary sample', 'older item'), ('Selected sample', 'Preview sample\nSecond preview line')]:
-                client.commit(wire.intent('create', str(uuid.uuid4()), class_id='NoteItem',
+                client.commit(wire.intent('create', str(uuid.uuid4()), class_id='Item',
                                           changes={'subject': wire.text(name), 'body': wire.text(body)}))
             baseline = wire.manifest(root / 'store')
             def session(): return tui.terminal(str(args.tui_binary.resolve()), root / 's', root / 'r.json', items_only=False)

@@ -40,7 +40,7 @@ final class ItemTextContentTests: XCTestCase {
         try fixture { store in
             _ = try store.commit(
                 CommitRequest(
-                    classID: "NoteItem",
+                    classID: "Item",
                     changes: [
                         "subject": .text("Ordinary searchable content"),
                         "developmentUUIDMigration": .object(["note": .text("original issuer unknown")]),
@@ -68,7 +68,7 @@ final class ItemTextContentTests: XCTestCase {
         [
             "itemID": .text("00000000-0000-1000-8000-000000000001"),
             "revisionID": .text("00000000-0000-1000-8000-000000000002"),
-            "classID": .text("NoteItem"), "schemaVersion": .integer(1),
+            "classID": .text("Item"), "schemaVersion": .integer(1),
             "createdAt": .date("2026-01-01T00:00:00Z"), "modifiedAt": .date("2026-01-01T00:00:00Z"),
             "actor": .text("actor"), "operationID": .text("operation"), "requestIdentity": .text("receipt"),
         ].merging(additions, uniquingKeysWith: { _, replacement in replacement })
@@ -78,13 +78,13 @@ final class ItemTextContentTests: XCTestCase {
         try fixture { store in
             let referenced = try store.commit(
                 CommitRequest(
-                    classID: "NoteItem", changes: ["subject": .text("unfollowed remote secret")],
+                    classID: "Item", changes: ["subject": .text("unfollowed remote secret")],
                     operationID: "referenced")
             )
             .revision
             let revision = try store.commit(
                 CommitRequest(
-                    classID: "NoteItem",
+                    classID: "Item",
                     changes: [
                         "workingNotes": .text("working-note needle"),
                         "checklist": .list([.object(["title": .text("checklist needle")])]),

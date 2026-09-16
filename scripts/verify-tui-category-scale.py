@@ -36,7 +36,7 @@ def main():
                     ]}
                 else:
                     fields['isAction'] = {'type': 'boolean', 'value': True}
-                return client.commit(wire.intent('create', 'seed-' + name, class_id='NoteItem', changes=fields))['revision']
+                return client.commit(wire.intent('create', 'seed-' + name, class_id='Item', changes=fields))['revision']
 
             start = create('Category root', [])
             parents, categories = [start], [start]

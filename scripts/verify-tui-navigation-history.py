@@ -58,7 +58,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='trac-history-', dir='/tmp') as directory:
         root = Path(directory)
         with wire.server(str(args.native_binary.resolve()), root / 'store', root / 's') as client:
-            def create(name, fields, kind='NoteItem'):
+            def create(name, fields, kind='Item'):
                 return client.commit(wire.intent('create', 'seed-' + name, class_id=kind,
                     changes={'subject': wire.text(name), **fields}))['revision']
             def category(name, rule):
@@ -71,7 +71,7 @@ def main():
             create('Numbered view', {'viewDefinition': tagged('object', {
                 'language': wire.text('tractanda.spotlight.v0'), 'expression': wire.text('rank >= 0'),
                 'sort': tagged('list', [tagged('object', {'property': wire.text('rank'), 'isAscending': tagged('boolean', True)})])
-            })}, 'SavedViewItem')
+            })}, 'Item')
             before = wire.manifest(root / 'store')
             state = client.call('TractandaItem/query', {'limit': 256})['queryState']
             proxy = tui.LostResponseProxy(root / 'proxy', root / 's', drop_method='TractandaStore/info')

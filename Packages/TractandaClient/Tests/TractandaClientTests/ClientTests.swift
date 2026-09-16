@@ -16,7 +16,7 @@ private actor ScriptedTransport: ItemTransport {
 func revision(_ subject: String) throws -> Revision {
     try Revision(fields: [
         "itemID": .text(Identifier.make()), "revisionID": .text(Identifier.make()),
-        "classID": .text("NoteItem"), "actor": .text("user:test"), "operationID": .text("fixture"),
+        "classID": .text("Item"), "actor": .text("user:test"), "operationID": .text("fixture"),
         "requestIdentity": .text("fixture"), "schemaVersion": .integer(1),
         "createdAt": .date("2026-09-08T00:00:00Z"), "modifiedAt": .date("2026-09-08T00:00:00Z"),
         "subject": .text(subject), "body": .text("Original body"),

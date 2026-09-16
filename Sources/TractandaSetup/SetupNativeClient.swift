@@ -64,7 +64,7 @@ struct SetupNativeClient {
             let result = try call(
                 "TractandaItem/commit",
                 [
-                    "action": "create", "classID": "NoteItem",
+                    "action": "create", "classID": "Item",
                     "operationID": "setup-sample-v1-" + instance + "-" + key,
                     "changes": fields, "unset": [],
                 ])

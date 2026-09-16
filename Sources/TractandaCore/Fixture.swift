@@ -41,33 +41,33 @@ public enum DemoFixture {
                 ]),
             ])
         let persons = try create(
-            "persons", "NoteItem",
+            "persons", "Item",
             [
                 "subject": .text("Associated with persons"),
                 "selection": selection("associatedPerson == *"),
             ])
         let family = try create(
-            "family", "NoteItem",
+            "family", "Item",
             [
                 "subject": .text("Family"),
                 "selection": selection("context == \"family\""),
             ])
         let lunch = try create(
-            "lunch", "NoteItem",
+            "lunch", "Item",
             [
                 "subject": .text("Family lunch with Alice"),
                 "body": .text("Discuss the chess club newsletter over lunch."),
                 "associatedPerson": .text("alice"), "context": .text("family"),
             ])
         let work = try create(
-            "work", "NoteItem",
+            "work", "Item",
             [
                 "subject": .text("Newsletter delivery issue"),
                 "body": .text("Alice reported a missing chess club newsletter."),
                 "associatedPerson": .text("alice"), "context": .text("work"),
             ])
         let todo = try create(
-            "todo", "NoteItem",
+            "todo", "Item",
             [
                 "subject": .text("Arrange the next general assembly"),
                 "body": .text("Confirm a date with the president."),

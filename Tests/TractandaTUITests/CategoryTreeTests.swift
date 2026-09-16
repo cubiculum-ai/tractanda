@@ -9,7 +9,7 @@ final class CategoryTreeTests: XCTestCase {
         try Revision(fields: [
             "itemID": .text(String(format: "%08x-0000-1000-8000-010000000001", number)),
             "revisionID": .text(String(format: "%08x-0000-1000-8001-010000000001", number)),
-            "classID": .text("NoteItem"), "schemaVersion": .integer(1),
+            "classID": .text("Item"), "schemaVersion": .integer(1),
             "actor": .text("fixture"), "operationID": .text("fixture-\(number)"),
             "requestIdentity": .text("fixture"), "createdAt": .date("2026-09-11T00:00:00Z"),
             "modifiedAt": .date("2026-09-11T00:00:00Z"),

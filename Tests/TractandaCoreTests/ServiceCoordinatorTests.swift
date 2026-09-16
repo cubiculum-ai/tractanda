@@ -100,7 +100,7 @@ final class ServiceCoordinatorTests: XCTestCase {
             let created = try seed!.withAccess(forUID: accounts.alice) {
                 try seed!.commit(
                     CommitRequest(
-                        classID: "NoteItem", changes: ["subject": .text("Alice note")],
+                        classID: "Item", changes: ["subject": .text("Alice note")],
                         operationID: "alice-create")
                 ).revision
             }
@@ -159,7 +159,7 @@ final class ServiceCoordinatorTests: XCTestCase {
         try await fixture { root, accounts in
             let store = try ItemStore(root: root, accounts: accounts)
             let request = CommitRequest(
-                classID: "NoteItem",
+                classID: "Item",
                 changes: [
                     "subject": .text("Migrated receipt"),
                     "permissions": .object([
@@ -194,7 +194,7 @@ final class ServiceCoordinatorTests: XCTestCase {
             var source: ItemStore? = try ItemStore(root: sourceRoot, accounts: accounts)
             func request(_ operationID: String) -> CommitRequest {
                 CommitRequest(
-                    classID: "NoteItem",
+                    classID: "Item",
                     changes: [
                         "subject": .text(operationID),
                         "permissions": .object([

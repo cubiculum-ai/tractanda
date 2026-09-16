@@ -4009,7 +4009,7 @@ public final class TerminalApplication {
                 form = editing
                 status =
                     draft.isCategory && draft.base == nil
-                    ? "New categories use the ordinary NoteItem default."
+                    ? "New categories use the ordinary Item default."
                     : "Class change is staged; Save retypes this item with its existing identity and history."
                 return
             }

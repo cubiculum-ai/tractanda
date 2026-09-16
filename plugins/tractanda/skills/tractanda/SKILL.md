@@ -19,7 +19,7 @@ Tool names may carry a harness prefix. Installed tool schemas describe the adapt
 
 ## Think in independent dimensions
 
-Everything is an item. An ordinary item can carry category criteria, a saved view definition, both, or neither. Item type describes data semantics; category membership organizes it. Do not introduce a new class for every project or action.
+Everything is an item. Use concrete `Item` for generic content; specialized classes add data semantics. An ordinary item can carry category criteria, a saved view definition, both, or neither. Item type describes data semantics; category membership organizes it. Do not introduce a new class for every project or action.
 
 Categories can overlap across axes such as Who, What/Project, When, Where, Means, Status, Priority and Knowledge role. These names are examples, not reserved schema. A note can concern a person, belong to a project, require a phone call and have a status simultaneously. An item may also be evidence, a preference, a decision or a conversation: the knowledge base is not just a task list.
 
@@ -29,9 +29,9 @@ For example, combine the existing project category with the existing unfinished-
 
 Kanban eligibility comes from project and status category membership. Do not require an IssueItem class or a board identifier. Discover the actual project's status organization and any saved presentation before editing it.
 
-Saved views are ordinary items carrying `viewDefinition`; use a supported class such as `NoteItem` for a new one. Their ordered `viewDefinition.presentation.sections` references define section order. An implicit project board uses that as a preferred order, then appends other status leaves; without it, sibling `categoryOrder` values and names determine traversal order. Set integer `categoryOrder` values deliberately when extending an ordered status taxonomy. None of the status names is built into the client.
+Saved views are ordinary items carrying `viewDefinition`; use a supported class such as `Item` for a new one. Their ordered `viewDefinition.presentation.sections` references define section order. An implicit project board uses that as a preferred order, then appends other status leaves; without it, sibling `categoryOrder` values and names determine traversal order. Set integer `categoryOrder` values deliberately when extending an ordered status taxonomy. None of the status names is built into the client.
 
-Represent ordinary actions as `NoteItem` with the instance's relevant category assignments. To-do and waiting states are categories; moving between them does not require retyping. Any item may carry `waitingOn` as a person/event reference or explanatory text. That field alone does not assign a category unless an existing category rule selects it.
+Represent ordinary actions as `Item` with the instance's relevant category assignments. To-do and waiting states are categories; moving between them does not require retyping. Any item may carry `waitingOn` as a person/event reference or explanatory text. That field alone does not assign a category unless an existing category rule selects it.
 
 ## Retrieve economically and accurately
 

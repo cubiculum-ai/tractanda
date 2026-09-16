@@ -45,7 +45,7 @@ def main():
         path, store = root / "s", root / "store"
         with wire.server(native, store, path) as client:
             def create(name, fields):
-                return client.commit(wire.intent("create", str(uuid.uuid4()), class_id="NoteItem",
+                return client.commit(wire.intent("create", str(uuid.uuid4()), class_id="Item",
                     changes={"subject": wire.text(name), **fields}))["revision"]
 
             categories = {name: create(name, {"selection": tagged("object", {

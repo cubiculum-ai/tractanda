@@ -22,7 +22,7 @@ final class MouseTests: XCTestCase {
         func item(_ title: String, fields: [String: ItemValue] = [:]) throws -> Revision {
             try client.commit(
                 CommitRequest(
-                    classID: "NoteItem", changes: fields.merging(["subject": .text(title)]) { _, new in new },
+                    classID: "Item", changes: fields.merging(["subject": .text(title)]) { _, new in new },
                     operationID: Identifier.make())
             ).revision
         }

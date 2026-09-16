@@ -35,7 +35,7 @@ def main():
  with tempfile.TemporaryDirectory(prefix='trac-preview-focus-',dir='/tmp') as temp:
   root=Path(temp);recovery=root/'pending.json';preferences=root/'pending.views.json'
   with wire.server(str(a.native_binary.resolve()),root/'store',root/'s') as client:
-   def create(name,fields):return client.commit(wire.intent('create','seed-'+name,class_id='NoteItem',changes={'subject':wire.text(name),**fields}))['revision']
+   def create(name,fields):return client.commit(wire.intent('create','seed-'+name,class_id='Item',changes={'subject':wire.text(name),**fields}))['revision']
    category=create('Alpha',{'body':wire.text('Initial category body'),'selection':val('object',{'language':wire.text('tractanda.spotlight.v0'),'expression':wire.text('bucket == "alpha"')}),'opaque':val('object',{'retain':wire.text('yes')})})
    create('Empty',{'selection':val('object',{'language':wire.text('tractanda.spotlight.v0'),'expression':wire.text('bucket == "empty"')})})
    view=create('Review',{'viewDefinition':val('object',{'language':wire.text('tractanda.spotlight.v0'),'expression':wire.text('bucket == "alpha"')})})

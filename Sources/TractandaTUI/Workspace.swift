@@ -561,14 +561,14 @@ final class Workspace {
             action: base == nil ? .create : .revise, itemID: base?.itemID,
             expectedRevisionID: base?.revisionID,
             // A view is defined by this property, not by a special item subtype.
-            classID: base == nil ? "NoteItem" : nil,
+            classID: base == nil ? "Item" : nil,
             changes: changes,
             operationID: Identifier.make())
     }
 }
 
 struct ItemDraft {
-    static let supportedClassIDs = ItemTypes.parents.keys.filter {
+    static let supportedClassIDs = Set(ItemTypes.parents.keys).union(["Item"]).filter {
         !ItemTypes.abstract.contains($0) && $0 != "PersonalStateItem" && $0 != "AccessConfigurationItem"
     }.sorted()
     let base: Revision?
@@ -586,7 +586,7 @@ struct ItemDraft {
         self.isCategory = isCategory
         subject = TextBuffer(base?.fields["subject"]?.string ?? "")
         body = TextBuffer(base?.fields["body"]?.string ?? "")
-        className = TextBuffer(base?.classID ?? "NoteItem")
+        className = TextBuffer(base?.classID ?? "Item")
         rule = TextBuffer(
             base?.fields["selection"]?.map?["expression"]?.string ?? (isCategory ? "itemID == \"\"" : ""))
         guard
@@ -599,7 +599,7 @@ struct ItemDraft {
     }
 
     mutating func cycleClass(forward: Bool) {
-        // A new category starts as an ordinary NoteItem. An existing category is still an item
+        // A new category starts as an ordinary Item. An existing category is still an item
         // and must retain (or deliberately change) its real class rather than being coerced.
         guard !(isCategory && base == nil), !Self.supportedClassIDs.isEmpty else { return }
         let index = Self.supportedClassIDs.firstIndex(of: className.text) ?? -1

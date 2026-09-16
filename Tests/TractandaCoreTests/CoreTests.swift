@@ -37,13 +37,69 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(try store.candidates().count, 8)
     }
 
+    func testGenericItemIsConcreteAndRootAncestryDoesNotRepeat() throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try ItemStore(root: root)
+        let item = try store.commit(
+            CommitRequest(
+                classID: "Item", changes: ["subject": .text("Generic content")],
+                operationID: "create-root-item")
+        ).revision
+        XCTAssertTrue(type(of: ItemTypes.makeItem(from: item)) == Item.self)
+        XCTAssertEqual(ItemTypes.ancestry(item.classID), ["Item"])
+        XCTAssertNil(ItemTypes.parents["Item"])
+        XCTAssertFalse(ItemTypes.abstract.contains("Item"))
+        XCTAssertTrue(try SpotlightQuery("classID == \"Item\"").matches(item))
+        XCTAssertTrue(try SpotlightQuery("kMDItemContentTypeTree == \"Item\"").matches(item))
+        let person = try store.commit(
+            CommitRequest(
+                classID: "NaturalPersonItem", changes: ["subject": .text("Someone")],
+                operationID: "create-person")
+        ).revision
+        XCTAssertEqual(ItemTypes.ancestry(person.classID), ["NaturalPersonItem", "PersonItem", "Item"])
+        XCTAssertFalse(try SpotlightQuery("classID == \"Item\"").matches(person))
+        XCTAssertTrue(try SpotlightQuery("kMDItemContentTypeTree == \"Item\"").matches(person))
+        for classID in ItemTypes.abstract {
+            assertCode("abstractClass") {
+                _ = try store.commit(
+                    CommitRequest(classID: classID, changes: [:], operationID: "abstract-\(classID)"))
+            }
+        }
+    }
+
+    func testRetiredPrototypeCapabilityCannotSubmitWrites() throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try ItemStore(root: root)
+        let service = ItemService(store: store)
+        let data = try JSONSerialization.data(withJSONObject: [
+            "using": ["https://tractanda.ai/ns/local-prototype/2"],
+            "methodCalls": [
+                [
+                    "TractandaItem/commit",
+                    [
+                        "action": "create", "classID": "NoteItem", "changes": [:],
+                        "unset": [], "operationID": "stale-client-create",
+                    ], "old-client",
+                ]
+            ],
+        ])
+        let response =
+            try JSONSerialization.jsonObject(
+                with: service.handle(data, peerUID: store.ownerUID)) as! [String: Any]
+        XCTAssertEqual(response["code"] as? String, "invalidRequest")
+        XCTAssertTrue((response["message"] as? String)?.contains(ItemService.capability) == true)
+        XCTAssertTrue(try store.candidates().isEmpty)
+    }
+
     func testRevisionIdentityWholeEditsRetryAndRecovery() throws {
         let root = root()
         defer { try? FileManager.default.removeItem(at: root) }
         var store: ItemStore? = try ItemStore(root: root)
         let first = try store!.commit(
             CommitRequest(
-                classID: "NoteItem", changes: ["subject": .text("First")], operationID: "create-note")
+                classID: "Item", changes: ["subject": .text("First")], operationID: "create-note")
         ).revision
         let path = files(root)[0]
         let original = try Data(contentsOf: path)
@@ -77,7 +133,7 @@ final class CoreTests: XCTestCase {
         let store = try ItemStore(root: root)
         store.beforeIndexUpdate = { throw TractandaError("injected", "Index unavailable after publication") }
         let request = CommitRequest(
-            classID: "NoteItem", changes: ["body": .text("Still committed")], operationID: "index-failure")
+            classID: "Item", changes: ["body": .text("Still committed")], operationID: "index-failure")
         let result = try store.commit(request)
         XCTAssertFalse(result.isIndexReady)
         XCTAssertFalse(result.warnings.isEmpty)
@@ -142,7 +198,7 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(try Categories.query(store: store, categoryPath: path).map(\.itemID), [ids["lunch"]!])
         let saved = try store.commit(
             CommitRequest(
-                classID: "SavedViewItem",
+                classID: "Item",
                 changes: [
                     "subject": .text("Family and Alice"),
                     "viewDefinition": .object([
@@ -172,7 +228,7 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(try store.candidates(text: "chess club").count, 3)
         let note = try store.commit(
             CommitRequest(
-                classID: "NoteItem",
+                classID: "Item",
                 changes: [
                     "subject": .text("Frédéric's chess notes"),
                     "priority": .integer(3), "tags": .list([.text("Family"), .text("Chess")]),
@@ -214,7 +270,7 @@ final class CoreTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         var store: ItemStore? = try ItemStore(root: root)
         assertCode("storeBusy") { _ = try ItemStore(root: root) }
-        let first = try store!.commit(CommitRequest(classID: "NoteItem", operationID: "first")).revision
+        let first = try store!.commit(CommitRequest(classID: "Item", operationID: "first")).revision
         _ = try edit(store!, first, ["subject": .text("Second")])
         let firstPath = try XCTUnwrap(
             files(root).first { $0.lastPathComponent == first.revisionID + ".tractanda" })
@@ -243,7 +299,7 @@ final class CoreTests: XCTestCase {
         let root = root()
         defer { try? FileManager.default.removeItem(at: root) }
         var store: ItemStore? = try ItemStore(root: root)
-        let r = try store!.commit(CommitRequest(classID: "NoteItem", operationID: "first")).revision
+        let r = try store!.commit(CommitRequest(classID: "Item", operationID: "first")).revision
         let path = files(root)[0]
         let staged = path.appendingPathExtension("abc123")
         try Data("incomplete publication".utf8).write(to: staged)
@@ -263,7 +319,7 @@ final class CoreTests: XCTestCase {
         var store: ItemStore? = try ItemStore(root: root)
         let revision = try store!.commit(
             CommitRequest(
-                classID: "NoteItem", changes: ["subject": .text("nested")], operationID: "nested")
+                classID: "Item", changes: ["subject": .text("nested")], operationID: "nested")
         ).revision
         let record = try XCTUnwrap(
             files(root).first { $0.lastPathComponent == revision.revisionID + ".tractanda" })
@@ -289,7 +345,7 @@ final class CoreTests: XCTestCase {
         let store = try ItemStore(root: root)
         let first = try store.commit(
             CommitRequest(
-                classID: "NoteItem", changes: ["number": .integer(Int64.max)], operationID: "large-number")
+                classID: "Item", changes: ["number": .integer(Int64.max)], operationID: "large-number")
         ).revision
         XCTAssertTrue(try SpotlightQuery("number == 9223372036854775807").matches(first))
         XCTAssertFalse(
@@ -300,7 +356,7 @@ final class CoreTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: unexpected.path)
         assertCode("recoveryError") { try store.rebuildIndex() }
         assertCode("recoveryRequired") {
-            _ = try store.commit(CommitRequest(classID: "NoteItem", operationID: "must-not-write"))
+            _ = try store.commit(CommitRequest(classID: "Item", operationID: "must-not-write"))
         }
         assertCode("recoveryRequired") { _ = try store.get(first.itemID) }
         try FileManager.default.removeItem(at: unexpected)
@@ -312,7 +368,7 @@ final class CoreTests: XCTestCase {
         let root = root()
         defer { try? FileManager.default.removeItem(at: root) }
         var store: ItemStore? = try ItemStore(root: root)
-        let first = try store!.commit(CommitRequest(classID: "NoteItem", operationID: "note")).revision
+        let first = try store!.commit(CommitRequest(classID: "Item", operationID: "note")).revision
         assertCode("notCategory") {
             _ = try Categories.query(
                 store: store!, expression: "itemID == 'no-match'", categoryPath: [first.itemID])
@@ -347,7 +403,7 @@ final class CoreTests: XCTestCase {
         let response = try envelope([
             [
                 "TractandaItem/query",
-                ["expression": "classID == \"NoteItem\" && subject == \"Newsletter delivery issue\""], "q",
+                ["expression": "classID == \"Item\" && subject == \"Newsletter delivery issue\""], "q",
             ],
             [
                 "TractandaItem/get",
@@ -380,7 +436,7 @@ final class CoreTests: XCTestCase {
         let ids = try DemoFixture.seed(store)
         let oversized = try store.commit(
             CommitRequest(
-                classID: "NoteItem",
+                classID: "Item",
                 changes: [
                     "subject": .text("Unicode 😀"),
                     "body": .text(String(repeating: "😀", count: 3_000)),
@@ -389,7 +445,7 @@ final class CoreTests: XCTestCase {
         ).revision
         let nearLimit = try store.commit(
             CommitRequest(
-                classID: "NoteItem",
+                classID: "Item",
                 changes: ["body": .text(String(repeating: "😀", count: 1_500))],
                 operationID: "near-limit-projection")
         ).revision
@@ -436,11 +492,17 @@ final class CoreTests: XCTestCase {
         let description = try response("TractandaStore/describe", ["topic": "types"])
         XCTAssertTrue(
             (description["types"] as? [[String: Any]])?.contains {
-                $0["classID"] as? String == "NoteItem"
+                $0["classID"] as? String == "Item"
             } == true)
         let classIDs = try XCTUnwrap(description["types"] as? [[String: Any]])
             .compactMap { $0["classID"] as? String }
-        XCTAssertTrue(Set(classIDs).isDisjoint(with: ["TodoItem", "PendencyItem", "ActionItem"]))
+        XCTAssertTrue(Set(classIDs).isDisjoint(with: ["NoteItem", "TodoItem", "PendencyItem", "ActionItem"]))
+        let rootType = try XCTUnwrap(
+            (description["types"] as? [[String: Any]])?.first {
+                $0["classID"] as? String == "Item"
+            })
+        XCTAssertEqual(rootType["abstract"] as? Bool, false)
+        XCTAssertTrue(rootType["parentID"] is NSNull)
         let overview = try response("TractandaStore/describe", [:])
         XCTAssertEqual(overview["currentUID"] as? UInt32, store.ownerUID)
         XCTAssertEqual(overview["ownerUID"] as? UInt32, store.ownerUID)
@@ -481,7 +543,7 @@ final class CoreTests: XCTestCase {
         func create(_ subject: String, fields: [String: ItemValue] = [:]) throws -> Revision {
             try store.commit(
                 CommitRequest(
-                    classID: "NoteItem",
+                    classID: "Item",
                     changes: fields.merging(["subject": .text(subject)]) { _, new in new },
                     operationID: Identifier.make())
             ).revision
@@ -504,7 +566,7 @@ final class CoreTests: XCTestCase {
                 ]),
             ])
         XCTAssertEqual(second.itemID, first.itemID)
-        XCTAssertEqual(second.classID, "NoteItem")
+        XCTAssertEqual(second.classID, "Item")
         XCTAssertFalse(try Categories.explain(second, category: todo, store: store).isIncluded)
         XCTAssertTrue(try Categories.explain(second, category: waiting, store: store).isIncluded)
         XCTAssertNil(first.fields["waitingOn"])
@@ -518,7 +580,7 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(referenced.fields["waitingOn"]?.link?.itemID, event.itemID)
         let ready = try edit(store, referenced, [:], unset: ["waitingOn"])
         XCTAssertNil(ready.fields["waitingOn"])
-        XCTAssertEqual(ready.classID, "NoteItem")
+        XCTAssertEqual(ready.classID, "Item")
     }
 
     func testRetypeCopyTombstoneAndPreserveUnknownValues() throws {
@@ -528,7 +590,7 @@ final class CoreTests: XCTestCase {
         let sourceBytes = Data("X-ACL: everyone\r\nFrom: example@example.invalid\r\n\r\nOriginal\0bytes".utf8)
         let first = try store.commit(
             CommitRequest(
-                classID: "NoteItem",
+                classID: "Item",
                 changes: [
                     "subject": .text("Ask for date"),
                     "source": .bytes(sourceBytes), "custom.key": .object(["one": .integer(1)]),

@@ -21,7 +21,7 @@ final class BreadcrumbTests: XCTestCase {
         func item(_ title: String, _ fields: [String: ItemValue] = [:]) throws -> Revision {
             try client.commit(
                 CommitRequest(
-                    classID: "NoteItem", changes: fields.merging(["subject": .text(title)]) { _, new in new },
+                    classID: "Item", changes: fields.merging(["subject": .text(title)]) { _, new in new },
                     operationID: Identifier.make())
             ).revision
         }

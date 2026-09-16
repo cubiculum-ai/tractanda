@@ -64,7 +64,7 @@ final class AccessControlTests: XCTestCase {
         try body(store, accounts)
     }
     private func create(
-        _ store: ItemStore, uid: UInt32, fields: [String: ItemValue] = [:], classID: String = "NoteItem"
+        _ store: ItemStore, uid: UInt32, fields: [String: ItemValue] = [:], classID: String = "Item"
     ) throws -> Revision {
         try store.withAccess(forUID: uid) {
             try store.commit(CommitRequest(classID: classID, changes: fields, operationID: Identifier.make()))
@@ -217,7 +217,7 @@ final class AccessControlTests: XCTestCase {
     func testCurrentPermissionsHistoryRetryCopyAndOwnerControl() throws {
         try fixture { store, accounts in
             let request = CommitRequest(
-                classID: "NoteItem",
+                classID: "Item",
                 changes: ["subject": .text("Shared"), "permissions": permissions(mode: 0o660)],
                 operationID: "shared-create")
             let first = try store.withAccess(forUID: accounts.alice) { try store.commit(request).revision }

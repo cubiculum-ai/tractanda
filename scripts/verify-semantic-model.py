@@ -31,7 +31,7 @@ def main():
                 ('Vegetable garden','Tomato seedlings need watering and compost.'),
                 ('Invoice payment','Pay the electricity bill by the end of the month.'),
             ]):
-                notes.append(client.commit(wire.intent('create',f'model-note-{index}',class_id='NoteItem',changes={
+                notes.append(client.commit(wire.intent('create',f'model-note-{index}',class_id='Item',changes={
                     'subject':wire.text(subject),'body':wire.text(body)}))['revision'])
             manifest=wire.manifest(root/'store')
             client.call('TractandaSemantic/configure',{'configuration':config})

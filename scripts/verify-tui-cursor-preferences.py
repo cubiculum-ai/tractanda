@@ -121,11 +121,11 @@ def main():
                 assert first != second, (first, second)
                 ui.send(F9); ui.wait('Draft canceled')
                 assert wire.revision_id(client.get(wire.item_id(note))) == wire.revision_id(note)
-                # NoteItem's next supported class is RoleItem; a vacant role is valid.
+                # Item's next supported class is LegalPersonItem; an empty legal person is valid.
                 ui.send(F2); ui.wait('Edit item'); ui.send(b'\t\t' + RIGHT); ui.settle()
                 ui.send(F8); ui.wait('Saved one revision')
                 changed = client.get(wire.item_id(note))
-                assert changed['fields']['classID'] == wire.text('RoleItem'), changed
+                assert changed['fields']['classID'] == wire.text('LegalPersonItem'), changed
                 assert changed['fields']['body'] == note['fields']['body']
                 assert client.call('TractandaItem/history', {'itemID': wire.item_id(note)})['total'] == 2
                 checks.append('Class rejects arbitrary buffer edits, cycles staged choices, cancels without revision and retypes with stable identity and history')
@@ -176,11 +176,11 @@ def main():
                 assert updated['fields']['opaque'] == wire.text('preserve me')
                 checks.append('Editing an existing unknown class preserves its identifier and opaque metadata')
 
-            invalid = client.commit(wire.intent('create', str(uuid.uuid4()), class_id='NoteItem', changes={
+            invalid = client.commit(wire.intent('create', str(uuid.uuid4()), class_id='Item', changes={
                 'subject': wire.text('Retype validation fixture'), 'holdings': wire.text('opaque note value')}))['revision']
             with tui.terminal(binary, root / 's', root / 'validation.json') as ui:
                 ui.wait('Retype validation fixture'); ui.send(F2); ui.wait('Edit item')
-                ui.send(b'\t\t' + RIGHT); ui.settle()
+                ui.send(b'\t\t' + RIGHT * 4); ui.settle()
                 assert 'RoleItem' in ui.screen and 'staged' in ui.screen
                 ui.send(F8); ui.wait('invalidRole')
                 assert 'Edit item' in ui.screen

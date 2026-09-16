@@ -16,7 +16,7 @@ import tempfile
 import time
 
 
-CAPABILITY = "https://tractanda.ai/ns/local-prototype/2"
+CAPABILITY = "https://tractanda.ai/ns/local-prototype/3"
 
 
 def exact(connection, count):
@@ -139,7 +139,7 @@ def main():
             status, _, body = http_request(port, "POST", "/api", info_request, api_headers)
             assert status == 200 and "ownerUID" in response_value(json.loads(body))
             write = {
-                "action": "create", "operationID": "shared-daemon-wire-write", "classID": "NoteItem",
+                "action": "create", "operationID": "shared-daemon-wire-write", "classID": "Item",
                 "changes": {"subject": {"type": "text", "value": "shared daemon wire fixture"}}, "unset": [],
             }
             commit_request = json.dumps({"using": [CAPABILITY], "methodCalls": [["TractandaItem/commit", write, "write"]]}).encode()

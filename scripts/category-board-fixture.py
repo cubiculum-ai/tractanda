@@ -5,7 +5,7 @@ def create_fixture(commit):
     def text(v):return {'type':'text','value':v}
     def ref(v):return {'type':'reference','value':{'itemID':v}}
     def refs(v):return {'type':'list','value':[ref(i) for i in v]}
-    def create(name,fields,kind='NoteItem'):
+    def create(name,fields,kind='Item'):
         return commit({'action':'create','classID':kind,'changes':{'subject':text(name),**fields},'unset':[],'operationID':'fixture-'+uuid.uuid4().hex})['revision']['fields']['itemID']['value']
     def category(name,parents=[]):
         return create(name,{'selection':{'type':'object','value':{'language':text('tractanda.spotlight.v0'),'expression':text('itemID == ""')}},'categoryParents':refs(parents)})
@@ -25,5 +25,5 @@ def create_fixture(commit):
             'checklist':{'type':'list','value':[{'type':'object','value':{'id':text(f'step-{index}'),'title':text('Verify'),'isComplete':{'type':'boolean','value':False}}}]},
             'dependencies':refs([] if not index else [items['TEST-1']]),
             'foreignMetadata':{'type':'object','value':{'retain':{'type':'boolean','value':True},'text':text('ä')}}
-        },kind='EmailMessageItem' if not index else 'NoteItem')
+        },kind='EmailMessageItem' if not index else 'Item')
     return {'viewItemID':view,'itemIDs':items,'projectID':project,'statusID':status,'columns':columns,'groupID':group}

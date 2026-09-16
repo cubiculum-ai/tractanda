@@ -21,7 +21,7 @@ final class ViewWorkflowTests: XCTestCase {
         deinit { try? FileManager.default.removeItem(at: root) }
         func item(_ fields: [String: ItemValue]) throws -> Revision {
             try client.commit(
-                CommitRequest(classID: "NoteItem", changes: fields, operationID: Identifier.make())
+                CommitRequest(classID: "Item", changes: fields, operationID: Identifier.make())
             ).revision
         }
         func category(_ name: String, rule: String = "rank == *") throws -> Revision {

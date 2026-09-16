@@ -32,7 +32,7 @@ def main():
         with wire.server(native, store, path) as client:
             def create(fields):
                 import uuid
-                return client.commit(wire.intent("create", str(uuid.uuid4()), class_id="NoteItem", changes=fields))["revision"]
+                return client.commit(wire.intent("create", str(uuid.uuid4()), class_id="Item", changes=fields))["revision"]
 
             categories = [create({"subject": wire.text(name), "selection": tagged("object", {
                 "language": wire.text("tractanda.spotlight.v0"), "expression": wire.text(rule),

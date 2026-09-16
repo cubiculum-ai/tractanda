@@ -10,7 +10,7 @@ final class CategoryExclusionTests: XCTestCase {
         let store = try ItemStore(root: root)
         func create(_ fields: [String: ItemValue]) throws -> Revision {
             try store.commit(
-                CommitRequest(classID: "NoteItem", changes: fields, operationID: Identifier.make())
+                CommitRequest(classID: "Item", changes: fields, operationID: Identifier.make())
             ).revision
         }
         func selection(_ expression: String, excluding: [Revision] = []) -> ItemValue {
@@ -80,7 +80,7 @@ final class CategoryExclusionTests: XCTestCase {
                 [
                     "TractandaItem/commit",
                     [
-                        "action": "create", "classID": "NoteItem",
+                        "action": "create", "classID": "Item",
                         "changes": ["subject": ["type": "text", "value": "Stale client"]],
                         "operationID": "stale-client",
                     ], "test",
