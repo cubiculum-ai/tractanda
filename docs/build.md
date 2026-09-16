@@ -33,7 +33,7 @@ TRACTANDA_BIN="$(swift build --show-bin-path)"
 "$TRACTANDA_BIN/tractanda" service install NAME STORE --shared --no-http
 ```
 
-They create a user-level launchd definition on macOS or user-level systemd unit on Linux, copy the executable and required bundled resources, and retain the compatible legacy native `serve` registration when `--shared` is omitted. Installation requires the OS permissions normally needed for a user service; it is not a system-wide service installer. Do not claim a dedicated system account, systemd guest verification, or privileged PAM installation from these commands: those deployment steps remain pending. The daemon does not need to run as root merely for password authentication.
+These development commands create a user-level launchd definition on macOS or user-level systemd unit on Linux, copy the executable and required bundled resources, and retain the compatible legacy native `serve` registration when `--shared` is omitted. The macOS preview installer is a separate path: it registers system LaunchDaemons for the server and embedding host under the existing `daemon` account. Linux systemd packaging, a dedicated service account and privileged PAM installation remain development work. The daemon does not need to run as root merely for password authentication.
 
 ## Verification
 
@@ -45,7 +45,7 @@ This runs style checks, package/client tests, and independent native/MCP/HTTP/te
 
 Run normal tests as a named, non-root account. Permission fixtures distinguish service and administrator identities. A VM without a permanent hardware MAC must set `TRACTANDA_UUID_NODE`; a local container may use the real issuer host node. CI's synthetic `00:00:00:00:00:01` node is strictly for disposable fixtures—production must configure a real host node.
 
-Real-account, managed-service, model and privileged-helper checks are separate, administrative test workflows. Their passing cannot be inferred from fake-credential or injected-identity tests. The current package suite passes 303 tests on each platform, with 13 additional standalone client tests, including text-v2 and the combined daemon. The native managed-service fixture passed on macOS; the actual production launchd startup issue is still under investigation. A Linux systemd boot was not exercised by the disposable container checks.
+Real-account, managed-service, model and privileged-helper checks are separate, administrative test workflows. Their passing cannot be inferred from fake-credential or injected-identity tests. The first prerelease passed 303 package tests on each platform, with 13 additional standalone client tests, including text-v2 and the combined daemon. The macOS installation uses system LaunchDaemons for the server and bundled embedding host; native install, upgrade, reinstall and managed restart checks passed. A machine reboot was not part of that verification. Linux installer/runtime packaging and a real systemd boot remain in development.
 
 ## Packaging
 

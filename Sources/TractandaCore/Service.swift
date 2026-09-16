@@ -504,6 +504,10 @@ public final class ItemService {
         case "TractandaStore/info":
             try check(args, allowed: [])
             return [
+                "features": [
+                    ServerFeature.runtimeIdentity.rawValue, ServerFeature.semanticJobTiming.rawValue,
+                ],
+                "server": try JSONSerialization.jsonObject(with: JSON.encode(RuntimeIdentity.current)),
                 "state": store.state, "ownerUID": store.ownerUID, "queryProfile": SpotlightQuery.profile,
                 "binding": "local experimental; not JMAP conformant", "capability": Self.capability,
                 "warnings": store.isAdministrator ? store.recoveryWarnings : [],

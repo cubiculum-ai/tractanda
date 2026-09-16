@@ -52,6 +52,11 @@ struct ToolDefinition: Sendable {
             if !missing.isEmpty {
                 problems.append("Missing required argument keys: \(missing.joined(separator: ", ")).")
             }
+            if nativeMethod == "TractandaItem/get", !supplied.isDisjoint(with: ["itemID", "itemIDs"]) {
+                problems.append(
+                    "tractanda_get is a batch operation: use ids: [\"item UUID\"]. Single-item tools use itemID."
+                )
+            }
             throw TractandaError("invalidArguments", problems.joined(separator: " "))
         }
         var arguments = input
@@ -209,7 +214,7 @@ enum ToolCatalog {
         .init(
             "tractanda_info", method: "TractandaStore/info",
             description:
-                "Read the native access scope, query/learning profiles and current state. Authority comes from verified Unix peer credentials for stdio or the authenticated OS-account session for HTTP.",
+                "Read connection diagnostics, native features, referenceCompatibility, build identity, access scope and state. Missing feature declarations mean unverified server support, not a proven defect. Stdio errors retain local diagnostics without cached server facts. Authority comes from Unix peer credentials or the authenticated HTTP session.",
             properties: [:]),
         .init(
             "tractanda_describe", method: "TractandaStore/describe",
@@ -237,7 +242,7 @@ enum ToolCatalog {
         .init(
             "tractanda_get", method: "TractandaItem/get",
             description:
-                "Fetch current revisions for up to 64 IDs. notFound are unreadable/missing IDs; remainingIDs are unprocessed IDs to fetch next with the same projection; compare state between pages. oversizedIDs are individually oversized readable records requiring a narrower projection. Item count and maxBytes are independent, and fields are not silently truncated.",
+                "Batch-fetch current revisions with ids (an array, even for one item); do not use itemID or itemIDs. Accepts up to 64 IDs. notFound are unreadable/missing IDs; remainingIDs are unprocessed IDs to fetch next with the same projection; compare state between pages. oversizedIDs require a narrower projection. Item count and maxBytes are independent; fields are not silently truncated.",
             properties: [
                 "ids": identifiers, "projection": projection, "properties": propertyNames,
                 "maxBytes": .object([
@@ -296,7 +301,7 @@ enum ToolCatalog {
         .init(
             "tractanda_semantic_search", method: "TractandaSemantic/search",
             description:
-                "Start a fresh asynchronous semantic query. Poll tractanda_semantic_results with the returned opaque queryID; it makes no canonical edit. The configured endpoint is numeric loopback, though a local proxy's own routing is outside this adapter.",
+                "Start an asynchronous semantic query; poll tractanda_semantic_results with queryID. A server declaring tractanda.semantic-job-timing.v1 in tractanda_info.features returns createdAt/expiresAt (120 seconds) and a pending retryAfterMilliseconds hint. Retain that expiry. Compiled documentation alone does not prove timing support. Makes no canonical edit.",
             properties: [
                 "text": text, "expression": text, "viewID": identifier,
                 "categoryPath": .object(["type": .string("array"), "items": identifier, "maxItems": .int(32)]
@@ -310,7 +315,7 @@ enum ToolCatalog {
         .init(
             "tractanda_semantic_results", method: "TractandaSemantic/results",
             description:
-                "Poll an opaque, caller-scoped semantic query. Results are rechecked against current access before return.",
+                "Poll a caller-scoped queryID. With native feature tractanda.semantic-job-timing.v1, result states retain createdAt/expiresAt and pending includes retryAfterMilliseconds; polling never extends expiry. notFound errors omit timing and deliberately do not distinguish expired/unknown/foreign IDs. Start a new search. Results recheck current access.",
             properties: ["queryID": identifier], required: ["queryID"]),
         .init(
             "tractanda_semantic_configure", method: "TractandaSemantic/configure",

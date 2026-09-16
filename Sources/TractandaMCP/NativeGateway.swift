@@ -7,21 +7,49 @@ actor NativeGateway {
     static let maximumArgumentSize = 1024 * 1024
     static let maximumResultSize = 512 * 1024
     private let connection: ServerConnection?
+    private let profileName: String?
+    private let profileSource: String?
     private let backend: (@Sendable (Data) async throws -> Data)?
     private let queue = DispatchQueue(label: "ai.tractanda.mcp.native")
     private var pendingCalls = 0
 
     init(connection: ServerConnection) {
         self.connection = connection
+        profileName = nil
+        profileSource = "explicitSocket"
+        backend = nil
+    }
+    init(resolution: ResolvedConnection) {
+        connection = resolution.connection
+        profileName = resolution.profileName
+        profileSource = resolution.source.rawValue
         backend = nil
     }
     init(socketPath: String) {
         self.connection = ServerConnection(socketPath: socketPath)
+        profileName = nil
+        profileSource = "explicitSocket"
         backend = nil
     }
     init(backend: @escaping @Sendable (Data) async throws -> Data) {
         connection = nil
+        profileName = nil
+        profileSource = nil
         self.backend = backend
+    }
+
+    /// Reads only the binding captured at startup; it never reconnects or retargets a request.
+    func connectionDetails() -> [String: Value] {
+        guard let connection else { return ["transport": .string("inProcess")] }
+        var details: [String: Value] = [
+            "transport": .string("unix"), "socketPath": .string(connection.socketPath),
+            "canStartUserService": .bool(connection.managedService != nil),
+            "serverIdentityDefaultsToCaller": .bool(connection.serverUser == nil),
+        ]
+        if let profileName { details["profile"] = .string(profileName) }
+        if let profileSource { details["profileSource"] = .string(profileSource) }
+        if let user = connection.serverUser { details["expectedServerUser"] = .string(user) }
+        return details
     }
 
     func call(_ method: String, arguments: [String: Value]) async throws -> Data {

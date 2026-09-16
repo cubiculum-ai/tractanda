@@ -87,6 +87,52 @@ final class MCPHTTPServiceTests: XCTestCase {
         await service.close()
     }
 
+    func testInProcessInfoReportsNoSocketOrProfile() async throws {
+        let alice = alice
+        let service = MCPHTTPService(
+            authorize: { token in
+                guard token == "alice" else { throw TractandaError("unauthorized", "bad") }
+                return alice
+            },
+            dispatch: { data, _ in
+                let request = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+                let call = (request["methodCalls"] as! [[Any]])[0]
+                let result: [String: Any] = [
+                    "accessScope": "single-user",
+                    "server": ["name": "Tractanda", "version": "fixture", "instanceID": "native-instance"],
+                ]
+                return try JSONSerialization.data(withJSONObject: [
+                    "methodResponses": [[call[0], result, call[2]]]
+                ])
+            }, resultFormat: .structured)
+        let initialize = await service.handle(
+            request(
+                try body(
+                    "1", "initialize",
+                    [
+                        "protocolVersion": "2025-11-25", "capabilities": [:],
+                        "clientInfo": ["name": "test", "version": "1"],
+                    ]), token: "alice"))
+        let session = try XCTUnwrap(
+            initialize.headers.first { $0.key.lowercased() == "mcp-session-id" }?.value)
+        let response = await service.handle(
+            request(
+                try body("2", "tools/call", ["name": "tractanda_info", "arguments": [:]]),
+                token: "alice", session: session))
+        XCTAssertEqual(response.statusCode, 200)
+        let payload = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: XCTUnwrap(response.bodyData)) as? [String: Any])
+        let result = try XCTUnwrap(payload["result"] as? [String: Any])
+        let structured = try XCTUnwrap(result["structuredContent"] as? [String: Any])
+        let connection = try XCTUnwrap(structured["connection"] as? [String: Any])
+        XCTAssertEqual(connection["transport"] as? String, "inProcess")
+        XCTAssertEqual(connection["status"] as? String, "ready")
+        XCTAssertNil(connection["socketPath"])
+        XCTAssertNil(connection["profile"])
+        XCTAssertEqual((structured["server"] as? [String: Any])?["instanceID"] as? String, "native-instance")
+        await service.close()
+    }
+
     func testConcurrentInitializeCapsAtEightAndNotificationDoesNotReserve() async throws {
         let service = service()
         let notification = HTTPRequest(

@@ -38,10 +38,10 @@ Use `--data-root` and `--index-root` to select different parent directories. Exi
 
 Open [the local web example](http://127.0.0.1:48728/) and sign in with your OS username and password. The web client is an example of an alternative client; the same server supports the terminal and agent interfaces.
 
-Start the installed terminal client with `tractanda-tui`, or select another database explicitly:
+Start the installed terminal client with `tractanda-tui`, or select another database explicitly. Omit `--profile` for the configured default; `default` is not a magic profile name:
 
 ```sh
-tractanda-tui --profile default
+tractanda-tui --profile NAME
 ```
 
 The shared executable lives at `/Users/Shared/Library/Application Support/Tractanda/current/bin/tractanda-tui`. The installer adds `/usr/local/bin/tractanda-tui` as a symlink when that path is available and protected. It leaves an unrelated existing command untouched. All databases share client binaries and identical release payloads; a database is selected through connection preferences or `--profile NAME`.

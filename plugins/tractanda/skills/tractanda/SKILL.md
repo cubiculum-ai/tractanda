@@ -10,12 +10,12 @@ Use the server as the authority for the current schema, readable records and per
 
 ## Orient once, then retrieve only what the task needs
 
-1. Use `tractanda_info` to identify the connected store and access scope. If several stores are available, use the one named or established by the user; clarify an ambiguous destination before writing.
+1. Use `tractanda_info` to identify the connected store and access scope. Inspect native `features` and `connection.referenceCompatibility` before relying on server-side reference claims. No valid feature declaration means unverified support, not a proven server defect. Its `connection` block reports the adapter's selected profile/socket and build even if the native call fails; native identity requires the `tractanda.runtime-identity.v1` feature. If several stores are available, use the one named or established by the user; clarify an ambiguous destination before writing.
 2. Call `tractanda_describe` with `topic: "overview"`. Read `tractanda://reference/intro`, then the `types` or `properties` catalog and relevant served references as needed. The catalog describes common properties, not an exhaustive closed schema.
 3. Discover existing categories, people, projects and views before creating them. IDs are authoritative; names may be duplicated or renamed. Do not assume the optional starter taxonomy exists.
 4. Form a small, task-specific query. A temporary view needs no stored view item. Save a view only when the user wants it reusable.
 
-Tool names may carry a harness prefix. Prefer the installed tool schema and served reference over an outdated example in this skill. If tools are unavailable but the native client is configured, its `request` command accepts the same native methods; see the connection guide.
+Tool names may carry a harness prefix. Installed tool schemas describe the adapter; served references are authoritative for server behavior only where the native server declares the features they require. A build digest alone cannot establish support. Refresh info after server restarts or behavior mismatches; an advertised feature missing its required fields is a contract violation, while undeclared support is unverified. References are compiled into the adapter: restart/reinitialize after upgrading it or changing its connection, then rediscover tools/resources. The initialize version and `connection.referenceRevision` identify its reference set. If tools are unavailable but the native client is configured, its `request` command accepts the same native methods; see the connection guide.
 
 ## Think in independent dimensions
 
@@ -32,12 +32,12 @@ Kanban eligibility comes from project and status category membership. Do not req
 ## Retrieve economically and accurately
 
 - Use `tractanda_query` for metadata predicates, literal FTS text, category intersections and exclusions. Read `tractanda://reference/query` for the portable Spotlight grammar. It is not arbitrary SQL or a promise of every native Spotlight feature.
-- Query IDs first, then `tractanda_get` with `projection: "summary"` or a small `properties` list. Fetch content for relevant records. Properties are literal top-level keys; a projection's omission does not mean a field is unset.
+- Query IDs first, then `tractanda_get` with `ids: ["item UUID"]` and `projection: "summary"` or a small `properties` list. This is a batch operation, including for one item; single-item tools use `itemID`. Fetch content for relevant records. Properties are literal top-level keys; a projection's omission does not mean a field is unset.
 - Honor pagination and the byte budget independently. Follow `remainingIDs`; narrow the projection for `oversizedIDs`. Do not interpret a partial batch as absence. Compare query/get states when consistency matters.
 - Use `sort` for an inline query. A saved `viewID` supplies its own criteria and sort; do not combine it with inline criteria. `sectionID` applies to a saved view.
 - For relative dates, send the relevant `timeZone` and, for reproducible interpretation, `at`. Resolve ambiguity between an event date and a reminder date before assigning precise dates.
 - Text and semantic retrieval include owned text in subject, body and eligible custom fields. Operational metadata and empty values are excluded; byte attachments and referenced items are not automatically expanded. Do not duplicate all metadata in body solely to make it searchable.
-- For meaning-based retrieval, check `tractanda_semantic_status`, read `tractanda://reference/semantic`, start `tractanda_semantic_search`, and poll `tractanda_semantic_results` with its returned query ID. Coverage may be incomplete. A low score or no result is not proof that an item does not exist; try metadata or literal search as appropriate. Fetch cited items before treating passages as current evidence.
+- For meaning-based retrieval, check `tractanda_semantic_status`, read `tractanda://reference/semantic`, start `tractanda_semantic_search`, and poll `tractanda_semantic_results` with its returned query ID. With native feature `tractanda.semantic-job-timing.v1`, retain `createdAt`/`expiresAt` and honor `retryAfterMilliseconds` while pending; polling does not renew the 120-second job. Missing timing fields without that feature are not evidence of a broken server. `notFound` omits timing and does not distinguish expired, unknown or foreign IDs: use your retained expiry to assess timing, then start a new search. Coverage may be incomplete. A low score or no result is not proof that an item does not exist; try metadata or literal search as appropriate. Fetch cited items before treating passages as current evidence.
 
 Return relevant item names/reference labels and IDs when useful, with a short account of unresolved or conflicting evidence. Avoid dumping entire histories or catalogs into the conversation.
 

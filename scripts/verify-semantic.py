@@ -6,6 +6,7 @@ not embedding-model quality (which has its own frozen, real-model evaluation).
 """
 import argparse
 from collections import Counter
+from datetime import datetime
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
@@ -214,8 +215,19 @@ def main():
                 assert {'tractanda_semantic_status','tractanda_semantic_search','tractanda_semantic_results'}<=names
                 assert agent.tool('tractanda_semantic_status')==client.call('TractandaSemantic/status')
                 query=agent.tool('tractanda_semantic_search',{'text':'Only a subject','limit':1})
+                assert 'tractanda.semantic-job-timing.v1' in agent.tool('tractanda_info')['features']
+                created = datetime.fromisoformat(query['createdAt'].replace('Z', '+00:00'))
+                expires = datetime.fromisoformat(query['expiresAt'].replace('Z', '+00:00'))
+                assert (expires-created).total_seconds() == 120
+                assert query['retryAfterMilliseconds'] == 500
                 result=wait_for(lambda:agent.tool('tractanda_semantic_results',{'queryID':query['queryID']}),lambda r:r['state']!='pending')
                 validate_passages(client,result)
+                assert result['createdAt'] == query['createdAt'] and result['expiresAt'] == query['expiresAt']
+                assert 'retryAfterMilliseconds' not in result
+            with mcp.MCPClient(adapter,path) as restarted:
+                restarted.initialize()
+                resumed = restarted.tool('tractanda_semantic_results', {'queryID':query['queryID']})
+                assert resumed['createdAt'] == query['createdAt'] and resumed['expiresAt'] == query['expiresAt']
             checks.append('Shipped CLI polling and real MCP stdio discovery/status/search/results use the native service')
 
             canonical=wire.manifest(store)

@@ -30,6 +30,14 @@ HTTP `/auth/login` accepts an OS username and password, then `/api` and `/mcp` r
 
 `/mcp` implements Streamable HTTP JSON. A session is bound to the authenticated principal; sessions and in-flight requests are bounded globally and per user, expire when idle, and are re-authorized on each request. There is no SSE endpoint or event replay. Clients initialize with HTTP POST, retain `Mcp-Session-Id`, and may DELETE that session. stdio MCP remains a separate local adapter.
 
+For stdio, omit `--profile` to use the configured default. `--profile default` selects a literal profile with that name; it is not a special default alias. User defaults precede the system default, and several local aliases may resolve to one socket. The adapter captures that selection at startup; restart it after changing connection settings.
+
+`tractanda_info` adds `connection` diagnostics: `transport`, the selected `profile`/`profileSource` and `socketPath` where applicable, expected server account, adapter identity and `referenceRevision`. Native-call failures retain this local block with `status: "error"` and the original error, without cached server facts. A successful response has `status: "ready"`; when native feature `tractanda.runtime-identity.v1` is declared, `server` contains release version, executable SHA-256 when readable, process ID and process instance ID. A source build without a matching bundle manifest reports version `development`; its digest distinguishes builds but does not prove feature support. The integrated HTTP adapter reports `transport: "inProcess"`, with no fabricated socket/profile, and cannot answer while its server process is down.
+
+Native `TractandaStore/info` returns a `features` array of versioned behavior IDs. This build declares `tractanda.runtime-identity.v1` and `tractanda.semantic-job-timing.v1`. These identify API support, not authorization or model availability. The MCP adapter compares fresh declarations with its `requiredServerFeatures` in `connection.referenceCompatibility`: `satisfied` when all listed requirements are declared, `missingFeatures` plus `missingServerFeatures` when a valid declaration omits them, `unverified` when the declaration is absent/invalid, and `unavailable` when native info failed. Extra unknown feature IDs are ignored. Skew does not make otherwise successful info a tool error. Neither build hashes nor cached declarations substitute for current feature support. An advertised feature with missing required fields is a contract violation; undeclared support is unverified.
+
+MCP reference resources are compiled into the adapter, while `tractanda_describe` is served by the native backend. References remain static during an adapter process; this preview advertises neither resource subscriptions nor list-change notifications. Restart/reinitialize after an upgrade and refresh discovery. The initialize version includes build and reference digests; `connection.referenceRevision` is the full reference-text cache key. If only the native server restarted, its process instance changes independently of the stdio adapter.
+
 ## Permissions and administration
 
 All reads, writes and history requests use current item permissions; changing access affects historical visibility too. OS identity and group membership are refreshed per request. An optional `AccessConfigurationItem` has profile `tractanda.access.v1`; `administration: "system"` recognizes root plus `admin` on macOS or `sudo` on Linux, unless `administratorGroup` overrides the OS group. Without an access configuration, legacy `serviceOwner` administration remains in effect pending migration.
@@ -39,6 +47,8 @@ All reads, writes and history requests use current item permissions; changing ac
 Tagged values include text, integer, real, boolean, date, bytes, reference, list and object. Use a persisted `operationID`; an uncertain mutation is retried with identical arguments and ID. Existing updates also require the current `expectedRevisionID`. Changes replace whole top-level fields, so fetch and merge a map before replacing it.
 
 Get/history support `full`, `content`, `summary`, or explicit top-level `properties`. Get is byte-bounded: follow ordered `remainingIDs`, handle `oversizedIDs` with a narrower projection, and compare state. An omitted projected property is not an unset field.
+
+`tractanda_get` and `TractandaItem/get` take an `ids` array, even for one item. Single-item explain/history/revision/resolve calls take `itemID`; `itemIDs` is not an alias.
 
 ## Literal and semantic search
 
@@ -51,6 +61,8 @@ Empty or whitespace-only text values are omitted together with their field label
 Semantic retrieval is optional and uses the same owned-text corpus as FTS5. The single input encoding is `item-text-utf8-v2`; the earlier subject/body-only prototype mode has been removed. The current extraction rules are `tractanda.item-text.v3`. Extraction-rule versions participate in the semantic profile identity, so a rules upgrade rebuilds the disposable vector index without changing the model, canonical records or item history. Before asserting semantic coverage, agents should inspect `TractandaSemantic/status`, especially `inputEncoding`, `itemTextProfile`, coverage and index counts. LSM query behavior is unchanged.
 
 Semantic configuration, rebuild and reset are administrator operations. The embedding endpoint is an operational loopback configuration, not a query-supplied URL. Semantic filtering still applies current permissions and the same category/query constraints.
+
+With native feature `tractanda.semantic-job-timing.v1`, semantic search starts a caller-scoped job with a fixed **120-second lifetime from creation**. Successful search and pending/ready/failed result states include `createdAt` and `expiresAt`; pending states also include `retryAfterMilliseconds` (currently 500), a polling interval rather than a prediction of remaining latency. The `at`/`timeZone` evaluation clock does not affect expiry, and polling never renews it. Jobs live in native-server memory: the same principal may resume polling after a stdio adapter restart, but a native-server restart loses them. Model/profile changes and index reset/rebuild may invalidate jobs earlier. Retain your query's expiry: `notFound` errors omit timing and deliberately do not distinguish expired, unknown or foreign jobs. Start a new search. Without the feature declaration, do not assume newer compiled adapter documentation describes the connected server.
 
 ## UUID node policy
 

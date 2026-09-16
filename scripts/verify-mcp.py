@@ -26,6 +26,11 @@ def obj(value):
     return tagged("object", value)
 
 
+def comparable_info(value):
+    """Exclude adapter-local diagnostics; compare state against a fresh native read."""
+    return {key: item for key, item in value.items() if key != "connection"}
+
+
 class MCPClient:
     """No SDK: newline JSON-RPC, bounded reads, separate process and real pipes."""
     def __init__(self, binary, socket, arguments=None, result_format="both", append_result_format=True,
@@ -79,6 +84,7 @@ class MCPClient:
             "clientInfo": {"name": client_name, "version": "1.0"}}, fragmented=True)
         assert response["protocolVersion"] == "2025-11-25", response
         assert set(response["capabilities"]) == {"tools", "resources"}, response
+        assert response["capabilities"]["resources"] == {} and response["capabilities"]["tools"] == {}, response
         self.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
         return response
 
@@ -135,10 +141,11 @@ class MCPClient:
 def check_cli_options(adapter, socket, root):
     """Exercise mixed adapter/connection option order against the disposable service."""
     configuration = root / "connections.json"
-    configuration.write_text(json.dumps({
+    profile_configuration = {
         "version": 1, "defaultProfile": "fixture",
         "profiles": {"fixture": {"socketPath": str(socket)}},
-    }))
+    }
+    configuration.write_text(json.dumps(profile_configuration))
     configuration.chmod(0o600)
     environment = dict(os.environ, TRACTANDA_CONFIG=str(configuration))
     permutations = [
@@ -151,7 +158,24 @@ def check_cli_options(adapter, socket, root):
         with MCPClient(adapter, socket, arguments=arguments, result_format=result_format,
                        append_result_format=False, env=environment) as client:
             client.initialize("CLI permutation fixture")
-            assert "ownerUID" in client.tool("tractanda_info")
+            info = client.tool("tractanda_info")
+            assert "ownerUID" in info
+            if "--profile" in arguments:
+                assert info["connection"]["profile"] == "fixture"
+                assert info["connection"]["profileSource"] == "user"
+                # The adapter captures its profile once; changing configuration while it is
+                # serving must not silently retarget the store in the middle of a session.
+                configuration.write_text(json.dumps({
+                    "version": 1, "defaultProfile": "changed",
+                    "profiles": {
+                        "fixture": {"socketPath": str(root / "retired")},
+                        "changed": {"socketPath": str(socket)},
+                    },
+                }))
+                frozen = client.tool("tractanda_info")
+                assert frozen["connection"]["profile"] == "fixture"
+                assert frozen["connection"]["socketPath"] == str(socket)
+                configuration.write_text(json.dumps(profile_configuration))
     for arguments in (["--socket", "--no-start"], ["--socket", str(socket), str(socket)]):
         process = subprocess.run([str(adapter), *arguments], input=b"", stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, env=environment, timeout=10)
@@ -160,6 +184,14 @@ def check_cli_options(adapter, socket, root):
 
 def exercise(binary, adapter, root, checks):
     store, socket = root / "store", root / "s"
+    stale = root / "retired"
+    with MCPClient(adapter, stale, arguments=["--socket", str(stale), "--no-start"]) as offline:
+        offline.initialize("Offline diagnostics fixture")
+        info = offline.tool("tractanda_info", error="connectionFailed")
+        assert info["connection"]["status"] == "error"
+        assert info["connection"]["socketPath"] == str(stale)
+        assert "server" not in info
+    checks.append("offline tractanda_info preserves the bound socket and adapter identity without claiming server facts")
     with wire.server(binary, store, socket) as native:
         check_cli_options(adapter, socket, root)
         checks.append("mixed socket/profile/no-start/result-format CLI permutations and missing/duplicate socket validation")
@@ -189,7 +221,18 @@ def exercise(binary, adapter, root, checks):
             client.resource("tractanda://items/../../reference/items", error=-32602)
             checks.append("initialization, ping, discovery, schemas, help resources, unknown methods and URI boundaries")
 
-            assert client.tool("tractanda_info") == native.call("TractandaStore/info")
+            native_info = native.call("TractandaStore/info")
+            info = client.tool("tractanda_info")
+            assert comparable_info(info) == comparable_info(native_info)
+            assert info["connection"]["status"] == "ready"
+            assert info["connection"]["transport"] == "unix"
+            assert info["connection"]["socketPath"] == str(socket)
+            assert info["connection"]["profileSource"] == "explicitSocket"
+            server_instance = info["server"]["instanceID"]
+            adapter_instance = info["connection"]["adapter"]["instanceID"]
+            assert {"tractanda.runtime-identity.v1", "tractanda.semantic-job-timing.v1"} <= set(info["features"])
+            assert info["connection"]["referenceCompatibility"]["status"] == "satisfied"
+            assert info["connection"]["referenceCompatibility"]["missingServerFeatures"] == []
             assert client.tool("tractanda_describe") == native.call("TractandaStore/describe")
             types = client.tool("tractanda_describe", {"topic": "types"})
             properties = client.tool("tractanda_describe", {"topic": "properties"})
@@ -419,16 +462,40 @@ def exercise(binary, adapter, root, checks):
                 formatted.initialize()
                 catalog = formatted.request("tools/list")["tools"]
                 assert all("outputSchema" not in tool for tool in catalog) == (result_format == "text")
-                assert formatted.tool("tractanda_info") == native.call("TractandaStore/info")
+                formatted_info = formatted.tool("tractanda_info")
+                assert comparable_info(formatted_info) == comparable_info(native.call("TractandaStore/info"))
+                assert formatted_info["connection"]["status"] == "ready"
                 formatted.tool("tractanda_get", {}, error="invalidArguments")
         checks.append("both/text/structured result modes, outputSchema discovery and error contracts")
     shutil.rmtree(store / "index")
     with wire.server(binary, store, socket):
         with MCPClient(adapter, socket) as rebuilt:
             rebuilt.initialize()
+            rebuilt_info = rebuilt.tool("tractanda_info")
+            assert rebuilt_info["server"]["instanceID"] != server_instance
+            assert rebuilt_info["connection"]["adapter"]["instanceID"] != adapter_instance
             assert rebuilt.tool("tractanda_commit", revise)["replayed"]
             assert rebuilt.tool("tractanda_history", {"itemID": item_id})["total"] == 2
     checks.append("native index loss and rebuild preserve MCP-visible history and durable retry identity")
+
+
+def exercise_older_server(binary, adapter, root, checks):
+    """Diagnose a real older native build without changing its installed store or executable."""
+    store, socket = root / "older-store", root / "older-socket"
+    with wire.server(binary, store, socket) as native:
+        assert "features" not in native.call("TractandaStore/info"), "Fixture must predate feature declarations"
+        with MCPClient(adapter, socket) as client:
+            client.initialize()
+            info = client.tool("tractanda_info")
+            assessment = info["connection"]["referenceCompatibility"]
+            assert info["connection"]["status"] == "ready"
+            assert assessment["status"] == "unverified"
+            assert "missingServerFeatures" not in assessment
+            assert "features" not in info
+            semantic = client.resource("tractanda://reference/semantic")["text"]
+            assert "tractanda.semantic-job-timing.v1" in semantic
+            assert "conditional" in semantic
+    checks.append("new adapter with real older native binary reports unverified features and conditional references in-band")
 
 
 def main():
@@ -436,11 +503,14 @@ def main():
     parser.add_argument("binary")
     parser.add_argument("adapter")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--older-server", type=Path, help="Optional native binary predating feature declarations")
     args = parser.parse_args()
     checks = []
     # macOS TMPDIR can itself exceed the Unix-domain socket path budget.
     with tempfile.TemporaryDirectory(prefix="trac-mcp-", dir="/tmp") as temporary:
         exercise(str(Path(args.binary).resolve()), str(Path(args.adapter).resolve()), Path(temporary), checks)
+        if args.older_server:
+            exercise_older_server(str(args.older_server.resolve()), str(Path(args.adapter).resolve()), Path(temporary), checks)
     result = {"status": "passed", "platform": platform.platform(), "python": platform.python_version(),
         "protocolVersion": "2025-11-25", "checks": checks}
     if args.output:

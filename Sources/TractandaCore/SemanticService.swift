@@ -159,6 +159,7 @@ final class SemanticService {
     private var epoch = 0
 
     private let queryLifetime: TimeInterval = 120
+    private let queryLifetimeClock: @Sendable () -> Date
     private let retryDelay: TimeInterval = 5
     private let maximumQueries = 64
 
@@ -170,6 +171,21 @@ final class SemanticService {
     ) {
         self.store = store
         self.storage = storage
+        queryLifetimeClock = { Date() }
+        self.embed = embed
+        configurations = SemanticConfigurationStore(storeRoot: store.root)
+    }
+
+    init(
+        store: ItemStore,
+        storage: SemanticVectorStorage = SemanticMemoryStorage(),
+        queryLifetimeClock: @escaping @Sendable () -> Date,
+        embed: @escaping @Sendable (SemanticConfiguration, [String], Bool) async throws -> [[Double]] =
+            SemanticService.defaultEmbed
+    ) {
+        self.store = store
+        self.storage = storage
+        self.queryLifetimeClock = queryLifetimeClock
         self.embed = embed
         configurations = SemanticConfigurationStore(storeRoot: store.root)
     }
@@ -319,7 +335,7 @@ final class SemanticService {
             throw TractandaError("semanticQuery", "Invalid or excessive semantic query.")
         }
         _ = try QueryCalendar.make(timeZone: timeZone)
-        let createdAt = Date()
+        let createdAt = queryLifetimeClock()
         let profile = try SemanticSource.profileID(configuration)
         let query = SemanticQuery(
             queryID: Identifier.make(),
@@ -337,28 +353,27 @@ final class SemanticService {
             timeZone: timeZone)
         _ = try eligibleSnapshots(query, configuration: configuration)
         queries[query.queryID] = query
-        return [
-            "queryID": query.queryID, "state": "pending", "profileID": profile,
-            "evaluatedAt": Timestamp.format(evaluatedAt), "timeZone": timeZone,
-        ]
+        return queryResponse(query, state: "pending")
     }
 
     func results(queryID: String) throws -> [String: Any] {
         guard let query = queries[queryID], query.callerScope == store.accessScope,
-            query.expiresAt > Date()
+            query.expiresAt > queryLifetimeClock()
         else {
-            throw TractandaError("notFound", "Semantic query is unavailable.")
+            throw TractandaError(
+                "notFound", "This semantic query may have expired or been invalidated; start a new search.")
         }
         guard let configuration = try configurations.load(),
             try SemanticSource.profileID(configuration) == query.profileID
         else {
-            throw TractandaError("notFound", "Semantic query is unavailable.")
+            throw TractandaError(
+                "notFound", "This semantic query may have expired or been invalidated; start a new search.")
         }
         if queryFailures.contains(queryID) {
-            return queryState(query, state: "failed", results: [])
+            return queryResponse(query, state: "failed", results: [])
         }
         guard let vector = queryVectors[queryID] else {
-            return queryState(query, state: "pending", results: [])
+            return queryResponse(query, state: "pending", results: [])
         }
         let current = try eligibleSnapshots(query, configuration: configuration)
         let missingCurrent: Bool
@@ -376,11 +391,7 @@ final class SemanticService {
         }
         let partial = storageProblem != nil || missingCurrent
         guard storageProfile == query.profileID, storageProblem == nil else {
-            return [
-                "queryID": queryID, "state": "ready", "profileID": query.profileID,
-                "evaluatedAt": Timestamp.format(query.evaluatedAt), "timeZone": query.timeZone,
-                "partialCoverage": true, "results": [],
-            ]
+            return queryResponse(query, state: "ready", results: [], partialCoverage: true)
         }
         let hits: [SemanticIndexedPassage]
         do {
@@ -388,18 +399,10 @@ final class SemanticService {
                 vector: vector, profileID: query.profileID, current: current, limit: query.limit)
         } catch let error as TractandaError {
             storageProblem = error
-            return [
-                "queryID": queryID, "state": "ready", "profileID": query.profileID,
-                "evaluatedAt": Timestamp.format(query.evaluatedAt), "timeZone": query.timeZone,
-                "partialCoverage": true, "results": [],
-            ]
+            return queryResponse(query, state: "ready", results: [], partialCoverage: true)
         } catch {
             storageProblem = TractandaError("semanticIndex", "Semantic index is unavailable.")
-            return [
-                "queryID": queryID, "state": "ready", "profileID": query.profileID,
-                "evaluatedAt": Timestamp.format(query.evaluatedAt), "timeZone": query.timeZone,
-                "partialCoverage": true, "results": [],
-            ]
+            return queryResponse(query, state: "ready", results: [], partialCoverage: true)
         }
         let currentByID = Dictionary(uniqueKeysWithValues: current.map { ($0.itemID, $0) })
         let result = try hits.compactMap { hit -> [String: Any]? in
@@ -423,26 +426,25 @@ final class SemanticService {
                 "similarity": hit.score ?? cosine(vector, hit.vector),
             ]
         }
-        return [
-            "queryID": queryID,
-            "state": "ready",
-            "profileID": query.profileID,
-            "evaluatedAt": Timestamp.format(query.evaluatedAt),
-            "timeZone": query.timeZone,
-            "partialCoverage": partial,
-            "results": result,
-        ]
+        return queryResponse(query, state: "ready", results: result, partialCoverage: partial)
     }
 
-    private func queryState(_ query: SemanticQuery, state: String, results: [Any]) -> [String: Any] {
-        [
+    private func queryResponse(
+        _ query: SemanticQuery, state: String, results: [Any]? = nil, partialCoverage: Bool? = nil
+    ) -> [String: Any] {
+        var response: [String: Any] = [
             "queryID": query.queryID,
             "state": state,
             "profileID": query.profileID,
             "evaluatedAt": Timestamp.format(query.evaluatedAt),
             "timeZone": query.timeZone,
-            "results": results,
+            "createdAt": Timestamp.format(query.createdAt),
+            "expiresAt": Timestamp.format(query.expiresAt),
         ]
+        if state == "pending" { response["retryAfterMilliseconds"] = 500 }
+        if let partialCoverage { response["partialCoverage"] = partialCoverage }
+        if let results { response["results"] = results }
+        return response
     }
 
     private func drain(_ configuration: SemanticConfiguration?) throws {
@@ -557,7 +559,8 @@ final class SemanticService {
         guard queryJobs.isEmpty, queryTasks.isEmpty else { return }
         guard
             let query = queries.values.sorted(by: { $0.createdAt < $1.createdAt }).first(where: {
-                $0.profileID == profileID && $0.expiresAt > Date() && queryVectors[$0.queryID] == nil
+                $0.profileID == profileID && $0.expiresAt > queryLifetimeClock()
+                    && queryVectors[$0.queryID] == nil
                     && !queryFailures.contains($0.queryID)
             })
         else { return }
@@ -720,7 +723,7 @@ final class SemanticService {
     }
 
     private func expireQueries() {
-        let now = Date()
+        let now = queryLifetimeClock()
         for (queryID, task) in queryTasks where queries[queryID]?.expiresAt ?? .distantPast <= now {
             task.cancel()
         }

@@ -17,20 +17,20 @@ A harness that accepts the common JSON MCP configuration shape can use:
   "mcpServers": {
     "tractanda": {
       "command": "/Users/Shared/Library/Application Support/Tractanda/current/bin/tractanda-mcp",
-      "args": ["--profile", "default", "--no-start", "--result-format", "text"]
+      "args": ["--no-start", "--result-format", "text"]
     }
   }
 }
 ```
 
-Replace the `default` profile argument when the database has another name; the executable path stays the same. Keep the executable path as one string, including its spaces. Use the harness's documented configuration location and scope. Do not replace its other servers or copy credentials into this plugin.
+Omitting `--profile` selects the configured default: the user's default takes precedence over the system registry's default. A literal profile named `default` exists only if that installation created one; it is not a magic alias. For an explicit database, add `"--profile", "NAME"` using a name from `connections list`. Profile names are local aliases, and several names may resolve to the same socket. Keep the executable path as one string, including its spaces. Use the harness's documented configuration location and scope. Do not replace its other servers or copy credentials into this plugin.
 
 For a Codex configuration that supports stdio MCP servers, the equivalent entry is:
 
 ```toml
 [mcp_servers.tractanda]
 command = "/Users/Shared/Library/Application Support/Tractanda/current/bin/tractanda-mcp"
-args = ["--profile", "default", "--no-start", "--result-format", "text"]
+args = ["--no-start", "--result-format", "text"]
 ```
 
 `text` avoids duplicating result JSON in both text and structured content. A structured-capable harness can use `structured`; `both` is the compatibility default. Stdio is reserved for MCP messages, so do not wrap the adapter in a launcher that prints startup text there.
@@ -46,14 +46,14 @@ Use the actual built `tractanda-mcp` path and a configured profile, or `--socket
 Inspect profiles without opening a new store:
 
 ```sh
-tractanda connections list
-tractanda --profile default info
+"/Users/Shared/Library/Application Support/Tractanda/current/bin/tractanda" connections list
+"/Users/Shared/Library/Application Support/Tractanda/current/bin/tractanda" --default info
 ```
 
 If only the native CLI is available, save JSON in a file and use:
 
 ```sh
-tractanda --profile default request request.json
+"/Users/Shared/Library/Application Support/Tractanda/current/bin/tractanda" --default request request.json
 ```
 
 The native API uses `methodCalls`; for example:
@@ -63,6 +63,10 @@ The native API uses `methodCalls`; for example:
 ```
 
 Read the repository's API guide for the native envelope and error handling. Avoid shell interpolation of item text; pass JSON through files or structured arguments. An executable's `--help` describes supported options. Linux packaging and a bundled Linux embedding runtime remain in development.
+
+`tractanda_info` exposes the adapter's frozen `connection` binding, including the resolved profile/source and socket. A native-call error still includes that local block. Native `features` explicitly declares supported behavior; `tractanda.runtime-identity.v1` supplies server build/process identity and `tractanda.semantic-job-timing.v1` supplies semantic timing. `connection.referenceCompatibility` reports `satisfied`, `missingFeatures`, `unverified` (no valid declaration), or `unavailable` (native info failed), and lists `requiredServerFeatures`. Missing support must not be inferred from a digest or assumed from newer adapter references. Error replies never retain a cached native declaration. Restart the adapter after editing profiles or moving a socket. The HTTP adapter is in the server process, so it cannot provide diagnostics when that entire process is down.
+
+References are static within an adapter process; this preview does not advertise subscriptions or list-change notifications. After an upgrade, restart/reinitialize and refresh tools/resources. Use the initialize version and `connection.referenceRevision` as cache identifiers, and refresh native info after a server restart or behavior mismatch. With `tractanda.semantic-job-timing.v1`, jobs last 120 seconds from creation and report `expiresAt`; polling never prolongs them. Restarting only a stdio adapter can resume the same principal's job within that lifetime. A non-disclosing `notFound` error omits timing: retain the earlier expiry rather than expecting the error to distinguish a stale job from an unknown ID.
 
 ## Available served references
 
@@ -74,4 +78,4 @@ Start with `tractanda_describe`; it supplies the current catalog. The preview se
 - `tractanda://reference/learning`
 - `tractanda://reference/semantic`
 
-Reference content comes from the connected server version. Use it to resolve differences between this skill and an upgraded server.
+Reference content comes from the running MCP adapter build; `tractanda_describe` comes from the native server. Gate feature-dependent reference claims on the native feature declaration. An advertised feature that omits required fields is a contract violation; an absent/invalid declaration means unverified support, often an older server. Upgrade and restart both components together when the API changes.

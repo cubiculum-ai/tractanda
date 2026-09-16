@@ -65,7 +65,7 @@ struct TractandaMCPCommand {
                     connection.socketPath = option
                 }
             }
-            try await MCPAdapter.serve(connection: connection.resolve(), resultFormat: resultFormat)
+            try await MCPAdapter.serve(resolution: connection.resolveDetails(), resultFormat: resultFormat)
         } catch {
             FileHandle.standardError.write(Data("tractanda-mcp: \(error)\n".utf8))
             exit(1)

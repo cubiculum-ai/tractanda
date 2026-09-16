@@ -1,8 +1,10 @@
 name: Publish user manual
 
-# Publication is an explicit maintainer action. Configure GitHub Pages to use
-# GitHub Actions after creating the repository; this workflow does not enable it.
+# Publish the user manual when reviewed changes reach main.
 on:
+  push:
+    branches: [main]
+    paths: ['docs/**', 'LICENSE', 'NOTICE', '.github/workflows/manual.yml']
   workflow_dispatch:
 
 permissions:

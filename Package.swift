@@ -55,12 +55,14 @@ let package = Package(
             dependencies: [
                 "CSQLite", "CTractandaPlatform", "TractandaLearning", "TractandaVectors",
                 .product(name: "TractandaClient", package: "TractandaClient"),
+                .product(name: "Crypto", package: "swift-crypto"),
             ]),
         .target(name: "TractandaKanban", dependencies: ["TractandaCore"]),
         .target(
             name: "TractandaMCP",
             dependencies: [
                 "TractandaCore", .product(name: "MCP", package: "swift-sdk"),
+                .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),

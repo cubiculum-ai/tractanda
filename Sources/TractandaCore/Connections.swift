@@ -1,6 +1,16 @@
 import CTractandaPlatform
 import Foundation
 
+/// Ephemeral selection details; profile aliases are client configuration, not database identities.
+public struct ResolvedConnection: Sendable {
+    public enum Source: String, Sendable {
+        case user, system, explicitSocket, automaticSocket
+    }
+    public var connection: ServerConnection
+    public let profileName: String?
+    public let source: Source
+}
+
 /// A local connection description. Names and paths are machine configuration, not canonical item data.
 public struct ServerConnection: Codable, Equatable, Sendable {
     public var socketPath: String
@@ -211,37 +221,55 @@ public struct ConnectionPreferences {
     static func selectProfile(user: Document, name: String?, global: () throws -> Document) throws
         -> ServerConnection?
     {
+        try selectProfileDetails(user: user, name: name, global: global)?.connection
+    }
+
+    static func selectProfileDetails(user: Document, name: String?, global: () throws -> Document) throws
+        -> ResolvedConnection?
+    {
         let requested = name ?? user.defaultProfile
-        if let requested, let local = user.profiles[requested] { return local }
+        if let requested, let local = user.profiles[requested] {
+            return ResolvedConnection(connection: local, profileName: requested, source: .user)
+        }
         let shared = try global()
         guard let selectedName = requested ?? shared.defaultProfile else { return nil }
         guard let selected = shared.profiles[selectedName] else {
             throw TractandaError("unknownProfile", "Unknown connection profile: \(selectedName)")
         }
-        return selected
+        return ResolvedConnection(connection: selected, profileName: selectedName, source: .system)
     }
 
     public func resolve(socketPath: String? = nil, profile: String? = nil, startsService: Bool = true)
         throws -> ServerConnection
     {
+        try resolveDetails(socketPath: socketPath, profile: profile, startsService: startsService).connection
+    }
+
+    public func resolveDetails(socketPath: String? = nil, profile: String? = nil, startsService: Bool = true)
+        throws -> ResolvedConnection
+    {
         guard socketPath == nil || profile == nil else {
             throw TractandaError("usage", "Choose either an explicit socket or a connection profile.")
         }
-        var connection: ServerConnection
+        var resolution: ResolvedConnection
         if let socketPath {
-            connection = ServerConnection(
-                socketPath: URL(fileURLWithPath: socketPath).standardizedFileURL.path)
+            resolution = ResolvedConnection(
+                connection: ServerConnection(
+                    socketPath: URL(fileURLWithPath: socketPath).standardizedFileURL.path),
+                profileName: nil, source: .explicitSocket)
         } else {
-            connection =
-                try Self.selectProfile(user: load(), name: profile, global: loadGlobal)
-                ?? ServerConnection(socketPath: Self.localSocketPath())
+            resolution =
+                try Self.selectProfileDetails(user: load(), name: profile, global: loadGlobal)
+                ?? ResolvedConnection(
+                    connection: ServerConnection(socketPath: Self.localSocketPath()),
+                    profileName: nil, source: .automaticSocket)
         }
         if let account = ProcessInfo.processInfo.environment["TRACTANDA_SERVER_USER"] {
-            connection.serverUser = account
+            resolution.connection.serverUser = account
         }
-        if !startsService { connection.managedService = nil }
-        try connection.validate()
-        return connection
+        if !startsService { resolution.connection.managedService = nil }
+        try resolution.connection.validate()
+        return resolution
     }
 }
 
@@ -271,6 +299,11 @@ public struct ConnectionOptions {
 
     public func resolve() throws -> ServerConnection {
         try ConnectionPreferences().resolve(
+            socketPath: socketPath, profile: profile, startsService: startsService)
+    }
+
+    public func resolveDetails() throws -> ResolvedConnection {
+        try ConnectionPreferences().resolveDetails(
             socketPath: socketPath, profile: profile, startsService: startsService)
     }
 }

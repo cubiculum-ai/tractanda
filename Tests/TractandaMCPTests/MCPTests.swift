@@ -6,6 +6,50 @@ import XCTest
 @testable import TractandaMCP
 
 final class MCPTests: XCTestCase {
+    func testInfoKeepsLocalBindingOnFailureWithoutCachedServerFacts() async throws {
+        let gateway = NativeGateway(
+            connection: ServerConnection(socketPath: "/tmp/retired-tractanda.sock", serverUser: "daemon"))
+        let diagnostics = try await MCPAdapter.connectionDetails(gateway: gateway, status: "error")
+        XCTAssertEqual(diagnostics["socketPath"]?.stringValue, "/tmp/retired-tractanda.sock")
+        XCTAssertEqual(diagnostics["expectedServerUser"]?.stringValue, "daemon")
+        XCTAssertEqual(diagnostics["status"]?.stringValue, "error")
+        XCTAssertNotNil(diagnostics["adapter"]?.objectValue?["instanceID"])
+        XCTAssertEqual(diagnostics["referenceRevision"]?.stringValue, ResourceCatalog.revision)
+        let result = try MCPAdapter.toolFailure(
+            TractandaError("connectionFailed", "Retired socket"), operationID: nil, connection: diagnostics)
+        XCTAssertEqual(result.isError, true)
+        XCTAssertEqual(
+            result.structuredContent?.objectValue?["connection"]?.objectValue?["socketPath"]?.stringValue,
+            "/tmp/retired-tractanda.sock")
+        XCTAssertNil(result.structuredContent?.objectValue?["server"])
+        let online = try await MCPAdapter.infoResult(
+            data: Data(#"{"accessScope":"user:alice","server":{"instanceID":"native-instance"}}"#.utf8),
+            gateway: gateway, resultFormat: .structured)
+        XCTAssertEqual(
+            online.structuredContent?.objectValue?["server"]?.objectValue?["instanceID"]?.stringValue,
+            "native-instance")
+        XCTAssertEqual(
+            online.structuredContent?.objectValue?["connection"]?.objectValue?["status"]?.stringValue, "ready"
+        )
+        let embedded = NativeGateway(backend: { _ in Data() })
+        let inProcess = await embedded.connectionDetails()
+        XCTAssertEqual(inProcess["transport"]?.stringValue, "inProcess")
+        XCTAssertNil(inProcess["socketPath"])
+        XCTAssertNil(inProcess["profile"])
+    }
+
+    func testGetExplainsPluralIDGuessWithoutAddingAmbiguousAliases() throws {
+        let get = try XCTUnwrap(ToolCatalog.definitions().first { $0.tool.name == "tractanda_get" })
+        for name in ["itemID", "itemIDs"] {
+            XCTAssertThrowsError(try get.arguments(from: [name: .array([.string("id")])])) { error in
+                let message = (error as? TractandaError)?.message ?? ""
+                XCTAssertTrue(message.contains("Unknown argument keys: \(name)"))
+                XCTAssertTrue(message.contains("Missing required argument keys: ids"))
+                XCTAssertTrue(message.contains("batch operation"))
+            }
+        }
+    }
+
     func testStructuredResultsPreserveInt64AndArbitraryText() throws {
         let data = Data(
             #"{"minimum":-9223372036854775808,"maximum":9223372036854775807,"body":"a\nb\\c","literal.key":"data:text/plain;base64,dGVzdA=="}"#

@@ -5,6 +5,51 @@ import XCTest
 @testable import TractandaCore
 
 final class ConnectionTests: XCTestCase {
+    func testProfileDiagnosticsDistinguishDefaultsFromLiteralNamesAndAliases() throws {
+        let socket = ServerConnection(socketPath: "/tmp/shared.sock", serverUser: "daemon")
+        var user = ConnectionPreferences.Document()
+        user.defaultProfile = "project"
+        user.profiles = ["project": socket]
+        var system = ConnectionPreferences.Document()
+        system.defaultProfile = "production"
+        system.profiles = ["production": socket]
+        let personal = try XCTUnwrap(
+            ConnectionPreferences.selectProfileDetails(user: user, name: nil, global: { system }))
+        XCTAssertEqual(personal.profileName, "project")
+        XCTAssertEqual(personal.source, .user)
+        let shared = try XCTUnwrap(
+            ConnectionPreferences.selectProfileDetails(user: user, name: "production", global: { system }))
+        XCTAssertEqual(shared.profileName, "production")
+        XCTAssertEqual(shared.source, .system)
+        XCTAssertEqual(personal.connection, shared.connection)
+        XCTAssertThrowsError(
+            try ConnectionPreferences.selectProfileDetails(user: user, name: "default", global: { system }))
+        let fallback = try XCTUnwrap(
+            ConnectionPreferences.selectProfileDetails(user: .init(), name: nil, global: { system }))
+        XCTAssertEqual(fallback.profileName, "production")
+    }
+
+    func testResolvedBindingIsFrozenAndExplicitSocketBypassesBrokenProfiles() throws {
+        let directory = try root()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let preferences = ConnectionPreferences(url: directory.appendingPathComponent("connections.json"))
+        try preferences.update {
+            $0.defaultProfile = "project"
+            $0.profiles["project"] = ServerConnection(socketPath: "/tmp/old.sock", managedService: "project")
+        }
+        let original = try preferences.resolveDetails(startsService: false)
+        XCTAssertEqual(original.profileName, "project")
+        XCTAssertEqual(original.source, .user)
+        XCTAssertNil(original.connection.managedService)
+        try preferences.update { $0.profiles["project"] = ServerConnection(socketPath: "/tmp/new.sock") }
+        XCTAssertEqual(original.connection.socketPath, "/tmp/old.sock")
+        XCTAssertEqual(try preferences.resolveDetails().connection.socketPath, "/tmp/new.sock")
+        try Data("broken".utf8).write(to: preferences.url)
+        let explicit = try preferences.resolveDetails(socketPath: "/tmp/explicit.sock")
+        XCTAssertEqual(explicit.source, .explicitSocket)
+        XCTAssertNil(explicit.profileName)
+    }
+
     private func root() throws -> URL {
         let root = URL(fileURLWithPath: "/tmp").appendingPathComponent(
             "tc-" + String(Identifier.make().prefix(8)))

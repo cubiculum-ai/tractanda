@@ -1,6 +1,6 @@
 {
   "name": "tractanda",
-  "version": "0.1.0-poc.1",
+  "version": "0.1.0-poc.2",
   "description": "Work with Tractanda knowledge, multidimensional categories and contextual views through its API.",
   "author": {
     "name": "rcfa - Cubiculum-AI",
@@ -15,7 +15,12 @@
     "longDescription": "Discover an existing Tractanda database, combine independent category dimensions, retrieve relevant evidence and make versioned edits. Includes connection guidance for the separately installed server and MCP adapter.",
     "developerName": "rcfa - Cubiculum-AI",
     "category": "Productivity",
-    "capabilities": ["Read", "Write"],
-    "defaultPrompt": ["Use $tractanda to find the context for this project."]
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Use $tractanda to find the context for this project."
+    ]
   }
 }

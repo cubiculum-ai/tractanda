@@ -165,7 +165,8 @@ def main():
         if path.is_file():
             files.append({'path': path.relative_to(output).as_posix(), 'sha256': digest(path),
                           'size': path.stat().st_size, 'mode': path.stat().st_mode & 0o777})
-    manifest = {'profile': 'tractanda.bundle.v1', 'version': args.version, 'platform': 'macos',
+    manifest = {'profile': 'tractanda.bundle.v1', 'version': args.version,
+                'sourceCommit': run('git', '-C', str(root), 'rev-parse', 'HEAD').strip(), 'platform': 'macos',
                 'arch': 'arm64', 'files': files}
     if embedding:
         manifest['embedding'] = embedding

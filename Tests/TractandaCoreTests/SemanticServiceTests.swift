@@ -51,6 +51,27 @@ final class SemanticServiceTests: XCTestCase {
         }
     }
 
+    private final class QueryLifetimeClock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Date
+
+        init(_ value: Date) {
+            self.value = value
+        }
+
+        func now() -> Date {
+            lock.lock()
+            defer { lock.unlock() }
+            return value
+        }
+
+        func set(_ value: Date) {
+            lock.lock()
+            self.value = value
+            lock.unlock()
+        }
+    }
+
     private func fixture(_ body: (ItemStore, URL) throws -> Void) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
             "semantic-\(Identifier.make())")
@@ -108,6 +129,14 @@ final class SemanticServiceTests: XCTestCase {
             service.maintain()
             usleep(10_000)
         }
+    }
+
+    private func assertQueryTiming(
+        _ response: [String: Any], createdAt: Date, expiresAt: Date, file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertEqual(response["createdAt"] as? String, Timestamp.format(createdAt), file: file, line: line)
+        XCTAssertEqual(response["expiresAt"] as? String, Timestamp.format(expiresAt), file: file, line: line)
     }
 
     func testBackgroundEmbeddingDoesNotBlockCommitAndMetadataRevisionReusesVectors() throws {
@@ -235,6 +264,122 @@ final class SemanticServiceTests: XCTestCase {
             }
             XCTAssertNoThrow(
                 try store.withAccess(forUID: store.ownerUID) { try service.results(queryID: pastQueryID) })
+        }
+    }
+
+    func testQueryDiagnosticsAreStableForPendingPartialAndFailedResults() throws {
+        try fixture { store, _ in
+            let createdAt = Timestamp.parse("2026-09-16T10:00:00Z")!
+            let clock = QueryLifetimeClock(createdAt)
+            let service = SemanticService(store: store, queryLifetimeClock: { clock.now() }) {
+                _, inputs, query in
+                if !query { throw TractandaError("semanticProvider", "injected") }
+                return inputs.map { _ in [1, 0] }
+            }
+            _ = try note(store, subject: "partial", body: "coverage", operation: "partial-coverage")
+            try store.withAccess(forUID: store.ownerUID) {
+                _ = try service.configure(configuration(), expectedConfigurationID: nil)
+            }
+            let search = try store.withAccess(forUID: store.ownerUID) {
+                try service.search(
+                    text: "diagnostics", expression: nil, categoryPath: [], excludedCategoryIDs: [],
+                    viewID: nil, limit: 10, evaluatedAt: Timestamp.parse("2000-01-01T00:00:00Z")!)
+            }
+            let queryID = search["queryID"] as! String
+            let expiresAt = createdAt.addingTimeInterval(120)
+            assertQueryTiming(search, createdAt: createdAt, expiresAt: expiresAt)
+            XCTAssertEqual(search["state"] as? String, "pending")
+            XCTAssertEqual(search["retryAfterMilliseconds"] as? Int, 500)
+
+            let pending = try store.withAccess(forUID: store.ownerUID) {
+                try service.results(queryID: queryID)
+            }
+            assertQueryTiming(pending, createdAt: createdAt, expiresAt: expiresAt)
+            XCTAssertEqual(pending["state"] as? String, "pending")
+            XCTAssertEqual(pending["retryAfterMilliseconds"] as? Int, 500)
+
+            drain(service)
+            let partial = try store.withAccess(forUID: store.ownerUID) {
+                try service.results(queryID: queryID)
+            }
+            assertQueryTiming(partial, createdAt: createdAt, expiresAt: expiresAt)
+            XCTAssertEqual(partial["state"] as? String, "ready")
+            XCTAssertEqual(partial["partialCoverage"] as? Bool, true)
+            XCTAssertNil(partial["retryAfterMilliseconds"])
+
+            let failedService = SemanticService(store: store, queryLifetimeClock: { clock.now() }) {
+                _, _, query in
+                if query { throw TractandaError("semanticProvider", "injected") }
+                return []
+            }
+            let previous = try store.withAccess(forUID: store.ownerUID) { try service.status() }
+            var failedConfiguration = configuration(operationID: "failed-query")
+            failedConfiguration.model = "failed-model"
+            try store.withAccess(forUID: store.ownerUID) {
+                _ = try failedService.configure(
+                    failedConfiguration, expectedConfigurationID: previous["configurationID"] as? String)
+            }
+            let failedSearch = try store.withAccess(forUID: store.ownerUID) {
+                try failedService.search(
+                    text: "diagnostics", expression: nil, categoryPath: [], excludedCategoryIDs: [],
+                    viewID: nil, limit: 10)
+            }
+            let failedID = failedSearch["queryID"] as! String
+            drain(failedService)
+            let failed = try store.withAccess(forUID: store.ownerUID) {
+                try failedService.results(queryID: failedID)
+            }
+            assertQueryTiming(failed, createdAt: createdAt, expiresAt: expiresAt)
+            XCTAssertEqual(failed["state"] as? String, "failed")
+            XCTAssertNil(failed["retryAfterMilliseconds"])
+        }
+    }
+
+    func testQueryLifetimeUsesCreationClockAndPollingDoesNotExtendIt() throws {
+        try fixture { store, _ in
+            let createdAt = Timestamp.parse("2026-09-16T10:00:00Z")!
+            let clock = QueryLifetimeClock(createdAt)
+            let service = SemanticService(store: store, queryLifetimeClock: { clock.now() })
+            try store.withAccess(forUID: store.ownerUID) {
+                _ = try service.configure(configuration(), expectedConfigurationID: nil)
+            }
+            let response = try store.withAccess(forUID: store.ownerUID) {
+                try service.search(
+                    text: "lifetime", expression: nil, categoryPath: [], excludedCategoryIDs: [], viewID: nil,
+                    limit: 10, evaluatedAt: Timestamp.parse("2000-01-01T00:00:00Z")!)
+            }
+            let queryID = response["queryID"] as! String
+            let expiresAt = createdAt.addingTimeInterval(120)
+            assertQueryTiming(response, createdAt: createdAt, expiresAt: expiresAt)
+
+            clock.set(createdAt.addingTimeInterval(119))
+            let polled = try store.withAccess(forUID: store.ownerUID) {
+                try service.results(queryID: queryID)
+            }
+            assertQueryTiming(polled, createdAt: createdAt, expiresAt: expiresAt)
+
+            clock.set(expiresAt)
+            var expiredError: TractandaError?
+            XCTAssertThrowsError(
+                try store.withAccess(forUID: store.ownerUID) {
+                    try service.results(queryID: queryID)
+                }
+            ) { error in
+                let error = error as? TractandaError
+                expiredError = error
+                XCTAssertEqual(error?.code, "notFound")
+                XCTAssertEqual(
+                    error?.message,
+                    "This semantic query may have expired or been invalidated; start a new search.")
+            }
+            XCTAssertThrowsError(
+                try store.withAccess(forUID: store.ownerUID) {
+                    try service.results(queryID: Identifier.make())
+                }
+            ) { error in
+                XCTAssertEqual((error as? TractandaError)?.code, expiredError?.code)
+                XCTAssertEqual((error as? TractandaError)?.message, expiredError?.message)
+            }
         }
     }
 
