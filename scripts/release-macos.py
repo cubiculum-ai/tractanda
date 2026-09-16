@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -146,6 +147,35 @@ def prepare(settings, notes):
     return state
 
 
+def revise(state, notes):
+    """Repair an unpublished candidate without replacing any live/published release."""
+    if any(name in state['steps'] for name in ('install', 'push', 'publish')):
+        raise RuntimeError('This candidate has reached deployment/publication; prepare a separate release after resolving it.')
+    current = Path(state['configuration']['softwareRoot']) / 'current/bundle-manifest.json'
+    if current.exists() and read(current).get('version') == state['version']:
+        raise RuntimeError('This candidate is already pinned locally; do not rewrite its source identity.')
+    if (ROOT / 'VERSION').read_text().strip() != state['version']:
+        raise RuntimeError('The pending candidate version must be retained during repair.')
+    audit_path = CONTROL / 'repair-audit.json'
+    command([sys.executable, 'scripts/audit-release.py', '--output', audit_path])
+    git('add', '--', *[entry['path'] for entry in read(audit_path)['manifest']])
+    command([sys.executable, 'scripts/audit-release.py', '--staged'])
+    git('commit', '-m', f'Fix pending {state["version"]}: {notes}')
+    source = Path(state['directory']) / 'source'
+    if git('status', '--porcelain', cwd=source):
+        raise RuntimeError('The sealed checkout changed; resolve it before revising the candidate.')
+    commit = git('rev-parse', 'HEAD')
+    git('checkout', '--detach', commit, cwd=source)
+    state.setdefault('previousCandidates', []).append({
+        'commit': state['commit'], 'steps': state['steps'], 'error': state.get('error')})
+    state.update(commit=commit, tree=git('rev-parse', 'HEAD^{tree}'), steps={}, status='ready')
+    state.pop('error', None)
+    state.pop('activeStep', None)
+    write(Path(state['directory']) / 'state.json', state)
+    write(CONTROL / 'current.json', state)
+    return state
+
+
 class Pipeline:
     def __init__(self, state):
         self.state = state
@@ -215,13 +245,21 @@ class Pipeline:
                 raise RuntimeError('The prepared release artifact changed: ' + name)
 
     def install(self):
-        # Only the reviewed activation program and this exact prepared candidate run as root.
-        args = [sys.executable, str(self.source / 'scripts/activate-release.py'),
-                '--bundle', str(self.bundle), '--software-root', self.settings['softwareRoot'],
-                '--instance', self.settings['instance'], '--manifest-sha256',
-                self.state['steps']['bundle']['result']['manifestSHA256']]
-        script = 'on run argv\n do shell script (item 1 of argv) with administrator privileges\nend run'
-        self.run_command('install', ['/usr/bin/osascript', '-e', script, shlex.join(args)])
+        # Root authorization does not bypass macOS privacy protection for Documents.
+        # Give the administrator process a private, verified temporary payload and cwd.
+        with tempfile.TemporaryDirectory(prefix='tractanda-release-', dir='/private/tmp') as staging:
+            staging = Path(staging)
+            shutil.copyfile(self.source / 'scripts/activate-release.py', staging / 'activate.py')
+            self.run_command('stage-install', ['/usr/bin/ditto', '--noextattr', '--norsrc',
+                                              self.bundle, staging / 'bundle'])
+            shutil.copyfile(self.package, staging / 'release.pkg')
+            args = [sys.executable, str(staging / 'activate.py'), '--bundle', str(staging / 'bundle'),
+                    '--software-root', self.settings['softwareRoot'], '--instance', self.settings['instance'],
+                    '--manifest-sha256', self.state['steps']['bundle']['result']['manifestSHA256'],
+                    '--package', str(staging / 'release.pkg'), '--package-sha256',
+                    self.state['steps']['artifacts']['result'][self.package.name]]
+            script = 'on run argv\n do shell script (item 1 of argv) with administrator privileges\nend run'
+            self.run_command('install', ['/usr/bin/osascript', '-e', script, shlex.join(args)], cwd=staging)
 
     def health(self):
         base = Path(self.settings['softwareRoot'])
@@ -291,6 +329,18 @@ class Pipeline:
             raise RuntimeError('Published asset verification failed.')
         return {'url': remote['html_url'], 'sha256': expected}
 
+    def cleanup(self):
+        removed = []
+        for path in self.directory.glob('*.incomplete-*'):
+            if path.is_symlink():
+                path.unlink()
+            elif path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+            removed.append(path.name)
+        return {'removedStagingArtifacts': removed, 'installedRetention': 'active and one previous; other databases retain their pins'}
+
     def run(self):
         if self.state['status'] == 'complete':
             return
@@ -309,6 +359,7 @@ class Pipeline:
         if 'ci' not in self.state['steps'] and not self.ci():
             return
         self.step('publish', self.publish)
+        self.step('cleanup', self.cleanup)
         self.state['status'] = 'complete'
         self.state.pop('activeStep', None)
         self.state.pop('error', None)
@@ -317,7 +368,7 @@ class Pipeline:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['prepare', 'run', 'status'])
+    parser.add_argument('action', choices=['prepare', 'revise', 'run', 'status'])
     parser.add_argument('--config', type=Path, default=DEFAULT_CONFIG)
     parser.add_argument('--notes', help='Concise description of this completed changeset')
     args = parser.parse_args()
@@ -326,10 +377,11 @@ def main():
         print(json.dumps(read(path) if path.exists() else {'status': 'notPrepared'}, indent=2))
         return
     with lock():
-        if args.action == 'prepare':
+        if args.action in ('prepare', 'revise'):
             if not args.notes:
-                parser.error('prepare requires --notes')
-            state = prepare(config(args.config), args.notes)
+                parser.error('prepare/revise requires --notes')
+            state = (prepare(config(args.config), args.notes) if args.action == 'prepare'
+                     else revise(read(CONTROL / 'current.json'), args.notes))
         else:
             pipeline = Pipeline(read(CONTROL / 'current.json'))
             try:

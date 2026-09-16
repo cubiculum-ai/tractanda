@@ -70,6 +70,11 @@ class ReleaseTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 pipeline.verify_artifacts()
 
+    def test_retention_keeps_current_previous_and_other_database_versions(self):
+        receipt = {'release': 'current', 'releases': {'current': 'a', 'previous': 'b', 'obsolete': 'c', 'shared': 'd'}}
+        other = {'release': 'shared', 'releases': {'shared': 'd'}}
+        self.assertEqual(activate.obsolete_releases(receipt, 'previous', [other]), {'obsolete': 'c'})
+
 
 if __name__ == '__main__':
     unittest.main()
