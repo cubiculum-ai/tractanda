@@ -19,6 +19,16 @@ activate = load('activate', 'activate-release.py')
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_unpublished_draft_is_addressed_by_release_id(self):
+        def github(args, **kwargs):
+            if args[:3] == ['gh', 'release', 'view']:
+                return '{"databaseId":123}'
+            if args == ['gh', 'api', 'repos/owner/repo/releases/123']:
+                return '{"id":123,"draft":true,"assets":[]}'
+            raise RuntimeError('The draft is not available through a tag endpoint')
+        with patch.object(release, 'command', side_effect=github):
+            self.assertTrue(release.release_info('owner/repo', 'v0.1.0-poc.2')['draft'])
+
     def test_versions_and_scope(self):
         self.assertEqual(release.next_version('0.1.0-poc.9'), '0.1.0-poc.10')
         with self.assertRaises(ValueError):

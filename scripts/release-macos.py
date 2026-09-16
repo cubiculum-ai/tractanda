@@ -61,6 +61,16 @@ def git(*args, cwd=ROOT):
     return command(['git', *args], cwd=cwd)
 
 
+def release_info(repository, tag):
+    # GitHub's tag endpoint cannot find an unpublished draft without a tag ref.
+    identity = json.loads(command(['gh', 'release', 'view', tag, '--repo', repository,
+                                   '--json', 'databaseId']))
+    identifier = identity['databaseId']
+    if not isinstance(identifier, int) or identifier <= 0:
+        raise ValueError('GitHub returned an invalid release ID.')
+    return json.loads(command(['gh', 'api', f'repos/{repository}/releases/{identifier}']))
+
+
 @contextmanager
 def lock():
     CONTROL.mkdir(parents=True, exist_ok=True)
@@ -312,7 +322,9 @@ class Pipeline:
             self.run_command('release-create', ['gh', 'release', 'create', tag, '--repo', repo,
                 '--target', self.state['commit'], '--draft', '--prerelease', '--title', 'Tractanda ' + version,
                 '--notes-file', notes], ROOT)
-        assets = json.loads(command(['gh', 'api', f'repos/{repo}/releases/tags/{tag}']))
+        assets = release_info(repo, tag)
+        if assets['target_commitish'] != self.state['commit']:
+            raise RuntimeError('The draft/release targets a different source commit; refusing to modify it.')
         expected = {**self.state['steps']['artifacts']['result'], 'SHA256SUMS': sha(self.directory / 'SHA256SUMS')}
         existing = {asset['name']: asset for asset in assets['assets']}
         for name, digest in expected.items():
@@ -323,7 +335,7 @@ class Pipeline:
                 self.run_command('upload-' + name, ['gh', 'release', 'upload', tag, self.directory / name, '--repo', repo], ROOT)
         self.run_command('release-publish', ['gh', 'release', 'edit', tag, '--repo', repo,
                                           '--draft=false', '--prerelease', '--notes-file', notes], ROOT)
-        remote = json.loads(command(['gh', 'api', f'repos/{repo}/releases/tags/{tag}']))
+        remote = release_info(repo, tag)
         observed = {a['name']: a.get('digest') for a in remote['assets']}
         if remote['draft'] or any(observed.get(name) != 'sha256:' + digest for name, digest in expected.items()):
             raise RuntimeError('Published asset verification failed.')
