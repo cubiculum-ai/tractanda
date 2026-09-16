@@ -74,6 +74,17 @@ final class MCPTests: XCTestCase {
         XCTAssertEqual(result.structuredContent?.objectValue?["operationID"]?.stringValue, "stable-retry")
     }
 
+    func testRejectedMutationArgumentsExplainHowToReuseAnOperationID() throws {
+        let result = try MCPAdapter.toolFailure(
+            TractandaError("invalidArguments", "Missing required argument keys: classID."),
+            operationID: "correct-after-rejection")
+        let advice = result.structuredContent?.objectValue?["retryAdvice"]?.stringValue ?? ""
+        XCTAssertTrue(advice.contains("Correct the rejected arguments"))
+        XCTAssertTrue(advice.contains("earlier attempt"))
+        XCTAssertTrue(advice.contains("corrected mutation with this operationID"))
+        XCTAssertFalse(advice.contains("retry identical arguments"))
+    }
+
     func testResultFormatsAndOutputSchemaContracts() throws {
         let data = Data(#"{"maximum":9223372036854775807}"#.utf8)
         let both = try MCPAdapter.toolResult(data: data, resultFormat: .both)

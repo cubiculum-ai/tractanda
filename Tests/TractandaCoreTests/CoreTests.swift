@@ -88,9 +88,67 @@ final class CoreTests: XCTestCase {
         let response =
             try JSONSerialization.jsonObject(
                 with: service.handle(data, peerUID: store.ownerUID)) as! [String: Any]
-        XCTAssertEqual(response["code"] as? String, "invalidRequest")
+        XCTAssertEqual(response["code"] as? String, "unsupportedCapability")
         XCTAssertTrue((response["message"] as? String)?.contains(ItemService.capability) == true)
         XCTAssertTrue(try store.candidates().isEmpty)
+    }
+
+    func testCapabilityNegotiationAndOperationIDRejectionContracts() throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try ItemStore(root: root)
+        let service = ItemService(store: store)
+        func response(_ envelope: [String: Any]) throws -> [String: Any] {
+            let data = try JSONSerialization.data(withJSONObject: envelope)
+            return try JSONSerialization.jsonObject(
+                with: service.handle(data, peerUID: store.ownerUID)) as! [String: Any]
+        }
+        let validCalls: [[Any]] = [["Core/echo", [:], "call"]]
+        for capabilities in [["urn:ietf:params:jmap:core"], [ItemService.capability, "future.capability"]] {
+            let rejected = try response(["using": capabilities, "methodCalls": validCalls])
+            XCTAssertEqual(rejected["code"] as? String, "unsupportedCapability")
+            XCTAssertTrue((rejected["message"] as? String)?.contains(ItemService.capability) == true)
+        }
+        let malformed = try response(["using": ItemService.capability, "methodCalls": validCalls])
+        XCTAssertEqual(malformed["code"] as? String, "invalidRequest")
+
+        let invalidID = String(repeating: "e", count: 201)
+        assertCode("invalidArguments") {
+            _ = try store.commit(CommitRequest(classID: "Item", operationID: invalidID))
+        }
+        assertCode("invalidArguments") {
+            _ = try store.commit(CommitRequest(classID: "Item", operationID: ""))
+        }
+        assertCode("invalidArguments") {
+            _ = try store.commit(CommitRequest(classID: "Item", operationID: "contains\0nul"))
+        }
+        let twoHundredUTF8Bytes = String(repeating: "é", count: 100)
+        XCTAssertEqual(twoHundredUTF8Bytes.utf8.count, 200)
+        XCTAssertNoThrow(
+            try store.commit(CommitRequest(classID: "Item", operationID: twoHundredUTF8Bytes)))
+        let operationID = "correct-after-rejection"
+        assertCode("invalidArguments") {
+            _ = try store.commit(
+                CommitRequest(
+                    classID: "Item", changes: ["itemID": .text("forbidden")], operationID: operationID))
+        }
+        let created = try store.commit(CommitRequest(classID: "Item", operationID: operationID))
+        XCTAssertFalse(created.wasReplayed)
+        let later = try store.commit(
+            CommitRequest(classID: "Item", operationID: "later-operation")
+        ).revision
+        let replay = try store.commit(CommitRequest(classID: "Item", operationID: operationID))
+        XCTAssertTrue(replay.wasReplayed)
+        XCTAssertEqual(replay.revision.revisionID, created.revision.revisionID)
+        XCTAssertNotEqual(later.revisionID, replay.revision.revisionID)
+
+        let description = try response([
+            "using": [ItemService.capability],
+            "methodCalls": [["TractandaStore/describe", ["topic": "properties"], "describe"]],
+        ])
+        let describeResult = (description["methodResponses"] as! [[Any]])[0][1] as! [String: Any]
+        let properties = describeResult["properties"] as! [[String: Any]]
+        XCTAssertTrue(properties.contains { $0["name"] as? String == "workingNotes" })
     }
 
     func testRevisionIdentityWholeEditsRetryAndRecovery() throws {

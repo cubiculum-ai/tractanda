@@ -10,7 +10,10 @@ ALLOWED_ROOT = {'install.sh', '.gitignore', '.gitattributes', '.swift-format', '
 ALLOWED_DIRS = {'Sources', 'Tests', 'Packages', 'scripts', 'templates', 'examples', 'containers',
                 'docs', '.github', 'LICENSES', 'plugins'}
 PUBLIC_CATALOGS = {'.agents/plugins/marketplace.json', '.claude-plugin/marketplace.json'}
-PUBLIC_SKILL_REFERENCES = {'plugins/tractanda/skills/tractanda/references/connection.md'}
+PUBLIC_SKILL_REFERENCES = {
+    'plugins/tractanda/skills/tractanda/references/connection.md',
+    'plugins/tractanda/skills/tractanda/references/importing.md',
+}
 PRIVATE_DIRS = {'work', 'outputs', 'output', 'references', 'tmp', 'data', 'domain-research',
                 '.build', '.swiftpm', '.agents', '.codex', '__pycache__', 'node_modules'}
 SECRET = re.compile(r'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|github_pat_[A-Za-z0-9_]{30,}|gh[pousr]_[A-Za-z0-9]{30,}|\bAKIA[A-Z0-9]{16}\b|\bsk-[A-Za-z0-9_-]{32,}')

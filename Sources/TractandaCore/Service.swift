@@ -213,6 +213,7 @@ public final class ItemService {
                 "properties": [
                     ["name": "subject", "kind": "text", "editing": "ordinary"],
                     ["name": "body", "kind": "text", "editing": "ordinary"],
+                    ["name": "workingNotes", "kind": "text", "editing": "ordinary"],
                     ["name": "waitingOn", "kind": "reference or text", "editing": "ordinary"],
                     ["name": "originalCreatedAt", "kind": "date", "editing": "ordinary source provenance"],
                     ["name": "originalModifiedAt", "kind": "date", "editing": "ordinary source provenance"],
@@ -595,13 +596,18 @@ public final class ItemService {
             throw TractandaError("invalidRequest", "Expected a JSON object under 8 MiB.")
         }
         try check(request, allowed: ["using", "methodCalls"])
-        guard let using = request["using"] as? [String], using.contains(Self.capability),
-            Set(using).isSubset(of: [Self.capability, "urn:ietf:params:jmap:core"]),
-            let calls = request["methodCalls"] as? [[Any]], calls.count <= 32
+        guard let using = request["using"] as? [String], let calls = request["methodCalls"] as? [[Any]],
+            calls.count <= 32
         else {
             throw TractandaError(
-                "invalidRequest",
-                "Declare \(Self.capability) and supply at most 32 method calls. Update older clients to this prototype API version."
+                "invalidRequest", "using must be a string array and methodCalls an array of at most 32 calls."
+            )
+        }
+        let supportedCapabilities: Set<String> = [Self.capability, "urn:ietf:params:jmap:core"]
+        guard using.contains(Self.capability), Set(using).isSubset(of: supportedCapabilities) else {
+            throw TractandaError(
+                "unsupportedCapability",
+                "This local service requires capability \(Self.capability). Update the client and server to matching prototype protocol versions."
             )
         }
         var ids: Set<String> = []

@@ -102,17 +102,23 @@ public final class KanbanRepository {
                     throw TractandaError(
                         "invalidStatusRoot", "The status root needs at least one readable leaf category.")
                 }
-                // A project may retain a saved presentation as an optional ordering hint.  It
-                // never contributes selection criteria, identity, or a required board object.
-                if let value = project.fields["viewDefinition"],
-                    let definition = try? SavedViewDefinition(value)
-                {
+                // A project may supply presentation and sort, while membership remains the
+                // project/status intersection rather than the saved view's selection criteria.
+                let definition = project.fields["viewDefinition"].flatMap { try? SavedViewDefinition($0) }
+                if let definition {
                     let available = Dictionary(uniqueKeysWithValues: statuses.map { ($0.id, $0) })
                     let preferred = definition.presentation.sectionIDs.compactMap { available[$0] }
                     let preferredIDs = Set(preferred.map(\.id))
                     statuses = preferred + statuses.filter { !preferredIDs.contains($0.id) }
                 }
-                let items = try client.revisions(query: ["categoryPath": [projectID, statusRootID]])
+                let viewSort = definition?.sort ?? []
+                var query: [String: Any] = ["categoryPath": [projectID, statusRootID]]
+                if !viewSort.isEmpty {
+                    query["sort"] = viewSort.map {
+                        ["property": $0.property, "isAscending": $0.isAscending] as [String: Any]
+                    }
+                }
+                let items = try client.revisions(query: query)
                 var memberships: [String: [String]] = [:]
                 for status in statuses {
                     for item in try client.revisions(query: ["categoryPath": [projectID, status.id]]) {
@@ -151,6 +157,7 @@ public final class KanbanRepository {
                 }.filter { $0.value.count > 1 }.map(\.key)
                 var document: [String: JSONValue] = [
                     "schemaVersion": .integer(3), "projectID": .string(projectID),
+                    "usesViewSort": .boolean(!viewSort.isEmpty),
                     "projectRootID": .string(projectRootID), "statusRootID": .string(statusRootID),
                     "serverState": .string(graph.state),
                     "title": .string(project.fields["subject"]?.string ?? "Project"),
@@ -188,13 +195,11 @@ public final class KanbanRepository {
                             Self.makeTask(
                                 from: $0, categoryIDs: memberships[$0.itemID] ?? [],
                                 filterCategoryIDs: filters[$0.itemID] ?? [], preferredScopes: [projectID]))
-                    }.sorted {
-                        let a = $0.objectValue!
-                        let b = $1.objectValue!
-                        let left = a["order"]?.integerValue ?? 0
-                        let right = b["order"]?.integerValue ?? 0
-                        return left == right ? a["id"]!.stringValue! < b["id"]!.stringValue! : left < right
                     })
+                document["tasks"] = .array(
+                    KanbanTaskOrder.ordered(
+                        document["tasks"]!.arrayValue!, usesViewSort: document["usesViewSort"]!.booleanValue!)
+                )
                 return document
             } catch let error as TractandaError where error.code == "stateChanged" { continue }
         }
@@ -281,6 +286,7 @@ public final class KanbanRepository {
                         .contains($0.key)
                 }.mapValues(JSONValue.init)
                 document["schemaVersion"] = .integer(2)
+                document["usesViewSort"] = .boolean(!definition.sort.isEmpty)
                 document["viewItemID"] = .string(view.itemID)
                 document["viewRevisionID"] = .string(view.revisionID)
                 document["serverState"] = .string(state)
@@ -308,13 +314,11 @@ public final class KanbanRepository {
                                 from: $0, categoryIDs: memberships[$0.itemID] ?? [],
                                 filterCategoryIDs: filters[$0.itemID] ?? [],
                                 preferredScopes: definition.categoryPath))
-                    }.sorted {
-                        let a = $0.objectValue!
-                        let b = $1.objectValue!
-                        let left = a["order"]?.integerValue ?? 0
-                        let right = b["order"]?.integerValue ?? 0
-                        return left == right ? a["id"]!.stringValue! < b["id"]!.stringValue! : left < right
                     })
+                document["tasks"] = .array(
+                    KanbanTaskOrder.ordered(
+                        document["tasks"]!.arrayValue!, usesViewSort: document["usesViewSort"]!.booleanValue!)
+                )
                 return document
             } catch let error as TractandaError where error.code == "stateChanged" { continue }
         }

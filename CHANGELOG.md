@@ -4,7 +4,9 @@
 
 The release dashboard and CLI show completed stages out of the planned total. The workflow and observer share one stage definition, and each prepared candidate records its plan. Upload substeps do not inflate the count. Foreground CLI releases launched with a relative script path are recognized using their verified working directory.
 
-The Kanban sidebar displays the connected server's reported version beneath the Tractanda name and above Workspace.
+The Kanban sidebar displays the connected server's reported version beneath the Tractanda name and above Workspace. Default cards within each column now sort by priority, with blank priorities last; explicit saved-view sorting is preserved in both browser and native exports.
+
+Agent guidance covers stale session adapters, exact-payload imports, operation-ID limits/rejections/replays, required unset arrays, local field conventions and thin project skills. Native protocol rejections are distinguishable from unavailable services, mutation validation errors give corrective retry advice, and the property catalogue includes workingNotes.
 
 ## 0.1.0-poc.6
 

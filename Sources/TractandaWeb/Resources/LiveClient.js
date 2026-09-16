@@ -293,7 +293,8 @@
         const ordered=preferred.map(id=>available.get(id)).filter(Boolean), seen=new Set(ordered.map(entry=>entry.id));
         statusEntries=[...ordered,...statusEntries.filter(entry=>!seen.has(entry.id))];
       } catch { /* An unrelated/invalid optional view cannot make a category board unavailable. */ }
-      const revisions=await queryRevisions({categoryPath:[projectID,statusRootID]},info.state);
+      const viewSort=plain(project.fields.viewDefinition)?.sort||[];
+      const revisions=await queryRevisions({categoryPath:[projectID,statusRootID],...(viewSort.length?{sort:viewSort}:{})},info.state);
       if(revisions===null)continue;
       const memberships=new Map();let changed=false;
       for(const status of statusEntries) {
@@ -315,7 +316,7 @@
       const completionID=reference(project,'completionCategory')||reference(statusRoot,'completionCategory');
       const duplicateNames=new Set(statusEntries.map(entry=>entry.path.at(-1)).filter((name,index,names)=>names.indexOf(name)!==index));
       const retained=Object.fromEntries(Object.entries(project.fields).filter(([key])=>['maintenance','sequenceStatus','originalSequence','recommendedSequence','activity'].includes(key)).map(([key,value])=>[key,plain(value)]));
-      const next={...retained,schemaVersion:3,projectID,projectRootID,statusRootID,serverState:info.state,title:fieldText(project.fields,'subject')||'Project',updatedAt:currentDate(),
+      const next={...retained,schemaVersion:3,usesViewSort:viewSort.length>0,projectID,projectRootID,statusRootID,serverState:info.state,title:fieldText(project.fields,'subject')||'Project',updatedAt:currentDate(),
         columns:statusEntries.map(entry=>({id:entry.id,name:duplicateNames.has(entry.path.at(-1))?entry.path.join(' / '):entry.path.at(-1)})),
         filters:filterIDs.map(id=>({id,name:fieldText(graph.categories.get(id).fields,'subject')||'Category'})),captureCategoryIDs:[projectID],
         defaultCategoryID:defaultID,completionCategoryID:completionID,originalSequence:[],recommendedSequence:[],
@@ -372,7 +373,7 @@
       if(hasChanged||(await nativeCall('TractandaStore/info')).state!==info.state)continue;
       const descriptors=ids=>ids.filter(id=>categories.has(id)).map(id=>({id,name:fieldText(categories.get(id).fields,'subject')}));
       const next=Object.fromEntries(Object.entries(fields).filter(([k])=>['maintenance','sequenceStatus','originalSequence','recommendedSequence','activity'].includes(k)).map(([k,v])=>[k,plain(v)]));
-      Object.assign(next,{schemaVersion:2,viewItemID:viewID,viewRevisionID:fieldText(fields,'revisionID'),serverState:info.state,title:fieldText(fields,'subject'),
+      Object.assign(next,{schemaVersion:2,usesViewSort:(plain(definition.sort)||[]).length>0,viewItemID:viewID,viewRevisionID:fieldText(fields,'revisionID'),serverState:info.state,title:fieldText(fields,'subject'),
         updatedAt:currentDate(),columns:descriptors(columnIDs),filters:descriptors(filterIDs),captureCategoryIDs:categoryReferences(fields.captureCategories||definition.categoryPath),
         completionCategoryID:fields.completionCategory?.value.itemID,defaultCategoryID:fields.defaultCategory?.value.itemID,
         originalSequence:plain(fields.originalSequence)||[],recommendedSequence:plain(fields.recommendedSequence)||[],

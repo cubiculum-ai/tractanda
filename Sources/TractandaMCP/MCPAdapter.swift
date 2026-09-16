@@ -96,9 +96,11 @@ public enum MCPAdapter {
                 }
                 return try toolResult(data: data, resultFormat: resultFormat)
             } catch {
+                let failure = error as? TractandaError
                 let connection =
                     definition.nativeMethod == "TractandaStore/info"
-                    ? try await connectionDetails(gateway: gateway, status: "error") : nil
+                    ? try await connectionDetails(
+                        gateway: gateway, status: "error", nativeError: failure) : nil
                 return try toolFailure(
                     error, operationID: parameters.arguments?["operationID"]?.stringValue,
                     resultFormat: resultFormat, connection: connection)
@@ -144,13 +146,22 @@ public enum MCPAdapter {
         return (server, initialization)
     }
 
-    static func connectionDetails(gateway: NativeGateway, status: String) async throws -> [String: Value] {
+    static func connectionDetails(
+        gateway: NativeGateway, status: String, nativeError: TractandaError? = nil
+    ) async throws -> [String: Value] {
         var result = await gateway.connectionDetails()
         result["status"] = .string(status)
         result["adapter"] = try JSONDecoder().decode(Value.self, from: JSON.encode(RuntimeIdentity.current))
         result["referenceRevision"] = .string(ResourceCatalog.revision)
         result["referencesAreStatic"] = .bool(true)
-        result["referenceCompatibility"] = .object(ResourceCatalog.compatibility(serverInfo: nil))
+        var compatibility = ResourceCatalog.compatibility(serverInfo: nil)
+        if nativeError?.code == "unsupportedCapability" {
+            compatibility["status"] = .string("protocolMismatch")
+            compatibility["message"] = .string(
+                "The native server rejected this adapter's required capability. Update the adapter and server to matching protocol versions, then retry tractanda_info."
+            )
+        }
+        result["referenceCompatibility"] = .object(compatibility)
         return result
     }
 
@@ -190,7 +201,9 @@ public enum MCPAdapter {
         if let operationID {
             result["operationID"] = .string(operationID)
             result["retryAdvice"] = .string(
-                "If the outcome is uncertain, retry identical arguments with this operationID. Do not replace the ID merely to retry."
+                failure.code == "invalidArguments"
+                    ? "Correct the rejected arguments. This request did not commit, but it does not prove an earlier attempt with this operationID did not commit; reconcile that uncertainty first. If no earlier attempt committed, submit the corrected mutation with this operationID. If it did commit, retry its exact original arguments."
+                    : "If the outcome is uncertain, retry identical arguments with this operationID. Do not replace the ID merely to retry."
             )
         }
         return try toolResult(data: JSONEncoder().encode(result), isError: true, resultFormat: resultFormat)

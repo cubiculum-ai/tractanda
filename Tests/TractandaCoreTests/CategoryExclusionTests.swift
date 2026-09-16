@@ -90,7 +90,7 @@ final class CategoryExclusionTests: XCTestCase {
         let response = service.handle(
             try JSONSerialization.data(withJSONObject: request), peerUID: store.ownerUID)
         let result = try JSONSerialization.jsonObject(with: response) as! [String: Any]
-        XCTAssertEqual(result["code"] as? String, "invalidRequest")
+        XCTAssertEqual(result["code"] as? String, "unsupportedCapability")
         XCTAssertTrue(try store.candidates().isEmpty)
     }
 }

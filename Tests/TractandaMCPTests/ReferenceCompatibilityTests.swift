@@ -55,4 +55,25 @@ final class ReferenceCompatibilityTests: XCTestCase {
         XCTAssertEqual(
             missing["missingServerFeatures"]?.arrayValue, [.string(ServerFeature.semanticJobTiming.rawValue)])
     }
+
+    func testUnsupportedCapabilityMarksInfoAsProtocolMismatchWithoutServerFacts() async throws {
+        let gateway = NativeGateway(socketPath: "/tmp/fixture.sock")
+        let diagnostics = try await MCPAdapter.connectionDetails(
+            gateway: gateway, status: "error",
+            nativeError: TractandaError("unsupportedCapability", "Missing local capability."))
+        let compatibility = try XCTUnwrap(diagnostics["referenceCompatibility"]?.objectValue)
+        XCTAssertEqual(compatibility["status"]?.stringValue, "protocolMismatch")
+        XCTAssertEqual(
+            compatibility["requiredServerFeatures"]?.arrayValue,
+            ResourceCatalog.requiredServerFeatures.map(Value.string))
+        XCTAssertNil(diagnostics["server"])
+        XCTAssertNil(diagnostics["features"])
+        XCTAssertTrue(compatibility["message"]?.stringValue?.contains("matching protocol") == true)
+
+        let malformed = try await MCPAdapter.connectionDetails(
+            gateway: gateway, status: "error",
+            nativeError: TractandaError("invalidRequest", "Malformed envelope."))
+        XCTAssertEqual(
+            malformed["referenceCompatibility"]?.objectValue?["status"]?.stringValue, "unavailable")
+    }
 }

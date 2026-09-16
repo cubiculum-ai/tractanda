@@ -63,6 +63,61 @@ final class KanbanTests: XCTestCase {
         }
     }
 
+    func testPriorityOrdersColumnsUnlessTheViewDefinesItsOwnSort() throws {
+        let f = try Fixture()
+        let project = try f.category("Project")
+        let status = try f.category("Status")
+        let ready = try f.category("Ready", parents: [status])
+        let assignments = [project, ready]
+        let high = try f.assigned(
+            "Zulu", categories: assignments,
+            extra: [
+                "priority": .text("P1"), "sortOrder": .integer(999),
+            ])
+        let low = try f.assigned(
+            "Alpha", categories: assignments,
+            extra: [
+                "priority": .text("P10"), "sortOrder": .integer(-99),
+            ])
+        let medium = try f.assigned("Middle", categories: assignments, extra: ["priority": .text("P2")])
+        let blank = try f.assigned("Blank", categories: assignments, extra: ["priority": .text(" ")])
+        let absent = try f.assigned("Absent", categories: assignments)
+        let view = try f.view(project, status, [ready])
+        let repository = KanbanRepository(client: f.client)
+        func projectBoard() throws -> [String: JSONValue] {
+            try repository.projectSnapshot(
+                projectID: project.itemID, projectRootID: project.itemID,
+                statusRootID: status.itemID)
+        }
+        func ids(_ document: [String: JSONValue]) -> [String] {
+            document["tasks"]!.arrayValue!.map { $0.objectValue!["id"]!.stringValue! }
+        }
+        for document in [try repository.snapshot(for: view.itemID), try projectBoard()] {
+            XCTAssertEqual(document["usesViewSort"], .boolean(false))
+            XCTAssertEqual(Array(ids(document).prefix(3)), [high.itemID, medium.itemID, low.itemID])
+            XCTAssertEqual(Set(ids(document).suffix(2)), [blank.itemID, absent.itemID])
+        }
+        var definition = view.fields["viewDefinition"]!.map!
+        definition["sort"] = .list([.object(["property": .text("subject"), "isAscending": .boolean(true)])])
+        _ = try f.client.commit(
+            CommitRequest(
+                action: .revise, itemID: view.itemID,
+                expectedRevisionID: view.revisionID, changes: ["viewDefinition": .object(definition)],
+                operationID: Identifier.make()))
+        // Optional project-view criteria must not replace the project/status intersection.
+        definition["expression"] = .text("itemID == \"\"")
+        _ = try f.client.commit(
+            CommitRequest(
+                action: .revise, itemID: project.itemID,
+                expectedRevisionID: project.revisionID, changes: ["viewDefinition": .object(definition)],
+                operationID: Identifier.make()))
+        for document in [try repository.snapshot(for: view.itemID), try projectBoard()] {
+            XCTAssertEqual(document["usesViewSort"], .boolean(true))
+            XCTAssertEqual(
+                ids(document), [absent.itemID, low.itemID, blank.itemID, medium.itemID, high.itemID])
+        }
+    }
+
     func testViewUsesCategoriesAndAcceptsEveryItemTypeWithoutKanbanMetadata() throws {
         let f = try Fixture()
         let project = try f.category("Project")

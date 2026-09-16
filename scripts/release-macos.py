@@ -204,7 +204,7 @@ def revise(state, notes):
     state.setdefault('previousCandidates', []).append({
         'commit': state['commit'], 'steps': state['steps'], 'error': state.get('error')})
     state.update(commit=commit, tree=git('rev-parse', 'HEAD^{tree}'), steps={}, status='ready',
-                 plannedSteps=list(RELEASE_STEPS))
+                 plannedSteps=list(RELEASE_STEPS), notes=notes)
     state.pop('error', None)
     state.pop('activeStep', None)
     write(Path(state['directory']) / 'state.json', state)

@@ -6,6 +6,11 @@ cd "$project_dir"
 export CLANG_MODULE_CACHE_PATH="$project_dir/.build/module-cache"
 mkdir -p work/verification
 sh scripts/check-style.sh
+if command -v node >/dev/null 2>&1; then
+    node scripts/test-kanban-order.js
+else
+    echo 'Node.js unavailable; browser ordering check must run on the macOS release host.'
+fi
 python3 scripts/test-release-pipeline.py
 python3 scripts/test-notarize-macos.py
 python3 scripts/test-release-status.py

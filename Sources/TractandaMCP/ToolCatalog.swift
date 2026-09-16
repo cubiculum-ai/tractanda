@@ -144,7 +144,7 @@ enum ToolCatalog {
     private static let operation: Value = .object([
         "type": .string("string"),
         "description": .string(
-            "Generate a unique ID before the write. Reuse it with identical arguments after an uncertain result; never generate a new ID merely to retry."
+            "Nonempty text, at most 200 UTF-8 bytes, with no NUL characters; it need not be a UUID. Scoped to the store and authenticated actor. Persist it with the exact payload and reuse both after an uncertain outcome."
         ),
     ])
     private static let identifiers: Value = .object([
@@ -280,7 +280,7 @@ enum ToolCatalog {
         .init(
             "tractanda_commit", method: "TractandaItem/commit",
             description:
-                "Commit one whole edit. Create needs classID; revise/retype/copy need itemID and expectedRevisionID; retype also needs classID. changes is a dictionary of native tagged values; unset removes keys. All writes require operationID. Deletes/restores revise isDeleted; copies start a new private history. Preserve unknown properties. Read tractanda://reference/items first.",
+                "Commit one whole edit. Create needs classID; revise/retype/copy need itemID and expectedRevisionID; retype also needs classID. changes is a dictionary of native tagged values; unset is required and removes named keys (send [] when removing nothing). All writes require operationID. Deletes/restores revise isDeleted; copies start a new private history. Preserve unknown properties. Read tractanda://reference/items first.",
             properties: [
                 "action": .object([
                     "type": .string("string"),
