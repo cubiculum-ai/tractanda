@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTROL = ROOT / 'work/release-pipeline'
@@ -295,6 +296,7 @@ class Pipeline:
             '--json', 'databaseId,status,conclusion,headSha']))
         if not runs or runs[0]['status'] != 'completed':
             self.state['status'] = 'waitingForCI'
+            self.state['activeStep'] = 'ci'
             self.save()
             return False
         if runs[0]['conclusion'] != 'success':
@@ -302,6 +304,14 @@ class Pipeline:
         self.state['steps']['ci'] = {'completedAt': now(), 'result': runs[0]}
         self.save()
         return True
+
+    def wait_for_ci(self, timeout):
+        deadline = time.monotonic() + timeout
+        while not self.ci():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError('CI wait timed out; run the same script again to resume without rebuilding.')
+            time.sleep(min(30, remaining))
 
     def publish(self):
         self.verify_artifacts()
@@ -327,12 +337,22 @@ class Pipeline:
             raise RuntimeError('The draft/release targets a different source commit; refusing to modify it.')
         expected = {**self.state['steps']['artifacts']['result'], 'SHA256SUMS': sha(self.directory / 'SHA256SUMS')}
         existing = {asset['name']: asset for asset in assets['assets']}
-        for name, digest in expected.items():
-            if name in existing:
-                if existing[name].get('digest') != 'sha256:' + digest:
-                    raise RuntimeError('Existing remote asset differs; refusing to overwrite ' + name)
-            else:
-                self.run_command('upload-' + name, ['gh', 'release', 'upload', tag, self.directory / name, '--repo', repo], ROOT)
+        # Keep pending uploads outside synced Documents: a sync client may rename an
+        # artifact while an earlier large upload runs. Verify a private local snapshot.
+        with tempfile.TemporaryDirectory(prefix='tractanda-upload-', dir='/private/tmp') as staging:
+            pending = []
+            for name, digest in expected.items():
+                if name in existing:
+                    if existing[name].get('digest') != 'sha256:' + digest:
+                        raise RuntimeError('Existing remote asset differs; refusing to overwrite ' + name)
+                else:
+                    target = Path(staging) / name
+                    shutil.copyfile(self.directory / name, target)
+                    if sha(target) != digest:
+                        raise RuntimeError('The upload staging copy differs: ' + name)
+                    pending.append(target)
+            for target in pending:
+                self.run_command('upload-' + target.name, ['gh', 'release', 'upload', tag, target, '--repo', repo], ROOT)
         self.run_command('release-publish', ['gh', 'release', 'edit', tag, '--repo', repo,
                                           '--draft=false', '--prerelease', '--notes-file', notes], ROOT)
         remote = release_info(repo, tag)
@@ -353,9 +373,10 @@ class Pipeline:
             removed.append(path.name)
         return {'removedStagingArtifacts': removed, 'installedRetention': 'active and one previous; other databases retain their pins'}
 
-    def run(self):
+    def run(self, ci_timeout=3600):
         if self.state['status'] == 'complete':
             return
+        self.state.pop('error', None)
         if git('rev-parse', 'HEAD', cwd=self.source) != self.state['commit'] or git('status', '--porcelain', cwd=self.source):
             raise RuntimeError('The sealed source checkout changed; refusing to release an unverified tree.')
         self.step('verify', lambda: self.run_command('verify', ['sh', 'scripts/test.sh']))
@@ -368,8 +389,8 @@ class Pipeline:
         self.state['steps']['health'] = {'completedAt': now(), 'result': self.health()}
         self.save()
         self.step('push', self.push)
-        if 'ci' not in self.state['steps'] and not self.ci():
-            return
+        if 'ci' not in self.state['steps']:
+            self.wait_for_ci(ci_timeout)
         self.step('publish', self.publish)
         self.step('cleanup', self.cleanup)
         self.state['status'] = 'complete'
@@ -378,32 +399,60 @@ class Pipeline:
         self.save()
 
 
+def start_runner(ci_timeout):
+    CONTROL.mkdir(parents=True, exist_ok=True)
+    log_path = CONTROL / 'runner.log'
+    with log_path.open('a') as log:
+        process = subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), 'run', '--ci-timeout', str(ci_timeout)],
+            cwd=ROOT, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+            start_new_session=True)
+    return {'status': 'launched', 'pid': process.pid, 'log': str(log_path)}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['prepare', 'revise', 'run', 'status'])
+    parser.add_argument('action', choices=['prepare', 'revise', 'release', 'run', 'status'])
     parser.add_argument('--config', type=Path, default=DEFAULT_CONFIG)
     parser.add_argument('--notes', help='Concise description of this completed changeset')
+    parser.add_argument('--background', action='store_true', help='Run in a detached local process; no agent or scheduler is used')
+    parser.add_argument('--ci-timeout', type=int, default=3600, help='Maximum CI wait in seconds (default: 3600)')
     args = parser.parse_args()
+    if args.ci_timeout <= 0:
+        parser.error('--ci-timeout must be positive')
+    if args.background and args.action not in ('run', 'release'):
+        parser.error('--background applies to run or release')
     if args.action == 'status':
         path = CONTROL / 'current.json'
         print(json.dumps(read(path) if path.exists() else {'status': 'notPrepared'}, indent=2))
         return
     with lock():
-        if args.action in ('prepare', 'revise'):
+        if args.action in ('prepare', 'revise', 'release'):
             if not args.notes:
-                parser.error('prepare/revise requires --notes')
-            state = (prepare(config(args.config), args.notes) if args.action == 'prepare'
+                parser.error('prepare/revise/release requires --notes')
+            state = (prepare(config(args.config), args.notes) if args.action in ('prepare', 'release')
                      else revise(read(CONTROL / 'current.json'), args.notes))
-        else:
+        if args.action in ('run', 'release') and not args.background:
             pipeline = Pipeline(read(CONTROL / 'current.json'))
+            runner = {'pid': os.getpid(), 'version': pipeline.state['version'], 'startedAt': now(), 'status': 'running'}
+            write(CONTROL / 'runner.json', runner)
             try:
-                pipeline.run()
+                pipeline.run(ci_timeout=args.ci_timeout)
             except BaseException as error:
                 pipeline.state['status'] = 'failed'
                 pipeline.state['error'] = str(error)
                 pipeline.save()
                 raise
+            finally:
+                runner.update(status=pipeline.state['status'], stoppedAt=now())
+                write(CONTROL / 'runner.json', runner)
             state = pipeline.state
+        if args.background:
+            state = read(CONTROL / 'current.json')
+    # Release the preparation mutex before the child takes its exclusive workflow lock.
+    if args.background and state['status'] != 'complete':
+        print(json.dumps(start_runner(args.ci_timeout), indent=2))
+    else:
         print(json.dumps({'status': state['status'], 'version': state['version'],
                           'directory': state['directory']}, indent=2))
 

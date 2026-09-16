@@ -19,6 +19,38 @@ activate = load('activate', 'activate-release.py')
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_background_runner_is_detached_and_does_not_recurse(self):
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.object(release, 'CONTROL', Path(temporary)), \
+                patch.object(release.subprocess, 'Popen') as popen:
+            popen.return_value.pid = 123
+            result = release.start_runner(900)
+            self.assertEqual(result['pid'], 123)
+            arguments = popen.call_args.args[0]
+            self.assertEqual(arguments[-3:], ['run', '--ci-timeout', '900'])
+            self.assertNotIn('--background', arguments)
+            self.assertTrue(popen.call_args.kwargs['start_new_session'])
+            self.assertEqual(popen.call_args.kwargs['stdin'], release.subprocess.DEVNULL)
+
+    def test_ci_wait_runs_to_completion_without_an_agent(self):
+        pipeline = release.Pipeline({'directory': '/unused', 'configuration': {}, 'version': 'test', 'steps': {}})
+        with patch.object(pipeline, 'ci', side_effect=[False, False, True]) as ci, \
+                patch.object(release.time, 'monotonic', return_value=0), \
+                patch.object(release.time, 'sleep') as sleep:
+            pipeline.wait_for_ci(3600)
+            self.assertEqual(ci.call_count, 3)
+            self.assertEqual(sleep.call_count, 2)
+
+    def test_ci_wait_is_bounded_and_propagates_failure(self):
+        pipeline = release.Pipeline({'directory': '/unused', 'configuration': {}, 'version': 'test', 'steps': {}})
+        with patch.object(pipeline, 'ci', return_value=False), \
+                patch.object(release.time, 'monotonic', side_effect=[0, 10]):
+            with self.assertRaisesRegex(RuntimeError, 'timed out'):
+                pipeline.wait_for_ci(10)
+        with patch.object(pipeline, 'ci', side_effect=RuntimeError('CI failed')):
+            with self.assertRaisesRegex(RuntimeError, 'CI failed'):
+                pipeline.wait_for_ci(3600)
+
     def test_unpublished_draft_is_addressed_by_release_id(self):
         def github(args, **kwargs):
             if args[:3] == ['gh', 'release', 'view']:

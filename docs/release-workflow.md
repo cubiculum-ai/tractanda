@@ -3,14 +3,15 @@
 For an actively used installation, completion includes the running software and downloadable packages. Prepare one coherent, reviewed changeset after focused checks. Runtime, API, UI, template, installer, shared-skill and release-document changes use this workflow; private notes and experiments do not trigger publication.
 
 ```sh
-python3 scripts/release-macos.py prepare --notes 'Describe the completed change'
-python3 scripts/release-macos.py run
+python3 scripts/release-macos.py release --notes 'Describe the completed change' --background
 python3 scripts/release-macos.py status
 ```
 
+`release` prepares and runs the entire workflow. `--background` starts a detached local process writing `work/release-pipeline/runner.log`; it uses no agent, tokens, or scheduler. Omit it to run in the foreground. Resume an interrupted candidate with `run --background`. The separate `prepare` command remains available when a review pause is useful.
+
 `prepare` audits public files, increments `VERSION` and the shared plugin versions, stages and commits the audited source, and creates an isolated checkout for that commit. It refuses another pending release. Finish unrelated or incomplete changes before preparing: this is an explicit completion boundary, not a watcher that publishes keystrokes.
 
-`run` records resumable steps: full source tests, release build, Developer ID signing, native package and archive construction, an upgrade of the existing managed installation, canonical-file preservation, live executable digest/client-pin verification, ordinary push, successful GitHub source CI, then prerelease upload with verified remote checksums. Resuming does not repeat completed expensive work. Changed prepared artifacts stop the run. Failed staging outputs are retained for inspection. An unavailable signing key, failed check or CI failure stops propagation instead of publishing a partial release.
+`run` records resumable steps: full source tests, release build, Developer ID signing, native package and archive construction, an upgrade of the existing managed installation, canonical-file preservation, live executable digest/client-pin verification, ordinary push, successful GitHub source CI, then prerelease upload with verified remote checksums. It waits for CI itself, polling every 30 seconds for up to an hour (configurable with `--ci-timeout`). Resuming does not repeat completed expensive work. Changed prepared artifacts stop the run. Pending uploads use verified private temporary copies to isolate long transfers from file-sync renames. Failed staging outputs are retained for inspection. An unavailable signing key, failed check or CI failure stops propagation instead of publishing a partial release.
 
 System installation uses the ordinary macOS administrator dialog; the controller creates no persistent privileged helper or authorization exception. It stages the verified payload in a private temporary directory so root activation does not depend on privacy access to the developer's Documents directory. The native setup engine repins/restarts server and embedding LaunchDaemons and rolls back registrations if startup fails. It preserves database ownership, paths, port and existing canonical files. It never uninstalls production. A failed publication can resume without rebuilding or reinstalling the same verified candidate.
 
@@ -20,7 +21,7 @@ The default database is upgraded through the generated native package, so macOS 
 
 Client launch configurations should point to the shared `current/bin` commands. A running stdio MCP session belongs to its client harness; replacing an executable does not change its loaded code or cached tool schemas. Reconnect that MCP server using the harness's control when required. Do not kill the surrounding conversation or discard unsaved terminal edits. HTTP clients reconnect to the restarted service.
 
-The project's development task runs propagation before declaring significant work complete. Its hourly Codex heartbeat resumes prepared releases after interruptions and CI waits, remaining quiet while nothing changes. It does not publish unprepared working-tree edits or repeatedly retry a blocked operation.
+The development task starts this deterministic script after a significant completed changeset. There is no scheduled agent follow-up, and no partially edited working tree is published. Failed operations stop with a recorded error rather than being retried indefinitely.
 
 ## Local maintainer configuration
 
