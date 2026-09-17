@@ -53,7 +53,9 @@ final class ReferenceCompatibilityTests: XCTestCase {
             "features": .array([.string(ServerFeature.runtimeIdentity.rawValue)])
         ])
         XCTAssertEqual(
-            missing["missingServerFeatures"]?.arrayValue, [.string(ServerFeature.semanticJobTiming.rawValue)])
+            missing["missingServerFeatures"]?.arrayValue,
+            ResourceCatalog.requiredServerFeatures.filter { $0 != ServerFeature.runtimeIdentity.rawValue }
+                .map(Value.string))
     }
 
     func testUnsupportedCapabilityMarksInfoAsProtocolMismatchWithoutServerFacts() async throws {

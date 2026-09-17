@@ -21,11 +21,11 @@ struct ViewDefinitionForm {
             case .includedCategories: "Included categories"
             case .excludedCategories: "Excluded categories"
             case .sections: "Section categories"
-            case .primaryProperty: "Primary sort property"
+            case .primaryProperty: "Primary sort target"
             case .primaryDirection: "Primary direction"
-            case .secondaryProperty: "Secondary sort property"
+            case .secondaryProperty: "Secondary sort target"
             case .secondaryDirection: "Secondary direction"
-            case .column(_, .property): "Column key"
+            case .column(_, .property): "Column key or category:<UUID>"
             case .column(_, .title): "Column title"
             case .column(_, .width): "Column width"
             }
@@ -40,7 +40,7 @@ struct ViewDefinitionForm {
         let original: ItemValue?
 
         init(_ value: ViewColumn) {
-            property = TextBuffer(value.property)
+            property = TextBuffer(Self.target(value))
             title = TextBuffer(value.title)
             width = TextBuffer(String(value.width))
             original = value.value
@@ -57,8 +57,20 @@ struct ViewDefinitionForm {
             guard let parsedWidth = Int(width.text) else {
                 throw TractandaError("invalidView", "Enter a column width from 6 to 120.")
             }
+            if let rootID = Self.categoryRootID(property.text) {
+                return try ViewColumn(
+                    categoryRootID: rootID, title: title.text, width: parsedWidth, preserving: original)
+            }
             return try ViewColumn(
                 property: property.text, title: title.text, width: parsedWidth, preserving: original)
+        }
+
+        private static func target(_ value: ViewColumn) -> String {
+            value.categoryRootID.map { "category:\($0)" } ?? value.property ?? ""
+        }
+        private static func categoryRootID(_ target: String) -> String? {
+            guard target.hasPrefix("category:") else { return nil }
+            return String(target.dropFirst("category:".count))
         }
     }
 
@@ -90,10 +102,10 @@ struct ViewDefinitionForm {
         self.includedCategories = includedCategories
         self.excludedCategories = excludedCategories
         self.sections = sections
-        primaryProperty = TextBuffer(sort.indices.contains(0) ? sort[0].property : "")
+        primaryProperty = TextBuffer(sort.indices.contains(0) ? Self.sortTarget(sort[0]) : "")
         primaryDirection = TextBuffer(
             sort.indices.contains(0) && !sort[0].isAscending ? "descending" : "ascending")
-        secondaryProperty = TextBuffer(sort.indices.contains(1) ? sort[1].property : "")
+        secondaryProperty = TextBuffer(sort.indices.contains(1) ? Self.sortTarget(sort[1]) : "")
         secondaryDirection = TextBuffer(
             sort.indices.contains(1) && !sort[1].isAscending ? "descending" : "ascending")
         self.columns = columns.map(Column.init)
@@ -269,7 +281,14 @@ struct ViewDefinitionForm {
             guard ["ascending", "descending", "asc", "desc"].contains(normalized) else {
                 throw TractandaError("invalidArguments", "Order must be ascending or descending.")
             }
-            value.append(try ItemSort(property: property, isAscending: normalized.hasPrefix("asc")))
+            if property.hasPrefix("category:") {
+                value.append(
+                    try ItemSort(
+                        categoryRootID: String(property.dropFirst("category:".count)),
+                        isAscending: normalized.hasPrefix("asc")))
+            } else {
+                value.append(try ItemSort(property: property, isAscending: normalized.hasPrefix("asc")))
+            }
         }
         value.append(contentsOf: retainedSort)
         try ItemSort.validate(value)
@@ -285,6 +304,8 @@ struct ViewDefinitionForm {
             + Array(2..<(2 + retainedSort.count))
         return zip(indices, comparators).map { index, comparator in
             var fields = originalSort.indices.contains(index) ? originalSort[index].map ?? [:] : [:]
+            fields["property"] = nil
+            fields["categoryRootID"] = nil
             fields.merge(comparator.value.map!) { _, new in new }
             return .object(fields)
         }
@@ -293,5 +314,9 @@ struct ViewDefinitionForm {
     private func names(_ values: [Revision]) -> String {
         let value = values.map { $0.fields["subject"]?.string ?? $0.itemID }.joined(separator: ", ")
         return value.isEmpty ? "(none)" : value
+    }
+
+    private static func sortTarget(_ sort: ItemSort) -> String {
+        sort.categoryRootID.map { "category:\($0)" } ?? sort.property ?? ""
     }
 }

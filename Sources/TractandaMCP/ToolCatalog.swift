@@ -111,18 +111,18 @@ struct ToolDefinition: Sendable {
             guard let values = sort.arrayValue, values.count <= 4 else {
                 throw TractandaError("invalidArguments", "sort must contain at most four entries.")
             }
-            var names = Set<String>()
             for value in values {
                 guard let object = value.objectValue,
-                    Set(object.keys).isSubset(of: ["property", "isAscending"]),
-                    let property = object["property"]?.stringValue, !property.isEmpty,
-                    property.utf8.count <= 256, !property.contains("\0"),
-                    object["isAscending"] == nil || object["isAscending"]?.boolValue != nil,
-                    names.insert(property).inserted
-                else {
-                    throw TractandaError(
-                        "invalidArguments", "sort must contain distinct property/isAscending entries.")
-                }
+                    Set(object.keys).isSubset(of: ["property", "categoryRootID", "isAscending"])
+                else { throw TractandaError("invalidArguments", "sort contains an unknown comparator key.") }
+            }
+            do {
+                let order = try JSONDecoder().decode([ItemSort].self, from: JSONEncoder().encode(sort))
+                try ItemSort.validate(order)
+            } catch {
+                throw TractandaError(
+                    "invalidArguments",
+                    "sort requires distinct property or categoryRootID targets and a Boolean isAscending.")
             }
         }
         if arguments["sectionID"] != nil && arguments["viewID"] == nil {
@@ -168,10 +168,17 @@ enum ToolCatalog {
             "properties": .object([
                 "property": .object(["type": .string("string"), "minLength": .int(1), "maxLength": .int(256)]
                 ),
+                "categoryRootID": identifier,
                 "isAscending": .object(["type": .string("boolean"), "default": .bool(true)]),
-            ]), "required": .array([.string("property")]),
+            ]),
+            "oneOf": .array([
+                .object(["required": .array([.string("property")])]),
+                .object(["required": .array([.string("categoryRootID")])]),
+            ]),
         ]),
-        "description": .string("Up to four distinct direct metadata properties, each with isAscending."),
+        "description": .string(
+            "Up to four distinct targets: property for owned metadata, or categoryRootID for effective membership ordered by that root’s immediate children. Unranked items remain last in either direction."
+        ),
     ])
     private static let tagged: Value = .object([
         "type": .string("object"),
@@ -250,6 +257,18 @@ enum ToolCatalog {
                     "default": .int(524_288),
                 ]),
             ], required: ["ids"]),
+        .init(
+            "tractanda_memberships", method: "TractandaCategory/memberships",
+            description:
+                "Read effective category branches for up to 64 items and 8 readable roots. roots describes ordered immediate children; memberships maps itemID to rootID to matching category IDs. Respects rules, inherited membership, exclusions and current ACLs. Empty means unranked; notFound covers missing or unreadable items. Check state across batches.",
+            properties: [
+                "ids": identifiers,
+                "categoryRootIDs": .object([
+                    "type": .string("array"), "items": identifier,
+                    "minItems": .int(1), "maxItems": .int(8), "uniqueItems": .bool(true),
+                ]),
+                "at": text,
+            ], required: ["ids", "categoryRootIDs"]),
         .init(
             "tractanda_history", method: "TractandaItem/history",
             description: "Read immutable revisions newest first, under the item's current permissions.",

@@ -32,6 +32,43 @@ public final class KanbanRepository {
         return (state, hierarchy)
     }
 
+    private static func axisRoots(presentation: ViewPresentation, sort: [ItemSort]) throws -> [String] {
+        var result: [String] = []
+        for id in presentation.columns.compactMap(\.categoryRootID) + sort.compactMap(\.categoryRootID)
+        where !result.contains(id) { result.append(id) }
+        guard result.count <= 8 else {
+            throw TractandaError("invalidView", "Use at most eight category axes.")
+        }
+        return result
+    }
+
+    private func categoryAxes(ids: [String], roots: [String], state: String) throws
+        -> CategoryMembershipProjection?
+    {
+        guard !roots.isEmpty else { return nil }
+        // The bounded endpoint also supplies root descriptors. Probe a readable root when the
+        // board is empty, then discard its incidental membership from the board result.
+        let batches =
+            ids.isEmpty
+            ? [[roots[0]]]
+            : stride(from: 0, to: ids.count, by: 64).map {
+                Array(ids[$0..<min($0 + 64, ids.count)])
+            }
+        var projection: CategoryMembershipProjection?
+        var memberships: [String: [String: [String]]] = [:]
+        for batch in batches {
+            let result = try client.categoryMemberships(ids: batch, categoryRootIDs: roots)
+            guard result.state == state, result.notFound.isEmpty else {
+                throw TractandaError("stateChanged", "Categories changed while loading the board.")
+            }
+            if projection == nil { projection = result }
+            memberships.merge(result.memberships) { _, newer in newer }
+        }
+        guard let projection else { return nil }
+        return CategoryMembershipProjection(
+            state: projection.state, roots: projection.roots, memberships: memberships, notFound: [])
+    }
+
     private static func descendants(
         of rootID: String, hierarchy: CategoryHierarchy, includeRoot: Bool = true
     ) -> [(id: String, path: [String])] {
@@ -102,23 +139,37 @@ public final class KanbanRepository {
                     throw TractandaError(
                         "invalidStatusRoot", "The status root needs at least one readable leaf category.")
                 }
-                // A project may supply presentation and sort, while membership remains the
-                // project/status intersection rather than the saved view's selection criteria.
-                let definition = project.fields["viewDefinition"].flatMap { try? SavedViewDefinition($0) }
-                if let definition {
+                let projectDefinition = project.fields["viewDefinition"].flatMap {
+                    try? SavedViewDefinition($0)
+                }
+                let rootDefinition = graph.hierarchy.items[projectRootID]?.fields["viewDefinition"]
+                    .flatMap { try? SavedViewDefinition($0) }
+                let projectDefinitionFields = project.fields["viewDefinition"]?.map
+                let presentation =
+                    projectDefinitionFields?["presentation"] != nil
+                    ? projectDefinition?.presentation : rootDefinition?.presentation
+                if let presentation {
                     let available = Dictionary(uniqueKeysWithValues: statuses.map { ($0.id, $0) })
-                    let preferred = definition.presentation.sectionIDs.compactMap { available[$0] }
+                    let preferred = presentation.sectionIDs.compactMap { available[$0] }
                     let preferredIDs = Set(preferred.map(\.id))
                     statuses = preferred + statuses.filter { !preferredIDs.contains($0.id) }
                 }
-                let viewSort = definition?.sort ?? []
+                let viewSort =
+                    projectDefinitionFields?["sort"] != nil
+                    ? projectDefinition?.sort ?? [] : rootDefinition?.sort ?? []
                 var query: [String: Any] = ["categoryPath": [projectID, statusRootID]]
                 if !viewSort.isEmpty {
                     query["sort"] = viewSort.map {
-                        ["property": $0.property, "isAscending": $0.isAscending] as [String: Any]
+                        var descriptor: [String: Any] = ["isAscending": $0.isAscending]
+                        if let property = $0.property { descriptor["property"] = property }
+                        if let rootID = $0.categoryRootID { descriptor["categoryRootID"] = rootID }
+                        return descriptor
                     }
                 }
                 let items = try client.revisions(query: query)
+                let axisRootIDs = try Self.axisRoots(
+                    presentation: presentation ?? ViewPresentation(), sort: viewSort)
+                let axes = try categoryAxes(ids: items.map(\.itemID), roots: axisRootIDs, state: graph.state)
                 var memberships: [String: [String]] = [:]
                 for status in statuses {
                     for item in try client.revisions(query: ["categoryPath": [projectID, status.id]]) {
@@ -157,7 +208,6 @@ public final class KanbanRepository {
                 }.filter { $0.value.count > 1 }.map(\.key)
                 var document: [String: JSONValue] = [
                     "schemaVersion": .integer(3), "projectID": .string(projectID),
-                    "usesViewSort": .boolean(!viewSort.isEmpty),
                     "projectRootID": .string(projectRootID), "statusRootID": .string(statusRootID),
                     "serverState": .string(graph.state),
                     "title": .string(project.fields["subject"]?.string ?? "Project"),
@@ -170,6 +220,16 @@ public final class KanbanRepository {
                                     duplicateStatusNames.contains(entry.path.last ?? "")
                                         ? entry.path.joined(separator: " / ")
                                         : (entry.path.last ?? "Category")),
+                            ])
+                        }),
+                    "categoryAxes": .array(
+                        (axes?.roots ?? []).map { root in
+                            .object([
+                                "id": .string(root.id), "name": .string(root.name),
+                                "children": .array(
+                                    root.children.map {
+                                        .object(["id": .string($0.id), "name": .string($0.name)])
+                                    }),
                             ])
                         }),
                     "filters": .array(
@@ -194,12 +254,9 @@ public final class KanbanRepository {
                         .object(
                             Self.makeTask(
                                 from: $0, categoryIDs: memberships[$0.itemID] ?? [],
-                                filterCategoryIDs: filters[$0.itemID] ?? [], preferredScopes: [projectID]))
+                                filterCategoryIDs: filters[$0.itemID] ?? [], preferredScopes: [projectID],
+                                axisCategoryIDs: axes?.memberships[$0.itemID] ?? [:]))
                     })
-                document["tasks"] = .array(
-                    KanbanTaskOrder.ordered(
-                        document["tasks"]!.arrayValue!, usesViewSort: document["usesViewSort"]!.booleanValue!)
-                )
                 return document
             } catch let error as TractandaError where error.code == "stateChanged" { continue }
         }
@@ -250,6 +307,9 @@ public final class KanbanRepository {
                     }
                 }
                 let items = try client.revisions(viewID: viewItemID)
+                let axisRootIDs = try Self.axisRoots(
+                    presentation: definition.presentation, sort: definition.sort)
+                let axes = try categoryAxes(ids: items.map(\.itemID), roots: axisRootIDs, state: state)
                 var memberships: [String: [String]] = [:]
                 for id in sectionIDs where categories[id] != nil {
                     for item in try client.revisions(viewID: viewItemID, sectionID: id) {
@@ -286,13 +346,22 @@ public final class KanbanRepository {
                         .contains($0.key)
                 }.mapValues(JSONValue.init)
                 document["schemaVersion"] = .integer(2)
-                document["usesViewSort"] = .boolean(!definition.sort.isEmpty)
                 document["viewItemID"] = .string(view.itemID)
                 document["viewRevisionID"] = .string(view.revisionID)
                 document["serverState"] = .string(state)
                 document["title"] = .string(view.fields["subject"]?.string ?? "Category view")
                 document["updatedAt"] = .string(Timestamp.now())
                 document["columns"] = descriptors(sectionIDs)
+                document["categoryAxes"] = .array(
+                    (axes?.roots ?? []).map { root in
+                        .object([
+                            "id": .string(root.id), "name": .string(root.name),
+                            "children": .array(
+                                root.children.map {
+                                    .object(["id": .string($0.id), "name": .string($0.name)])
+                                }),
+                        ])
+                    })
                 document["filters"] = descriptors(filterIDs)
                 document["captureCategoryIDs"] = .array(
                     try Self.references(
@@ -313,12 +382,9 @@ public final class KanbanRepository {
                             Self.makeTask(
                                 from: $0, categoryIDs: memberships[$0.itemID] ?? [],
                                 filterCategoryIDs: filters[$0.itemID] ?? [],
-                                preferredScopes: definition.categoryPath))
+                                preferredScopes: definition.categoryPath,
+                                axisCategoryIDs: axes?.memberships[$0.itemID] ?? [:]))
                     })
-                document["tasks"] = .array(
-                    KanbanTaskOrder.ordered(
-                        document["tasks"]!.arrayValue!, usesViewSort: document["usesViewSort"]!.booleanValue!)
-                )
                 return document
             } catch let error as TractandaError where error.code == "stateChanged" { continue }
         }
@@ -327,7 +393,7 @@ public final class KanbanRepository {
 
     public static func makeTask(
         from item: Revision, categoryIDs: [String], filterCategoryIDs: [String],
-        preferredScopes: [String] = []
+        preferredScopes: [String] = [], axisCategoryIDs: [String: [String]] = [:]
     )
         -> [String: JSONValue]
     {
@@ -343,14 +409,11 @@ public final class KanbanRepository {
         task["title"] = .string(item.fields["subject"]?.string ?? "")
         task["summary"] = .string(item.fields["body"]?.string ?? "")
         task["updatedAt"] = .string(item.modifiedAt)
-        task["order"] = .integer(item.fields["sortOrder"]?.integerValue ?? 0)
         task["categoryIDs"] = .array(categoryIDs.map(JSONValue.string))
         task["filterCategoryIDs"] = .array(filterCategoryIDs.map(JSONValue.string))
-        for (output, input) in [
-            "priority": "priority", "owner": "assignee", "kind": "taskKind", "notes": "workingNotes",
-        ] {
-            task[output] = .string(item.fields[input]?.string ?? "")
-        }
+        task["axisCategoryIDs"] = .object(
+            axisCategoryIDs.mapValues { .array($0.map(JSONValue.string)) })
+        task["notes"] = .string(item.fields["workingNotes"]?.string ?? "")
         task["dependsOn"] = .array(
             (item.fields["dependencies"]?.array ?? []).compactMap { $0.link.map { .string($0.itemID) } })
         task["checklist"] = .array(

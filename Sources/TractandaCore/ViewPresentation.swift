@@ -1,8 +1,9 @@
 import Foundation
 
-/// Portable table presentation; a column displays one literal key of the item itself.
+/// Portable table presentation; a column displays one literal key or category membership.
 public struct ViewColumn: Equatable, Sendable {
-    public let property: String
+    public let property: String?
+    public let categoryRootID: String?
     public let title: String
     public let width: Int
     private let extensions: [String: ItemValue]
@@ -14,22 +15,45 @@ public struct ViewColumn: Equatable, Sendable {
             throw TractandaError("invalidView", "Columns need a property, title and width from 6 to 120.")
         }
         self.property = property
+        categoryRootID = nil
+        self.title = title
+        self.width = width
+        extensions = value?.map ?? [:]
+    }
+
+    public init(categoryRootID: String, title: String, width: Int, preserving value: ItemValue? = nil) throws
+    {
+        try Identifier.validate(categoryRootID)
+        guard !title.isEmpty, title.utf8.count <= 256, !title.contains("\0"), (6...120).contains(width) else {
+            throw TractandaError("invalidView", "Columns need a title and width from 6 to 120.")
+        }
+        property = nil
+        self.categoryRootID = categoryRootID
         self.title = title
         self.width = width
         extensions = value?.map ?? [:]
     }
 
     public init(_ value: ItemValue) throws {
-        guard let map = value.map, let property = map["property"]?.string,
-            let title = map["title"]?.string, case .integer(let width) = map["width"],
+        guard let map = value.map, let title = map["title"]?.string, case .integer(let width) = map["width"],
             (6...120).contains(width)
         else { throw TractandaError("invalidView", "Invalid table column.") }
-        try self.init(property: property, title: title, width: Int(width), preserving: value)
+        switch (map["property"], map["categoryRootID"]) {
+        case (.some(.text(let property)), nil):
+            try self.init(property: property, title: title, width: Int(width), preserving: value)
+        case (nil, .some(.reference(let reference))) where reference.revisionID == nil:
+            try self.init(
+                categoryRootID: reference.itemID, title: title, width: Int(width), preserving: value)
+        default: throw TractandaError("invalidView", "Invalid table column.")
+        }
     }
 
     public var value: ItemValue {
         var map = extensions
-        map["property"] = .text(property)
+        map["property"] = nil
+        map["categoryRootID"] = nil
+        if let property { map["property"] = .text(property) }
+        if let categoryRootID { map["categoryRootID"] = .reference(ItemReference(categoryRootID)) }
         map["title"] = .text(title)
         map["width"] = .integer(Int64(width))
         return .object(map)

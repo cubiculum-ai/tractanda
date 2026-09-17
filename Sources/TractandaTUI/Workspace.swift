@@ -45,6 +45,8 @@ final class Workspace {
     private(set) var sections: [WorkspaceSection] = []
     private(set) var queryState: String?
     private(set) var categoryNavigation: CategoryHierarchy?
+    private(set) var categoryMemberships: [String: [String: [String]]] = [:]
+    private(set) var categoryMembershipLabels: [String: [String: String]] = [:]
     var categoriesWithChildren: Set<String> {
         Set(categoryNavigation?.children.filter { !$0.value.isEmpty }.keys.map { $0 } ?? [])
     }
@@ -183,6 +185,8 @@ final class Workspace {
         sections = []
         queryState = nil
         categoryNavigation = nil
+        categoryMemberships = [:]
+        categoryMembershipLabels = [:]
     }
 
     private func queryArguments(category: Revision?, position: Int, limit: Int) -> [String: Any] {
@@ -199,7 +203,10 @@ final class Workspace {
             if !excludedCategoryIDs.isEmpty { arguments["excludedCategoryIDs"] = excludedCategoryIDs }
             if !sort.isEmpty {
                 arguments["sort"] = sort.map {
-                    ["property": $0.property, "isAscending": $0.isAscending]
+                    var descriptor: [String: Any] = ["isAscending": $0.isAscending]
+                    if let property = $0.property { descriptor["property"] = property }
+                    if let rootID = $0.categoryRootID { descriptor["categoryRootID"] = rootID }
+                    return descriptor
                 }
             }
         }
@@ -292,6 +299,29 @@ final class Workspace {
                 throw TractandaError("stateChanged", "Categories changed while loading. Refresh the view.")
             }
             sections = loaded
+            let roots = Array(Set(columns.compactMap(\.categoryRootID))).sorted()
+            if !roots.isEmpty {
+                guard let evaluatedAt = Timestamp.parse(queryDate) else {
+                    throw TractandaError("invalidArguments", "Invalid query timestamp.")
+                }
+                let projection = try client.categoryMemberships(
+                    ids: loaded.flatMap(\.items).map(\.itemID), categoryRootIDs: roots,
+                    at: evaluatedAt)
+                guard projection.state == initialState, projection.notFound.isEmpty else {
+                    throw TractandaError("stateChanged", "Items changed while loading; refresh the view.")
+                }
+                categoryMemberships = projection.memberships
+                var labels: [String: [String: String]] = [:]
+                for root in projection.roots {
+                    var names = [root.id: root.name]
+                    for child in root.children { names[child.id] = child.name }
+                    labels[root.id] = names
+                }
+                categoryMembershipLabels = labels
+            } else {
+                categoryMemberships = [:]
+                categoryMembershipLabels = [:]
+            }
             excludedCategoryNames = excludedNames
             categoryNavigation = navigation
             sectionCategories = categories
@@ -300,6 +330,8 @@ final class Workspace {
             sections = []
             excludedCategoryNames = []
             categoryNavigation = nil
+            categoryMemberships = [:]
+            categoryMembershipLabels = [:]
             throw error
         }
     }
@@ -533,7 +565,16 @@ final class Workspace {
         definition["sort"] = .list(
             sortValues
                 ?? sort.map { comparator in
-                    var map = oldSort.first { $0.map?["property"]?.string == comparator.property }?.map ?? [:]
+                    var map =
+                        oldSort.first { value in
+                            guard let fields = value.map else { return false }
+                            return comparator.property.map { fields["property"]?.string == $0 }
+                                ?? comparator.categoryRootID.map {
+                                    fields["categoryRootID"]?.link?.itemID == $0
+                                } ?? false
+                        }?.map ?? [:]
+                    map["property"] = nil
+                    map["categoryRootID"] = nil
                     map.merge(comparator.value.map!) { _, new in new }
                     return .object(map)
                 })

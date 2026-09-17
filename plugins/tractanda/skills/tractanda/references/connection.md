@@ -59,7 +59,7 @@ If only the native CLI is available, save JSON in a file and use:
 The native API uses `methodCalls`; for example:
 
 ```json
-{"using":["https://tractanda.ai/ns/local-prototype/3"],"methodCalls":[["TractandaStore/describe",{"topic":"overview"},"overview"]]}
+{"using":["https://tractanda.ai/ns/local-prototype/4"],"methodCalls":[["TractandaStore/describe",{"topic":"overview"},"overview"]]}
 ```
 
 Read the repository's API guide for the native envelope and error handling. Avoid shell interpolation of item text; pass JSON through files or structured arguments. An executable's `--help` describes supported options. Linux packaging and a bundled Linux embedding runtime remain in development.

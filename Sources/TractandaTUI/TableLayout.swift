@@ -9,7 +9,9 @@ struct ColumnEditor {
 /// Terminal width allocation never changes the saved preferred widths.
 enum TableLayout {
     static func line(
-        item: Revision?, columns: [ViewColumn], offset: Int, width: Int, preferredScopes: [String] = []
+        item: Revision?, columns: [ViewColumn], offset: Int, width: Int, preferredScopes: [String] = [],
+        categoryMemberships: [String: [String: [String]]] = [:],
+        categoryLabels: [String: [String: String]] = [:]
     ) -> String {
         let visible = Array(columns.dropFirst(offset))
         var remaining = width
@@ -18,10 +20,14 @@ enum TableLayout {
             guard remaining > 0 else { break }
             let cellWidth = index == visible.count - 1 ? remaining : min(column.width, remaining)
             let text =
-                item.map {
+                item.map { item in
                     column.property == "referenceLabels"
-                        ? ItemReferenceLabel.display(in: $0, preferredScopes: preferredScopes)
-                        : display($0.fields[column.property])
+                        ? ItemReferenceLabel.display(in: item, preferredScopes: preferredScopes)
+                        : column.property.map { display(item.fields[$0]) }
+                            ?? column.categoryRootID.map { rootID in
+                                let ids = categoryMemberships[item.itemID]?[rootID] ?? []
+                                return ids.map { categoryLabels[rootID]?[$0] ?? $0 }.joined(separator: ", ")
+                            } ?? "—"
                 } ?? column.title
             cells.append(TerminalText.fit(text, columns: cellWidth))
             remaining -= cellWidth + 1

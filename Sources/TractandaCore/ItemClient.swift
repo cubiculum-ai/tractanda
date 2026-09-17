@@ -60,6 +60,48 @@ public final class ItemClient {
         return try JSON.decode(Result.self, call("TractandaStore/info")).state
     }
 
+    public func categoryMemberships(
+        ids: [String], categoryRootIDs: [String], at: Date = Date()
+    ) throws -> CategoryMembershipProjection {
+        var uniqueIDs: [String] = []
+        for id in ids where !uniqueIDs.contains(id) { uniqueIDs.append(id) }
+        guard !categoryRootIDs.isEmpty else {
+            throw TractandaError("invalidArguments", "Supply at least one category root.")
+        }
+        let batches =
+            uniqueIDs.isEmpty
+            ? [[categoryRootIDs[0]]]
+            : stride(
+                from: 0, to: uniqueIDs.count, by: 64
+            ).map { Array(uniqueIDs[$0..<min($0 + 64, uniqueIDs.count)]) }
+        var expectedState: String?
+        var roots: [CategoryMembershipRoot] = []
+        var memberships: [String: [String: [String]]] = [:]
+        var notFound: [String] = []
+        for (index, batch) in batches.enumerated() {
+            let result = try JSON.decode(
+                CategoryMembershipProjection.self,
+                call(
+                    "TractandaCategory/memberships",
+                    arguments: [
+                        "ids": batch, "categoryRootIDs": categoryRootIDs, "at": Timestamp.format(at),
+                    ]))
+            if let expectedState, expectedState != result.state {
+                throw TractandaError("stateChanged", "Categories changed while loading memberships.")
+            }
+            expectedState = result.state
+            if index == 0 { roots = result.roots }
+            memberships.merge(result.memberships) { _, newer in newer }
+            notFound.append(contentsOf: result.notFound)
+        }
+        if uniqueIDs.isEmpty {
+            memberships.removeValue(forKey: categoryRootIDs[0])
+            notFound.removeAll { $0 == categoryRootIDs[0] }
+        }
+        return CategoryMembershipProjection(
+            state: expectedState!, roots: roots, memberships: memberships, notFound: notFound)
+    }
+
     public func revisions(matching expression: String? = nil, viewID: String? = nil, sectionID: String? = nil)
         throws -> [Revision]
     {

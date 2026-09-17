@@ -63,7 +63,7 @@ final class KanbanTests: XCTestCase {
         }
     }
 
-    func testPriorityOrdersColumnsUnlessTheViewDefinesItsOwnSort() throws {
+    func testNativeQueryOrderIsPreservedUnlessTheViewDefinesItsOwnSort() throws {
         let f = try Fixture()
         let project = try f.category("Project")
         let status = try f.category("Status")
@@ -93,9 +93,8 @@ final class KanbanTests: XCTestCase {
             document["tasks"]!.arrayValue!.map { $0.objectValue!["id"]!.stringValue! }
         }
         for document in [try repository.snapshot(for: view.itemID), try projectBoard()] {
-            XCTAssertEqual(document["usesViewSort"], .boolean(false))
-            XCTAssertEqual(Array(ids(document).prefix(3)), [high.itemID, medium.itemID, low.itemID])
-            XCTAssertEqual(Set(ids(document).suffix(2)), [blank.itemID, absent.itemID])
+            XCTAssertEqual(
+                ids(document), [absent.itemID, blank.itemID, medium.itemID, low.itemID, high.itemID])
         }
         var definition = view.fields["viewDefinition"]!.map!
         definition["sort"] = .list([.object(["property": .text("subject"), "isAscending": .boolean(true)])])
@@ -112,7 +111,6 @@ final class KanbanTests: XCTestCase {
                 expectedRevisionID: project.revisionID, changes: ["viewDefinition": .object(definition)],
                 operationID: Identifier.make()))
         for document in [try repository.snapshot(for: view.itemID), try projectBoard()] {
-            XCTAssertEqual(document["usesViewSort"], .boolean(true))
             XCTAssertEqual(
                 ids(document), [absent.itemID, low.itemID, blank.itemID, medium.itemID, high.itemID])
         }
@@ -341,5 +339,78 @@ final class KanbanTests: XCTestCase {
         XCTAssertEqual(snapshot["defaultCategoryID"], .string(done.itemID))
         XCTAssertEqual(snapshot["completionCategoryID"], .string(done.itemID))
         XCTAssertEqual(snapshot["captureCategoryIDs"], .array([.string(alpha.itemID)]))
+    }
+
+    func testProjectRootAxesChunkLargeBoardsAndChildSortDoesNotReplacePresentation() throws {
+        let f = try Fixture()
+        let projects = try f.category("Projects")
+        let alpha = try f.category("Alpha", parents: [projects])
+        let empty = try f.category("Empty", parents: [projects])
+        let status = try f.category("Status")
+        let ready = try f.category("Ready", parents: [status])
+        let urgency = try f.category("Urgency")
+        let urgent = try f.category("Urgent", parents: [urgency])
+        let priority = try f.category("Priority")
+        let first = try f.category("First", parents: [priority])
+        let second = try f.category("Second", parents: [priority])
+        let rootDefinition: ItemValue = .object([
+            "language": .text(SpotlightQuery.profile),
+            "presentation": .object([
+                "profile": .text(ViewPresentation.profile),
+                "columns": .list([
+                    .object([
+                        "categoryRootID": .reference(ItemReference(urgency.itemID)),
+                        "title": .text("Urgency"), "width": .integer(18),
+                    ]),
+                    .object([
+                        "categoryRootID": .reference(ItemReference(priority.itemID)),
+                        "title": .text("Priority"), "width": .integer(18),
+                    ]),
+                ]),
+            ]),
+            // This must not filter either child project.
+            "expression": .text("itemID == \"\""),
+        ])
+        let projectsCurrent = try f.client.revision(for: projects.itemID)
+        _ = try f.client.commit(
+            CommitRequest(
+                action: .revise, itemID: projects.itemID, expectedRevisionID: projectsCurrent.revisionID,
+                changes: ["viewDefinition": rootDefinition], operationID: "root-axis-defaults"))
+        let alphaCurrent = try f.client.revision(for: alpha.itemID)
+        _ = try f.client.commit(
+            CommitRequest(
+                action: .revise, itemID: alpha.itemID, expectedRevisionID: alphaCurrent.revisionID,
+                changes: [
+                    "viewDefinition": .object([
+                        "language": .text(SpotlightQuery.profile),
+                        "sort": .list([try ItemSort(categoryRootID: priority.itemID).value]),
+                    ])
+                ], operationID: "child-category-sort"))
+        var firstItem: Revision?
+        for index in 0..<70 {
+            let branch = index.isMultiple(of: 2) ? first : second
+            let item = try f.assigned(
+                "Task \(index)", categories: [alpha, ready, urgent, branch],
+                extra: ["priority": .text(index.isMultiple(of: 2) ? "P9" : "P0")])
+            if index == 0 { firstItem = item }
+        }
+        let repository = KanbanRepository(client: f.client)
+        let snapshot = try repository.projectSnapshot(
+            projectID: alpha.itemID, projectRootID: projects.itemID, statusRootID: status.itemID)
+        let tasks = snapshot["tasks"]!.arrayValue!.compactMap(\.objectValue)
+        XCTAssertEqual(tasks.count, 70)
+        XCTAssertEqual(tasks.first?["id"], .string(try XCTUnwrap(firstItem).itemID))
+        XCTAssertEqual(
+            snapshot["categoryAxes"]?.arrayValue?.compactMap { $0.objectValue?["id"]?.stringValue },
+            [urgency.itemID, priority.itemID],
+            "Axis order follows inherited presentation; status is not injected.")
+        XCTAssertEqual(
+            tasks.first?["axisCategoryIDs"]?.objectValue?[priority.itemID], .array([.string(first.itemID)]))
+        let emptySnapshot = try repository.projectSnapshot(
+            projectID: empty.itemID, projectRootID: projects.itemID, statusRootID: status.itemID)
+        XCTAssertTrue(emptySnapshot["tasks"]?.arrayValue?.isEmpty == true)
+        XCTAssertEqual(
+            emptySnapshot["categoryAxes"]?.arrayValue?.compactMap { $0.objectValue?["id"]?.stringValue },
+            [urgency.itemID, priority.itemID])
     }
 }

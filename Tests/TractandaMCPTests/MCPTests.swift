@@ -120,6 +120,34 @@ final class MCPTests: XCTestCase {
             try query.arguments(from: [
                 "sort": .array([.object(["property": .string("modifiedAt"), "isAscending": .bool(false)])])
             ]))
+        let rootID = "44444444-4444-4444-8444-444444444444"
+        XCTAssertNoThrow(
+            try query.arguments(from: [
+                "sort": .array([
+                    .object([
+                        "categoryRootID": .string(rootID), "isAscending": .bool(true),
+                    ])
+                ])
+            ]))
+        XCTAssertThrowsError(
+            try query.arguments(from: [
+                "sort": .array([
+                    .object([
+                        "categoryRootID": .string(rootID), "property": .string("subject"),
+                    ])
+                ])
+            ]))
+        XCTAssertThrowsError(
+            try query.arguments(from: [
+                "sort": .array([
+                    .object([
+                        "categoryRootID": .string("not-an-id")
+                    ])
+                ])
+            ]))
+        XCTAssertEqual(
+            definitions.first { $0.tool.name == "tractanda_memberships" }?.nativeMethod,
+            "TractandaCategory/memberships")
         XCTAssertThrowsError(try query.arguments(from: ["sectionID": .string("id")]))
         XCTAssertThrowsError(try query.arguments(from: ["viewID": .string("id"), "sort": .array([])]))
 

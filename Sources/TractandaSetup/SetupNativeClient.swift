@@ -74,11 +74,63 @@ struct SetupNativeClient {
             else { throw SetupError("Sample commit did not return an item identity.") }
             return value
         }
+        let categoryColumns: [[String: Any]] = [
+            ("priority", "Priority"), ("urgency", "Urgency"), ("work-type", "Work type"),
+            ("assigned-to", "Assigned to"), ("optional", "Optional"),
+        ].compactMap { key, title in
+            guard let id = items[key] else { return nil }
+            return [
+                "type": "object",
+                "value": [
+                    "categoryRootID": reference(id), "title": text(title),
+                    "width": ["type": "integer", "value": 18],
+                ],
+            ]
+        }
+        let columns: [String: Any] = [
+            "type": "list",
+            "value": [
+                [
+                    "type": "object",
+                    "value": [
+                        "property": text("subject"), "title": text("Item"),
+                        "width": ["type": "integer", "value": 40],
+                    ],
+                ]
+            ] + categoryColumns,
+        ]
+        let sort: [String: Any] = [
+            "type": "list",
+            "value": items["priority"].map { id in
+                [
+                    [
+                        "type": "object",
+                        "value": [
+                            "categoryRootID": reference(id),
+                            "isAscending": ["type": "boolean", "value": true],
+                        ],
+                    ]
+                ]
+            } ?? [],
+        ]
         let projects = try create(
             "projects",
             [
                 "subject": text("Project"), "selection": selection,
                 "categoryParents": references([items["what"]].compactMap { $0 }),
+                "viewDefinition": [
+                    "type": "object",
+                    "value": [
+                        "language": text("tractanda.spotlight.v0"), "categoryPath": references([status]),
+                        "sort": sort,
+                        "presentation": [
+                            "type": "object",
+                            "value": [
+                                "profile": text("tractanda.table.v0"), "columns": columns,
+                            ],
+                        ],
+                    ],
+                ],
             ])
         let project = try create(
             "project",
@@ -94,7 +146,10 @@ struct SetupNativeClient {
                     "Items can belong to several categories at once. Select categories to narrow a view; edit this sample or delete any optional category. Nothing here is required by the category engine."
                 ),
                 "categoryOverrides": [
-                    "type": "object", "value": [project: text("include"), ready: text("include")],
+                    "type": "object",
+                    "value": Dictionary(
+                        uniqueKeysWithValues: ([project, ready] + [items["priority.p1"]].compactMap { $0 })
+                            .map { ($0, text("include")) }),
                 ],
             ])
         _ = try create(
@@ -106,11 +161,13 @@ struct SetupNativeClient {
                     "value": [
                         "language": text("tractanda.spotlight.v0"),
                         "categoryPath": references([project, status]),
+                        "sort": sort,
                         "presentation": [
                             "type": "object",
                             "value": [
                                 "profile": text("tractanda.table.v0"),
                                 "sections": references([ready, doing, done]),
+                                "columns": columns,
                             ],
                         ],
                     ],

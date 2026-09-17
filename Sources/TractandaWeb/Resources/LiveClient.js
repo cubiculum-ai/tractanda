@@ -7,7 +7,7 @@
   const sessionStorageKey = 'tractanda.web-session';
   const browserStorageKey = 'tractanda.browser-session';
   var isSigningIn = false, resumeEditorAfterSignIn = false;
-  const nativeCapability = 'https://tractanda.ai/ns/local-prototype/3';
+  const nativeCapability = 'https://tractanda.ai/ns/local-prototype/4';
   const typedText = value => ({type:'text',value});
   const fieldText = (fields, key) => fields[key]?.type === 'text' ? fields[key].value : '';
 
@@ -214,14 +214,36 @@
     return [...new Set(value.value.map(v=>v.value.itemID))];
   }
   function projectTask(revision, categoryIDs, filterCategoryIDs, preferredScopes=[]) {
-    const f=revision.fields, task=Object.fromEntries(Object.entries(f).filter(([k])=>['optional','rationale','originalPosition','requestedTitle','acceptance','evidence','activityNotes'].includes(k)).map(([k,v])=>[k,plain(v)]));
+    const f=revision.fields, task=Object.fromEntries(Object.entries(f).filter(([k])=>['rationale','originalPosition','requestedTitle','acceptance','evidence','activityNotes'].includes(k)).map(([k,v])=>[k,plain(v)]));
     Object.assign(task,{id:fieldText(f,'itemID'),revisionID:fieldText(f,'revisionID'),
       reference:(preferredScopes.slice().reverse().map(scope=>(plain(f.referenceLabels)||[]).find(l=>l.scope===scope)).find(Boolean)||(plain(f.referenceLabels)||[])[0])?.label||fieldText(f,'itemID').slice(0,8),title:fieldText(f,'subject'),summary:fieldText(f,'body'),updatedAt:f.modifiedAt.value,
-      order:f.sortOrder?.value||0,categoryIDs,filterCategoryIDs,priority:fieldText(f,'priority'),owner:fieldText(f,'assignee'),kind:fieldText(f,'taskKind'),notes:fieldText(f,'workingNotes')});
+      categoryIDs,filterCategoryIDs,notes:fieldText(f,'workingNotes')});
     task.dependsOn=categoryReferences(f.dependencies);
     task.checklist=(plain(f.checklist)||[]).map(step=>{const result={...step,done:step.isComplete===true};delete result.isComplete;return result;});
     task.history=task.activityNotes||[];task.acceptance??=[];task.evidence??=[];
     return task;
+  }
+  function boardDefinition(project,root) {
+    const own=plain(project.fields.viewDefinition)||{},defaults=plain(root?.fields.viewDefinition)||{};
+    return {...own,sort:own.sort??defaults.sort??[],presentation:own.presentation??defaults.presentation};
+  }
+  async function readCategoryAxes(revisions,definition,state,at) {
+    const roots=[];
+    for(const entry of [...(definition?.presentation?.columns||[]),...(definition?.sort||[])]) {
+      const id=entry?.categoryRootID;if(typeof id==='string'&&!roots.includes(id))roots.push(id);
+    }
+    if(roots.length>8)throw apiError('invalidView','Use at most eight category axes.');
+    const memberships=new Map();let categoryAxes=[];
+    if(!roots.length)return {categoryAxes,memberships};
+    // An empty board still needs its axis choices for the first new item.
+    const ids=revisions.length?revisions.map(r=>fieldText(r.fields,'itemID')):[roots[0]];
+    for(let index=0;index<ids.length;index+=64) {
+      const result=await nativeCall('TractandaCategory/memberships',{ids:ids.slice(index,index+64),categoryRootIDs:roots,at});
+      if(result.state!==state||result.notFound?.length)throw apiError('stateChanged','The category graph changed during refresh.');
+      for(const [id,values] of Object.entries(result.memberships||{}))memberships.set(id,values);
+      if(index===0)categoryAxes=result.roots||[];
+    }
+    return {categoryAxes,memberships};
   }
   function categoryOrder(revision) {
     const value=revision?.fields?.categoryOrder;
@@ -248,9 +270,10 @@
     return result;
   }
   async function queryRevisions(argumentsObject, state) {
+    const at=argumentsObject.at||currentDate();
     const ids=[];
     for(let position=0;;) {
-      const page=await nativeCall('TractandaItem/query',{...argumentsObject,position,limit:64});
+      const page=await nativeCall('TractandaItem/query',{...argumentsObject,at,position,limit:64});
       if(page.queryState!==state)return null;
       ids.push(...page.ids);position+=page.ids.length;
       if(position>=page.total)break;
@@ -280,7 +303,7 @@
   }
   async function readProjectBoard(projectID) {
     for(let attempt=0;attempt<3;attempt++) {
-      const info=await nativeCall('TractandaStore/info');
+      const info=await nativeCall('TractandaStore/info'),at=currentDate();
       const graph=await projectGraph(info.state);
       if(!graph)continue;
       const projectRootID=projectBoard.projectRootID,statusRootID=projectBoard.statusRootID;
@@ -288,39 +311,42 @@
       if(!project||!statusRoot||!categoryDescendants(projectRootID,graph).some(entry=>entry.id===projectID)) throw apiError('projectUnavailable','The selected project category is unavailable.');
       let statusEntries=categoryDescendants(statusRootID,graph).filter(entry=>entry.id!==statusRootID&&(graph.children.get(entry.id)||[]).length===0);
       if(!statusEntries.length)throw apiError('invalidStatusRoot','The status root needs at least one readable leaf category.');
+      const definition=boardDefinition(project,graph.categories.get(projectRootID));
       try {
-        const preferred=categoryReferences(project.fields.viewDefinition?.value?.presentation?.value?.sections), available=new Map(statusEntries.map(entry=>[entry.id,entry]));
+        const preferred=(definition.presentation?.sections||[]), available=new Map(statusEntries.map(entry=>[entry.id,entry]));
         const ordered=preferred.map(id=>available.get(id)).filter(Boolean), seen=new Set(ordered.map(entry=>entry.id));
         statusEntries=[...ordered,...statusEntries.filter(entry=>!seen.has(entry.id))];
       } catch { /* An unrelated/invalid optional view cannot make a category board unavailable. */ }
-      const viewSort=plain(project.fields.viewDefinition)?.sort||[];
-      const revisions=await queryRevisions({categoryPath:[projectID,statusRootID],...(viewSort.length?{sort:viewSort}:{})},info.state);
+      const viewSort=definition.sort;
+      const revisions=await queryRevisions({at,categoryPath:[projectID,statusRootID],...(viewSort.length?{sort:viewSort}:{})},info.state);
       if(revisions===null)continue;
       const memberships=new Map();let changed=false;
       for(const status of statusEntries) {
-        const matches=await queryRevisions({categoryPath:[projectID,status.id]},info.state);
+        const matches=await queryRevisions({at,categoryPath:[projectID,status.id]},info.state);
         if(matches===null){changed=true;break;}
         for(const item of matches) {const id=fieldText(item.fields,'itemID');memberships.set(id,[...(memberships.get(id)||[]),status.id]);}
       }
       const filterIDs=categoryReferences(project.fields.filterCategories).filter(id=>graph.categories.has(id));
       const filters=new Map();
       for(const filterID of filterIDs) {
-        const matches=await queryRevisions({categoryPath:[projectID,filterID]},info.state);
+        const matches=await queryRevisions({at,categoryPath:[projectID,filterID]},info.state);
         if(matches===null){changed=true;break;}
         for(const item of matches) {const id=fieldText(item.fields,'itemID');filters.set(id,[...(filters.get(id)||[]),filterID]);}
       }
       if(changed||(await nativeCall('TractandaStore/info')).state!==info.state)continue;
+      const axes=await readCategoryAxes(revisions,definition,info.state,at);
       const statusIDs=new Set(statusEntries.map(entry=>entry.id));
       const reference=(category,key)=>{const id=category.fields[key]?.value?.itemID;return statusIDs.has(id)?id:undefined;};
       const defaultID=reference(project,'defaultCategory')||reference(statusRoot,'defaultCategory');
       const completionID=reference(project,'completionCategory')||reference(statusRoot,'completionCategory');
       const duplicateNames=new Set(statusEntries.map(entry=>entry.path.at(-1)).filter((name,index,names)=>names.indexOf(name)!==index));
       const retained=Object.fromEntries(Object.entries(project.fields).filter(([key])=>['maintenance','sequenceStatus','originalSequence','recommendedSequence','activity'].includes(key)).map(([key,value])=>[key,plain(value)]));
-      const next={...retained,schemaVersion:3,usesViewSort:viewSort.length>0,projectID,projectRootID,statusRootID,serverState:info.state,title:fieldText(project.fields,'subject')||'Project',updatedAt:currentDate(),
+      const next={...retained,schemaVersion:3,projectID,projectRootID,statusRootID,serverState:info.state,title:fieldText(project.fields,'subject')||'Project',updatedAt:currentDate(),
         columns:statusEntries.map(entry=>({id:entry.id,name:duplicateNames.has(entry.path.at(-1))?entry.path.join(' / '):entry.path.at(-1)})),
         filters:filterIDs.map(id=>({id,name:fieldText(graph.categories.get(id).fields,'subject')||'Category'})),captureCategoryIDs:[projectID],
         defaultCategoryID:defaultID,completionCategoryID:completionID,originalSequence:[],recommendedSequence:[],
-        tasks:revisions.map(revision=>projectTask(revision,memberships.get(fieldText(revision.fields,'itemID'))||[],filters.get(fieldText(revision.fields,'itemID'))||[],[projectID]))};
+        categoryAxes:axes.categoryAxes,
+        tasks:revisions.map(revision=>{const task=projectTask(revision,memberships.get(fieldText(revision.fields,'itemID'))||[],filters.get(fieldText(revision.fields,'itemID'))||[],[projectID]);task.axisCategoryIDs=axes.memberships.get(task.id)||{};return task;})};
       return {data:next,revisions:new Map(revisions.map(r=>[fieldText(r.fields,'itemID'),r]))};
     }
     throw apiError('stateChanged','The project board changed during refresh. Try again; an open draft is kept.');
@@ -332,7 +358,7 @@
   async function readLiveBoard(viewID=selectedViewID) {
     if(projectBoard)return readProjectBoard(viewID);
     for (let attempt=0;attempt<3;attempt++) {
-      const info=await nativeCall('TractandaStore/info');
+      const info=await nativeCall('TractandaStore/info'),at=currentDate();
       const result=await nativeCall('TractandaItem/get',{ids:[viewID]});
       const view=result.list[0], fields=view?.fields;
       if (!fields || fields.isDeleted?.value || !fields.viewDefinition) throw apiError('viewUnavailable','This saved view is unavailable.');
@@ -348,7 +374,7 @@
       async function idsFor(argumentsObject) {
         const ids=[];let position=0;
         while(true) {
-          const page=await nativeCall('TractandaItem/query',{...argumentsObject,position,limit:64});
+          const page=await nativeCall('TractandaItem/query',{...argumentsObject,at,position,limit:64});
           if(page.queryState!==info.state){hasChanged=true;return [];}
           ids.push(...page.ids);position+=page.ids.length;
           if(position>=page.total)return ids;
@@ -371,13 +397,14 @@
         for(const itemID of await idsFor(args))filters.set(itemID,[...(filters.get(itemID)||[]),id]);
       }
       if(hasChanged||(await nativeCall('TractandaStore/info')).state!==info.state)continue;
+      const axes=await readCategoryAxes(revisions,plain(fields.viewDefinition),info.state,at);
       const descriptors=ids=>ids.filter(id=>categories.has(id)).map(id=>({id,name:fieldText(categories.get(id).fields,'subject')}));
       const next=Object.fromEntries(Object.entries(fields).filter(([k])=>['maintenance','sequenceStatus','originalSequence','recommendedSequence','activity'].includes(k)).map(([k,v])=>[k,plain(v)]));
-      Object.assign(next,{schemaVersion:2,usesViewSort:(plain(definition.sort)||[]).length>0,viewItemID:viewID,viewRevisionID:fieldText(fields,'revisionID'),serverState:info.state,title:fieldText(fields,'subject'),
+      Object.assign(next,{schemaVersion:3,categoryAxes:axes.categoryAxes,viewItemID:viewID,viewRevisionID:fieldText(fields,'revisionID'),serverState:info.state,title:fieldText(fields,'subject'),
         updatedAt:currentDate(),columns:descriptors(columnIDs),filters:descriptors(filterIDs),captureCategoryIDs:categoryReferences(fields.captureCategories||definition.categoryPath),
         completionCategoryID:fields.completionCategory?.value.itemID,defaultCategoryID:fields.defaultCategory?.value.itemID,
         originalSequence:plain(fields.originalSequence)||[],recommendedSequence:plain(fields.recommendedSequence)||[],
-        tasks:revisions.map(r=>projectTask(r,memberships.get(fieldText(r.fields,'itemID'))||[],filters.get(fieldText(r.fields,'itemID'))||[],categoryReferences(definition.categoryPath)))});
+        tasks:revisions.map(r=>{const task=projectTask(r,memberships.get(fieldText(r.fields,'itemID'))||[],filters.get(fieldText(r.fields,'itemID'))||[],categoryReferences(definition.categoryPath));task.axisCategoryIDs=axes.memberships.get(task.id)||{};return task;})});
       return {data:next,revisions:new Map(revisions.map(r=>[fieldText(r.fields,'itemID'),r]))};
     }
     throw apiError('stateChanged','The view changed during refresh. Try again; an open draft is kept.');
@@ -449,9 +476,11 @@
 
   function makeLiveFields(candidate, baseRevision) {
     const base=baseRevision?.fields||{}, previous=baseRevision?byId(fieldText(base,'itemID')):null;
-    const fields={subject:typedText(candidate.title),body:typedText(candidate.summary),priority:typedText(candidate.priority),assignee:typedText(candidate.owner),
-      taskKind:typedText(candidate.kind),workingNotes:typedText(candidate.notes),sortOrder:{type:'integer',value:candidate.order}};
-    fields.checklist={type:'list',value:candidate.checklist.map(step=>{
+    const fields={subject:typedText(candidate.title)};
+    for(const [key,value] of [['body',candidate.summary],['workingNotes',candidate.notes]]) {
+      if(base[key]||String(value||'').trim()) fields[key]=typedText(value||'');
+    }
+    if((base.checklist?.value||[]).length||(candidate.checklist||[]).length)fields.checklist={type:'list',value:(candidate.checklist||[]).map(step=>{
       const prior=(base.checklist?.value||[]).find(entry=>entry.value.id?.value===step.id)?.value||{};
       const value={...clone(prior),id:typedText(step.id),title:typedText(step.title),isComplete:{type:'boolean',value:step.done}};
       if(typeof step.source==='string')value.source=typedText(step.source);else delete value.source;
@@ -462,8 +491,12 @@
     for(const [choices,before,after] of [[data.columns,baseRevision?(candidate.originalCategoryIDs||previous?.categoryIDs||[]):[],candidate.categoryIDs],[data.filters,baseRevision?(candidate.originalFilterCategoryIDs||previous?.filterCategoryIDs||[]):[],candidate.filterCategoryIDs]]) {
       for(const category of choices||[])if(after.includes(category.id)!==before.includes(category.id))overrides[category.id]=typedText(after.includes(category.id)?'include':'exclude');
     }
-    fields.categoryOverrides={type:'object',value:overrides};
-    if(!baseRevision)fields.dependencies={type:'list',value:[]};
+    for(const axis of data.categoryAxes||[]) {
+      const before=baseRevision?(candidate.originalAxisCategoryIDs?.[axis.id]||previous?.axisCategoryIDs?.[axis.id]||[]):[];
+      const after=candidate.axisCategoryIDs?.[axis.id]||[];
+      for(const choice of axis.children?.length?axis.children:[axis])if(after.includes(choice.id)!==before.includes(choice.id))overrides[choice.id]=typedText(after.includes(choice.id)?'include':'exclude');
+    }
+    if(JSON.stringify(overrides)!==JSON.stringify(base.categoryOverrides?.value||{}))fields.categoryOverrides={type:'object',value:overrides};
     return Object.fromEntries(Object.entries(fields).filter(([key,value])=>JSON.stringify(base[key])!==JSON.stringify(value)));
   }
 

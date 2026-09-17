@@ -16,7 +16,7 @@ async (page) => {
   const picker=page.getByLabel('Project',{exact:true});
   const text=value=>({type:'text',value}), ref=id=>({type:'reference',value:{itemID:id}});
   async function rpc(method,args) {
-    const response=await page.request.post(origin+'/api',{headers:{Authorization:'Bearer '+token,'Content-Type':'application/json',Origin:origin},data:{using:['https://tractanda.ai/ns/local-prototype/3'],methodCalls:[[method,args,'acceptance']]}});
+    const response=await page.request.post(origin+'/api',{headers:{Authorization:'Bearer '+token,'Content-Type':'application/json',Origin:origin},data:{using:['https://tractanda.ai/ns/local-prototype/4'],methodCalls:[[method,args,'acceptance']]}});
     const call=(await response.json()).methodResponses?.[0];
     if(!call||call[0]!==method)throw new Error('Native method failed: '+JSON.stringify(call));
     return call[1];

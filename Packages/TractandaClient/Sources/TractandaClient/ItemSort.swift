@@ -1,8 +1,9 @@
 import Foundation
 
-/// A direct metadata sort key. References are never followed while sorting.
+/// Sort by owned metadata or effective membership under a category root.
 public struct ItemSort: Codable, Equatable, Sendable {
-    public let property: String
+    public let property: String?
+    public let categoryRootID: String?
     public let isAscending: Bool
 
     public init(property: String, isAscending: Bool = true) throws {
@@ -10,24 +11,61 @@ public struct ItemSort: Codable, Equatable, Sendable {
             throw TractandaError("invalidArguments", "A sort property must contain 1–256 bytes, without NUL.")
         }
         self.property = property
+        categoryRootID = nil
         self.isAscending = isAscending
     }
 
-    private enum CodingKeys: String, CodingKey { case property, isAscending }
+    /// Orders by the first matching immediate child of this readable category root.
+    public init(categoryRootID: String, isAscending: Bool = true) throws {
+        try Identifier.validate(categoryRootID)
+        property = nil
+        self.categoryRootID = categoryRootID
+        self.isAscending = isAscending
+    }
+
+    private enum CodingKeys: String, CodingKey { case property, categoryRootID, isAscending }
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        try self.init(
-            property: container.decode(String.self, forKey: .property),
-            isAscending: container.decodeIfPresent(Bool.self, forKey: .isAscending) ?? true)
+        let property = try container.decodeIfPresent(String.self, forKey: .property)
+        let categoryRootID = try container.decodeIfPresent(String.self, forKey: .categoryRootID)
+        let ascending = try container.decodeIfPresent(Bool.self, forKey: .isAscending) ?? true
+        guard !(container.contains(.property) && property == nil),
+            !(container.contains(.categoryRootID) && categoryRootID == nil)
+        else {
+            throw TractandaError("invalidArguments", "A sort target cannot be null.")
+        }
+        switch (property, categoryRootID) {
+        case (.some(let property), nil): try self.init(property: property, isAscending: ascending)
+        case (nil, .some(let categoryRootID)):
+            try self.init(categoryRootID: categoryRootID, isAscending: ascending)
+        default:
+            throw TractandaError(
+                "invalidArguments", "A sort comparator requires exactly one property or categoryRootID.")
+        }
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        if let property { try container.encode(property, forKey: .property) }
+        if let categoryRootID { try container.encode(categoryRootID, forKey: .categoryRootID) }
+        try container.encode(isAscending, forKey: .isAscending)
     }
 
     public var value: ItemValue {
-        .object(["property": .text(property), "isAscending": .boolean(isAscending)])
+        var result: [String: ItemValue] = ["isAscending": .boolean(isAscending)]
+        if let property { result["property"] = .text(property) }
+        if let categoryRootID { result["categoryRootID"] = .reference(ItemReference(categoryRootID)) }
+        return .object(result)
     }
 
     public static func validate(_ order: [ItemSort]) throws {
-        guard order.count <= 4, Set(order.map(\.property)).count == order.count else {
-            throw TractandaError("invalidArguments", "Use at most four distinct sort properties.")
+        let keys = order.compactMap { sort -> String? in
+            if let property = sort.property { return "property:\(property)" }
+            if let categoryRootID = sort.categoryRootID { return "category:\(categoryRootID)" }
+            return nil
+        }
+        guard order.count <= 4, keys.count == order.count, Set(keys).count == order.count else {
+            throw TractandaError("invalidArguments", "Use at most four distinct sort keys.")
         }
     }
 

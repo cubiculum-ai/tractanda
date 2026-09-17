@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 import time
 
-CAPABILITY = "https://tractanda.ai/ns/local-prototype/3"
+CAPABILITY = "https://tractanda.ai/ns/local-prototype/4"
 
 
 def text(value):

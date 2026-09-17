@@ -1114,6 +1114,10 @@ public final class TerminalApplication {
         if viewWorkspace != nil { try reloadViewWorkspace() }
     }
 
+    private func columnTarget(_ column: ViewColumn) -> String {
+        column.categoryRootID.map { "category:\($0)" } ?? column.property ?? ""
+    }
+
     private func execute(_ action: () throws -> Void) {
         do { try action() } catch { status = String(describing: error) }
     }
@@ -1868,7 +1872,7 @@ public final class TerminalApplication {
             if mouse.isDoubleClick(target, scene: scene, at: time) { handleLearning(.activate) }
         case .columnRow(let index, let property):
             guard columnEditor?.columns.indices.contains(index) == true,
-                columnEditor?.columns[index].property == property
+                columnTarget(columnEditor!.columns[index]) == property
             else { return }
             columnEditor?.index = index
             if mouse.isDoubleClick(target, scene: scene, at: time) { handleColumns(.editColumn) }
@@ -2630,10 +2634,10 @@ public final class TerminalApplication {
                 purpose: .column(isNew ? nil : editor.index),
                 title: isNew ? "Add column" : "Edit column",
                 fields: [
-                    TextBuffer(column?.property ?? ""), TextBuffer(column?.title ?? ""),
+                    TextBuffer(column.map(columnTarget) ?? ""), TextBuffer(column?.title ?? ""),
                     TextBuffer(String(column?.width ?? 20)),
                 ],
-                labels: ["Metadata key", "Column title", "Preferred width (6–120)"])
+                labels: ["Key or category:<UUID>", "Column title", "Preferred width (6–120)"])
         default: break
         }
         columnEditor = editor
@@ -2670,7 +2674,8 @@ public final class TerminalApplication {
             case .sort:
                 let order = workspace.sort
                 func field(_ index: Int) -> String {
-                    order.indices.contains(index) ? order[index].property : ""
+                    guard order.indices.contains(index) else { return "" }
+                    return order[index].categoryRootID.map { "category:\($0)" } ?? order[index].property ?? ""
                 }
                 func direction(_ index: Int) -> String {
                     order.indices.contains(index) && !order[index].isAscending ? "descending" : "ascending"
@@ -2682,8 +2687,8 @@ public final class TerminalApplication {
                         TextBuffer(direction(1)),
                     ],
                     labels: [
-                        "Primary property (blank uses default)", "Primary order",
-                        "Secondary property (optional)", "Secondary order",
+                        "Primary target (key or category:<UUID>)", "Primary order",
+                        "Secondary target (optional)", "Secondary order",
                     ])
                 status =
                     "Default: recently modified first. Set a property and ascending/descending to override."
@@ -4206,10 +4211,13 @@ public final class TerminalApplication {
                                 throw TractandaError(
                                     "invalidArguments", "Order must be ascending or descending.")
                             }
+                            let target = editing.fields[index].text
                             order.append(
-                                try ItemSort(
-                                    property: editing.fields[index].text,
-                                    isAscending: direction.hasPrefix("asc")))
+                                try target.hasPrefix("category:")
+                                    ? ItemSort(
+                                        categoryRootID: String(target.dropFirst("category:".count)),
+                                        isAscending: direction.hasPrefix("asc"))
+                                    : ItemSort(property: target, isAscending: direction.hasPrefix("asc")))
                         }
                         order.append(contentsOf: original.dropFirst(2))
                     }
@@ -4243,10 +4251,16 @@ public final class TerminalApplication {
                     guard var editor = columnEditor, let width = Int(editing.fields[2].text) else {
                         throw TractandaError("invalidView", "Enter a column width from 6 to 120.")
                     }
-                    let column = try ViewColumn(
-                        property: editing.fields[0].text,
-                        title: editing.fields[1].text, width: width,
-                        preserving: index.map { editor.columns[$0].value })
+                    let target = editing.fields[0].text
+                    let column =
+                        try target.hasPrefix("category:")
+                        ? ViewColumn(
+                            categoryRootID: String(target.dropFirst("category:".count)),
+                            title: editing.fields[1].text, width: width,
+                            preserving: index.map { editor.columns[$0].value })
+                        : ViewColumn(
+                            property: target, title: editing.fields[1].text, width: width,
+                            preserving: index.map { editor.columns[$0].value })
                     if let index {
                         editor.columns[index] = column
                     } else {
@@ -6186,9 +6200,10 @@ public final class TerminalApplication {
                 lines.append(
                     ScreenLine(
                         text:
-                            " \(index == editor.index ? ">" : " ") \(column.title) · \(column.property) · width \(column.width)",
+                            " \(index == editor.index ? ">" : " ") \(column.title) · \(columnTarget(column)) · width \(column.width)",
                         style: index == editor.index ? .activeSelection : .normal,
-                        hits: [MouseHit(columns: 0..<width, target: .columnRow(index, column.property))]))
+                        hits: [MouseHit(columns: 0..<width, target: .columnRow(index, columnTarget(column)))])
+                )
             }
         } else if isBatchMenuOpen {
             lines.append(ScreenLine(text: " Group operations · \(marks.items.count) marked", style: .header))
@@ -6364,7 +6379,9 @@ public final class TerminalApplication {
                         text += marks.contains(item.itemID) ? "◆ " : "  "
                         text += TableLayout.line(
                             item: item, columns: workspace.columns, offset: columnOffset, width: left - 4,
-                            preferredScopes: workspace.categoryPath.map(\.itemID))
+                            preferredScopes: workspace.categoryPath.map(\.itemID),
+                            categoryMemberships: workspace.categoryMemberships,
+                            categoryLabels: workspace.categoryMembershipLabels)
                     case .heading:
                         hits.append(MouseHit(columns: 2..<5, target: .browserDisclosure(index, key)))
                         let category = section.category!

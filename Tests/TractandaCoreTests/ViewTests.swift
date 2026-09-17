@@ -7,6 +7,14 @@ final class ViewTests: XCTestCase {
         try store.commit(CommitRequest(classID: "Item", changes: fields, operationID: Identifier.make()))
             .revision
     }
+    private func edit(_ store: ItemStore, _ item: Revision, _ fields: [String: ItemValue]) throws -> Revision
+    {
+        try store.commit(
+            CommitRequest(
+                action: .revise, itemID: item.itemID, expectedRevisionID: item.revisionID,
+                changes: fields, operationID: Identifier.make())
+        ).revision
+    }
 
     func testDefaultOrderUsesModificationInstantsAndStableIdentityTies() throws {
         func item(_ suffix: String, modified: String, created: String) throws -> Revision {
@@ -205,6 +213,106 @@ final class ViewTests: XCTestCase {
                     ItemSort(property: "rank"), ItemSort(property: "kMDItemTitle"),
                 ]
             ).map(\.itemID), [first.itemID, second.itemID])
+    }
+
+    func testCategorySortUsesAuthorizedEffectiveMembershipAndOrderedChildren() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(Identifier.make())
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ItemStore(root: directory)
+        func category(_ subject: String, parents: [Revision] = [], rule: String = "fixture == \"never\"")
+            throws
+            -> Revision
+        {
+            try create(
+                store,
+                [
+                    "subject": .text(subject),
+                    "selection": .object([
+                        "language": .text(SpotlightQuery.profile), "expression": .text(rule),
+                    ]),
+                    "categoryParents": .list(parents.map { .reference(ItemReference($0.itemID)) }),
+                ])
+        }
+        var root = try category("Root")
+        let first = try category("First", parents: [root], rule: "branch == \"first\"")
+        let second = try category("Second", parents: [root], rule: "branch == \"second\"")
+        let blocked = try category("Blocked", rule: "branch == \"blocked\"")
+        root = try edit(
+            store, root,
+            [
+                "selection": .object([
+                    "language": .text(SpotlightQuery.profile), "expression": .text("fixture == \"never\""),
+                    "excludedCategoryIDs": .list([.reference(ItemReference(blocked.itemID))]),
+                ])
+            ])
+        func item(_ name: String, branch: String, overrides: [String: ItemValue] = [:]) throws -> Revision {
+            try create(
+                store,
+                [
+                    "subject": .text(name), "fixture": .text("yes"), "branch": .text(branch),
+                    "legacyRank": .text(name), "categoryOverrides": .object(overrides),
+                ])
+        }
+        let firstOnly = try item("B", branch: "first")
+        let both = try item("A", branch: "first", overrides: [second.itemID: .text("include")])
+        let manualSecond = try item("C", branch: "none", overrides: [second.itemID: .text("include")])
+        let secondOnly = try item("Z", branch: "second")
+        let rootOnly = try item("D", branch: "none", overrides: [root.itemID: .text("include")])
+        let excluded = try item(
+            "E", branch: "first", overrides: [blocked.itemID: .text("include")])
+        let categorySort = try ItemSort(categoryRootID: root.itemID)
+        let metadata = try ItemSort(property: "legacyRank")
+        XCTAssertEqual(
+            try Categories.query(
+                store: store, expression: "fixture == \"yes\"", sort: [categorySort, metadata]
+            )
+            .map(\.itemID),
+            [both, firstOnly, manualSecond, secondOnly, rootOnly, excluded].map(\.itemID))
+        XCTAssertEqual(
+            try Categories.query(
+                store: store, expression: "fixture == \"yes\"",
+                sort: [try ItemSort(categoryRootID: root.itemID, isAscending: false), metadata]
+            )
+            .map(\.itemID),
+            [manualSecond, secondOnly, both, firstOnly, rootOnly, excluded].map(\.itemID))
+        let projection = try Categories.memberships(
+            store: store, ids: [both.itemID, rootOnly.itemID, excluded.itemID],
+            categoryRootIDs: [root.itemID], at: Date())
+        XCTAssertEqual(projection.roots.first?.children.map(\.id), [first.itemID, second.itemID])
+        XCTAssertEqual(projection.memberships[both.itemID]?[root.itemID], [first.itemID, second.itemID])
+        XCTAssertNil(projection.memberships[rootOnly.itemID]?[root.itemID])
+        XCTAssertNil(projection.memberships[excluded.itemID]?[root.itemID])
+        _ = try edit(store, second, ["categoryOrder": .integer(-1)])
+        try store.rebuildIndex()
+        XCTAssertEqual(
+            try Categories.query(
+                store: store, expression: "fixture == \"yes\"", sort: [categorySort, metadata]
+            )
+            .map(\.itemID),
+            [both, manualSecond, secondOnly, firstOnly, rootOnly, excluded].map(\.itemID))
+    }
+
+    func testCategorySortDescriptorsUseCurrentReferencesInSavedViews() throws {
+        let rootID = Identifier.make()
+        let descriptor = try ItemSort(categoryRootID: rootID, isAscending: false)
+        XCTAssertEqual(descriptor.value.map?["categoryRootID"], .reference(ItemReference(rootID)))
+        let definition: [String: ItemValue] = [
+            "language": .text(SpotlightQuery.profile), "sort": .list([descriptor.value]),
+        ]
+        XCTAssertEqual(try SavedViewDefinition(.object(definition)).sort, [descriptor])
+        var malformed = definition
+        malformed["sort"] = .list([
+            .object([
+                "categoryRootID": .text(rootID), "isAscending": .boolean(true),
+            ])
+        ])
+        XCTAssertThrowsError(try SavedViewDefinition(.object(malformed)))
+        malformed["sort"] = .list([
+            .object([
+                "property": .text("subject"), "categoryRootID": .reference(ItemReference(rootID)),
+            ])
+        ])
+        XCTAssertThrowsError(try SavedViewDefinition(.object(malformed)))
     }
 
     func testSavedSectionsIntersectFiltersAndHonorManualDecisions() throws {

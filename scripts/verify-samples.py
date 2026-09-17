@@ -80,6 +80,7 @@ def verify(binary):
             for record in before[0].values():
                 fields = record["fields"]
                 assert fields["classID"]["value"] in concrete, fields["classID"]
+                assert not set(fields).intersection({"priority","urgency","taskKind","assignee","optional","status"})
                 for key in ("activity", "activityNotes"):
                     for entry in fields.get(key, {}).get("value", []):
                         assert entry["value"]["at"]["type"] == "date", (key, entry)

@@ -1,6 +1,6 @@
 # API and agent integration
 
-Use executable help and `TractandaStore/describe` as the operational reference for this experimental API. The local capability is `https://tractanda.ai/ns/local-prototype/3`, not a published network JMAP extension.
+Use executable help and `TractandaStore/describe` as the operational reference for this experimental API. The local capability is `https://tractanda.ai/ns/local-prototype/4`, not a published network JMAP extension.
 
 `Item` is the concrete generic class and the superclass of the specialized families. `classID == "Item"` selects generic items; `kMDItemContentTypeTree == "Item"` includes all classes. Older prototype clients using capability `/2` must be updated and reconnected before using this server.
 
@@ -52,7 +52,15 @@ A category with the valid selection expression `itemID == ""` has no direct rule
 
 Ordinary actions use `Item` and category assignments for to-do, waiting and other workflow states. Change membership to change those states; no class transition is needed. Every item may carry `waitingOn` as a tagged reference to a person/event or explanatory text, or leave it unset. Category rules and manual overrides determine membership independently of that property. Discover supported concrete types with `TractandaStore/describe` (`topic: "types"`).
 
-A default Kanban board sorts priority labels naturally (P2 before P10), with missing/blank priorities last and the native query order retained for ties. An explicit saved sort takes precedence; a project category may supply that sort without replacing the project/status membership intersection. `sortOrder` is ordinary metadata, used only when a view explicitly sorts by it.
+Kanban preserves native query order. The optional sample Project definition sorts by Priority **category membership**. Project-specific `viewDefinition.sort` and `presentation` override those defaults independently, without inheriting selection criteria. With neither definition supplying a sort, normal modified-time order applies. Priority, urgency, work type, assignment and optionality are categories; the client does not write parallel scalar fields. `sortOrder` remains optional ordinary metadata only for explicit saved sorts and is never populated by browser saves.
+
+In the TUI view editor, enter `category:<axis UUID>` as a sort or column target; ordinary field names continue to address owned metadata.
+
+A query sort has up to four distinct targets: `{"property":"modifiedAt","isAscending":false}` or `{"categoryRootID":"<axis UUID>","isAscending":true}`. Category comparators use effective membership in ordered immediate children (`categoryOrder`, name, ID). Descendants inherit into that branch; multiple matches take the first branch. A root exclusion wins, and unranked items stay last in either direction. In canonical `viewDefinition.sort` and `presentation.columns`, `categoryRootID` is a tagged current reference. A column chooses either `property` or `categoryRootID`, with its usual title/width.
+
+`TractandaCategory/memberships` (MCP `tractanda_memberships`) accepts 1–64 `ids`, 1–8 `categoryRootIDs` and optional `at`. It returns `state`, ordered `roots`/children, `memberships[itemID][rootID]` as matching category IDs, and non-disclosing `notFound`. This is an ephemeral ACL-filtered projection, never an item property. A childless root returns its own ID when included. Use a fixed clock and compare state across batches.
+
+Web edits preserve untouched absent fields and unknown metadata. Clearing existing text explicitly stores empty text; API `unset` removes it. The client writes subject/body/workingNotes, checklist content and changed category overrides only. It does not materialize empty fields or inject dependencies/order values on an unrelated edit.
 
 Tagged values include text, integer, real, boolean, date, bytes, reference, list and object. Use a persisted `operationID` and exact payload; an uncertain mutation is retried with both unchanged. IDs are nonempty text of at most 200 UTF-8 bytes with no NUL characters, scoped to store and authenticated actor. A definite pre-commit rejection does not consume an unused ID, so corrected arguments may reuse it. Reconcile any earlier uncertain attempt first. An exact replay returns `replayed: true` and the original committed revision, not a newer head; current read permission still applies. `unset` is required even when it is `[]`. Existing updates also require the current `expectedRevisionID`. Changes replace whole top-level fields, so fetch and merge a map before replacing it.
 

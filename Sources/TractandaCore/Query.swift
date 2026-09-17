@@ -417,11 +417,17 @@ public struct SavedViewDefinition: Sendable {
                 throw TractandaError("invalidView", "sort must be a list of comparators.")
             }
             sort = try list.map { value in
-                guard let comparator = value.map, let property = comparator["property"]?.string,
+                guard let comparator = value.map,
                     comparator["isAscending"] == nil || comparator["isAscending"]?.booleanValue != nil
                 else { throw TractandaError("invalidView", "Invalid sort comparator.") }
-                return try ItemSort(
-                    property: property, isAscending: comparator["isAscending"]?.booleanValue ?? true)
+                let ascending = comparator["isAscending"]?.booleanValue ?? true
+                switch (comparator["property"], comparator["categoryRootID"]) {
+                case (.some(.text(let property)), nil):
+                    return try ItemSort(property: property, isAscending: ascending)
+                case (nil, .some(.reference(let reference))) where reference.revisionID == nil:
+                    return try ItemSort(categoryRootID: reference.itemID, isAscending: ascending)
+                default: throw TractandaError("invalidView", "Invalid sort comparator.")
+                }
             }
             try ItemSort.validate(sort)
         } else {
@@ -443,6 +449,55 @@ public struct SavedViewDefinition: Sendable {
         }
     }
 }
+
+private func categorySortRank(
+    _ item: Revision, rootID: String, evaluator: CategoryEvaluator, cache: inout [String: Membership]
+) throws -> Int? {
+    // Root membership is the authorization-aware effective decision. In particular, an
+    // excluded root must not acquire a branch rank through an otherwise matching child.
+    guard try evaluator.membership(item, categoryID: rootID, cache: &cache).isIncluded else { return nil }
+    let children = evaluator.hierarchy.children[rootID] ?? []
+    guard !children.isEmpty else { return 0 }
+    for (rank, childID) in children.enumerated() {
+        if try evaluator.membership(item, categoryID: childID, cache: &cache).isIncluded { return rank }
+    }
+    // A direct root decision has no branch when the root has children.
+    return nil
+}
+
+private func readableCategoryRoot(_ store: ItemStore, _ id: String) throws -> Revision {
+    do { return try store.get(id) } catch let error as TractandaError
+        where error.code == "notFound" || error.code == "forbidden"
+    { throw TractandaError("notFound", "Category is unavailable.") }
+}
+
+public struct CategoryMembershipRoot: Codable, Equatable, Sendable {
+    public struct Child: Codable, Equatable, Sendable {
+        public let id: String
+        public let name: String
+    }
+    public let id: String
+    public let name: String
+    public let children: [Child]
+}
+
+public struct CategoryMembershipProjection: Codable, Equatable, Sendable {
+    public let state: String
+    public let roots: [CategoryMembershipRoot]
+    /// Each listed category is an immediate matching child; a childless root returns itself.
+    public let memberships: [String: [String: [String]]]
+    public let notFound: [String]
+    public init(
+        state: String, roots: [CategoryMembershipRoot], memberships: [String: [String: [String]]],
+        notFound: [String]
+    ) {
+        self.state = state
+        self.roots = roots
+        self.memberships = memberships
+        self.notFound = notFound
+    }
+}
+
 public enum Categories {
     static func rule(_ category: Revision) throws -> SpotlightQuery {
         guard !category.isDeleted, let selection = category.fields["selection"]?.map,
@@ -495,25 +550,106 @@ public enum Categories {
         let query = try expression.map(SpotlightQuery.init)
         let calendar = try QueryCalendar.make(timeZone: timeZone)
         for id in categoryPath + excludedCategoryIDs { _ = try rule(store.get(id)) }
+        let categorySortIDs = sort.compactMap(\.categoryRootID)
+        try ItemSort.validate(sort)
+        for id in categorySortIDs { _ = try readableCategoryRoot(store, id) }
         let evaluator =
-            try categoryPath.isEmpty && excludedCategoryIDs.isEmpty
+            try categoryPath.isEmpty && excludedCategoryIDs.isEmpty && categorySortIDs.isEmpty
             ? nil : CategoryEvaluator(store.candidates(), store: store, at: date)
-        // Each level intersects the candidates from the preceding level.
-        let result = try store.candidates(text: text).filter { item in
-            if let query, !query.matches(item, at: date, calendar: calendar) { return false }
+        // Each level intersects the candidates from the preceding level. Retain the same
+        // per-item cache for category sorting so manual/personal decisions and time rules
+        // are evaluated exactly once for each category.
+        let evaluated = try store.candidates(text: text).compactMap {
+            item -> (Revision, [String: Membership])? in
+            if let query, !query.matches(item, at: date, calendar: calendar) { return nil }
             var cache: [String: Membership] = [:]
             for id in categoryPath {
                 if try evaluator?.membership(item, categoryID: id, cache: &cache).isIncluded != true {
-                    return false
+                    return nil
                 }
             }
             for id in excludedCategoryIDs {
                 if try evaluator?.membership(item, categoryID: id, cache: &cache).isIncluded == true {
-                    return false
+                    return nil
                 }
             }
-            return true
+            return (item, cache)
         }
-        return try ItemSort.ordered(result, by: sort)
+        let result = evaluated.map(\.0)
+        var categoryRanks: [String: [String: Int]] = [:]
+        if !categorySortIDs.isEmpty {
+            guard let evaluator else { fatalError("Category sorting requires an evaluator.") }
+            for rootID in categorySortIDs where evaluator.hierarchy.items[rootID] == nil {
+                throw TractandaError("notCategory", "This item has no available selection criteria.")
+            }
+            for rootID in categorySortIDs { categoryRanks[rootID] = [:] }
+            for (item, initialCache) in evaluated {
+                var cache = initialCache
+                for rootID in categorySortIDs {
+                    if let rank = try categorySortRank(
+                        item, rootID: rootID, evaluator: evaluator, cache: &cache)
+                    {
+                        categoryRanks[rootID]![item.itemID] = rank
+                    }
+                }
+            }
+        }
+        return try ItemSort.ordered(result, by: sort, categoryRanks: categoryRanks)
+    }
+
+    public static func memberships(
+        store: ItemStore, ids: [String], categoryRootIDs: [String], at date: Date
+    ) throws -> CategoryMembershipProjection {
+        guard (1...64).contains(ids.count), Set(ids).count == ids.count,
+            (1...8).contains(categoryRootIDs.count), Set(categoryRootIDs).count == categoryRootIDs.count
+        else {
+            throw TractandaError(
+                "invalidArguments", "Supply 1–64 distinct items and 1–8 distinct category roots.")
+        }
+        // `get` keeps an unreadable root indistinguishable from an unavailable item before
+        // constructing the caller-authorized graph.
+        for rootID in categoryRootIDs { _ = try readableCategoryRoot(store, rootID) }
+        let evaluator = try CategoryEvaluator(store.candidates(), store: store, at: date)
+        var roots: [CategoryMembershipRoot] = []
+        for rootID in categoryRootIDs {
+            guard let root = evaluator.hierarchy.items[rootID] else {
+                throw TractandaError("notCategory", "This item has no available selection criteria.")
+            }
+            let children = (evaluator.hierarchy.children[rootID] ?? []).compactMap {
+                childID -> CategoryMembershipRoot.Child? in
+                guard let child = evaluator.hierarchy.items[childID] else { return nil }
+                return .init(id: childID, name: child.fields["subject"]?.string ?? childID)
+            }
+            roots.append(
+                .init(id: rootID, name: root.fields["subject"]?.string ?? rootID, children: children))
+        }
+        var memberships: [String: [String: [String]]] = [:]
+        var notFound: [String] = []
+        for id in ids {
+            let item: Revision
+            do { item = try store.get(id) } catch let error as TractandaError
+                where error.code == "notFound" || error.code == "forbidden"
+            {
+                notFound.append(id)
+                continue
+            }
+            var cache: [String: Membership] = [:]
+            var itemMemberships: [String: [String]] = [:]
+            for root in roots {
+                guard try evaluator.membership(item, categoryID: root.id, cache: &cache).isIncluded else {
+                    continue
+                }
+                if root.children.isEmpty {
+                    itemMemberships[root.id] = [root.id]
+                    continue
+                }
+                let matches = try root.children.filter {
+                    try evaluator.membership(item, categoryID: $0.id, cache: &cache).isIncluded
+                }.map(\.id)
+                if !matches.isEmpty { itemMemberships[root.id] = matches }
+            }
+            if !itemMemberships.isEmpty { memberships[id] = itemMemberships }
+        }
+        return .init(state: store.state, roots: roots, memberships: memberships, notFound: notFound)
     }
 }

@@ -9,6 +9,8 @@ public struct CategoryTemplate: Codable, Sendable {
         public let fields: [String: ItemValue]
         public let viewCategoryKeys: [String]?
         public let excludedCategoryKeys: [String]?
+        public let viewSortCategoryKeys: [String?]?
+        public let viewColumnCategoryKeys: [String?]?
     }
     public let identifier: String
     public let entries: [Entry]
@@ -29,6 +31,39 @@ public struct CategoryTemplate: Codable, Sendable {
             throw TractandaError("invalidTemplate", "Templates need 1–256 entries in parent-first order.")
         }
         var seen: Set<String> = []
+        func bindView(_ entry: Entry, fields: inout [String: ItemValue], resolve: (String) throws -> String)
+            throws
+        {
+            guard entry.viewSortCategoryKeys != nil || entry.viewColumnCategoryKeys != nil else { return }
+            guard var view = fields["viewDefinition"]?.map else {
+                throw TractandaError("invalidTemplate", "View category bindings require a view definition.")
+            }
+            func bind(_ value: ItemValue?, keys: [String?]) throws -> ItemValue {
+                guard var list = value?.array, list.count == keys.count else {
+                    throw TractandaError(
+                        "invalidTemplate", "View category bindings must match their sort or column entries.")
+                }
+                for (index, key) in keys.enumerated() {
+                    guard let key else { continue }
+                    guard var target = list[index].map else {
+                        throw TractandaError("invalidTemplate", "Invalid view category binding.")
+                    }
+                    target.removeValue(forKey: "property")
+                    target["categoryRootID"] = .reference(ItemReference(try resolve(key)))
+                    list[index] = .object(target)
+                }
+                return .list(list)
+            }
+            if let keys = entry.viewSortCategoryKeys { view["sort"] = try bind(view["sort"], keys: keys) }
+            if let keys = entry.viewColumnCategoryKeys {
+                guard var presentation = view["presentation"]?.map else {
+                    throw TractandaError("invalidTemplate", "Column bindings require a presentation.")
+                }
+                presentation["columns"] = try bind(presentation["columns"], keys: keys)
+                view["presentation"] = .object(presentation)
+            }
+            fields["viewDefinition"] = .object(view)
+        }
         // Validate the entire specification before the first commit. Individual canonical
         // commits remain independently durable; an interrupted install resumes by template key.
         for entry in entries {
@@ -41,6 +76,12 @@ public struct CategoryTemplate: Codable, Sendable {
                 throw TractandaError("invalidTemplate", "Duplicate, forward or reserved template property.")
             }
             var fields = entry.fields
+            try bindView(entry, fields: &fields) { key in
+                guard seen.contains(key) else {
+                    throw TractandaError("invalidTemplate", "Unknown or forward view category binding.")
+                }
+                return Identifier.make()
+            }
             fields.merge([
                 "itemID": .text(Identifier.make()), "revisionID": .text(Identifier.make()),
                 "classID": .text(entry.classID), "schemaVersion": .integer(1),
@@ -70,6 +111,12 @@ public struct CategoryTemplate: Codable, Sendable {
                 continue
             }
             var fields = entry.fields
+            try bindView(entry, fields: &fields) { key in
+                guard let item = installed[key], !item.isDeleted, item.fields["selection"] != nil else {
+                    throw TractandaError("invalidTemplate", "A bound view category is unavailable.")
+                }
+                return item.itemID
+            }
             fields["templateKey"] = .text(key)
             fields["categoryParents"] = .list(
                 entry.parents.compactMap { parent in

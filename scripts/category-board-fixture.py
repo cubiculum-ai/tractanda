@@ -20,7 +20,6 @@ def create_fixture(commit):
         assignments=[project,group,columns['ready' if index==0 else 'planned']]
         items[f'TEST-{index+1}']=create(name,{
             'referenceLabels':{'type':'list','value':[{'type':'object','value':{'scope':ref(project),'label':text(f'TEST-{index+1}')}}]},'body':text('Only a test fixture.'),
-            'sortOrder':{'type':'integer','value':10*(index+1)},'priority':text('P1'),
             'categoryOverrides':{'type':'object','value':{id:text('include') for id in assignments}},
             'checklist':{'type':'list','value':[{'type':'object','value':{'id':text(f'step-{index}'),'title':text('Verify'),'isComplete':{'type':'boolean','value':False}}}]},
             'dependencies':refs([] if not index else [items['TEST-1']]),

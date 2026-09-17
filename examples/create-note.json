@@ -1,5 +1,5 @@
 {
-  "using": ["https://tractanda.ai/ns/local-prototype/3"],
+  "using": ["https://tractanda.ai/ns/local-prototype/4"],
   "methodCalls": [
     ["TractandaItem/commit", {
       "action": "create",

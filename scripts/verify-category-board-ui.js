@@ -8,7 +8,7 @@ async (page) => {
   await page.locator('.card-title').first().waitFor();
   const origin=await page.evaluate(()=>location.origin);
   async function rpc(method,args) {
-    const response=await page.request.post(origin+'/api',{headers:{Authorization:'Bearer '+token,'Content-Type':'application/json',Origin:origin},data:{using:['https://tractanda.ai/ns/local-prototype/3'],methodCalls:[[method,args,'ui']]}});
+    const response=await page.request.post(origin+'/api',{headers:{Authorization:'Bearer '+token,'Content-Type':'application/json',Origin:origin},data:{using:['https://tractanda.ai/ns/local-prototype/4'],methodCalls:[[method,args,'ui']]}});
     const data=await response.json();const result=data.methodResponses[0];if(result[0]!==method)throw new Error(JSON.stringify(result));return result[1];
   }
   async function item(id){return (await rpc('TractandaItem/get',{ids:[id]})).list[0];}

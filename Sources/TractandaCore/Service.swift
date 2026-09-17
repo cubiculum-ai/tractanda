@@ -233,6 +233,14 @@ public final class ItemService {
                     ],
                     ["name": "selection", "kind": "object", "editing": "ordinary category criterion"],
                     ["name": "categoryOverrides", "kind": "object", "editing": "ordinary include/exclude"],
+                    ["name": "sortOrder", "kind": "integer", "editing": "optional explicit-view metadata"],
+                    [
+                        "name": "checklist", "kind": "list", "editing": "ordinary",
+                        "element": [
+                            "id": "text", "title": "text", "isComplete": "Boolean", "source": "text",
+                        ],
+                    ],
+                    ["name": "dependencies", "kind": "list of current references", "editing": "ordinary"],
                     ["name": "viewDefinition", "kind": "object", "editing": "ordinary saved view"],
                     ["name": "permissions", "kind": "object", "editing": "owner-controlled"],
                     ["name": "target", "kind": "reference", "editing": "PersonalStateItem only"],
@@ -329,6 +337,22 @@ public final class ItemService {
             return [
                 "items": try definition.install(in: store, timeZone: string(args, "timeZone"), actorUID: uid)
             ]
+        case "TractandaCategory/memberships":
+            try check(args, allowed: ["ids", "categoryRootIDs", "at"])
+            let date: Date
+            if args["at"] == nil {
+                date = Date()
+            } else {
+                guard let parsed = Timestamp.parse(try string(args, "at")) else {
+                    throw TractandaError("invalidArguments", "Invalid query timestamp.")
+                }
+                date = parsed
+            }
+            return try object(
+                Categories.memberships(
+                    store: store, ids: strings(args, "ids"),
+                    categoryRootIDs: strings(args, "categoryRootIDs"),
+                    at: date)) as! [String: Any]
         case "TractandaLearning/status", "TractandaLearning/train", "TractandaLearning/reset":
             try check(args, allowed: ["categoryID"])
             let id = try string(args, "categoryID")
@@ -533,6 +557,8 @@ public final class ItemService {
             return [
                 "features": [
                     ServerFeature.runtimeIdentity.rawValue, ServerFeature.semanticJobTiming.rawValue,
+                    ServerFeature.categoryMembershipSort.rawValue,
+                    ServerFeature.categoryMembershipProjection.rawValue,
                 ],
                 "server": try JSONSerialization.jsonObject(with: JSON.encode(RuntimeIdentity.current)),
                 "state": store.state, "ownerUID": store.ownerUID, "queryProfile": SpotlightQuery.profile,

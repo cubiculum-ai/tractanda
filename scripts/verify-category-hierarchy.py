@@ -58,7 +58,7 @@ def main():
                 response = subprocess.check_output([native, 'install-categories', str(socket),
                     str(PROJECT / 'templates/starter-categories.json'), 'Europe/Vienna'])
                 ids = json.loads(response)['items']
-                assert 'item' not in ids and len(ids) == 63
+                assert 'item' not in ids and len(ids) == 71
                 for key in ['who','what','when','where','means','priority','urgency']:
                     assert client.get(ids[key])['fields']['categoryParents']['value'] == []
                 def create(key, fields):

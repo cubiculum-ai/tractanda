@@ -3,11 +3,23 @@ import Foundation
 extension ItemSort {
     /// Applies ordering to the full authorized result, before pagination. Empty order means
     /// most recently modified first. Missing/compound values sort last in either direction.
-    public static func ordered(_ items: [Revision], by order: [ItemSort]) throws -> [Revision] {
+    public static func ordered(
+        _ items: [Revision], by order: [ItemSort], categoryRanks: [String: [String: Int]] = [:]
+    ) throws -> [Revision] {
         let order = try order.isEmpty ? [ItemSort(property: "modifiedAt", isAscending: false)] : order
         try validate(order)
+        for sort in order where sort.categoryRootID != nil && categoryRanks[sort.categoryRootID!] == nil {
+            throw TractandaError("invalidArguments", "Category sort ranks must be evaluated before ordering.")
+        }
         let decorated = items.map { item in
-            (item, order.map { SortValue(item.fields[metadataKey($0.property)]) })
+            (
+                item,
+                order.map { sort -> SortValue? in
+                    if let property = sort.property { return SortValue(item.fields[metadataKey(property)]) }
+                    guard let rootID = sort.categoryRootID else { return nil }
+                    return categoryRanks[rootID]?[item.itemID].map(SortValue.category)
+                }
+            )
         }
         return decorated.sorted { lhs, rhs in
             for index in order.indices {
@@ -36,6 +48,7 @@ func metadataKey(_ property: String) -> String {
 }
 
 private enum SortValue {
+    case category(Int)
     case number(ItemValue)
     case date(Date)
     case text(String)
@@ -53,6 +66,7 @@ private enum SortValue {
     }
     var rank: Int {
         switch self {
+        case .category: return -1
         case .number: return 0
         case .date: return 1
         case .text: return 2
@@ -62,6 +76,7 @@ private enum SortValue {
     func compare(to other: SortValue) -> Int {
         func compare<T: Comparable>(_ a: T, _ b: T) -> Int { a == b ? 0 : a < b ? -1 : 1 }
         switch (self, other) {
+        case (.category(let a), .category(let b)): return compare(a, b)
         case (.number(.integer(let a)), .number(.integer(let b))): return compare(a, b)
         case (.number(.real(let a)), .number(.real(let b))): return compare(a, b)
         case (.number(.integer(let a)), .number(.real(let b))): return Self.compare(a, to: b)

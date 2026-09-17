@@ -485,7 +485,7 @@
             },
             "expression": {
               "type": "text",
-              "value": "context ==[c] \"family\""
+              "value": "itemID == \"\""
             }
           }
         },
@@ -519,7 +519,7 @@
             },
             "expression": {
               "type": "text",
-              "value": "context ==[c] \"friends\""
+              "value": "itemID == \"\""
             }
           }
         },
@@ -553,7 +553,7 @@
             },
             "expression": {
               "type": "text",
-              "value": "context ==[c] \"work\""
+              "value": "itemID == \"\""
             }
           }
         },
@@ -1897,7 +1897,7 @@
             },
             "expression": {
               "type": "text",
-              "value": "location ==[c] \"anywhere\""
+              "value": "itemID == \"\""
             }
           }
         },
@@ -1931,7 +1931,7 @@
             },
             "expression": {
               "type": "text",
-              "value": "location ==[c] \"home\""
+              "value": "itemID == \"\""
             }
           }
         },
@@ -1965,7 +1965,7 @@
             },
             "expression": {
               "type": "text",
-              "value": "location ==[c] \"office\""
+              "value": "itemID == \"\""
             }
           }
         },
@@ -1999,7 +1999,7 @@
             },
             "expression": {
               "type": "text",
-              "value": "location == * && location !=[c] \"anywhere\""
+              "value": "location == *"
             }
           }
         },
@@ -2022,7 +2022,7 @@
         },
         "body": {
           "type": "text",
-          "value": "Suggestions for calls: an explicit phone method, or call/talk-to wording without an attached location. Contact details, a duration estimate and a complete action form are not prerequisites. Include or exclude manually to correct suggestions."
+          "value": "Call suggestions from subject/body wording when no location or required-place category applies. Assign Phone directly for an explicit call; manual inclusion or exclusion corrects suggestions."
         },
         "selection": {
           "type": "object",
@@ -2033,7 +2033,7 @@
             },
             "expression": {
               "type": "text",
-              "value": "selection != * && viewDefinition != * && (means ==[c] \"phone\" || (location != * && (subject ==[cd] \"*talk to *\" || body ==[cd] \"*talk to *\" || subject ==[cd] \"*call *\" || body ==[cd] \"*call *\" || subject ==[cd] \"*phone *\" || body ==[cd] \"*phone *\" || subject ==[cd] \"*telephone *\" || body ==[cd] \"*telephone *\")))"
+              "value": "selection != * && viewDefinition != * && location != * && (subject ==[cd] \"*talk to *\" || body ==[cd] \"*talk to *\" || subject ==[cd] \"*call *\" || body ==[cd] \"*call *\" || subject ==[cd] \"*phone *\" || body ==[cd] \"*phone *\" || subject ==[cd] \"*telephone *\" || body ==[cd] \"*telephone *\")"
             }
           }
         },
@@ -2041,7 +2041,12 @@
           "type": "integer",
           "value": 43
         }
-      }
+      },
+      "excludedCategoryKeys": [
+        "where.home",
+        "where.office",
+        "where.site"
+      ]
     },
     {
       "key": "means.email",
@@ -2067,7 +2072,7 @@
             },
             "expression": {
               "type": "text",
-              "value": "means ==[c] \"email\""
+              "value": "itemID == \"\""
             }
           }
         },
@@ -2101,7 +2106,7 @@
             },
             "expression": {
               "type": "text",
-              "value": "means ==[c] \"video\""
+              "value": "itemID == \"\""
             }
           }
         },
@@ -2135,7 +2140,7 @@
             },
             "expression": {
               "type": "text",
-              "value": "means ==[c] \"in-person\""
+              "value": "itemID == \"\""
             }
           }
         },
@@ -2169,7 +2174,7 @@
             },
             "expression": {
               "type": "text",
-              "value": "priority == \"P0\""
+              "value": "itemID == \"\""
             }
           }
         },
@@ -2203,7 +2208,7 @@
             },
             "expression": {
               "type": "text",
-              "value": "priority == \"P1\""
+              "value": "itemID == \"\""
             }
           }
         },
@@ -2237,7 +2242,7 @@
             },
             "expression": {
               "type": "text",
-              "value": "priority == \"P2\""
+              "value": "itemID == \"\""
             }
           }
         },
@@ -2271,7 +2276,7 @@
             },
             "expression": {
               "type": "text",
-              "value": "priority == \"P3\""
+              "value": "itemID == \"\""
             }
           }
         },
@@ -2305,7 +2310,7 @@
             },
             "expression": {
               "type": "text",
-              "value": "priority == \"P4\""
+              "value": "itemID == \"\""
             }
           }
         },
@@ -2339,7 +2344,7 @@
             },
             "expression": {
               "type": "text",
-              "value": "urgency == \"U0\""
+              "value": "itemID == \"\""
             }
           }
         },
@@ -2373,7 +2378,7 @@
             },
             "expression": {
               "type": "text",
-              "value": "urgency == \"U1\""
+              "value": "itemID == \"\""
             }
           }
         },
@@ -2407,7 +2412,7 @@
             },
             "expression": {
               "type": "text",
-              "value": "urgency == \"U2\""
+              "value": "itemID == \"\""
             }
           }
         },
@@ -2441,7 +2446,7 @@
             },
             "expression": {
               "type": "text",
-              "value": "urgency == \"U3\""
+              "value": "itemID == \"\""
             }
           }
         },
@@ -2484,10 +2489,6 @@
                 {
                   "type": "object",
                   "value": {
-                    "property": {
-                      "type": "text",
-                      "value": "urgency"
-                    },
                     "isAscending": {
                       "type": "boolean",
                       "value": true
@@ -2497,10 +2498,6 @@
                 {
                   "type": "object",
                   "value": {
-                    "property": {
-                      "type": "text",
-                      "value": "priority"
-                    },
                     "isAscending": {
                       "type": "boolean",
                       "value": true
@@ -2527,7 +2524,284 @@
       },
       "excludedCategoryKeys": [
         "status.done"
+      ],
+      "viewSortCategoryKeys": [
+        "urgency",
+        "priority",
+        null
       ]
+    },
+    {
+      "key": "work-type",
+      "classID": "Item",
+      "parents": [
+        "what"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Work type"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Assign by category membership; edit or delete freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == \"\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 60
+        }
+      }
+    },
+    {
+      "key": "work-type.foundation",
+      "classID": "Item",
+      "parents": [
+        "work-type"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Foundation"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Assign by category membership; edit or delete freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == \"\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 0
+        }
+      }
+    },
+    {
+      "key": "work-type.task",
+      "classID": "Item",
+      "parents": [
+        "work-type"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Task"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Assign by category membership; edit or delete freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == \"\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 1
+        }
+      }
+    },
+    {
+      "key": "work-type.milestone",
+      "classID": "Item",
+      "parents": [
+        "work-type"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Milestone"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Assign by category membership; edit or delete freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == \"\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 2
+        }
+      }
+    },
+    {
+      "key": "work-type.followup",
+      "classID": "Item",
+      "parents": [
+        "work-type"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Follow-up"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Assign by category membership; edit or delete freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == \"\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 3
+        }
+      }
+    },
+    {
+      "key": "work-type.implementation",
+      "classID": "Item",
+      "parents": [
+        "work-type"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Implementation"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Assign by category membership; edit or delete freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == \"\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 4
+        }
+      }
+    },
+    {
+      "key": "assigned-to",
+      "classID": "Item",
+      "parents": [
+        "who"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Assigned to"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Assign by category membership; edit or delete freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == \"\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 61
+        }
+      }
+    },
+    {
+      "key": "optional",
+      "classID": "Item",
+      "parents": [
+        "what"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Optional"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional starter category. Assign by category membership; edit or delete freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == \"\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 62
+        }
+      }
     }
   ]
 }
