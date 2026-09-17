@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Portable, side-effect-free checks for the release controller's safety gates."""
 import importlib.util
+import subprocess
+import shutil
 from pathlib import Path
 import tempfile
 import unittest
@@ -143,6 +145,144 @@ class ReleaseTests(unittest.TestCase):
         self.assertTrue(release.significant(['Sources/TractandaCore/Service.swift']))
         self.assertTrue(release.significant(['plugins/tractanda/skills/tractanda/SKILL.md']))
         self.assertFalse(release.significant(['work/notes.md', 'outputs/Tractanda-Resume.md']))
+
+    def test_prune_keeps_newest_verified_publication_and_preserves_malformed(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(release, 'CONTROL', Path(temporary)):
+            root = Path(temporary)
+            def published(version):
+                directory = root / version; directory.mkdir()
+                release.write(directory / 'state.json', {
+                    'version': version, 'directory': str(directory), 'status': 'complete', 'commit': 'a' * 40,
+                    'configuration': {'repository': 'owner/repo'},
+                    'steps': {'publish': {'result': {
+                        'url': f'https://github.com/owner/repo/releases/tag/v{version}', 'sha256': {
+                            f'tractanda-{version}-macos-arm64.tar.gz': 'a' * 64,
+                            f'Tractanda-{version}-arm64.pkg': 'b' * 64, 'SHA256SUMS': 'c' * 64,
+                        },
+                    }}},
+                })
+                (directory / 'bundle').mkdir(); (directory / 'bundle' / 'large').write_bytes(b'x')
+                return directory
+            old, newest = published('0.1.0-poc.9'), published('0.1.0-poc.10')
+            malformed = root / '0.1.0-poc.8'; malformed.mkdir(); (malformed / 'state.json').write_text('{bad')
+            with patch.object(release, 'git', return_value=''):
+                result = release.prune_releases()
+            self.assertEqual(result['removed'], ['0.1.0-poc.9'])
+            self.assertFalse((old / 'bundle').exists())
+            self.assertFalse((newest / 'bundle').exists())
+            self.assertTrue(malformed.exists())
+
+    def test_prune_does_not_follow_version_or_receipt_symlinks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            control = root / 'control'; control.mkdir()
+            outside = root / 'outside'; outside.mkdir()
+            important = outside / 'keep'; important.write_text('user data')
+            (control / '0.1.0-poc.99').symlink_to(outside, target_is_directory=True)
+            with patch.object(release, 'CONTROL', control), patch.object(release, 'git', return_value=''):
+                self.assertEqual(release.prune_releases()['removed'], [])
+                self.assertEqual(important.read_text(), 'user data')
+                (control / 'receipts').symlink_to(outside, target_is_directory=True)
+                with self.assertRaisesRegex(RuntimeError, 'symlinks'):
+                    release.prune_releases()
+                self.assertEqual(list(outside.iterdir()), [important])
+
+    def test_manual_prune_and_release_share_the_same_exclusion_lock(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(release, 'CONTROL', Path(temporary)):
+            with release.lock():
+                with self.assertRaisesRegex(RuntimeError, 'Another release operation'):
+                    with release.lock():
+                        self.fail('Concurrent release mutation was admitted')
+
+    def test_retention_runs_only_after_publication_is_marked_complete(self):
+        pipeline = object.__new__(release.Pipeline)
+        pipeline.directory = Path('/unused')
+        pipeline.source = Path('/unused/source')
+        pipeline.state = {'status': 'ready', 'commit': 'test', 'steps': {}}
+        pipeline.save = lambda: None
+        pipeline.step = lambda name, action: pipeline.state['steps'].update({name: {}})
+        pipeline.verify_artifacts = lambda: None
+        pipeline.health = lambda: {}
+        pipeline.wait_for_ci = lambda timeout: pipeline.state['steps'].update({'ci': {}})
+        seen = []
+        def retention(value):
+            self.assertEqual(value.state['status'], 'complete')
+            self.assertEqual(set(value.state['steps']), set(release.RELEASE_STEPS))
+            seen.append(value)
+        with patch.object(release, 'git', side_effect=['test', '']), \
+                patch.object(release, 'record_release_retention', side_effect=retention):
+            pipeline.run()
+        self.assertEqual(seen, [pipeline])
+
+    def test_verified_publication_requires_exact_receipt(self):
+        version = '0.1.0-poc.10'
+        hashes = {
+            f'tractanda-{version}-macos-arm64.tar.gz': 'a' * 64,
+            f'Tractanda-{version}-arm64.pkg': 'b' * 64, 'SHA256SUMS': 'c' * 64,
+        }
+        state = {'version': version, 'commit': 'd' * 40, 'status': 'complete',
+                 'configuration': {'repository': 'owner/repo'},
+                 'steps': {'publish': {'result': {
+                     'url': f'https://github.com/owner/repo/releases/tag/v{version}', 'sha256': hashes}}}}
+        self.assertTrue(release.is_verified_published(state))
+        state['steps']['publish']['result']['url'] = 'https://example.invalid/'
+        self.assertFalse(release.is_verified_published(state))
+
+    def test_retention_warning_is_recorded_without_failing_published_pipeline(self):
+        pipeline = type('Pipeline', (), {'state': {}, 'save': lambda self: None})()
+        with patch.object(release, 'prune_releases', side_effect=RuntimeError('disk unavailable')):
+            release.record_release_retention(pipeline)
+        self.assertEqual(pipeline.state['retention'], {'warning': 'disk unavailable'})
+
+    def test_prune_uses_real_git_worktrees_and_later_removes_compacted_release(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary) / 'repo'; repo.mkdir()
+            def run(*args, cwd=repo):
+                return subprocess.check_output(['git', *args], cwd=cwd, text=True).strip()
+            run('init'); (repo / 'tracked').write_text('x')
+            run('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'add', 'tracked')
+            run('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-m', 'test')
+            commit = run('rev-parse', 'HEAD')
+            unrelated = repo / 'unrelated'
+            run('worktree', 'add', '--detach', str(unrelated), commit)
+            shutil.rmtree(unrelated)
+            control = repo / 'work/release-pipeline'; control.mkdir(parents=True)
+            def state(version, directory, complete=True):
+                result = {'version': version, 'directory': str(directory), 'commit': commit,
+                          'configuration': {'repository': 'owner/repo'}, 'status': 'complete' if complete else 'running',
+                          'steps': {}}
+                if complete:
+                    result['steps']['publish'] = {'result': {'url': f'https://github.com/owner/repo/releases/tag/v{version}', 'sha256': {
+                        f'tractanda-{version}-macos-arm64.tar.gz': 'a' * 64,
+                        f'Tractanda-{version}-arm64.pkg': 'b' * 64, 'SHA256SUMS': 'c' * 64}}}
+                return result
+            directories = {}
+            for suffix, complete in [('8', True), ('9', True), ('10', True), ('11', False), ('2', True)]:
+                version = '0.1.0-poc.' + suffix; directory = control / version; directory.mkdir(); directories[suffix] = directory
+                release.write(directory / 'state.json', state(version, directory, complete))
+                run('worktree', 'add', '--detach', str(directory / 'source'), commit)
+                (directory / f'Tractanda-{version}-arm64.pkg').write_bytes(b'pkg')
+                (directory / f'tractanda-{version}-macos-arm64.tar.gz').write_bytes(b'tar')
+            (directories['8'] / 'source' / 'dirty').write_text('dirty')
+            shutil.rmtree(directories['2'] / 'source')
+            release.write(control / 'current.json', state('0.1.0-poc.11', directories['11'], False))
+            def adapter(*args, cwd=None): return run(*args, cwd=Path(cwd) if cwd else repo)
+            with patch.object(release, 'CONTROL', control), patch.object(release, 'git', side_effect=adapter):
+                first = release.prune_releases()
+                self.assertIn('0.1.0-poc.9', first['removed'], first)
+                self.assertFalse(directories['9'].exists())
+                self.assertFalse((directories['10'] / 'source').exists())
+                self.assertTrue((directories['10'] / 'Tractanda-0.1.0-poc.10-arm64.pkg').exists())
+                self.assertTrue(directories['11'].exists())
+                self.assertTrue(directories['8'].exists())
+                release.write(directories['11'] / 'state.json', state('0.1.0-poc.11', directories['11'], True))
+                release.write(control / 'current.json', state('0.1.0-poc.11', directories['11'], True))
+                second = release.prune_releases()
+                self.assertIn('0.1.0-poc.10', second['removed'])
+                self.assertFalse(directories['10'].exists())
+                remaining = run('worktree', 'list', '--porcelain', '-z')
+                self.assertIn(str(unrelated.resolve()), remaining)
+                self.assertNotIn(str((directories['2'] / 'source').resolve()), remaining)
 
     def test_canonical_preservation_accepts_append_only_and_rejects_rewrites(self):
         before = {'items/old.tractanda': 'a'}

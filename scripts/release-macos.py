@@ -135,10 +135,154 @@ def next_version(version):
     return match[1] + str(int(match[2]) + 1)
 
 
+def release_version(path):
+    match = re.fullmatch(r'(\d+)\.(\d+)\.(\d+)-poc\.(\d+)', Path(path).name)
+    return tuple(map(int, match.groups())) if match else None
+
+
+def is_verified_published(state):
+    if not isinstance(state, dict) or state.get('status') != 'complete':
+        return False
+    version = state.get('version', '')
+    configuration = state.get('configuration', {})
+    steps = state.get('steps', {})
+    if not isinstance(configuration, dict) or not isinstance(steps, dict):
+        return False
+    published = steps.get('publish', {})
+    result = published.get('result', {}) if isinstance(published, dict) else {}
+    repo = configuration.get('repository', '')
+    if not isinstance(result, dict) or not isinstance(repo, str) or not re.fullmatch(r'[\w.-]+/[\w.-]+', repo):
+        return False
+    if not isinstance(version, str) or release_version(version) is None:
+        return False
+    if not isinstance(state.get('commit'), str) or not re.fullmatch(r'[0-9a-f]{40}', state['commit']):
+        return False
+    if result.get('url') != f'https://github.com/{repo}/releases/tag/v{version}':
+        return False
+    hashes = result.get('sha256')
+    expected = {f'tractanda-{version}-macos-arm64.tar.gz', f'Tractanda-{version}-arm64.pkg', 'SHA256SUMS'}
+    return (isinstance(hashes, dict) and expected.issubset(hashes)
+            and all(isinstance(name, str) and Path(name).name == name
+                    and isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value)
+                    for name, value in hashes.items()))
+
+
+def prune_releases():
+    """Caller holds pipeline.lock. Reclaim only self-bound, published build trees."""
+    report = {'removed': [], 'compacted': [], 'retained': [], 'skipped': [], 'prunedWorktrees': []}
+    if not CONTROL.exists():
+        return report
+    receipts = CONTROL / 'receipts'
+    current_path = CONTROL / 'current.json'
+    if CONTROL.is_symlink() or receipts.is_symlink() or current_path.is_symlink():
+        raise RuntimeError('Release control/receipt paths must not be symlinks.')
+    current = read(current_path) if current_path.exists() else {}
+    if not isinstance(current, dict):
+        raise RuntimeError('Invalid current release state; refusing cleanup.')
+    active = current.get('directory') if current.get('status') != 'complete' else None
+    active_path = Path(active).resolve() if isinstance(active, str) and active else None
+    candidates = []
+    for path in sorted(CONTROL.iterdir()):
+        if release_version(path) is None or path.is_symlink() or not path.is_dir():
+            continue
+        state_path = path / 'state.json'
+        if state_path.is_symlink() or not state_path.is_file():
+            continue
+        try:
+            state = read(state_path)
+        except (OSError, ValueError):
+            report['skipped'].append({'version': path.name, 'reason': 'unreadable state'})
+            continue
+        if (not is_verified_published(state) or state.get('directory') != str(path)
+                or state['version'] != path.name):
+            continue
+        candidates.append((path, state))
+    newest = max((path for path, _ in candidates), key=release_version, default=None)
+    # Git's NUL-delimited format preserves spaces in linked checkout paths.
+    registered, entry = {}, None
+    for field in git('worktree', 'list', '--porcelain', '-z').split('\0'):
+        if field.startswith('worktree '):
+            entry = str(Path(field[9:]).resolve()); registered[entry] = {'locked': False}
+        elif field.startswith('locked') and entry:
+            registered[entry]['locked'] = True
+    for path, state in candidates:
+        if path.resolve() == active_path:
+            report['retained'].append(path.name)
+            continue
+        source = path / 'source'
+        source_key = str(source.resolve())
+        if source.is_symlink() or (source.exists() and not source.is_dir()):
+            report['skipped'].append({'version': path.name, 'reason': 'unsafe source path'})
+            continue
+        if source.exists():
+            try:
+                if (source_key not in registered or registered[source_key]['locked']
+                        or git('rev-parse', 'HEAD', cwd=source) != state['commit']
+                        or git('status', '--porcelain', cwd=source)):
+                    report['skipped'].append({'version': path.name, 'reason': 'source changed, locked or unregistered'})
+                    continue
+            except (OSError, subprocess.CalledProcessError):
+                report['skipped'].append({'version': path.name, 'reason': 'source check failed'})
+                continue
+        # Persist provenance before removing any version tree. write() replaces
+        # a receipt atomically and never follows a pre-existing receipt symlink.
+        write(receipts / (path.name + '.json'), state)
+        if source.exists() or source_key in registered:
+            try:
+                if registered.get(source_key, {}).get('locked'):
+                    report['skipped'].append({'version': path.name, 'reason': 'locked checkout'})
+                    continue
+                git('worktree', 'remove', '--force', str(source))
+                registered.pop(source_key, None)
+            except (OSError, subprocess.CalledProcessError):
+                report['skipped'].append({'version': path.name, 'reason': 'checkout removal failed'})
+                continue
+        if path != newest:
+            shutil.rmtree(path)  # rmtree unlinks nested symlinks; it does not visit their targets.
+            report['removed'].append(path.name)
+            continue
+        # Completed source and unpacked payloads are disposable; retain final
+        # downloads plus compact state/log/notarization evidence for the newest.
+        payloads = [path / name for name in ('.build', 'bundle', 'signed', 'staging', 'unpacked',
+                    f'tractanda-{path.name}-macos-arm64')]
+        payloads += list(path.glob('*.incomplete-*'))
+        for target in payloads:
+            if target.is_symlink(): target.unlink()
+            elif target.is_dir(): shutil.rmtree(target)
+            elif target.exists(): target.unlink()
+        report['compacted'].append(path.name)
+        report['retained'].append(path.name)
+    # The user may already have removed a version folder. Remove only its
+    # missing linked-checkout registration, never prune unrelated worktrees.
+    for name, details in registered.items():
+        source = Path(name)
+        if (source.name != 'source' or source.parent.parent.resolve() != CONTROL.resolve()
+                or release_version(source.parent) is None or source.parent.resolve() == active_path
+                or details['locked'] or source.exists() or source.is_symlink()):
+            continue
+        try:
+            git('worktree', 'remove', '--force', str(source))
+            report['prunedWorktrees'].append(name)
+        except (OSError, subprocess.CalledProcessError):
+            report['skipped'].append({'version': source.parent.name, 'reason': 'stale checkout removal failed'})
+    return report
+
+
+def record_release_retention(pipeline):
+    """A cleanup failure must not make a published release require rebuilding."""
+    try:
+        result = prune_releases()
+    except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:
+        result = {'warning': str(error)}
+    pipeline.state['retention'] = result
+    pipeline.save()
+
+
 def prepare(settings, notes):
     current_path = CONTROL / 'current.json'
     if current_path.exists() and read(current_path)['status'] != 'complete':
         raise RuntimeError('Finish or explicitly retire the pending release before preparing another.')
+    prune_releases()
     if git('branch', '--show-current') != settings['branch']:
         raise RuntimeError('Prepare from the configured publication branch.')
     origins = {f'https://github.com/{settings["repository"]}.git', f'git@github.com:{settings["repository"]}.git'}
@@ -471,6 +615,10 @@ class Pipeline:
         self.state.pop('activeStepStartedAt', None)
         self.state.pop('error', None)
         self.save()
+        # Publication is durably complete before any sealed checkout is removed.
+        if getattr(self, 'directory', None) is not None:
+            record_release_retention(self)
+
 
 
 def ensure_dashboard(port=48730):
@@ -516,7 +664,7 @@ def start_runner(ci_timeout):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['prepare', 'revise', 'release', 'run', 'status', 'dashboard'])
+    parser.add_argument('action', choices=['prepare', 'revise', 'release', 'run', 'status', 'dashboard', 'prune'])
     parser.add_argument('--config', type=Path, default=DEFAULT_CONFIG)
     parser.add_argument('--notes', help='Concise description of this completed changeset')
     parser.add_argument('--background', action='store_true', help='Run in a detached local process; no agent or scheduler is used')
@@ -545,6 +693,9 @@ def main():
         subprocess.run(arguments, check=True)
         return
     with lock():
+        if args.action == 'prune':
+            print(json.dumps(prune_releases(), indent=2))
+            return
         if args.action in ('prepare', 'revise', 'release'):
             if not args.notes:
                 parser.error('prepare/revise/release requires --notes')

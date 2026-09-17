@@ -26,3 +26,38 @@ for(const key of ['priority','urgency','assignee','taskKind','optional','sortOrd
 const script=html.slice(html.indexOf('"use strict";'),html.indexOf('</script>',html.indexOf('"use strict";'))).replace('@@LIVE_CLIENT@@',live).replace('@@LEARNING_CLIENT@@','');
 new vm.Script(script);
 console.log('Kanban native order, category edits, absent values, no-op, unknown overrides, and script syntax passed.');
+
+// Use only controls that actually exist in the shipped page. Removed controls
+// must not break clearing the old board before an asynchronous project switch.
+(async()=>{
+  const controls=new Map(Array.from(html.matchAll(/\bid="([^"]+)"/g),m=>[m[1],{value:'stale',open:false}]));
+  const events=[],load=[];
+  let navigation;
+  const reset=()=>({tasks:[{id:'old'}],title:'Old project',categoryAxes:[{id:'old-axis'}]});
+  navigation=vm.createContext({data:reset(),projectBoard:{},selectedViewID:'alpha',viewGeneration:0,
+    revisionsByID:new Map([['old',{}]]),dirty:true,pendingWrite:null,isSaving:false,isConnected:true,
+    undoStack:[{}],changes:2,$:id=>controls.get(id)||null,currentDate:()=>new Date(0).toISOString(),
+    render:()=>events.push(clone(navigation.data)),replaceViewURL:id=>load.push(['url',id]),
+    restorePendingWrite:()=>{},updateConnectionState:()=>{},toast:()=>{},
+    refreshLiveBoard:async force=>{load.push(['load',navigation.selectedViewID,force]);navigation.data={projectID:navigation.selectedViewID,tasks:[{id:navigation.selectedViewID+'-item'}],columns:[{id:navigation.selectedViewID+'-column'}]};}
+  });
+  vm.runInContext(live.slice(live.indexOf('  function clearViewData('),live.indexOf('  function restorePendingWrite(')),navigation);
+  vm.runInContext(live.slice(live.indexOf('  async function selectProjectView('),live.indexOf('  function makeLiveFields(')),navigation);
+  for(const id of ['beta','alpha']) {
+    await navigation.selectProjectView(id);
+    assert.equal(navigation.data.projectID,id);
+    assert.equal(navigation.data.tasks[0].id,id+'-item');
+    assert.equal(navigation.data.columns[0].id,id+'-column');
+    assert.equal(controls.get('search').value,'');
+    assert.equal(controls.get('track-filter').value,'all');
+    assert.equal(events.at(-1).tasks.length,0);
+    assert.equal(events.at(-1).categoryAxes,undefined);
+  }
+  assert.equal(navigation.viewGeneration,2);
+  assert.deepEqual(load,[['url','beta'],['load','beta',true],['url','alpha'],['load','alpha',true]]);
+  assert.equal(navigation.revisionsByID.size,0);
+  controls.get('task-dialog').open=true;
+  await navigation.selectProjectView('beta');
+  assert.equal(navigation.selectedViewID,'alpha','An open draft still blocks switching.');
+  console.log('Project switching in both directions clears old board state and loads the new selection.');
+})().catch(error=>{console.error(error);process.exitCode=1;});

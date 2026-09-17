@@ -52,7 +52,7 @@
     revisionsByID.clear();dirty=!!pendingWrite;undoStack=[];changes=0;isConnected=false;
     learningCategoryID='';learningNotice='';learningItemPosition=0;learningSuggestionPosition=0;learningQueryState=null;
     if ($('learning-dialog').open) $('learning-dialog').close();
-    $('search').value='';$('track-filter').value='all';$('scope-filter').value='all';render();
+    $('search').value='';$('track-filter').value='all';render();
   }
 
   function restorePendingWrite(viewID) {
