@@ -10,12 +10,20 @@ public enum DemoFixture {
         func selection(_ expression: String) -> ItemValue {
             .object(["language": .text(SpotlightQuery.profile), "expression": .text(expression)])
         }
+        let persons = try create(
+            "persons", "Item",
+            ["subject": .text("Associated with persons"), "selection": selection("itemID == \"\"")])
+        let family = try create(
+            "family", "Item", ["subject": .text("Family"), "selection": selection("itemID == \"\"")])
+        let workCategory = try create(
+            "work-category", "Item", ["subject": .text("Work"), "selection": selection("itemID == \"\"")])
         let alice = try create(
             "alice", "NaturalPersonItem",
             [
                 "subject": .text("Alice"),
                 "displayName": .text("Alice"), "mobilePhone": .text("+43 000 111111"),
-                "selection": selection("associatedPerson == \"alice\""),
+                "selection": selection("itemID == \"\""),
+                "categoryParents": .list([.reference(ItemReference(persons.itemID))]),
             ])
         let bob = try create(
             "bob", "NaturalPersonItem",
@@ -40,31 +48,23 @@ public enum DemoFixture {
                     holding("bob-term", bob, "2025-02-01T00:00:00Z"),
                 ]),
             ])
-        let persons = try create(
-            "persons", "Item",
-            [
-                "subject": .text("Associated with persons"),
-                "selection": selection("associatedPerson == *"),
-            ])
-        let family = try create(
-            "family", "Item",
-            [
-                "subject": .text("Family"),
-                "selection": selection("context == \"family\""),
-            ])
         let lunch = try create(
             "lunch", "Item",
             [
                 "subject": .text("Family lunch with Alice"),
                 "body": .text("Discuss the chess club newsletter over lunch."),
-                "associatedPerson": .text("alice"), "context": .text("family"),
+                "categoryOverrides": .object([
+                    alice.itemID: .text("include"), family.itemID: .text("include"),
+                ]),
             ])
         let work = try create(
             "work", "Item",
             [
                 "subject": .text("Newsletter delivery issue"),
                 "body": .text("Alice reported a missing chess club newsletter."),
-                "associatedPerson": .text("alice"), "context": .text("work"),
+                "categoryOverrides": .object([
+                    alice.itemID: .text("include"), workCategory.itemID: .text("include"),
+                ]),
             ])
         let todo = try create(
             "todo", "Item",
@@ -76,7 +76,7 @@ public enum DemoFixture {
         return [
             "alice": alice.itemID, "bob": bob.itemID, "president": role.itemID,
             "persons": persons.itemID, "family": family.itemID, "lunch": lunch.itemID,
-            "issue": work.itemID, "todo": todo.itemID,
+            "issue": work.itemID, "todo": todo.itemID, "work": workCategory.itemID,
         ]
     }
 }

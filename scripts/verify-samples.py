@@ -44,7 +44,7 @@ def verify(binary):
         store, socket = root / "store", root / "socket"
         # This is the same core fixture used by the documented `tractanda seed` command.
         seeded = json.loads(subprocess.check_output([binary, "seed", str(store)]))
-        assert len(seeded) == 8
+        assert len(seeded) == 9
         with wire.server(binary, store, socket) as client:
             template = json.loads((PROJECT / "templates/starter-categories.json").read_text())
             installed = client.call("TractandaCategory/installTemplate", {
@@ -80,7 +80,7 @@ def verify(binary):
             for record in before[0].values():
                 fields = record["fields"]
                 assert fields["classID"]["value"] in concrete, fields["classID"]
-                assert not set(fields).intersection({"priority","urgency","taskKind","assignee","optional","status"})
+                assert not set(fields).intersection({"priority","urgency","taskKind","assignee","optional","status","context","associatedPerson"})
                 for key in ("activity", "activityNotes"):
                     for entry in fields.get(key, {}).get("value", []):
                         assert entry["value"]["at"]["type"] == "date", (key, entry)

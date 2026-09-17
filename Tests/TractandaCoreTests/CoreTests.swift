@@ -33,8 +33,8 @@ final class CoreTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let store = try ItemStore(root: root)
         let fixture = try DemoFixture.seed(store)
-        XCTAssertEqual(fixture.count, 8)
-        XCTAssertEqual(try store.candidates().count, 8)
+        XCTAssertEqual(fixture.count, 9)
+        XCTAssertEqual(try store.candidates().count, 9)
     }
 
     func testGenericItemIsConcreteAndRootAncestryDoesNotRepeat() throws {
@@ -269,16 +269,28 @@ final class CoreTests: XCTestCase {
             try Categories.savedView(store: store, id: saved.itemID).map(\.itemID), [ids["lunch"]!])
         let issue = try store.get(ids["issue"]!)
         let included = try edit(
-            store, issue, ["categoryOverrides": .object([ids["family"]!: .text("include")])])
+            store, issue,
+            [
+                "categoryOverrides": .object(
+                    issue.fields["categoryOverrides"]!.map!.merging([ids["family"]!: .text("include")]) {
+                        _, new in new
+                    })
+            ])
         XCTAssertEqual(
             Set(try Categories.query(store: store, categoryPath: path).map(\.itemID)),
             Set([ids["lunch"]!, issue.itemID]))
         XCTAssertEqual(
             try Categories.explain(included, category: store.get(ids["family"]!)).reason, "manual include")
         let excluded = try edit(
-            store, included, ["categoryOverrides": .object([ids["family"]!: .text("exclude")])])
+            store, included,
+            [
+                "categoryOverrides": .object(
+                    included.fields["categoryOverrides"]!.map!.merging([ids["family"]!: .text("exclude")]) {
+                        _, new in new
+                    })
+            ])
         XCTAssertEqual(try Categories.query(store: store, categoryPath: path).count, 1)
-        _ = try edit(store, excluded, ["categoryOverrides": .object([:])])
+        _ = try edit(store, excluded, ["categoryOverrides": issue.fields["categoryOverrides"]!])
         XCTAssertEqual(try Categories.query(store: store, categoryPath: path).count, 1)
         XCTAssertEqual(
             try Categories.query(store: store, expression: "kMDItemContentTypeTree == \"PersonItem\"").count,
@@ -587,11 +599,14 @@ final class CoreTests: XCTestCase {
         _ = try edit(
             store, store.get(ids["alice"]!),
             ["categoryParents": .list([.reference(ItemReference(ids["family"]!))])])
+        _ = try edit(
+            store, store.get(ids["lunch"]!), ["categoryOverrides": .object([ids["alice"]!: .text("include")])]
+        )
         let witness = try Categories.explain(
             store.get(ids["lunch"]!), category: store.get(ids["persons"]!), store: store)
         XCTAssertEqual(witness.inheritancePath?.first, ids["persons"])
         XCTAssertEqual(witness.inheritancePath, [ids["persons"]!, ids["family"]!, ids["alice"]!])
-        XCTAssertEqual(witness.sourceReason, "selection rule")
+        XCTAssertEqual(witness.sourceReason, "manual include")
     }
 
     func testActionAndWaitingCategoriesDoNotChangeItemType() throws {

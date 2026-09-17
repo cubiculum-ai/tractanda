@@ -201,7 +201,7 @@ def exercise(binary, adapter, root, checks):
             client.initialize()
             catalog = client.request("tools/list")["tools"]
             catalog_names = {tool["name"] for tool in catalog}
-            assert len(catalog) == 22 and len(catalog_names) == 22
+            assert len(catalog) == 23 and len(catalog_names) == 23
             assert {
                 "tractanda_semantic_status", "tractanda_semantic_search", "tractanda_semantic_results",
                 "tractanda_semantic_configure", "tractanda_semantic_rebuild", "tractanda_semantic_reset",
