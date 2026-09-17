@@ -65,6 +65,20 @@ def git(*args, cwd=ROOT):
     return command(['git', *args], cwd=cwd)
 
 
+def render_release_notes(template, version, commit, notes, repository):
+    """Render self-contained user guidance from the sealed release's template."""
+    if (not re.fullmatch(r'\d+\.\d+\.\d+-poc\.\d+', version)
+            or not re.fullmatch(r'[0-9a-f]{40}', commit)
+            or not re.fullmatch(r'[\w.-]+/[\w.-]+', repository)):
+        raise ValueError('Invalid release-note identity.')
+    values = {'VERSION': version, 'SOURCE_COMMIT': commit, 'CHANGES': notes,
+              'TAG_URL': f'https://github.com/{repository}/blob/v{version}'}
+    pattern = r'\{\{([A-Z_]+)\}\}'
+    if set(re.findall(pattern, template)) != set(values):
+        raise ValueError('Release-note template has missing or unknown placeholders.')
+    return re.sub(pattern, lambda match: values[match.group(1)], template)
+
+
 def release_info(repository, tag):
     # GitHub's tag endpoint cannot find an unpublished draft without a tag ref.
     identity = json.loads(command(['gh', 'release', 'view', tag, '--repo', repository,
@@ -524,15 +538,9 @@ class Pipeline:
         repo, version = self.settings['repository'], self.state['version']
         tag = 'v' + version
         notes = self.directory / 'release-notes.md'
-        notes.write_text(f'Tractanda {version}\n\n{self.state["notes"]}\n\n'
-            f'Source commit: `{self.state["commit"]}`. The signed macOS package and archive include the pinned Qwen3 '
-            'embedding runtime/model. Linux installation remains in development. Developer ID-signed; '
-            'the native package is notarized, stapled and verified by Gatekeeper. Standalone binaries in '
-            'the archive rely on Apple’s online notarization lookup because tickets cannot be stapled to bare executables. '
-            'The preview is experimental and uses the PolyForm Noncommercial license.\n\n'
-            'The local macOS source suite, signed package checks, managed upgrade, canonical-file preservation and '
-            'running-build identity checks passed. GitHub source CI passed.\n\n'
-            f'Installation: https://github.com/{repo}/blob/{tag}/docs/install.md\n')
+        notes.write_text(render_release_notes(
+            (self.source / 'docs/github-release-template.md').read_text(), version,
+            self.state['commit'], self.state['notes'], repo))
         probe = subprocess.run(['gh', 'release', 'view', tag, '--repo', repo, '--json', 'isDraft'],
                                capture_output=True, text=True)
         if probe.returncode:

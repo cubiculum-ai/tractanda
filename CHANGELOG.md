@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.1.0-poc.9
+## 0.1.0-poc.10
+
+This consolidated preview supersedes the early distributions. Its release page contains current installation, client/agent usage, storage, backup and compatibility guidance without depending on earlier release notes. The unpublished poc.9 candidate was superseded before installation or publication.
 
 TRAC-094 adds read-only extracted-text diagnostics through the native API and MCP. Source, FTS-input and summary projections identify current revisions, extraction rules, byte counts and independent index freshness. Large results use explicit continuation/oversized IDs; current permissions apply before text or index metadata is returned. The extraction profile and embedding model are unchanged.
 

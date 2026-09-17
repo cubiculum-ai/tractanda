@@ -4,7 +4,7 @@ This is a source-available proof of concept. See the [changelog](../CHANGELOG.md
 
 From **0.1.0-poc.6**, generic content uses the concrete `Item` class. Shipped templates, fresh installer samples, CLI fixtures and runnable examples use the current classes and native capability `/4` (since poc.8). Update and reconnect older clients. Historical stores are not destructively rewritten by the installer; use a fresh evaluation store to try the current samples. The automated sample check exercises loading, exact retries, view execution and an index rebuild from canonical files.
 
-From **0.1.0-poc.9**, extracted-text diagnostics distinguish canonical text, FTS inputs, semantic source/chunk parameters and actual index freshness. Use the served query reference and the declared `tractanda.extracted-text.v1` feature.
+From **0.1.0-poc.10**, extracted-text diagnostics distinguish canonical text, FTS inputs, semantic source/chunk parameters and actual index freshness. Use the served query reference and the declared `tractanda.extracted-text.v1` feature.
 
 ## Included
 

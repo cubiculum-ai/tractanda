@@ -138,6 +138,23 @@ class ReleaseTests(unittest.TestCase):
         with patch.object(release, 'command', side_effect=github):
             self.assertTrue(release.release_info('owner/repo', 'v0.1.0-poc.2')['draft'])
 
+    def test_release_notes_are_self_contained_and_version_pinned(self):
+        template = (Path(__file__).resolve().parents[1] / 'docs/github-release-template.md').read_text()
+        rendered = release.render_release_notes(template, '0.1.0-poc.10', 'a' * 40,
+                                                'Current diagnostic and UI improvements.', 'owner/repo')
+        self.assertIn('Tractanda-0.1.0-poc.10-arm64.pkg', rendered)
+        self.assertIn('tractanda-0.1.0-poc.10-macos-arm64.tar.gz', rendered)
+        self.assertIn('blob/v0.1.0-poc.10/docs/install.md', rendered)
+        self.assertIn('Current diagnostic and UI improvements.', rendered)
+        for phrase in ('--empty', 'tractanda-tui --profile NAME', '127.0.0.1:48728',
+                       'MCP', 'LaunchDaemons', 'canonical store', 'notarized', 'Linux',
+                       'PolyForm', 'not a universal migration tool'):
+            self.assertIn(phrase, rendered)
+        self.assertNotIn('{{', rendered)
+        self.assertNotIn('Tractanda-0.1.0-poc.1-arm64.pkg', rendered)
+        with self.assertRaises(ValueError):
+            release.render_release_notes(template + '{{UNKNOWN}}', '0.1.0-poc.10', 'a' * 40, '', 'owner/repo')
+
     def test_versions_and_scope(self):
         self.assertEqual(release.next_version('0.1.0-poc.9'), '0.1.0-poc.10')
         with self.assertRaises(ValueError):
