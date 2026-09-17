@@ -45,6 +45,8 @@ Use the actual built `tractanda-mcp` path and a configured profile, or `--socket
 
 Profile names identify stores, not project categories. For example, a main store may use `production`, with separate `test` or purpose-specific profiles. Use the configured names rather than inventing aliases for each project.
 
+Skill names are separate from connection profiles. A local companion named `tractanda-production` can document a connection using `--profile production`; naming a skill does not select or create that profile. Confirm the connection's actual profile rather than inferring it from the skill title.
+
 Inspect profiles without opening a new store:
 
 ```sh
