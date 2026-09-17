@@ -37,8 +37,10 @@ Represent ordinary actions as `Item` with the instance's relevant category assig
 
 ## Retrieve economically and accurately
 
+`tractanda_get`, `tractanda_memberships` and `tractanda_extracted_text` are batch tools: pass `ids: ["item UUID"]`, even for one item. Single-item tools use `itemID`.
+
 - Use `tractanda_query` for metadata predicates, literal FTS text, category intersections and exclusions. Read `tractanda://reference/query` for the portable Spotlight grammar. It is not arbitrary SQL or a promise of every native Spotlight feature.
-- Query IDs first, then `tractanda_get` with `ids: ["item UUID"]` and `projection: "summary"` or a small `properties` list, never both. This is a batch operation, including for one item; single-item tools use `itemID`. Fetch content for relevant records. Properties are literal top-level keys; a projection's omission does not mean a field is unset.
+- Query IDs first, then `tractanda_get` with `projection: "summary"` or a small `properties` list, never both. Fetch content for relevant records. Properties are literal top-level keys; a projection's omission does not mean a field is unset.
 - Honor pagination and the byte budget independently. Follow `remainingIDs`; narrow the projection for `oversizedIDs`. Do not interpret a partial batch as absence. Compare query/get states across pages of one read. The token covers the readable store, so unrelated changes do not invalidate writes already made or require repeating them.
 - Use `sort` for an inline query. A saved `viewID` supplies its own criteria and sort; do not combine it with inline criteria. `sectionID` applies to a saved view.
 - For relative dates, send the relevant `timeZone` and, for reproducible interpretation, `at`. Resolve ambiguity between an event date and a reminder date before assigning precise dates.
