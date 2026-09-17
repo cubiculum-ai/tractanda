@@ -4,4 +4,5 @@ public enum ServerFeature: String, Sendable {
     case semanticJobTiming = "tractanda.semantic-job-timing.v1"
     case categoryMembershipSort = "tractanda.category-membership-sort.v1"
     case categoryMembershipProjection = "tractanda.category-membership-projection.v1"
+    case extractedTextDiagnostics = "tractanda.extracted-text.v1"
 }

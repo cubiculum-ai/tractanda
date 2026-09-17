@@ -10,6 +10,15 @@ final class SemanticVec1Storage: SemanticVectorStorage {
         index = try Vec1Index(path: path, dimensions: dimensions, profileID: profileID)
     }
 
+    func identity(itemID: String, profileID: String) throws -> SemanticIndexedIdentity? {
+        guard index.profileID == profileID, let metadata = try index.itemMetadata(itemID: itemID),
+            metadata.recordCount > 0
+        else { return nil }
+        return SemanticIndexedIdentity(
+            revisionID: metadata.revisionID, profileID: profileID, contentHash: metadata.contentHash,
+            count: metadata.recordCount)
+    }
+
     func hasCurrent(itemID: String, profileID: String, contentHash: String) throws -> Bool {
         try index.itemMetadata(itemID: itemID)?.contentHash == contentHash
     }

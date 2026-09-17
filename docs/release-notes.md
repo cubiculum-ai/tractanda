@@ -2,7 +2,9 @@
 
 This is a source-available proof of concept. See the [changelog](../CHANGELOG.md) for version-specific changes. Formats and APIs may change before 1.0. Use a dedicated evaluation store and keep backups.
 
-From **0.1.0-poc.6**, generic content uses the concrete `Item` class. Shipped templates, fresh installer samples, CLI fixtures and runnable examples use the current classes and native capability `/3`. Update and reconnect older clients. Historical stores are not destructively rewritten by the installer; use a fresh evaluation store to try the current samples. The automated sample check exercises loading, exact retries, view execution and an index rebuild from canonical files.
+From **0.1.0-poc.6**, generic content uses the concrete `Item` class. Shipped templates, fresh installer samples, CLI fixtures and runnable examples use the current classes and native capability `/4` (since poc.8). Update and reconnect older clients. Historical stores are not destructively rewritten by the installer; use a fresh evaluation store to try the current samples. The automated sample check exercises loading, exact retries, view execution and an index rebuild from canonical files.
+
+From **0.1.0-poc.9**, extracted-text diagnostics distinguish canonical text, FTS inputs, semantic source/chunk parameters and actual index freshness. Use the served query reference and the declared `tractanda.extracted-text.v1` feature.
 
 ## Included
 
@@ -23,7 +25,7 @@ From **0.1.0-poc.6**, generic content uses the concrete `Item` class. Shipped te
 - The bundled macOS semantic provider is Qwen3-Embedding-0.6B through vmlx-swift, with pinned model/runtime revisions and included model licenses. Granite Embedding 311M multilingual R2 remains a planned integration. The obsolete subject/body-only input mode has been removed; indexes are rebuildable.
 - Linux remains in development. Earlier Debian source, real-account and synthetic-provider checks do not certify the current installer or a real CPU embedding runtime. No systemd guest boot is claimed.
 - Real macOS lifecycle checks passed on isolated empty/sample stores: both launchd jobs ran as `daemon`, restart preserved records, a deliberately failed upgrade rolled back, and uninstall preserved canonical data. Boot registration is configured, but an actual machine reboot is not part of that test. Production data was not used for uninstall testing.
-- The clean macOS source export passed 331 package tests, 13 standalone client tests, and the native IPC, access planner, Kanban, learning, MCP, shared-daemon and TUI integration checks.
+- Each release validates its sealed source through package/client tests and native IPC, permissions, Kanban, learning, MCP, shared-daemon and TUI integration checks. Consult the version-specific release evidence for that run.
 - General synchronization, attachments, a native GUI and broader operational recovery remain incomplete. The macOS publication workflow verifies Developer ID signatures, package notarization, stapling and Gatekeeper acceptance before publishing each installer.
 
 ## Evaluation guidance

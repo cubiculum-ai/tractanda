@@ -160,6 +160,103 @@ public final class ItemService {
         }
         return result
     }
+    private func extractionEntry(_ revision: Revision, projection: String) throws -> [String: Any] {
+        let corpus = ItemTextContent.corpus(for: revision)
+        let source = corpus.sourceText
+        var fts: [String: Any] = ["searchEligible": !revision.isDeleted && !source.isEmpty]
+        do {
+            if let row = try store.ftsTextRow(for: revision.itemID) {
+                fts["indexedRevisionID"] = row.revisionID
+                fts["status"] =
+                    row.revisionID == revision.revisionID && row.subject == corpus.subject
+                        && row.body == corpus.body && row.metadata == corpus.metadata ? "current" : "stale"
+            } else {
+                fts["status"] = "missing"
+            }
+        } catch {
+            // An unavailable derived cache does not prevent canonical extraction.
+            // Never return SQLite messages, filenames or old index text.
+            fts["status"] = "unavailable"
+        }
+        var result: [String: Any] = [
+            "itemID": revision.itemID, "revisionID": revision.revisionID, "isDeleted": revision.isDeleted,
+            "sourceHash": try SemanticSource.contentHash(sourceText: source),
+            "sourceUTF8Bytes": source.utf8.count,
+            "ftsUTF8Bytes": [
+                "subject": corpus.subject.utf8.count, "body": corpus.body.utf8.count,
+                "metadata": corpus.metadata.utf8.count,
+            ],
+            "index": ["fts": fts, "semantic": semantic.textDiagnostics(for: revision, corpus: corpus)],
+        ]
+        if projection == "source" { result["sourceText"] = source }
+        if projection == "fts" {
+            result["fts"] = ["subject": corpus.subject, "body": corpus.body, "metadata": corpus.metadata]
+        }
+        return result
+    }
+
+    private func extractedText(ids: [String], projection: String, maxBytes: Int) throws -> [String: Any] {
+        let state = store.state
+        var list: [[String: Any]] = []
+        var notFound: [String] = []
+        var oversized: [String] = []
+        func response(_ remaining: ArraySlice<String>) -> [String: Any] {
+            [
+                "extractionProfile": ItemTextContent.profile, "state": state,
+                "list": list, "notFound": notFound, "remainingIDs": Array(remaining),
+                "oversizedIDs": oversized,
+                "excludedRootFields": ItemTextContent.excludedRootFields.sorted(),
+                "ignoredValueTypes": ["integer", "real", "boolean", "date", "reference", "bytes"],
+                "blankMetadataTextOmitted": true, "blankSourceSectionsOmitted": true,
+            ]
+        }
+        func fits(_ result: [String: Any]) throws -> Bool {
+            try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]).count
+                <= maxBytes
+        }
+        for offset in ids.indices {
+            let id = ids[offset]
+            let suffix = ids[(offset + 1)...]
+            let revision: Revision
+            do { revision = try store.get(id) } catch let error as TractandaError
+                where error.code == "notFound" || error.code == "forbidden"
+            {
+                notFound.append(id)
+                guard try fits(response(suffix)) else {
+                    throw TractandaError("responseTooLarge", "The diagnostic continuation exceeds maxBytes.")
+                }
+                continue
+            }
+            let entry = try extractionEntry(revision, projection: projection)
+            list.append(entry)
+            if try fits(response(suffix)) { continue }
+            list.removeLast()
+            var alone = response([])
+            alone["list"] = [entry]
+            alone["notFound"] = [String]()
+            alone["oversizedIDs"] = [String]()
+            if try fits(alone) {
+                let result = response(ids[offset...])
+                guard offset > 0, try fits(result) else {
+                    throw TractandaError(
+                        "responseTooLarge",
+                        "This record fits alone, but not with its continuation. Retry this ID alone, use summary, or increase maxBytes."
+                    )
+                }
+                return result
+            }
+            oversized.append(id)
+            guard try fits(response(suffix)) else {
+                throw TractandaError("responseTooLarge", "The diagnostic continuation exceeds maxBytes.")
+            }
+        }
+        let result = response([])
+        guard try fits(result) else {
+            throw TractandaError("responseTooLarge", "The diagnostic response exceeds maxBytes.")
+        }
+        return result
+    }
+
     private func storeDescription(topic: String, currentUID: UInt32) throws -> [String: Any] {
         switch topic {
         case "overview":
@@ -442,6 +539,22 @@ public final class ItemService {
                 "list": try list.map { try projectedRevision($0, projection: projection) },
                 "notFound": notFound, "state": store.state,
             ]
+        case "TractandaItem/extractedText":
+            try check(args, allowed: ["ids", "projection", "maxBytes"])
+            let ids = try strings(args, "ids")
+            guard (1...64).contains(ids.count), Set(ids).count == ids.count else {
+                throw TractandaError("invalidArguments", "ids must contain 1–64 distinct UUIDs.")
+            }
+            for id in ids { try Identifier.validate(id) }
+            guard args["projection"] == nil || args["projection"] is String else {
+                throw TractandaError("invalidArguments", "projection must be text.")
+            }
+            let projection = args["projection"] as? String ?? "source"
+            guard ["source", "fts", "summary"].contains(projection) else {
+                throw TractandaError("invalidArguments", "projection must be source, fts, or summary.")
+            }
+            let maximum = try integer(args, "maxBytes", default: 65_536, range: 8_192...524_288)
+            return try extractedText(ids: ids, projection: projection, maxBytes: maximum)
         case "TractandaItem/query":
             try check(
                 args,
@@ -559,6 +672,7 @@ public final class ItemService {
                     ServerFeature.runtimeIdentity.rawValue, ServerFeature.semanticJobTiming.rawValue,
                     ServerFeature.categoryMembershipSort.rawValue,
                     ServerFeature.categoryMembershipProjection.rawValue,
+                    ServerFeature.extractedTextDiagnostics.rawValue,
                 ],
                 "server": try JSONSerialization.jsonObject(with: JSON.encode(RuntimeIdentity.current)),
                 "state": store.state, "ownerUID": store.ownerUID, "queryProfile": SpotlightQuery.profile,

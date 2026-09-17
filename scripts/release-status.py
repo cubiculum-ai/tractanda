@@ -207,7 +207,9 @@ class Observer:
         marker = (data.get('stage'), data.get('latestObservedProgress'),
                   data.get('lastLogActivityAt'),
                   (data.get('uploadReadProgress') or {}).get('readBytes'))
-        if data['status'] in TERMINAL:
+        if data['status'] == 'paused':
+            data['advancement'] = 'paused; awaiting an explicit release request'
+        elif data['status'] in TERMINAL:
             data['advancement'] = 'finished'
         elif self.previous is None:
             data['advancement'] = 'single observation; advancement unknown'
@@ -275,7 +277,9 @@ def snapshot(control=DEFAULT_CONTROL, runner=subprocess.run, now=None, observer=
     except OSError:
         pass
     terminal = status in TERMINAL
-    if terminal:
+    if status == 'paused':
+        observation = 'paused; awaiting an explicit release request'
+    elif terminal:
         observation = 'completed' if status == 'complete' else 'failed'
     elif status == 'waitingForCI' and matches:
         observation = 'waiting for CI; quiet logs do not prove a stall'

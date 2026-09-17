@@ -201,7 +201,7 @@ def exercise(binary, adapter, root, checks):
             client.initialize()
             catalog = client.request("tools/list")["tools"]
             catalog_names = {tool["name"] for tool in catalog}
-            assert len(catalog) == 23 and len(catalog_names) == 23
+            assert len(catalog) == 24 and len(catalog_names) == 24
             assert {
                 "tractanda_semantic_status", "tractanda_semantic_search", "tractanda_semantic_results",
                 "tractanda_semantic_configure", "tractanda_semantic_rebuild", "tractanda_semantic_reset",
@@ -258,6 +258,20 @@ def exercise(binary, adapter, root, checks):
             assert client.tool("tractanda_get", {"ids": [item_id]}) == compact
             full = client.tool("tractanda_get", {"ids": [item_id], "projection": "full", "maxBytes": 524288})
             assert full["list"] == [native_full]
+            for projection in ("source", "fts", "summary"):
+                args = {"ids": [item_id], "projection": projection, "maxBytes": 65536}
+                extracted = client.tool("tractanda_extracted_text", args)
+                assert extracted == native.call("TractandaItem/extractedText", args)
+                diagnostic = extracted["list"][0]
+                assert diagnostic["revisionID"] == wire.revision_id(first)
+                assert diagnostic["index"]["fts"]["status"] == "current"
+                if projection == "source":
+                    assert 'field["unknown.key"]["x"]' in diagnostic["sourceText"]
+                    assert "requestIdentity" not in diagnostic["sourceText"]
+                if projection == "summary":
+                    assert "sourceText" not in diagnostic and "fts" not in diagnostic
+            client.tool("tractanda_extracted_text", {"ids": [item_id], "projection": "content"}, error="invalidArguments")
+            checks.append("extracted-text source/FTS/summary parity, identity, exclusions and actual index freshness")
             current_uri = "tractanda://items/" + item_id
             assert json.loads(client.resource(current_uri)["text"])["list"] == native.call(
                 "TractandaItem/get", {"ids": [item_id], "projection": "content"})["list"]

@@ -515,6 +515,11 @@ public final class ItemStore {
         try requireRead(heads[itemID]!)
         return revision
     }
+    func ftsTextRow(for itemID: String) throws -> ItemIndex.TextRow? {
+        _ = try get(itemID)
+        guard let index else { throw TractandaError("indexUnavailable", "The text index is unavailable.") }
+        return try index.textRow(id: itemID)
+    }
     public func history(_ itemID: String) throws -> [Revision] {
         var current = try get(itemID)
         var result = [current]

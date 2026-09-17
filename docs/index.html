@@ -1,16 +1,152 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Tractanda — User guide</title>
-<style>:root{color-scheme:light dark;--paper:#f5f7fb;--ink:#14233d;--navy:#102b52;--line:#cbd6e5}*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:17px/1.65 system-ui,sans-serif}header{background:var(--navy);color:white;padding:3rem max(1.5rem,calc((100vw - 960px)/2))}header h1{margin:0;font-size:2.7rem;line-height:1.15}header p{max-width:48rem;margin-bottom:0}main{max-width:960px;margin:auto;padding:1.5rem 1.5rem 4rem}nav{display:flex;flex-wrap:wrap;gap:.6rem 1.2rem;padding:1rem 0;border-bottom:1px solid var(--line)}a{color:#23589b}header a{color:#e5efff}section{scroll-margin-top:1rem;margin-top:2.8rem}h2{line-height:1.3}pre{overflow:auto;background:#e6edf6;border:1px solid var(--line);border-radius:.4rem;padding:1rem;font:14px/1.5 ui-monospace,monospace}code,kbd{font-family:ui-monospace,monospace}table{border-collapse:collapse;width:100%}th,td{border-bottom:1px solid var(--line);padding:.6rem;text-align:left;vertical-align:top}.note{border-left:4px solid #4771a6;padding:.7rem 1rem;background:#e8eef7}footer{border-top:1px solid var(--line);margin-top:3rem;padding-top:1rem;font-size:.9rem}@media(prefers-color-scheme:dark){:root{--paper:#101927;--ink:#e0e8f5;--line:#34435b}a{color:#91bbf2}pre,.note{background:#19283e}}@media(max-width:600px){body{font-size:16px}header{padding:2rem 1.5rem}header h1{font-size:2.1rem}pre{font-size:12px}}</style></head>
-<body><header><h1>Tractanda</h1><p>A shared knowledge base for people and AI agents: versioned items, overlapping categories and reusable views.</p><p>Proof-of-concept user guide</p></header><main>
-<nav aria-label="Contents"><a href="#start">Start</a><a href="#concepts">Concepts</a><a href="#daemon">Daemon</a><a href="#agents">Agents</a><a href="#search">Search</a><a href="#recovery">Recovery</a><a href="#limits">Limits</a></nav>
-<section id="start"><h2>Start a local store</h2><pre><code>swift build
-TRACTANDA_BIN="$(swift build --show-bin-path)"
-"$TRACTANDA_BIN/tractanda" init "$HOME/Documents/Tractanda/demo"
-"$TRACTANDA_BIN/tractanda" serve "$HOME/Documents/Tractanda/demo" /tmp/tractanda-demo.sock</code></pre><p>The Unix service works with the CLI, TUI and stdio MCP adapter. Use a separate evaluation store and keep backups: formats and APIs are experimental.</p></section>
-<section id="concepts"><h2>Items, categories and views</h2><p>An item can be a note, message, person, action, category or view definition. An edit publishes a new immutable revision. Categories overlap: the same item can belong to several contexts without being copied. A saved view is a capability of an ordinary item, not a container.</p><p>Access is separate from categorization. Current item permissions govern current content and all history. One server writes a store; do not use independent writers against synchronized copies.</p></section>
-<section id="daemon"><h2>Shared daemon and browser example</h2><p>One daemon can host the native Unix API, an optional loopback browser/API surface, and MCP HTTP:</p><pre><code>"$TRACTANDA_BIN/tractanda" daemon STORE SOCKET --http-port 48728</code></pre><p><code>STORE</code> and <code>SOCKET</code> are positional arguments separated by a space. HTTP is loopback-only; <code>--no-http</code> leaves the native listener alone. Optional board presentation is either <code>--view ID</code> or <code>--project-root ID --status-root ID [--project ID]</code>.</p><p>For source-build development, <code>service prepare|install NAME STORE --shared</code> creates user-level launchd/systemd registration. The macOS preview installer uses system LaunchDaemons for the server and embedding host under the existing <code>daemon</code> account. Linux systemd packaging and a dedicated service account remain in development.</p></section>
-<section id="agents"><h2>People, browsers and AI agents</h2><p>Unix clients are identified by their socket peer credentials. Browser/API users sign in for a bearer session; on macOS password verification uses OpenDirectory. Linux verification of another user's password requires a separate privileged PAM helper deployment, which is still pending installation and real-account testing. Do not run the daemon as root merely for PAM.</p><p>Native <code>TractandaAuth/createSession</code> with empty arguments makes only the connected peer's own token. HTTP cannot select a UID or mint a token with it. HTTP <code>/mcp</code> is Streamable HTTP JSON with bounded per-user sessions; it has no SSE or replay. Stdio MCP remains available. <code>tractanda_info</code> reports the adapter's frozen socket/profile and build even when the native service is unavailable; successful replies also identify the live server.</p><p>A tool label is not an OS identity. Run an agent host under its intended account and grant only explicit item permissions. Full managed agent accounts and homes are deferred.</p></section>
-<section id="search"><h2>Literal and semantic search</h2><p>Literal <code>text</code> search is a literal FTS5 phrase over subject, body, and owned tagged-text metadata such as working notes, checklists, labels and custom text. It does not follow references or extract bytes, attachments or remote content. Root-only operational fields, including migration receipts and template identifiers, are excluded; nested ordinary text remains included. Blank text values and their labels are omitted. Named metadata SQL predicates are separate.</p><p>Semantic retrieval is optional and uses the same owned-text corpus as literal search. Its input encoding is <code>item-text-utf8-v2</code>. Extraction-rule versions are part of the index profile: upgrades rebuild the disposable semantic index, preserving the selected model and canonical records. When native <code>features</code> declares <code>tractanda.semantic-job-timing.v1</code>, query states report <code>createdAt</code>/<code>expiresAt</code> for a fixed 120-second lifetime, and pending replies suggest a 500 ms polling interval. Retain that expiry: <code>notFound</code> errors omit timing and do not distinguish expired from unknown jobs. Without a valid feature declaration, support is unverified; compiled adapter references alone cannot establish it. Before claiming coverage, inspect semantic status, especially <code>inputEncoding</code>, profile and coverage fields. LSM behavior is unchanged.</p></section>
-<section id="recovery"><h2>Recovery and identity</h2><p>Canonical revisions are self-contained files; SQLite metadata, FTS and vector indexes are disposable derivatives. Back up the canonical <code>items/</code> tree and required deployment permissions. UUIDv1 IDs intentionally reveal time/host-node provenance. Production must use a real host node; CI's synthetic node is only for disposable tests.</p><p>System administration can be configured through the canonical access configuration. It recognizes root and OS administrator membership (macOS <code>admin</code>, Linux <code>sudo</code>, or an explicit override) per request. Existing stores retain legacy service-owner administration until migrated.</p></section>
-<section id="limits"><h2>Proof-of-concept limits</h2><ul><li>Loopback HTTP is not an internet-facing gateway.</li><li>Linux semantic verification, Linux systemd packaging and privileged PAM-helper installation/testing remain pending; macOS managed startup is installed and tested without a machine-reboot test.</li><li>Password success in fake-credential tests is not proof of a deployed authentication boundary.</li><li>Attachments, synchronization, native GUI and notarized packaging are not complete.</li><li>Broad macOS tests were completed before the latest documentation changes; Linux broad tests were before text-v2.</li></ul><p>Keep credentials and private data outside the source checkout. Report problems without including passwords, tokens or private records.</p></section>
-<footer>Source-available under <a href="https://polyformproject.org/licenses/noncommercial/1.0.0">PolyForm Noncommercial 1.0.0</a>.</footer></main></body></html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tractanda — User guide</title>
+<link rel="icon" href="data:,">
+<style>
+:root{color-scheme:light dark;--paper:#f5f7fb;--ink:#14233d;--navy:#102b52;--line:#cbd6e5;--panel:#e8eef7;--link:#23589b}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:17px/1.65 system-ui,sans-serif}
+header{background:var(--navy);color:white;padding:2.5rem max(1.5rem,calc((100vw - 960px)/2))}header h1{margin:0;font-size:2.7rem;line-height:1.15}header p{max-width:48rem;margin-bottom:0}
+main{max-width:960px;overflow-wrap:anywhere;margin:auto;padding:1.5rem 1.5rem 4rem}nav{display:flex;flex-wrap:wrap;gap:.5rem 1.2rem;padding:1rem 0;border-bottom:1px solid var(--line)}a{color:var(--link)}header a{color:#e5efff}
+section{scroll-margin-top:1rem;margin-top:2.8rem}h2,h3{line-height:1.3}h3{margin-top:1.5rem}pre{overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:.4rem;padding:1rem;font:14px/1.5 ui-monospace,monospace}code,kbd{font-family:ui-monospace,monospace}kbd{white-space:nowrap}
+table{border-collapse:collapse;width:100%}th,td{border-bottom:1px solid var(--line);padding:.65rem;text-align:left;vertical-align:top}.table-wrap{overflow-x:auto}.note{border-left:4px solid #4771a6;padding:.8rem 1rem;background:var(--panel)}.note p:first-child{margin-top:0}.note p:last-child{margin-bottom:0}li+li{margin-top:.35rem}footer{border-top:1px solid var(--line);margin-top:3rem;padding-top:1rem;font-size:.9rem}a:focus-visible{outline:2px solid currentColor;outline-offset:3px}
+@media(prefers-color-scheme:dark){:root{--paper:#101927;--ink:#e0e8f5;--line:#34435b;--panel:#19283e;--link:#91bbf2}}
+@media(max-width:600px){body{font-size:16px}header{padding:2rem 1.5rem}header h1{font-size:2.1rem}pre{font-size:12px}th,td{padding:.5rem}}
+</style>
+</head>
+<body>
+<header><h1>Tractanda</h1><p>A shared knowledge base for people and AI agents. Keep information once, categorize it in several ways, and choose views that fit the task.</p><p>User guide · proof of concept</p></header>
+<main>
+<nav aria-label="Contents">
+<a href="#start">Start</a><a href="#concepts">Items &amp; categories</a><a href="#web">Web board</a><a href="#views">Views &amp; order</a><a href="#tui">Terminal client</a><a href="#learning">Learning</a><a href="#search">Search</a><a href="#agents">AI agents</a><a href="#recovery">Data &amp; recovery</a><a href="#help">Troubleshooting</a><a href="#limits">Limits</a>
+</nav>
+<section id="start">
+<h2>Get started on a Mac</h2>
+<p>Install the Apple Silicon preview package, then open <a href="http://127.0.0.1:48728/">the local web client</a>. Sign in with your computer account’s username and password. A new package installation provides a sample database; you can change or delete its example items and categories.</p>
+<p>The package includes the server, terminal client, MCP adapter and their runtime libraries. The bundled semantic-search edition includes the Qwen embedding model and its runtime. You do not need Xcode or Swift to use the downloaded package.</p>
+<p>The installer sets up system LaunchDaemons for the server and bundled embedding service. They start at boot. Installing an update upgrades and restarts the managed services while preserving the database and its connection settings.</p>
+<p>To use the terminal interface, open Terminal or iTerm and run:</p>
+<pre><code>tractanda-tui</code></pre>
+<p>The installer normally creates this command in <code>/usr/local/bin</code>. Its stable target is <code>/Users/Shared/Library/Application Support/Tractanda/current/bin/tractanda-tui</code>. If that command name was already occupied, use the full path.</p>
+<h3>Choose a database</h3>
+<p>Connection profiles select a database. Omit the option to use the configured default, or choose an existing profile:</p>
+<pre><code>tractanda-tui --profile NAME</code></pre>
+<p><code>NAME</code> is your profile name; there is no special profile that must literally be called “default”. Multiple databases have separate stores and connection settings; for example, a main store named <code>production</code> and a separate <code>test</code> store. The web board’s Project selector chooses a project <em>within</em> the connected database.</p>
+<p>The local TUI uses your existing OS identity through its Unix socket connection, so it does not ask for your password again. The browser uses its own sign-in session. For an empty installation, custom database names, ports, upgrades or uninstalling, see <a href="https://github.com/cubiculum-ai/tractanda/blob/main/docs/install.md">macOS installation</a>.</p>
+</section>
+<section id="concepts">
+<h2>One item, several dimensions</h2>
+<p>An item can hold a note, message, person, action, reference material or a view definition. Most simple entries use the generic <code>Item</code> type. Editing an item creates a new revision; its identity stays the same. Human-friendly reference labels may be shown alongside that identity.</p>
+<p>Categories are ordinary items with selection properties. Membership can come from a rule, a manual inclusion or a manual exclusion. An item can belong to several categories without being copied. Parent categories also include matching members of their children, unless an applicable exclusion prevents membership.</p>
+<p>The category system is multidimensional. For example:</p>
+<div class="table-wrap"><table><thead><tr><th>Item</th><th>Possible categories</th></tr></thead><tbody>
+<tr><td>Call Fred about Saturday’s barbecue</td><td>Who: Fred · What: Barbecue · Means: Phone</td></tr>
+<tr><td>Review the roof inspection report</td><td>What: Building project · Work type: Review · Priority: High</td></tr>
+<tr><td>Keep the receipt for a replacement part</td><td>What: Building project · Knowledge role: Reference, if you create that category</td></tr>
+</tbody></table></div>
+<p>These are examples, not required names or fields. The starter template supplies dimensions such as Who, What, When, Where, Means, Priority, Urgency and Status, with supporting categories. All of them are editable and deletable. “All items” is simply the empty filter: the implicit root, not another stored category.</p>
+<p>Combining dimensions narrows the result. Phone + Fred can find calls involving Fred; adding a project category limits it to that project. Information need not be a task to belong in the knowledge base.</p>
+<div class="note"><p><strong>Classifications are memberships.</strong> Priority, urgency, assignment, work type, optionality and workflow status do not need parallel text or Boolean fields. Assign the relevant categories. Actual facts—dates, estimated duration, document text, phone numbers and relationships—remain item properties.</p></div>
+<p>Deleting a category does not delete its member items. Access permissions are separate: belonging to a category does not grant anyone permission to read its items. Personal category decisions can differ from shared decisions.</p>
+</section>
+<section id="web">
+<h2>Use the web Kanban board</h2>
+<p>The web client is one example of a Tractanda front-end. A project board selects items belonging to the chosen project and a status category. A project does not need a special task class or a separately saved Kanban view.</p>
+<ol>
+<li>Choose a project from <strong>Project</strong>. <strong>All projects</strong> combines the available project hierarchy. <strong>Refresh projects</strong> discovers newly added projects.</li>
+<li>Use <strong>Search tasks</strong> and the category filter to narrow the loaded board. Switching projects clears those local filters. The selection is recorded in the page URL, so you can bookmark it.</li>
+<li>Open a card to edit its title, description, working notes, checklist and displayed category assignments. Use <strong>Save to Tractanda</strong> to publish the edit, or Cancel to discard the draft.</li>
+<li>Use <strong>New task</strong> to create an ordinary item associated with the selected project and its configured default category.</li>
+<li>Drag a card between columns to change its status-category assignments. Other memberships remain intact. An item assigned to several displayed status categories can appear in several columns.</li>
+</ol>
+<p>The card editor shows category choices from the view’s configured axes. Change priority or assignment by checking the appropriate categories. Unknown properties are preserved; an unrelated save does not add empty fields or a hidden card-order value. Clearing a nonempty description or working-notes field removes that field. API clients can still deliberately store empty text, which is distinct from a missing value.</p>
+<p>An open draft or unresolved save blocks project switching. If the server rejects a stale edit because someone else changed the item, review the newer revision before applying your changes. If the result of a save is uncertain, use the retained retry operation; do not recreate the item to guess whether the first save worked.</p>
+<p>A configured completion category checks the card’s checklist and dependencies before completion. The board’s labels, default category and completion category are data, not hardcoded status names.</p>
+<p><strong>Export HTML</strong> and <strong>Export JSON</strong> save snapshots. Editing an exported HTML file does not change the server. Keep it as a portable report or an independent snapshot, not as a synchronized database.</p>
+</section>
+<section id="views">
+<h2>Define views and choose their order</h2>
+<p>A view combines category filters, optional text or metadata criteria, sorting and presentation. A temporary view can answer one question; save a useful definition to reuse it. Any ordinary item can carry a saved view definition.</p>
+<p>In the TUI, select a saved view and use <strong>Edit view definition</strong>. The form keeps its criteria, sorting and column settings together. Choose which properties or category dimensions to display, their titles and widths, and any section categories. Save the complete definition as one edit.</p>
+<h3>Columns and cards have different ordering rules</h3>
+<ul>
+<li><strong>Kanban columns / report sections:</strong> an explicit section list defines their order. An implicit project board uses that list as a preferred sequence, then adds other eligible status leaves. Otherwise the category hierarchy’s sibling order applies.</li>
+<li><strong>Items within a section:</strong> the view’s sort applies. Category sorting follows effective membership in the root’s immediate child categories, ordered by <code>categoryOrder</code>, then name and ID. Inherited membership counts. An item matching several branches takes the first-ranked branch; unranked items stay last in either direction.</li>
+<li><strong>No explicit sort:</strong> normal queries show most recently modified items first. The sample Project view supplies a Priority category sort. A project can override its Project root’s presentation and sort independently.</li>
+</ul>
+<p>The browser preserves the server’s item order. It does not infer priority from a text field or assign <code>sortOrder</code> on every save. Existing views may explicitly sort by ordinary metadata such as <code>sortOrder</code>.</p>
+<p>For an advanced category-backed column or sort target in the TUI form, enter <code>category:&lt;axis UUID&gt;</code>. Use an ordinary field name, such as <code>subject</code> or <code>dueAt</code>, for owned metadata. <a href="https://github.com/cubiculum-ai/tractanda/blob/main/docs/api.md">The API guide</a> describes the stored definitions.</p>
+</section>
+<section id="tui">
+<h2>Work in the terminal</h2>
+<p>The TUI starts in the <strong>Views</strong> workspace. Its selector is beside the report, with an optional item preview below. The <strong>Categories</strong> workspace similarly combines category navigation with either member items or a category inspector. Focus determines which selection a command acts on.</p>
+<div class="table-wrap"><table><thead><tr><th>Key or control</th><th>Use</th></tr></thead><tbody>
+<tr><td><kbd>F1</kbd></td><td>Open context help.</td></tr>
+<tr><td><kbd>F10</kbd></td><td>Open the global menu. Use arrow keys and Return, or the mouse. Unavailable commands are dimmed.</td></tr>
+<tr><td><kbd>F9</kbd> in a main workspace</td><td>Switch between Views and Categories. In many editors and temporary panels, F9 cancels or closes instead.</td></tr>
+<tr><td><kbd>Tab</kbd> / <kbd>Shift-Tab</kbd></td><td>Move focus or move between form fields. The active pane is visually distinguished.</td></tr>
+<tr><td><kbd>F8</kbd> in a main workspace</td><td>Switch selector/report focus. In an editor it may be Save; follow the bottom key labels.</td></tr>
+<tr><td><kbd>F11</kbd> / <kbd>F12</kbd></td><td>Show or hide the preview / refresh the workspace, when enabled. The menus provide the same actions on terminals with fewer function keys.</td></tr>
+<tr><td><kbd>Ctrl-N</kbd>, <kbd>Ctrl-E</kbd>, <kbd>Ctrl-S</kbd></td><td>New, edit and save where applicable. The focused selector may act on a view definition rather than a report item.</td></tr>
+<tr><td><kbd>Ctrl-Q</kbd></td><td>Quit. Follow any prompt concerning an unresolved operation.</td></tr>
+</tbody></table></div>
+<p>The bottom function-key strip is the guide for the current context; inactive functions are blank. Terminal applications may intercept Command keys, so Control equivalents are available for common commands. Some keyboards need Fn with the function keys.</p>
+<p>Mouse support includes selections, menus, scrolling and category breadcrumbs. Click an ancestor breadcrumb to go back, or its child-menu control to choose a child category. Terminal resizing preserves the current working state. Drag the preview divider or use View menu commands to adjust the preview height.</p>
+<p>In Categories, choose <strong>Items</strong> or <strong>Category</strong> for the right-hand pane. The Category menu provides those modes; <kbd>Shift-F2</kbd> toggles them. Outline versus connected-tree presentation is available in Category preferences, and <kbd>Ctrl-T</kbd> toggles it in that workspace.</p>
+<p>Use the Tractanda menu’s <strong>Settings / Appearance</strong> and <strong>Category preferences</strong> for colors, presets, active/passive panes, cursor appearance and layout options. Custom colors and cursor controls depend on what the terminal supports. Your terminal application controls its font and window size.</p>
+</section>
+<section id="learning">
+<h2>Teach a category</h2>
+<p>The category learner uses examples of membership and exclusion. Open <strong>Learning</strong>, choose a category, review its examples and settings, then train it. It may need more positive and negative examples before it can provide useful suggestions.</p>
+<p>Accepting a suggestion creates an ordinary category assignment. Excluding an item records a negative decision; a suggestion alone does not change membership. Manual decisions retain authority. Reset discards the derived model for that category without deleting items or accepted assignments; train again when ready.</p>
+<p>Learning is scoped to the material the caller may read. Suggestions are experimental, and automatic classification is not implemented. Category learning is distinct from semantic search: the former learns membership examples, while the latter retrieves text by similarity.</p>
+</section>
+<section id="search">
+<h2>Search beyond the current board</h2>
+<p>The web board’s search box filters its loaded cards. Native/API text search uses SQLite FTS5 over subject, body and owned text metadata such as working notes and checklists. It omits blank values and operational metadata. It does not follow references or search attachment bytes.</p>
+<p>If a result seems missing, an agent or API client can use extracted-text diagnostics to see what text is eligible for indexing and whether the FTS and semantic indexes are current. Source, FTS-input and summary projections serve different questions. This does not search attachments or prove that the item matches a particular query.</p>
+<p>Metadata expressions use the supported portable Spotlight-style query language. For example:</p>
+<pre><code>subject ==[cd] "*chess*"
+estimatedMinutes &lt;= 20</code></pre>
+<p>Category paths combine category filters by intersection. Relative-date categories are reevaluated when queried using their configured time zone; their changing membership does not require rewriting the items.</p>
+<p>Semantic retrieval is supplemental. When configured and indexed, it searches the same owned-text corpus using embeddings. Check its coverage before assuming every item is indexed. The model/index can be rebuilt independently of the original records. Attachment extraction and automatic reminders are not provided by this preview.</p>
+</section>
+<section id="agents">
+<h2>Share context with AI agents</h2>
+<p>The same items and categories are available to the CLI, TUI, browser and MCP clients under the caller’s permissions. Agents can construct temporary views for a task; they do not have to create a saved view for every query.</p>
+<p>Install the repository’s shared skill and connect the MCP adapter using an existing connection profile. Start discovery with <code>tractanda_info</code> and <code>tractanda_describe</code>, then the served introduction and references. An agent should discover the actual categories and their IDs rather than assume that a starter taxonomy is present. Restarting the adapter may not refresh the harness’s tool list; reconnect or refresh discovery if a new tool is missing. Some harnesses require a fresh session. Available category queries and membership explanations remain useful while the catalog is stale.</p>
+<p>Tell an agent which project and task it may work on. An agent launched under your OS account has that account’s access; a tool name does not create a separate identity. Separate agent accounts and managed provisioning remain future work. See <a href="https://github.com/cubiculum-ai/tractanda/blob/main/docs/agent-skill.md">skill installation</a> and <a href="https://github.com/cubiculum-ai/tractanda/blob/main/docs/agent-access.md">agent access</a>.</p>
+</section>
+<section id="recovery">
+<h2>Keep and recover your data</h2>
+<p>Canonical revisions are self-contained files. The managed macOS installation separates them from its rebuildable indexes:</p>
+<div class="table-wrap"><table><thead><tr><th>Content</th><th>Default location</th></tr></thead><tbody>
+<tr><td>Records and durable settings</td><td><code>/Users/Shared/Library/Tractanda/Stores/NAME</code></td></tr>
+<tr><td>Derived metadata, text and vector indexes</td><td><code>/Users/Shared/Library/Application Support/Tractanda/Indexes/NAME</code></td></tr>
+</tbody></table></div>
+<p>Back up the complete canonical store and its ownership/permissions, not just the SQLite index. If an index is lost, the server can rebuild it from canonical records. Normal access is through clients; direct file editing is an administrative repair operation.</p>
+<p>Current permissions govern the item’s entire history. Revoking access also revokes access to old revisions through the server. To share current content without earlier history, make a separately shared copy. Categories never replace those permissions.</p>
+<p>Only one server writer should manage a store. Copying the directory with a sync service does not provide supported multi-server synchronization. Uninstalling through the supplied setup tool preserves canonical data; review the <a href="https://github.com/cubiculum-ai/tractanda/blob/main/docs/install.md">installation guide</a> before administrative changes.</p>
+</section>
+<section id="help">
+<h2>Troubleshooting</h2>
+<dl>
+<dt><strong>The browser cannot connect.</strong></dt><dd>Use the configured database’s address; the default is <code>http://127.0.0.1:48728/</code>. Check that its managed service is running. A working local TUI uses a Unix socket, so it does not by itself prove that the HTTP listener is available.</dd>
+<dt><strong>The board is empty.</strong></dt><dd>Check the selected project, local search/category filters, status assignments and your access rights. Project knowledge without a status does not appear on its Kanban board.</dd>
+<dt><strong>A save needs a retry.</strong></dt><dd>Keep the pending edit and retry it after reconnecting. Do not repeat it as a new create operation. After a prototype migration, review old pending requests before resubmitting them.</dd>
+<dt><strong>Keys act differently in a text field.</strong></dt><dd>Text editing and navigation have different contexts. Check F1 and the bottom key strip, or use F10. Command keys may be consumed by the terminal; use the documented Control alternative.</dd>
+<dt><strong>What changed after an upgrade?</strong></dt><dd>Check the server version in the web sidebar, reload the page, and reconnect long-running TUI/MCP clients when instructed. Replacing a binary does not replace the code already loaded by an existing client process.</dd>
+</dl>
+</section>
+<section id="limits">
+<h2>Preview scope</h2>
+<p>The macOS preview has managed startup, signed/notarized packages, a web example, TUI and agent API. Linux source/runtime work continues, but a ready Linux installer is not part of this preview.</p>
+<p>Attachments, synchronization/offline replicas, a native SwiftUI app, scheduled automations and broader feed integrations remain planned. Hierarchical saved-view organization is also future work. The HTTP service is local-loopback oriented; this is not a public Internet deployment guide.</p>
+<p>Formats and APIs can change before 1.0. Keep backups and follow migration notes.</p>
+</section>
+<footer><p><a href="#start">Back to start</a> · <a href="http://127.0.0.1:48728/">Open local web client</a> · <a href="https://github.com/cubiculum-ai/tractanda">Source and releases</a></p><p>Source-available under <a href="https://polyformproject.org/licenses/noncommercial/1.0.0">PolyForm Noncommercial 1.0.0</a>. This guide describes the current source; an installed copy reflects the release that bundled it.</p></footer>
+</main>
+</body>
+</html>

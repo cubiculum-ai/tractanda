@@ -108,6 +108,15 @@ class StatusTests(unittest.TestCase):
     def fixture(self, root, state, runner=None):
         runner = runner or {'pid': 44, 'status': 'running', 'version': state.get('version')}
         (root / 'current.json').write_text(json.dumps(state)); (root / 'runner.json').write_text(json.dumps(runner))
+    def test_paused_release_is_not_reported_as_interrupted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root, {'version': 'v', 'status': 'paused', 'steps': {}, 'activeStep': 'notarization'})
+            data = status.snapshot(root, runner=lambda *a, **k: None, observer=status.Observer())
+            self.assertEqual(data['status'], 'paused')
+            self.assertIn('explicit release request', data['observation'])
+            self.assertTrue(data['advancement'].startswith('paused'))
+
     def test_complete_precedes_dead_pid(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); self.fixture(root, {'version':'v','status':'complete','steps':{},'createdAt':'2026-01-01T00:00:00+00:00'})

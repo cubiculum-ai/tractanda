@@ -1,6 +1,6 @@
 # Propagate a completed change
 
-For an actively used installation, completion includes the running software and downloadable packages. Prepare one coherent, reviewed changeset after focused checks. Runtime, API, UI, template, installer, shared-skill and release-document changes use this workflow; private notes and experiments do not trigger publication.
+Accumulate related fixes and documentation updates—including feedback from multiple reviewers—and run focused checks as you work. Releases can remain frequent; individual messages or typo fixes are not release boundaries. Start this workflow only when the maintainer explicitly requests a release. Source changes alone do not authorize preparation, signing, installation or publication, and do not start a background release queue. Local deployment also waits for that release request; ordinary development and manual updates remain in the workspace until then.
 
 ```sh
 python3 scripts/release-macos.py release --notes 'Describe the completed change' --background
@@ -33,7 +33,7 @@ Use `python3 scripts/release-macos.py prune` to apply the same policy manually. 
 
 Client launch configurations should point to the shared `current/bin` commands. A running stdio MCP session belongs to its client harness; replacing an executable does not change its loaded code or cached tool schemas. Reconnect that MCP server using the harness's control when required. Do not kill the surrounding conversation or discard unsaved terminal edits. HTTP clients reconnect to the restarted service.
 
-The development task starts this deterministic script after a significant completed changeset. There is no scheduled agent follow-up, and no partially edited working tree is published. Failed operations stop with a recorded error rather than being retried indefinitely.
+After an explicit release request, the development task starts this deterministic script for the reviewed accumulated changeset. There is no scheduled agent follow-up, and no partially edited working tree is published. Failed operations stop with a recorded error rather than being retried indefinitely.
 
 ## Local maintainer configuration
 

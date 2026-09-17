@@ -43,6 +43,8 @@ Local connections authenticate using Unix peer credentials. Running an agent und
 
 Use the actual built `tractanda-mcp` path and a configured profile, or `--socket PATH` with the expected server account. Profiles carry server identity; a different service owner without a profile requires the documented `TRACTANDA_SERVER_USER` setting. Never guess the UID from a model or adapter name.
 
+Profile names identify stores, not project categories. For example, a main store may use `production`, with separate `test` or purpose-specific profiles. Use the configured names rather than inventing aliases for each project.
+
 Inspect profiles without opening a new store:
 
 ```sh
@@ -70,7 +72,7 @@ An adapter launched from `current/bin` keeps the executable it started with afte
 
 `protocolMismatch` and native `unsupportedCapability` mean a server answered but refused the requested API capability; update/reconnect the adapter or server to matching versions. They do not establish which side is older. Earlier previews may instead return `invalidRequest` explicitly naming the required prototype capability; distinguish that message from unrelated malformed-request errors. A stopped/unreachable server needs service diagnosis. Neither outcome justifies changing item permissions or repeatedly retrying writes.
 
-References are static within an adapter process; this preview does not advertise subscriptions or list-change notifications. After an upgrade, restart/reinitialize and refresh tools/resources. Use the initialize version and `connection.referenceRevision` as cache identifiers, and refresh native info after a server restart or behavior mismatch. With `tractanda.semantic-job-timing.v1`, jobs last 120 seconds from creation and report `expiresAt`; polling never prolongs them. Restarting only a stdio adapter can resume the same principal's job within that lifetime. A non-disclosing `notFound` error omits timing: retain the earlier expiry rather than expecting the error to distinguish a stale job from an unknown ID.
+References are static within an adapter process; this preview does not advertise subscriptions or list-change notifications. After an upgrade, distinguish restarting the adapter from refreshing the harness’s cached tool list. Some harnesses, including configurations of Claude Code, enumerate tools once per session. A current adapter can therefore coexist with an older tool catalog. Reconnect the MCP connection and refresh discovery; if the harness cannot refresh within a conversation, use a fresh session. Until `tractanda_memberships` appears, use already-listed `tractanda_explain` and category queries for effective membership. Do not infer server support merely from whether a tool is listed, or attempt to invoke an unlisted tool. Use the initialize version and `connection.referenceRevision` as cache identifiers, and refresh native info after a server restart or behavior mismatch. With `tractanda.semantic-job-timing.v1`, jobs last 120 seconds from creation and report `expiresAt`; polling never prolongs them. Restarting only a stdio adapter can resume the same principal's job within that lifetime. A non-disclosing `notFound` error omits timing: retain the earlier expiry rather than expecting the error to distinguish a stale job from an unknown ID.
 
 ## Available served references
 

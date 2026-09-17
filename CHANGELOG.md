@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.0-poc.9
+
+TRAC-094 adds read-only extracted-text diagnostics through the native API and MCP. Source, FTS-input and summary projections identify current revisions, extraction rules, byte counts and independent index freshness. Large results use explicit continuation/oversized IDs; current permissions apply before text or index metadata is returned. The extraction profile and embedding model are unchanged.
+
+The web project selector refreshes correctly after removal of the old task-kind filter. Clearing a nonempty description or working-notes field removes its key. The user manual now covers current installation, categories, views, TUI controls, learning and recovery; agent guidance distinguishes cached harness tool lists from adapter processes and documents mutually exclusive retrieval options.
+
+Release tooling reclaims completed local build trees while preserving active candidates, current downloads, compact receipts and installed rollback versions. The observer recognizes paused releases. Publication and local deployment now follow explicitly requested batches rather than individual edits.
+
+## 0.1.0-poc.8
+
+Category membership defines priority and other classifications. Native category-axis sorting, category-backed columns, effective-membership projection and generic Kanban category controls replace parallel classification fields. Source samples follow the same conventions. The experimental native capability advances to `/4`; clients must update and reconnect.
+
+
 ## 0.1.0-poc.7
 
 Notarization records every upload attempt and retries a proven pre-upload Xcode account-discovery failure once through the CLI. Uncertain outcomes still require reconciliation, and the release observer reports a concise failure cause.

@@ -148,6 +148,50 @@ final class AccessControlTests: XCTestCase {
         assertCode("invalidPermissions") { _ = try ItemPermissions(permissions(mode: 0o755)) }
     }
 
+    func testExtractedTextDoesNotDiscloseDeniedRecordsAndHonorsRevocation() throws {
+        try fixture { store, accounts in
+            let secret = try create(
+                store, uid: accounts.alice,
+                fields: [
+                    "subject": .text("private diagnostic needle"), "body": .text("private body"),
+                    "permissions": permissions(mode: 0o600),
+                ])
+            let service = ItemService(store: store)
+            let missing = Identifier.make()
+            let denied = try response(
+                service, uid: accounts.bob, method: "TractandaItem/extractedText",
+                args: ["ids": [secret.itemID, missing]])
+            XCTAssertEqual(denied["notFound"] as? [String], [secret.itemID, missing])
+            XCTAssertEqual((denied["list"] as? [[String: Any]])?.count, 0)
+            XCTAssertFalse(
+                String(decoding: try JSONSerialization.data(withJSONObject: denied), as: UTF8.self).contains(
+                    "private"))
+            let shared = try edit(
+                store, uid: accounts.alice, base: secret,
+                fields: [
+                    "permissions": permissions(
+                        mode: 0o640,
+                        acl: [
+                            "mask": .integer(4), "owningGroup": .integer(0),
+                            "users": .object(["bob": .integer(4)]),
+                        ])
+                ])
+            let allowed = try response(
+                service, uid: accounts.bob, method: "TractandaItem/extractedText",
+                args: ["ids": [secret.itemID]])
+            let record = try XCTUnwrap((allowed["list"] as? [[String: Any]])?.first)
+            XCTAssertEqual(record["revisionID"] as? String, shared.revisionID)
+            XCTAssertTrue((record["sourceText"] as? String)?.contains("private body") == true)
+            _ = try edit(
+                store, uid: accounts.alice, base: shared, fields: ["permissions": permissions(mode: 0o600)])
+            let revoked = try response(
+                service, uid: accounts.bob, method: "TractandaItem/extractedText",
+                args: ["ids": [secret.itemID]])
+            XCTAssertEqual(revoked["notFound"] as? [String], [secret.itemID])
+            XCTAssertEqual((revoked["list"] as? [[String: Any]])?.count, 0)
+        }
+    }
+
     func testInheritedMembershipUsesOnlyReadableCategoriesAndPersonalOverrides() throws {
         try fixture { store, accounts in
             let selection: (String) -> ItemValue = {

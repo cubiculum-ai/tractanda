@@ -60,7 +60,7 @@ A query sort has up to four distinct targets: `{"property":"modifiedAt","isAscen
 
 `TractandaCategory/memberships` (MCP `tractanda_memberships`) accepts 1–64 `ids`, 1–8 `categoryRootIDs` and optional `at`. It returns `state`, ordered `roots`/children, `memberships[itemID][rootID]` as matching category IDs, and non-disclosing `notFound`. This is an ephemeral ACL-filtered projection, never an item property. A childless root returns its own ID when included. Use a fixed clock and compare state across batches.
 
-Web edits preserve untouched absent fields and unknown metadata. Clearing existing text explicitly stores empty text; API `unset` removes it. The client writes subject/body/workingNotes, checklist content and changed category overrides only. It does not materialize empty fields or inject dependencies/order values on an unrelated edit.
+Web edits preserve untouched absent fields and unknown metadata. Clearing a nonempty body or working-notes field in the web editor removes its key with `unset`. Untouched absent or explicitly empty values remain unchanged; API clients can still deliberately store empty text. The client writes subject/body/workingNotes, checklist content and changed category overrides only. It does not materialize empty fields or inject dependencies/order values on an unrelated edit.
 
 Tagged values include text, integer, real, boolean, date, bytes, reference, list and object. Use a persisted `operationID` and exact payload; an uncertain mutation is retried with both unchanged. IDs are nonempty text of at most 200 UTF-8 bytes with no NUL characters, scoped to store and authenticated actor. A definite pre-commit rejection does not consume an unused ID, so corrected arguments may reuse it. Reconcile any earlier uncertain attempt first. An exact replay returns `replayed: true` and the original committed revision, not a newer head; current read permission still applies. `unset` is required even when it is `[]`. Existing updates also require the current `expectedRevisionID`. Changes replace whole top-level fields, so fetch and merge a map before replacing it.
 
@@ -73,6 +73,26 @@ Get/history support `full`, `content`, `summary`, or explicit top-level `propert
 `state`/`queryState` cover the administrator's store, or an ordinary caller's readable revision set and group context. They are not scoped to the query result or a pinned snapshot. Keep `at` and `timeZone` fixed across relative-date pages. Per-item revision guards decide whether an edit conflicts; an unrelated state change does not require repeating committed imports or abandoning a batch of known item IDs.
 
 `tractanda_get` and `TractandaItem/get` take an `ids` array, even for one item. Single-item explain/history/revision/resolve calls take `itemID`; `itemIDs` is not an alias.
+
+## Extracted-text diagnostics
+
+`TractandaItem/extractedText` (MCP `tractanda_extracted_text`) is a read-only diagnostic for **current** revisions. It requires the declared feature `tractanda.extracted-text.v1`. Supply 1–64 distinct canonical UUIDs in `ids`; there is no historical-revision argument.
+
+Choose `projection: "source"` (default) for assembled semantic source, `"fts"` for the exact subject/body/metadata strings supplied to FTS5, or `"summary"` for identities, byte counts and index status without item text. The same existing extraction profile is used; this feature does not change the corpus or require an index rebuild.
+
+```json
+{"ids":["<item UUID>"],"projection":"summary","maxBytes":65536}
+```
+
+The response has `extractionProfile`, caller-scoped `state`, `list`, `notFound`, `remainingIDs` and `oversizedIDs`. Each record identifies `itemID`, `revisionID`, `isDeleted`, `sourceHash`, `sourceUTF8Bytes`, `ftsUTF8Bytes`, and separate `index.fts` / `index.semantic` diagnostics. `sourceHash` is the server’s semantic-content identity, not a checksum of raw text bytes; treat it as opaque. The response also describes root exclusions and ignored value types. Non-text/date values and references/bytes are omitted from extraction, and references or attachments are never followed. Ordinary nested text with an operational-sounding key remains eligible; exclusions apply at the root only. Blank metadata leaves and blank assembled-source sections are omitted. The FTS subject/body strings still preserve their original bytes, including whitespace, so their byte counts can be nonzero when no source section is emitted.
+
+`maxBytes` is 8192–524288, default65536. It bounds the independently encoded native method result, including continuation/error-ID arrays, not the surrounding native/MCP framing. Follow `remainingIDs` with the same projection and compare state. A record that cannot fit alone appears only in `oversizedIDs`; use `summary` to inspect it. Text is never silently truncated or replaced by an incomplete record. If a record fits alone but not with its continuation, `responseTooLarge` tells the caller to request that ID alone, narrow the projection or increase the budget. Missing and unreadable items share `notFound`, with no extracted content or item-specific index details.
+
+FTS status is `current`, `stale`, `missing` or `unavailable`. It compares the indexed revision and all three column inputs with current canonical extraction; old index text and SQLite error details are not returned. `searchEligible` excludes deleted or empty-corpus items. It does not promise a match for a particular tokenizer, query, category filter or permission scope.
+
+Semantic status is `disabled`, `notIndexable`, `pending`, `missing`, `stale`, `current` or `unavailable`. It reports the applicable configuration/profile and chunk parameters when those are readable. `current` requires both the content hash and revision binding to agree, with stored records present. Matching text alone is insufficient. A configuration that cannot be read reports unknown `enabled` as null; index faults are not treated as proof that the model is disabled.
+
+`sourceText` is the deterministic source **before** chunking and any model document prefix. Chunk sizes/overlap are byte parameters, not token limits; diagnostics do not compute embeddings or return vectors. Normal server background maintenance may continue. Extracted source can be available while either derived index is absent, stale or unavailable. Use actual search results to assess retrieval, rather than treating extraction or index freshness as a relevance guarantee.
 
 ## Literal and semantic search
 

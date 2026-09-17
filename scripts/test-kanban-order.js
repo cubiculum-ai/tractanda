@@ -17,7 +17,10 @@ assert.deepEqual(clone(context.makeLiveFields({...draft,categoryIDs:['ready']},b
 const assigned={fields:{...base.fields,body:text('Original'),categoryOverrides:{type:'object',value:{secret:text('exclude'),low:text('include')}}}};
 const change={...draft,summary:'Original',axisCategoryIDs:{axis:['high']},originalAxisCategoryIDs:{axis:['low']}};
 assert.deepEqual(clone(context.makeLiveFields(change,assigned)),{categoryOverrides:{type:'object',value:{secret:text('exclude'),low:text('exclude'),high:text('include')}}});
-assert.deepEqual(clone(context.makeLiveFields({...draft,summary:''},{fields:{...base.fields,body:text('Original')}})),{body:text('')},'Explicit clearing remains distinct from absence.');
+assert.deepEqual(clone(context.makeLiveEdit(draft,{fields:{...base.fields,body:text('Original'),workingNotes:text('Notes')}})),{changes:{},unset:['body','workingNotes']},'Clearing displayed text removes its keys.');
+assert.deepEqual(clone(context.makeLiveEdit(draft,base)),{changes:{},unset:[]},'Untouched absence is a no-op.');
+assert.deepEqual(clone(context.makeLiveEdit(draft,{fields:{...base.fields,body:text(''),workingNotes:{type:'object',value:{unknown:text('keep')}}}})),{changes:{},unset:[]},'Untouched explicit-empty and undisplayed typed values are preserved.');
+assert.deepEqual(clone(context.makeLiveEdit({...draft,summary:'New'},base)),{changes:{body:text('New')},unset:[]});
 context.data.captureCategoryIDs=['project'];
 const created=clone(context.makeLiveFields({...draft,title:'New'},null));
 assert.deepEqual(Object.keys(created).sort(),['categoryOverrides','subject']);
@@ -30,6 +33,17 @@ console.log('Kanban native order, category edits, absent values, no-op, unknown 
 // Use only controls that actually exist in the shipped page. Removed controls
 // must not break clearing the old board before an asynchronous project switch.
 (async()=>{
+  // An unset-only edit must be journaled and sent, not mistaken for no changes.
+  let journal=null,sends=0;
+  Object.assign(context,{isSaving:false,pendingWrite:null,selectedViewID:'project',crypto:{randomUUID:()=> 'fixture'},
+    $:()=>({close:()=>{}}),toast:()=>{},retainPendingWrite:write=>{journal=clone(write);},sendPendingWrite:async()=>{sends++;}});
+  vm.runInContext(live.slice(live.indexOf('  async function saveLiveTask('),live.indexOf('  async function sendPendingWrite(')),context);
+  await context.saveLiveTask(draft,{fields:{...base.fields,revisionID:text('base-revision'),body:text('Original')}});
+  assert.equal(sends,1);
+  assert.deepEqual(journal.request.changes,{});
+  assert.deepEqual(journal.request.unset,['body']);
+  assert.equal(journal.request.expectedRevisionID,'base-revision');
+  assert.equal(journal.request.operationID,'web:fixture');
   const controls=new Map(Array.from(html.matchAll(/\bid="([^"]+)"/g),m=>[m[1],{value:'stale',open:false}]));
   const events=[],load=[];
   let navigation;

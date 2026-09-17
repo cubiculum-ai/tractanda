@@ -1,6 +1,7 @@
 import Foundation
 
 protocol SemanticVectorStorage: AnyObject {
+    func identity(itemID: String, profileID: String) throws -> SemanticIndexedIdentity?
     func hasCurrent(itemID: String, profileID: String, contentHash: String) throws -> Bool
     func rebind(_ snapshot: SemanticSnapshot) throws
     func replace(_ snapshot: SemanticSnapshot, chunks: [SemanticChunk], vectors: [[Double]]) throws
@@ -9,6 +10,12 @@ protocol SemanticVectorStorage: AnyObject {
         vector: [Double], profileID: String, current: [SemanticSnapshot], limit: Int
     ) throws -> [SemanticIndexedPassage]
     func reset() throws
+}
+struct SemanticIndexedIdentity {
+    let revisionID: String
+    let profileID: String
+    let contentHash: String
+    let count: Int
 }
 
 struct SemanticIndexedPassage: Sendable, Equatable {
@@ -24,6 +31,13 @@ struct SemanticIndexedPassage: Sendable, Equatable {
 
 final class SemanticMemoryStorage: SemanticVectorStorage {
     private var values: [String: [SemanticIndexedPassage]] = [:]
+    func identity(itemID: String, profileID: String) throws -> SemanticIndexedIdentity? {
+        guard let values = values[itemID]?.filter({ $0.profileID == profileID }), let first = values.first
+        else { return nil }
+        return .init(
+            revisionID: first.revisionID, profileID: first.profileID, contentHash: first.contentHash,
+            count: values.count)
+    }
 
     func hasCurrent(itemID: String, profileID: String, contentHash: String) throws -> Bool {
         values[itemID]?.first.map {
@@ -144,6 +158,7 @@ final class SemanticService {
     private let store: ItemStore
     private let configurations: SemanticConfigurationStore
     private var storage: SemanticVectorStorage
+    private let hasInjectedStorage: Bool
     private let embed: @Sendable (SemanticConfiguration, [String], Bool) async throws -> [[Double]]
     private let mailbox = SemanticMailbox()
     private var queries: [String: SemanticQuery] = [:]
@@ -165,12 +180,13 @@ final class SemanticService {
 
     init(
         store: ItemStore,
-        storage: SemanticVectorStorage = SemanticMemoryStorage(),
+        storage: SemanticVectorStorage? = nil,
         embed: @escaping @Sendable (SemanticConfiguration, [String], Bool) async throws -> [[Double]] =
             SemanticService.defaultEmbed
     ) {
         self.store = store
-        self.storage = storage
+        self.storage = storage ?? SemanticMemoryStorage()
+        hasInjectedStorage = storage != nil
         queryLifetimeClock = { Date() }
         self.embed = embed
         configurations = SemanticConfigurationStore(storeRoot: store.root)
@@ -178,13 +194,14 @@ final class SemanticService {
 
     init(
         store: ItemStore,
-        storage: SemanticVectorStorage = SemanticMemoryStorage(),
+        storage: SemanticVectorStorage? = nil,
         queryLifetimeClock: @escaping @Sendable () -> Date,
         embed: @escaping @Sendable (SemanticConfiguration, [String], Bool) async throws -> [[Double]] =
             SemanticService.defaultEmbed
     ) {
         self.store = store
-        self.storage = storage
+        self.storage = storage ?? SemanticMemoryStorage()
+        hasInjectedStorage = storage != nil
         self.queryLifetimeClock = queryLifetimeClock
         self.embed = embed
         configurations = SemanticConfigurationStore(storeRoot: store.root)
@@ -264,6 +281,53 @@ final class SemanticService {
             "indexedItems": indexed,
             "coverage": indexed == snapshots.count && storageProblem == nil ? "complete" : "partial",
         ]
+    }
+
+    /// Cheap, local per-item diagnostic. It never schedules work or changes index state.
+    func textDiagnostics(for revision: Revision, corpus: ItemTextContent.Corpus) -> [String: Any] {
+        do {
+            guard let configuration = try configurations.load() else {
+                return [
+                    "status": "disabled", "enabled": false, "configurationID": NSNull(),
+                    "profileID": NSNull(),
+                ]
+            }
+            let profileID = try SemanticSource.profileID(configuration)
+            var result: [String: Any] = [
+                "enabled": true, "configurationID": configuration.configurationID, "profileID": profileID,
+                "inputEncoding": configuration.inputEncoding.rawValue, "model": configuration.model,
+                "chunkBytes": configuration.chunkBytes, "overlapBytes": configuration.overlapBytes,
+                "documentPrefixApplied": !configuration.documentPrefix.isEmpty,
+            ]
+            guard !revision.isDeleted, !corpus.sourceText.isEmpty else {
+                result["status"] = "notIndexable"
+                return result
+            }
+            if storageProblem != nil {
+                result["status"] = "unavailable"
+                return result
+            }
+            let hash = try SemanticSource.contentHash(sourceText: corpus.sourceText)
+            guard storageProfile == profileID else {
+                result["status"] = "pending"
+                return result
+            }
+            let identity: SemanticIndexedIdentity?
+            do { identity = try storage.identity(itemID: revision.itemID, profileID: profileID) } catch {
+                result["status"] = "unavailable"
+                return result
+            }
+            guard let identity else {
+                result["status"] = "missing"
+                return result
+            }
+            result["indexedRevisionID"] = identity.revisionID
+            result["recordCount"] = identity.count
+            result["status"] =
+                identity.count > 0 && identity.revisionID == revision.revisionID
+                    && identity.contentHash == hash ? "current" : "stale"
+            return result
+        } catch { return ["enabled": NSNull(), "status": "unavailable"] }
     }
 
     func configure(_ configuration: SemanticConfiguration, expectedConfigurationID: String?) throws
@@ -660,6 +724,12 @@ final class SemanticService {
     }
 
     private func ensureStorage(_ configuration: SemanticConfiguration, profileID: String) throws {
+        if hasInjectedStorage {
+            if let storageProfile, storageProfile != profileID { try storage.reset() }
+            storageProfile = profileID
+            storageProblem = nil
+            return
+        }
         guard storageProfile != profileID || storageProblem != nil || storage is SemanticMemoryStorage else {
             return
         }
@@ -684,7 +754,7 @@ final class SemanticService {
     }
 
     private func discardDerivedIndex() throws {
-        storage = SemanticMemoryStorage()
+        if hasInjectedStorage { try storage.reset() } else { storage = SemanticMemoryStorage() }
         storageProfile = nil
         storageProblem = nil
         let fileManager = FileManager.default

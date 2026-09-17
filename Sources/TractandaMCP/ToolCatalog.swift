@@ -77,6 +77,18 @@ struct ToolDefinition: Sendable {
                 throw TractandaError("invalidArguments", "\(name) must contain 1 through 64 string IDs.")
             }
         }
+        if nativeMethod == "TractandaItem/extractedText" {
+            if let value = arguments["projection"],
+                !["source", "fts", "summary"].contains(value.stringValue ?? "")
+            {
+                throw TractandaError("invalidArguments", "projection must be source, fts, or summary.")
+            }
+            if let ids = arguments["ids"]?.arrayValue,
+                Set(ids.compactMap(\.stringValue)).count != ids.count
+            {
+                throw TractandaError("invalidArguments", "ids must be distinct.")
+            }
+        }
         for key in ["categoryPath", "excludedCategoryIDs"] {
             if let path = arguments[key] {
                 guard let values = path.arrayValue, values.count <= 32,
@@ -153,13 +165,16 @@ enum ToolCatalog {
     ])
     private static let projection: Value = .object([
         "type": .string("string"), "enum": .array(["full", "content", "summary"].map(Value.string)),
-        "description": .string("full is native complete output; MCP defaults to content when omitted."),
+        "description": .string(
+            "full is native complete output; MCP defaults to content when omitted. Mutually exclusive with properties."
+        ),
     ])
     private static let propertyNames: Value = .object([
         "type": .string("array"), "items": .object(["type": .string("string"), "minLength": .int(1)]),
         "maxItems": .int(64), "uniqueItems": .bool(true),
         "description": .string(
-            "Literal top-level field names; always retains available record identity fields."),
+            "Literal top-level field names; always retains available record identity fields. Mutually exclusive with projection."
+        ),
     ])
     private static let sort: Value = .object([
         "type": .string("array"), "maxItems": .int(4),
@@ -249,12 +264,31 @@ enum ToolCatalog {
         .init(
             "tractanda_get", method: "TractandaItem/get",
             description:
-                "Batch-fetch current revisions with ids (an array, even for one item); do not use itemID or itemIDs. Accepts up to 64 IDs. notFound are unreadable/missing IDs; remainingIDs are unprocessed IDs to fetch next with the same projection; compare state between pages. oversizedIDs require a narrower projection. Item count and maxBytes are independent; fields are not silently truncated.",
+                "Batch-fetch current revisions with ids (an array, even for one item); do not use itemID or itemIDs. Accepts up to 64 IDs. projection and properties are mutually exclusive; choose one or omit both. notFound are unreadable/missing IDs; remainingIDs are unprocessed IDs to fetch next with the same projection; compare state between pages. oversizedIDs require a narrower projection. Item count and maxBytes are independent; fields are not silently truncated.",
             properties: [
                 "ids": identifiers, "projection": projection, "properties": propertyNames,
                 "maxBytes": .object([
                     "type": .string("integer"), "minimum": .int(8_192), "maximum": .int(524_288),
                     "default": .int(524_288),
+                ]),
+            ], required: ["ids"]),
+        .init(
+            "tractanda_extracted_text", method: "TractandaItem/extractedText",
+            description:
+                "Diagnose search coverage for readable current items. Returns item/revision identity, extractionProfile, byte counts and separate FTS/semantic index freshness. source returns canonical semantic input before chunking; fts returns the three FTS input fields; summary omits text. It never follows references or extracts attachments. No silent truncation: follow remainingIDs; retry oversizedIDs with summary. maxBytes covers the native result, not MCP framing. Requires tractanda.extracted-text.v1; read the served query/semantic references.",
+            properties: [
+                "ids": .object([
+                    "type": .string("array"), "items": identifier,
+                    "minItems": .int(1), "maxItems": .int(64), "uniqueItems": .bool(true),
+                ]),
+                "projection": .object([
+                    "type": .string("string"),
+                    "enum": .array(["source", "fts", "summary"].map(Value.string)),
+                    "default": .string("source"),
+                ]),
+                "maxBytes": .object([
+                    "type": .string("integer"), "minimum": .int(8_192),
+                    "maximum": .int(524_288), "default": .int(65_536),
                 ]),
             ], required: ["ids"]),
         .init(
@@ -271,13 +305,14 @@ enum ToolCatalog {
             ], required: ["ids", "categoryRootIDs"]),
         .init(
             "tractanda_history", method: "TractandaItem/history",
-            description: "Read immutable revisions newest first, under the item's current permissions.",
+            description:
+                "Read immutable revisions newest first, under the item's current permissions. projection and properties are mutually exclusive; choose one or omit both.",
             properties: page(["itemID": identifier, "projection": projection, "properties": propertyNames]),
             required: ["itemID"], isPaged: true),
         .init(
             "tractanda_revision", method: "TractandaRevision/get",
             description:
-                "Read one revision belonging to an item. Current item permissions also govern old revisions.",
+                "Read one revision belonging to an item. Current item permissions also govern old revisions. projection and properties are mutually exclusive; choose one or omit both.",
             properties: [
                 "itemID": identifier, "revisionID": identifier, "projection": projection,
                 "properties": propertyNames,

@@ -2,6 +2,12 @@ import CSQLite
 import Foundation
 
 final class ItemIndex {
+    struct TextRow {
+        let revisionID: String
+        let subject: String
+        let body: String
+        let metadata: String
+    }
     private var database: OpaquePointer?
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
     init(path: String, create: Bool) throws {
@@ -93,5 +99,28 @@ final class ItemIndex {
             guard step == SQLITE_ROW, let text = sqlite3_column_text(statement, 0) else { throw error() }
             result.append(String(cString: text))
         }
+    }
+    func textRow(id: String) throws -> TextRow? {
+        let statement = try prepare(
+            "SELECT items.revision, text_index.id, text_index.subject, text_index.body, text_index.metadata FROM items LEFT JOIN text_index ON items.id = text_index.id WHERE items.id = ?",
+            [id])
+        defer { sqlite3_finalize(statement) }
+        let step = sqlite3_step(statement)
+        if step == SQLITE_DONE { return nil }
+        guard step == SQLITE_ROW else { throw error() }
+        if sqlite3_column_type(statement, 1) == SQLITE_NULL { return nil }
+        func value(_ column: Int32) throws -> String {
+            guard let pointer = sqlite3_column_text(statement, column),
+                let text = String(
+                    bytes: UnsafeBufferPointer(
+                        start: pointer, count: Int(sqlite3_column_bytes(statement, column))), encoding: .utf8)
+            else { throw TractandaError("indexError", "Invalid indexed text.") }
+            return text
+        }
+        let result = try TextRow(revisionID: value(0), subject: value(2), body: value(3), metadata: value(4))
+        guard sqlite3_step(statement) == SQLITE_DONE else {
+            throw TractandaError("indexError", "Ambiguous indexed text.")
+        }
+        return result
     }
 }

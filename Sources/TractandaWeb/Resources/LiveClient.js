@@ -478,7 +478,7 @@
     const base=baseRevision?.fields||{}, previous=baseRevision?byId(fieldText(base,'itemID')):null;
     const fields={subject:typedText(candidate.title)};
     for(const [key,value] of [['body',candidate.summary],['workingNotes',candidate.notes]]) {
-      if(base[key]||String(value||'').trim()) fields[key]=typedText(value||'');
+      if(typeof value==='string'&&value.length) fields[key]=typedText(value);
     }
     if((base.checklist?.value||[]).length||(candidate.checklist||[]).length)fields.checklist={type:'list',value:(candidate.checklist||[]).map(step=>{
       const prior=(base.checklist?.value||[]).find(entry=>entry.value.id?.value===step.id)?.value||{};
@@ -500,6 +500,17 @@
     return Object.fromEntries(Object.entries(fields).filter(([key,value])=>JSON.stringify(base[key])!==JSON.stringify(value)));
   }
 
+  function makeLiveEdit(candidate, baseRevision) {
+    const base=baseRevision?.fields||{};
+    const unset=[];
+    for(const [key,value] of [['body',candidate.summary],['workingNotes',candidate.notes]]) {
+      // Only an actual clear of displayed text removes a key. An untouched
+      // absent/explicit-empty value or an undisplayed non-text property survives.
+      if(value===''&&base[key]?.type==='text'&&base[key].value.length)unset.push(key);
+    }
+    return {changes:makeLiveFields(candidate,baseRevision),unset};
+  }
+
   function retainPendingWrite(write) {
     // This is a retry journal for one unconfirmed request, not an authoritative task database.
     sessionStorage.setItem(pendingStorageKey(write.viewItemID),JSON.stringify(write));
@@ -511,9 +522,9 @@
 
   async function saveLiveTask(candidate, baseRevision) {
     if (isSaving || pendingWrite) {toast('Resolve the pending edit before starting another.',true);return;}
-    const changes=makeLiveFields(candidate,baseRevision);
-    if (!Object.keys(changes).length) {$('task-dialog').close();toast('No changes to save.');return;}
-    const request={action:baseRevision?'revise':'create',changes,unset:[],operationID:'web:'+crypto.randomUUID()};
+    const {changes,unset}=makeLiveEdit(candidate,baseRevision);
+    if (!Object.keys(changes).length&&!unset.length) {$('task-dialog').close();toast('No changes to save.');return;}
+    const request={action:baseRevision?'revise':'create',changes,unset,operationID:'web:'+crypto.randomUUID()};
     if (baseRevision) {request.itemID=fieldText(baseRevision.fields,'itemID');request.expectedRevisionID=fieldText(baseRevision.fields,'revisionID');}
     else request.classID='Item';
     try {retainPendingWrite({viewItemID:selectedViewID,request,candidate});}

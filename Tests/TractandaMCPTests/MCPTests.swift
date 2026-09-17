@@ -152,6 +152,22 @@ final class MCPTests: XCTestCase {
         XCTAssertThrowsError(try query.arguments(from: ["viewID": .string("id"), "sort": .array([])]))
 
         let get = try XCTUnwrap(definitions.first { $0.tool.name == "tractanda_get" })
+        for name in ["tractanda_get", "tractanda_history", "tractanda_revision"] {
+            let tool = try XCTUnwrap(definitions.first { $0.tool.name == name })
+            XCTAssertTrue(tool.description.contains("projection and properties are mutually exclusive"))
+            var arguments: [String: Value] = [
+                "projection": .string("summary"), "properties": .array([.string("subject")]),
+            ]
+            if name == "tractanda_get" {
+                arguments["ids"] = .array([.string(rootID)])
+            } else {
+                arguments["itemID"] = .string(rootID)
+            }
+            if name == "tractanda_revision" { arguments["revisionID"] = .string(rootID) }
+            XCTAssertThrowsError(try tool.arguments(from: arguments)) { error in
+                XCTAssertTrue((error as? TractandaError)?.message.contains("mutually exclusive") == true)
+            }
+        }
         let getProperties = try XCTUnwrap(get.tool.inputSchema.objectValue?["properties"]?.objectValue)
         XCTAssertEqual(getProperties["maxBytes"]?.objectValue?["maximum"]?.intValue, 524_288)
         XCTAssertNoThrow(
@@ -180,6 +196,28 @@ final class MCPTests: XCTestCase {
         XCTAssertEqual(
             Set(explainProperties.keys),
             Set(["itemID", "categoryID"]))
+    }
+
+    func testExtractedTextToolDescribesAndValidatesItsIndependentLimits() throws {
+        let tool = try XCTUnwrap(
+            ToolCatalog.definitions().first { $0.tool.name == "tractanda_extracted_text" })
+        XCTAssertEqual(tool.nativeMethod, "TractandaItem/extractedText")
+        XCTAssertTrue(tool.readOnly)
+        XCTAssertFalse(tool.destructive)
+        let id = "44444444-4444-4444-8444-444444444444"
+        XCTAssertNoThrow(
+            try tool.arguments(from: [
+                "ids": .array([.string(id)]), "projection": .string("fts"), "maxBytes": .int(8_192),
+            ]))
+        XCTAssertThrowsError(
+            try tool.arguments(from: ["ids": .array([.string(id)]), "projection": .string("content")]))
+        XCTAssertThrowsError(try tool.arguments(from: ["ids": .array([.string(id), .string(id)])]))
+        XCTAssertThrowsError(
+            try tool.arguments(from: ["ids": .array([.string(id)]), "maxBytes": .int(8_191)]))
+        XCTAssertThrowsError(
+            try tool.arguments(from: ["ids": .array([.string(id)]), "properties": .array([])]))
+        XCTAssertTrue(tool.description.contains("oversizedIDs"))
+        XCTAssertTrue(tool.description.contains("tractanda.extracted-text.v1"))
     }
 
     func testWriteAndSemanticHintsMatchTheirActualEffects() throws {

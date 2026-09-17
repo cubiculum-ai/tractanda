@@ -131,6 +131,127 @@ final class SemanticServiceTests: XCTestCase {
         }
     }
 
+    private final class FailingDiagnosticStorage: SemanticVectorStorage {
+        func identity(itemID: String, profileID: String) throws -> SemanticIndexedIdentity? {
+            throw TractandaError("semanticIndex", "/private/sensitive-index diagnostic secret")
+        }
+        func hasCurrent(itemID: String, profileID: String, contentHash: String) throws -> Bool { false }
+        func rebind(_ snapshot: SemanticSnapshot) throws {}
+        func replace(_ snapshot: SemanticSnapshot, chunks: [SemanticChunk], vectors: [[Double]]) throws {}
+        func prune(profileID: String, keeping itemIDs: Set<String>) throws {}
+        func search(vector: [Double], profileID: String, current: [SemanticSnapshot], limit: Int) throws
+            -> [SemanticIndexedPassage]
+        { [] }
+        func reset() throws {}
+    }
+
+    func testTextDiagnosticsPendingAndFailuresStayLocalAndNonDisclosing() throws {
+        try fixture { store, root in
+            let calls = Counter()
+            let service = SemanticService(store: store, storage: FailingDiagnosticStorage()) { _, _, _ in
+                calls.increment()
+                return []
+            }
+            let config = configuration(operationID: "diagnostic-failure")
+            try service.configure(config, expectedConfigurationID: nil)
+            // Establish the backend with an empty canonical store: no documents to embed.
+            service.maintain()
+            let item = try note(store, subject: "Visible", body: "Text", operation: "diagnostic-failure-item")
+            let corpus = ItemTextContent.corpus(for: item)
+            let pendingService = SemanticService(store: store, storage: SemanticMemoryStorage()) { _, _, _ in
+                calls.increment()
+                return []
+            }
+            XCTAssertEqual(
+                pendingService.textDiagnostics(for: item, corpus: corpus)["status"] as? String, "pending")
+            let result = service.textDiagnostics(for: item, corpus: corpus)
+            XCTAssertEqual(result["status"] as? String, "unavailable")
+            XCTAssertEqual(result["enabled"] as? Bool, true)
+            XCTAssertEqual(result["configurationID"] as? String, config.configurationID)
+            XCTAssertFalse(
+                String(decoding: try JSONSerialization.data(withJSONObject: result), as: UTF8.self).contains(
+                    "sensitive-index"))
+            try Data("invalid configuration".utf8).write(to: root.appendingPathComponent("semantic.json"))
+            let unknown = service.textDiagnostics(for: item, corpus: corpus)
+            XCTAssertEqual(unknown["status"] as? String, "unavailable")
+            XCTAssertTrue(unknown["enabled"] is NSNull)
+            XCTAssertEqual(calls.read(), 0)
+        }
+    }
+
+    func testTextDiagnosticsDisabledAndNotIndexableDoNotEmbed() throws {
+        try fixture { store, _ in
+            let calls = Counter()
+            let service = SemanticService(store: store) { _, _, _ in
+                calls.increment()
+                return []
+            }
+            let empty = try note(store, subject: "", body: "", operation: "diagnostic-empty")
+            let emptyCorpus = ItemTextContent.corpus(for: empty)
+            XCTAssertEqual(
+                service.textDiagnostics(for: empty, corpus: emptyCorpus)["status"] as? String, "disabled")
+            XCTAssertEqual(calls.read(), 0)
+            try service.configure(configuration(), expectedConfigurationID: nil)
+            XCTAssertEqual(
+                service.textDiagnostics(for: empty, corpus: emptyCorpus)["status"] as? String, "notIndexable")
+            let deleted = try store.commit(
+                CommitRequest(
+                    action: .revise, itemID: empty.itemID, expectedRevisionID: empty.revisionID,
+                    changes: ["isDeleted": .boolean(true)], operationID: "diagnostic-delete")
+            ).revision
+            XCTAssertEqual(
+                service.textDiagnostics(for: deleted, corpus: ItemTextContent.corpus(for: deleted))["status"]
+                    as? String, "notIndexable")
+            XCTAssertEqual(calls.read(), 0)
+        }
+    }
+
+    func testTextDiagnosticsIdentityLifecycleDoesNotEmbed() throws {
+        try fixture { store, _ in
+            let calls = Counter()
+            let storage = SemanticMemoryStorage()
+            let service = SemanticService(store: store, storage: storage) { _, _, _ in
+                calls.increment()
+                return [[1, 0]]
+            }
+            let configuration = configuration(operationID: "diagnostic-lifecycle")
+            try service.configure(configuration, expectedConfigurationID: nil)
+            service.maintain()
+            let item = try note(store, subject: "Alpha", body: "Body", operation: "diagnostic-item")
+            let corpus = ItemTextContent.corpus(for: item)
+            XCTAssertEqual(service.textDiagnostics(for: item, corpus: corpus)["status"] as? String, "missing")
+            let profile = try SemanticSource.profileID(configuration)
+            let hash = try SemanticSource.contentHash(sourceText: corpus.sourceText)
+            XCTAssertEqual(service.textDiagnostics(for: item, corpus: corpus)["status"] as? String, "missing")
+            let chunk = try XCTUnwrap(
+                SemanticChunker.chunks(
+                    corpus.sourceText, chunkBytes: configuration.chunkBytes,
+                    overlapBytes: configuration.overlapBytes
+                ).first)
+            let snapshot = SemanticSnapshot(
+                itemID: item.itemID, revisionID: item.revisionID, subject: corpus.subject, body: corpus.body,
+                sourceText: corpus.sourceText, profileID: profile, contentHash: hash)
+            try storage.replace(snapshot, chunks: [chunk], vectors: [[1, 0]])
+            XCTAssertEqual(service.textDiagnostics(for: item, corpus: corpus)["status"] as? String, "current")
+            let revised = try store.commit(
+                CommitRequest(
+                    action: .revise, itemID: item.itemID, expectedRevisionID: item.revisionID,
+                    changes: ["dueAt": .date("2030-01-01T00:00:00Z")], operationID: "diagnostic-revision")
+            ).revision
+            XCTAssertEqual(
+                service.textDiagnostics(for: revised, corpus: ItemTextContent.corpus(for: revised))["status"]
+                    as? String, "stale")
+            try storage.rebind(
+                SemanticSnapshot(
+                    itemID: revised.itemID, revisionID: revised.revisionID, subject: corpus.subject,
+                    body: corpus.body, sourceText: corpus.sourceText, profileID: profile, contentHash: hash))
+            XCTAssertEqual(
+                service.textDiagnostics(for: revised, corpus: ItemTextContent.corpus(for: revised))["status"]
+                    as? String, "current")
+            XCTAssertEqual(calls.read(), 0)
+        }
+    }
+
     private func assertQueryTiming(
         _ response: [String: Any], createdAt: Date, expiresAt: Date, file: StaticString = #filePath,
         line: UInt = #line

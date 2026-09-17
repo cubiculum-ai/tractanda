@@ -350,6 +350,7 @@ def revise(state, notes):
     state.update(commit=commit, tree=git('rev-parse', 'HEAD^{tree}'), steps={}, status='ready',
                  plannedSteps=list(RELEASE_STEPS), notes=notes)
     state.pop('error', None)
+    state.pop('pauseReason', None)
     state.pop('activeStep', None)
     write(Path(state['directory']) / 'state.json', state)
     write(CONTROL / 'current.json', state)
@@ -588,6 +589,7 @@ class Pipeline:
         if self.state['status'] == 'complete':
             return
         self.state.pop('error', None)
+        self.state.pop('pauseReason', None)
         if git('rev-parse', 'HEAD', cwd=self.source) != self.state['commit'] or git('status', '--porcelain', cwd=self.source):
             raise RuntimeError('The sealed source checkout changed; refusing to release an unverified tree.')
         self.state['plannedSteps'] = list(RELEASE_STEPS)
