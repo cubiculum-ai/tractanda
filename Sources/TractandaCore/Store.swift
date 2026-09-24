@@ -109,7 +109,11 @@ public final class ItemStore {
             try ensureDirectory(self.root.appendingPathComponent("items"))
             try rejectIndexInsideCanonicalItems()
             try ensureDirectory(indexDirectory)
-            if usesExternalIndexDirectory { try bindExternalIndexDirectory() }
+            if usesExternalIndexDirectory {
+                try bindExternalIndexDirectory()
+            } else {
+                _ = try canonicalStoreIdentity(creatingIfMissing: true)
+            }
             try rebuildIndex()
         } catch {
             if indexWriter >= 0 { tractanda_unlock(indexWriter) }
@@ -126,17 +130,35 @@ public final class ItemStore {
     private struct IndexBinding: Codable, Equatable {
         let formatVersion: Int
         let canonicalPath: String
+        let storeID: String
         let canonicalDevice: UInt64
         let canonicalInode: UInt64
 
         func identifiesSameStore(as other: Self) -> Bool {
-            formatVersion == other.formatVersion && canonicalDevice == other.canonicalDevice
-                && canonicalInode == other.canonicalInode
+            formatVersion == other.formatVersion && storeID == other.storeID
         }
+    }
+
+    private struct LegacyIndexBinding: Codable, Equatable {
+        let formatVersion: Int
+        let canonicalPath: String
+        let canonicalDevice: UInt64
+        let canonicalInode: UInt64
+
+        func identifiesSameStore(as root: URL, metadata: FileMetadata) -> Bool {
+            formatVersion == 1 && canonicalPath == root.path && canonicalDevice == metadata.device
+                && canonicalInode == metadata.inode
+        }
+    }
+
+    private struct CanonicalStoreIdentity: Codable, Equatable {
+        let formatVersion: Int
+        let storeID: String
     }
 
     private static let indexBindingName = ".tractanda-index-binding.json"
     private static let indexLockName = ".tractanda-index.writer.lock"
+    private static let canonicalIdentityName = ".tractanda-store-identity.json"
 
     private static func isDescendant(_ candidate: URL, of parent: URL) -> Bool {
         // Resolve existing parent aliases (notably macOS `/tmp`) before comparing. A supplied
@@ -177,21 +199,42 @@ public final class ItemStore {
                 $0 != Self.indexLockName && $0 != Self.indexBindingName
             }
             let rootMetadata = try FileMetadata.read(at: root)
-            let binding = IndexBinding(
-                formatVersion: 1, canonicalPath: root.path, canonicalDevice: rootMetadata.device,
-                canonicalInode: rootMetadata.inode)
             if FileManager.default.fileExists(atPath: markerURL.path) {
                 try PrivateConfiguration.validate(markerURL, directory: false)
-                let existing = try JSON.decode(IndexBinding.self, Data(contentsOf: markerURL))
-                guard existing.identifiesSameStore(as: binding) else {
+                let marker = try Data(contentsOf: markerURL)
+                let formatVersion = try JSON.decode(BindingFormat.self, marker).formatVersion
+                switch formatVersion {
+                case 1:
+                    let legacy = try JSON.decode(LegacyIndexBinding.self, marker)
+                    guard legacy.identifiesSameStore(as: root, metadata: rootMetadata) else {
+                        throw TractandaError(
+                            "indexBindingMismatch",
+                            "Derived index directory has a legacy binding mismatch; rebuild the derived index directory."
+                        )
+                    }
+                    let binding = try currentIndexBinding(rootMetadata: rootMetadata, creatingIdentity: true)
+                    try PrivateConfiguration.write(try JSON.encode(binding), to: markerURL)
+                case 2:
+                    let binding = try currentIndexBinding(rootMetadata: rootMetadata, creatingIdentity: false)
+                    let existing = try JSON.decode(IndexBinding.self, marker)
+                    guard existing.identifiesSameStore(as: binding) else {
+                        throw TractandaError(
+                            "indexBindingMismatch",
+                            "Derived index directory belongs to another canonical store.")
+                    }
+                    if existing != binding {
+                        try PrivateConfiguration.write(try JSON.encode(binding), to: markerURL)
+                    }
+                default:
                     throw TractandaError(
-                        "indexBindingMismatch", "Derived index directory belongs to another canonical store.")
+                        "indexBindingMismatch", "Derived index directory has an unsupported binding format.")
                 }
             } else {
                 guard entries.isEmpty else {
                     throw TractandaError(
                         "indexBindingRequired", "Refusing an unbound nonempty derived index directory.")
                 }
+                let binding = try currentIndexBinding(rootMetadata: rootMetadata, creatingIdentity: true)
                 try PrivateConfiguration.write(try JSON.encode(binding), to: markerURL)
             }
         } catch {
@@ -199,6 +242,49 @@ public final class ItemStore {
             indexWriter = -1
             throw error
         }
+    }
+
+    private struct BindingFormat: Decodable {
+        let formatVersion: Int
+    }
+
+    private func currentIndexBinding(rootMetadata: FileMetadata, creatingIdentity: Bool) throws
+        -> IndexBinding
+    {
+        IndexBinding(
+            formatVersion: 2, canonicalPath: root.path,
+            storeID: try canonicalStoreIdentity(creatingIfMissing: creatingIdentity),
+            canonicalDevice: rootMetadata.device, canonicalInode: rootMetadata.inode)
+    }
+
+    /// This identity belongs to canonical storage, never to a disposable index. The root writer
+    /// lock is held before this method can run, so creation cannot race another store process.
+    private func canonicalStoreIdentity(creatingIfMissing: Bool) throws -> String {
+        let identityURL = root.appendingPathComponent(Self.canonicalIdentityName)
+        do {
+            _ = try FileMetadata.read(at: identityURL)
+            try PrivateConfiguration.validate(identityURL, directory: false)
+            let identity = try JSON.decode(CanonicalStoreIdentity.self, Data(contentsOf: identityURL))
+            guard identity.formatVersion == 1, let uuid = UUID(uuidString: identity.storeID),
+                uuid.version1Components != nil
+            else {
+                throw TractandaError("invalidStoreIdentity", "Canonical store identity is invalid.")
+            }
+            return uuid.uuidString.lowercased()
+        } catch FileMetadataError.posix(let code) where code == ENOENT {
+            // A missing identity is handled below. Any other lstat failure remains fatal.
+        } catch {
+            throw error
+        }
+        guard creatingIfMissing else {
+            throw TractandaError(
+                "indexBindingMismatch",
+                "Canonical store identity is missing; rebuild the derived index directory.")
+        }
+        let identity = CanonicalStoreIdentity(
+            formatVersion: 1, storeID: try UUID.makeVersion1().uuidString.lowercased())
+        try PrivateConfiguration.write(try JSON.encode(identity), to: identityURL)
+        return identity.storeID
     }
 
     private func ensureDirectory(_ url: URL) throws {

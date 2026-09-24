@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+External indexes use a private canonical-store UUID instead of treating filesystem device numbers as permanent identity. This fixes startup failures after device renumbering during an OS update or reboot while retaining wrong-store, private-path and writer-lock checks. Rebuilding an index preserves the store UUID. Earlier bindings migrate only on an exact identity match; mismatches still require an explicit index rebuild.
+
+The web integration check waits for the CLI's completed-startup record before inspecting the session file, avoiding a race with final permission setup while retaining the privacy assertion.
+
 ## 0.1.0-poc.10
 
 This consolidated preview supersedes the early distributions. Its release page contains current installation, client/agent usage, storage, backup and compatibility guidance without depending on earlier release notes. The unpublished poc.9 candidate was superseded before installation or publication.

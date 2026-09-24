@@ -28,6 +28,8 @@ The installer registers system LaunchDaemons for the server and, when included, 
 
 Each database occupies its own named subdirectory. Back up the complete canonical store, including its durable settings. Indexes can be regenerated.
 
+The canonical store's `.tractanda-store-identity.json` is durable metadata and belongs in that backup. External indexes bind to its persistent UUIDv1; paths, device numbers and inodes are diagnostic only because they can change after moves, restores or reboots. Deleting a derived index must not delete the canonical identity. Early device/inode bindings upgrade only when their recorded identity still matches; a mismatched old index requires an explicit, data-preserving index rebuild.
+
 Use `--data-root` and `--index-root` to select different parent directories. Existing paths must have suitable ownership and permissions; the installer refuses to change unrelated shared folders or adopt an unrecognized database. It reports an unsafe parent before installing. A read-only plan is available with:
 
 ```sh
