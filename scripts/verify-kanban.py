@@ -41,6 +41,20 @@ def wait_for(path, process):
         time.sleep(0.03)
 
 
+def wait_for_web_startup(path, process):
+    """Wait for the CLI's post-permissions startup record, not file creation."""
+    deadline = time.monotonic() + 20
+    while True:
+        if process.poll() is not None:
+            raise RuntimeError(f'Web adapter stopped with status {process.returncode}')
+        try:
+            return json.loads(path.read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            if time.monotonic() > deadline:
+                raise TimeoutError('Web adapter did not report completed startup')
+            time.sleep(0.03)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('binary')
@@ -68,7 +82,8 @@ def main():
                 raise RuntimeError(result.stderr)
             return json.loads(result.stdout)
 
-        with (root / 'servers.log').open('w') as log:
+        startup_file = root / 'web-startup.json'
+        with (root / 'servers.log').open('w') as log, startup_file.open('w') as startup_output:
             try:
                 if options.import_from:
                     source = Path(options.import_from)
@@ -90,8 +105,9 @@ def main():
                     check(initial['tasks'] == manifest['snapshot']['tasks'], 'Transferred canonical board preserves tasks, identities, order and references')
                 cli('export-kanban',socket,board_id,root/'snapshot.html')
                 check('HTTP test' in (root/'snapshot.html').read_text(), 'CLI exports an HTML snapshot from canonical items')
-                web = subprocess.Popen([binary,'web',str(socket),board_id,'--session-file',str(session_file)],stdout=log,stderr=log)
-                wait_for(session_file,web)
+                web = subprocess.Popen([binary,'web',str(socket),board_id,'--session-file',str(session_file)],stdout=startup_output,stderr=log)
+                startup = wait_for_web_startup(startup_file,web)
+                check(startup.get('sessionFile') == str(session_file), 'Web adapter confirms the requested session file after startup')
                 session = json.loads(session_file.read_text())
                 address = urlsplit(session['url'])
                 token = parse_qs(address.fragment)['token'][0]
