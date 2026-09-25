@@ -1,8 +1,8 @@
 # macOS preview installation
 
-The downloadable preview targets Apple Silicon Macs. It contains the server, terminal client, MCP adapter, native installer and their required runtime libraries. A bundle with semantic retrieval also contains the pinned Qwen3 embedding model and the vmlx-swift host. Running the downloaded bundle does not require Xcode, Swift, Python or a model download.
+The downloadable preview targets Apple Silicon Macs. It contains the server, terminal client, MCP adapter, native installer and their required runtime libraries. A bundle with semantic retrieval also contains the pinned Granite Embedding 311M multilingual R2 model and the vmlx-swift host. Running the downloaded bundle does not require Xcode, Swift, Python or a model download.
 
-Linux remains in development. Its source and local HTTP embedding-provider interface are retained; a supported Linux installer is a later step.
+Linux installation remains in development. The portable CPU embedding host can be built from source; see [embedding runtime build and checks](embedding-runtime.md). A supported Linux installer is a later step.
 
 ## Install an empty or sample database
 

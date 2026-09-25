@@ -37,7 +37,8 @@ final class SetupTests: XCTestCase {
             }
             if executable == "/usr/bin/curl" {
                 return ProcessResult(
-                    status: 0, output: "{\"ready\":true,\"model\":\"" + EmbeddingPayload.qwen.model + "\"}")
+                    status: 0, output: "{\"ready\":true,\"model\":\"" + EmbeddingPayload.granite.model + "\"}"
+                )
             }
             return ProcessResult(status: 0)
         }
@@ -101,6 +102,58 @@ final class SetupTests: XCTestCase {
         SetupEngine(
             roots: fixture.roots, runner: runner, rootCheck: { true }, trustedOwnership: false,
             readinessCheck: { _, account, _ in XCTAssertEqual(account, "daemon") })
+    }
+
+    private func addGranitePayload(to fixture: Fixture) throws {
+        let manifestURL = fixture.bundle.appendingPathComponent("bundle-manifest.json")
+        let original = try JSONDecoder().decode(BundleManifest.self, from: Data(contentsOf: manifestURL))
+        var files = original.files
+        for name in [
+            "bin/tractanda-embeddings", "licenses/Granite/LICENSE", "licenses/Granite/README.md",
+            "models/granite-embedding-311m-multilingual-r2/model.safetensors",
+            "models/granite-embedding-311m-multilingual-r2/config.json",
+            "models/granite-embedding-311m-multilingual-r2/1_Pooling/config.json",
+            "models/granite-embedding-311m-multilingual-r2/config_sentence_transformers.json",
+            "models/granite-embedding-311m-multilingual-r2/modules.json",
+            "models/granite-embedding-311m-multilingual-r2/sentence_bert_config.json",
+            "models/granite-embedding-311m-multilingual-r2/special_tokens_map.json",
+            "models/granite-embedding-311m-multilingual-r2/tokenizer.json",
+            "models/granite-embedding-311m-multilingual-r2/tokenizer_config.json",
+        ] {
+            let url = fixture.bundle.appendingPathComponent(name)
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let data = Data("synthetic Granite fixture".utf8)
+            try data.write(to: url)
+            let mode: UInt16 = name.hasPrefix("bin/") ? 0o755 : 0o644
+            try FileManager.default.setAttributes(
+                [.posixPermissions: NSNumber(value: mode)], ofItemAtPath: url.path)
+            files.append(
+                .init(
+                    path: name, sha256: SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined(),
+                    size: UInt64(data.count), mode: mode))
+        }
+        try JSONEncoder().encode(
+            BundleManifest(
+                version: "0.1.0-preview.2", platform: original.platform, arch: original.arch, files: files,
+                embedding: .granite)
+        ).write(to: manifestURL)
+    }
+
+    private func legacySemanticConfiguration(_ installer: SetupEngine, _ receipt: InstallationReceipt) throws
+        -> BundledSemanticConfiguration
+    {
+        installer.legacyConfiguration(for: receipt)
+    }
+
+    private func recordLegacyEmbeddingRegistration(
+        _ installer: SetupEngine, _ receipt: inout InstallationReceipt
+    ) throws {
+        let data = Data("legacy embedding registration".utf8)
+        let url = installer.embeddingDefinitionURL(receipt.instance)
+        try data.write(to: url)
+        receipt.embeddingDefinitionSHA256 = SHA256.hash(data: data).map { String(format: "%02x", $0) }
+            .joined()
     }
 
     func testManifestRejectsUnsafeNamesModesMissingAndUnexpectedFiles() throws {
@@ -231,29 +284,7 @@ final class SetupTests: XCTestCase {
     func testFailureAfterEmbeddingStartupRollsBackBothJobs() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
-        let manifestURL = f.bundle.appendingPathComponent("bundle-manifest.json")
-        let original = try JSONDecoder().decode(BundleManifest.self, from: Data(contentsOf: manifestURL))
-        var files = original.files
-        for name in [
-            "bin/tractanda-embeddings", "licenses/Qwen3/LICENSE", "licenses/Qwen3/README.md",
-            "models/qwen3-embedding-0.6b/model.safetensors", "models/qwen3-embedding-0.6b/tokenizer.json",
-            "models/qwen3-embedding-0.6b/manifest.json",
-        ] {
-            let url = f.bundle.appendingPathComponent(name)
-            try FileManager.default.createDirectory(
-                at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o755])
-            let data = Data("synthetic fixture".utf8)
-            try data.write(to: url)
-            files.append(
-                .init(
-                    path: name, sha256: SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined(),
-                    size: UInt64(data.count), mode: name.hasPrefix("bin/") ? 0o755 : 0o644))
-        }
-        let manifest = BundleManifest(
-            version: original.version, platform: original.platform, arch: original.arch,
-            files: files, embedding: .qwen)
-        try JSONEncoder().encode(manifest).write(to: manifestURL)
+        try addGranitePayload(to: f)
         let runner = Runner()
         let installer = SetupEngine(
             roots: f.roots, runner: runner, rootCheck: { true }, trustedOwnership: false,
@@ -274,6 +305,189 @@ final class SetupTests: XCTestCase {
                 $0.1.contains(where: { $0.contains("ai.tractanda.embeddings.preview.plist") })
             })
         XCTAssertEqual(try installer.readReceipt("preview")?.state, .preparing)
+    }
+
+    func testManagedQwenConfigurationUpgradesToGraniteAndIsIdempotent() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let runner = Runner()
+        let initial = engine(f, runner: runner)
+        try initial.install(f.options)
+        var receipt = try XCTUnwrap(initial.readReceipt("preview"))
+        receipt.embedding = .legacyQwen
+        receipt.embeddingConfigured = true
+        try recordLegacyEmbeddingRegistration(initial, &receipt)
+        try initial.writeReceipt(receipt)
+        var semantic = try legacySemanticConfiguration(initial, receipt)
+        semantic.operationID = "pilot-semantic-cutover"
+        try JSONEncoder().encode(semantic).write(
+            to: URL(fileURLWithPath: receipt.store).appendingPathComponent("semantic.json"))
+        try addGranitePayload(to: f)
+        var configureCalls = 0
+        let installer = SetupEngine(
+            roots: f.roots, runner: runner, rootCheck: { true }, trustedOwnership: false,
+            readinessCheck: { _, _, _ in },
+            semanticCall: { _, _, method, arguments in
+                guard runner.jobs.contains("system/ai.tractanda.server.preview") else {
+                    throw SetupError("Native server is not running.")
+                }
+                if method == "TractandaSemantic/status" {
+                    return [
+                        "enabled": true, "configurationID": semantic.configurationID, "model": semantic.model,
+                    ]
+                }
+                configureCalls += 1
+                let data = try JSONSerialization.data(
+                    withJSONObject: try XCTUnwrap(arguments["configuration"]))
+                let candidate = try JSONDecoder().decode(BundledSemanticConfiguration.self, from: data)
+                if semantic.operationID == candidate.operationID, semantic == candidate {
+                    return ["enabled": true, "configurationID": semantic.configurationID]
+                }
+                XCTAssertEqual(arguments["expectedConfigurationID"] as? String, semantic.configurationID)
+                semantic = candidate
+                return ["enabled": true, "configurationID": semantic.configurationID]
+            })
+        try installer.install(f.options, upgrade: true)
+        let upgraded = try XCTUnwrap(installer.readReceipt("preview"))
+        XCTAssertEqual(upgraded.embedding, .granite)
+        XCTAssertTrue(upgraded.embeddingConfigured)
+        XCTAssertNil(upgraded.embeddingPreviousConfiguration)
+        XCTAssertEqual(semantic, installer.graniteConfiguration(for: upgraded, payload: .granite))
+        let callsAfterUpgrade = configureCalls
+        try installer.install(f.options, upgrade: true)
+        XCTAssertEqual(configureCalls, callsAfterUpgrade)
+    }
+
+    func testGraniteUpgradeRefusesChangedSemanticConfiguration() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let runner = Runner()
+        let installer = engine(f, runner: runner)
+        try installer.install(f.options)
+        var receipt = try XCTUnwrap(installer.readReceipt("preview"))
+        receipt.embedding = .legacyQwen
+        receipt.embeddingConfigured = true
+        try recordLegacyEmbeddingRegistration(installer, &receipt)
+        try installer.writeReceipt(receipt)
+        var changed = try legacySemanticConfiguration(installer, receipt)
+        changed.queryPrefix = "administrator-selected-prefix"
+        try JSONEncoder().encode(changed).write(
+            to: URL(fileURLWithPath: receipt.store).appendingPathComponent("semantic.json"))
+        try addGranitePayload(to: f)
+        XCTAssertThrowsError(try installer.install(f.options, upgrade: true)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("different semantic configuration"))
+        }
+        XCTAssertEqual(try installer.readReceipt("preview")?.embedding, .legacyQwen)
+        XCTAssertEqual(
+            try Data(contentsOf: URL(fileURLWithPath: receipt.store).appendingPathComponent("semantic.json")),
+            try JSONEncoder().encode(changed))
+    }
+
+    func testPostConfigurationFailureRestoresManagedQwenConfiguration() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let runner = Runner()
+        let initial = engine(f, runner: runner)
+        try initial.install(f.options)
+        var receipt = try XCTUnwrap(initial.readReceipt("preview"))
+        receipt.embedding = .legacyQwen
+        receipt.embeddingConfigured = true
+        try recordLegacyEmbeddingRegistration(initial, &receipt)
+        try initial.writeReceipt(receipt)
+        var semantic = try legacySemanticConfiguration(initial, receipt)
+        let semanticURL = URL(fileURLWithPath: receipt.store).appendingPathComponent("semantic.json")
+        try JSONEncoder().encode(semantic).write(to: semanticURL)
+        try addGranitePayload(to: f)
+        let installer = SetupEngine(
+            roots: f.roots, runner: runner, rootCheck: { true }, trustedOwnership: false,
+            readinessCheck: { _, _, _ in },
+            semanticCall: { _, _, method, arguments in
+                guard runner.jobs.contains("system/ai.tractanda.server.preview") else {
+                    throw SetupError("Native server is not running.")
+                }
+                if method == "TractandaSemantic/status" {
+                    return [
+                        "enabled": true, "configurationID": semantic.configurationID, "model": semantic.model,
+                    ]
+                }
+                let data = try JSONSerialization.data(
+                    withJSONObject: try XCTUnwrap(arguments["configuration"]))
+                let candidate = try JSONDecoder().decode(BundledSemanticConfiguration.self, from: data)
+                XCTAssertEqual(arguments["expectedConfigurationID"] as? String, semantic.configurationID)
+                semantic = candidate
+                try JSONEncoder().encode(semantic).write(to: semanticURL)
+                return ["enabled": true, "configurationID": semantic.configurationID]
+            })
+        let badProfiles: [String: Any] = [
+            "version": 1, "profiles": ["preview": ["socketPath": "changed", "serverUser": "daemon"]],
+        ]
+        try JSONSerialization.data(withJSONObject: badProfiles).write(
+            to: f.roots.configuration.appendingPathComponent("connections.json"))
+        XCTAssertThrowsError(try installer.install(f.options, upgrade: true))
+        XCTAssertEqual(semantic, try legacySemanticConfiguration(initial, receipt))
+        XCTAssertEqual(try installer.readReceipt("preview")?.embedding, .legacyQwen)
+        XCTAssertTrue(runner.jobs.contains("system/ai.tractanda.server.preview"))
+    }
+
+    func testFailedSemanticRollbackLeavesServicesStopped() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let runner = Runner()
+        let initial = engine(f, runner: runner)
+        try initial.install(f.options)
+        var receipt = try XCTUnwrap(initial.readReceipt("preview"))
+        receipt.embedding = .legacyQwen
+        receipt.embeddingConfigured = true
+        try recordLegacyEmbeddingRegistration(initial, &receipt)
+        try initial.writeReceipt(receipt)
+        var semantic = try legacySemanticConfiguration(initial, receipt)
+        let semanticURL = URL(fileURLWithPath: receipt.store).appendingPathComponent("semantic.json")
+        try JSONEncoder().encode(semantic).write(to: semanticURL)
+        try addGranitePayload(to: f)
+        var configureCalls = 0
+        let installer = SetupEngine(
+            roots: f.roots, runner: runner, rootCheck: { true }, trustedOwnership: false,
+            readinessCheck: { _, _, _ in },
+            semanticCall: { _, _, method, arguments in
+                guard runner.jobs.contains("system/ai.tractanda.server.preview") else {
+                    throw SetupError("Native server is not running.")
+                }
+                if method == "TractandaSemantic/status" {
+                    return [
+                        "enabled": true, "configurationID": semantic.configurationID, "model": semantic.model,
+                    ]
+                }
+                configureCalls += 1
+                if configureCalls > 1 { throw SetupError("Injected semantic rollback failure") }
+                let data = try JSONSerialization.data(
+                    withJSONObject: try XCTUnwrap(arguments["configuration"]))
+                semantic = try JSONDecoder().decode(BundledSemanticConfiguration.self, from: data)
+                try JSONEncoder().encode(semantic).write(to: semanticURL)
+                return ["enabled": true, "configurationID": semantic.configurationID]
+            })
+        let badProfiles: [String: Any] = [
+            "version": 1, "profiles": ["preview": ["socketPath": "changed", "serverUser": "daemon"]],
+        ]
+        try JSONSerialization.data(withJSONObject: badProfiles).write(
+            to: f.roots.configuration.appendingPathComponent("connections.json"))
+        XCTAssertThrowsError(try installer.install(f.options, upgrade: true)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("semantic configuration rollback also failed"))
+        }
+        XCTAssertTrue(runner.jobs.isEmpty)
+        let stalled = try XCTUnwrap(installer.readReceipt("preview"))
+        XCTAssertEqual(stalled.state, .preparing)
+        XCTAssertEqual(stalled.embedding, .granite)
+        XCTAssertFalse(stalled.embeddingConfigured)
+        XCTAssertNotNil(stalled.embeddingPreviousConfiguration)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: installer.definitionURL("preview").path))
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: installer.embeddingDefinitionURL("preview").path))
+        XCTAssertThrowsError(try installer.start(f.options))
+        semantic.configurationID = "administrator-selected"
+        semantic.operationID = "administrator-selected"
+        try JSONEncoder().encode(semantic).write(to: semanticURL)
+        XCTAssertThrowsError(try installer.install(f.options, upgrade: true))
+        XCTAssertEqual(semantic.configurationID, "administrator-selected")
     }
 
     func testProcessRunnerDrainsBeyondPipeCapacityAndReapsTimeout() throws {

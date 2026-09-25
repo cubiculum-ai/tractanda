@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Portable, side-effect-free checks for the release controller's safety gates."""
 import importlib.util
+import json
 import subprocess
 import shutil
 from pathlib import Path
@@ -18,6 +19,7 @@ def load(name, filename):
 
 release = load('release', 'release-macos.py')
 activate = load('activate', 'activate-release.py')
+packager = load('packager', 'package-macos.py')
 
 
 class ReleaseTests(unittest.TestCase):
@@ -43,10 +45,59 @@ class ReleaseTests(unittest.TestCase):
             path = Path(temporary) / 'config.json'
             settings = {key: 'configured' for key in (
                 'branch', 'softwareRoot', 'applicationIdentity', 'installerIdentity',
-                'embeddingHost', 'modelDirectory', 'modelNotices')}
+                'modelDirectory')}
             settings.update(repository='owner/repo', instance='production', developerTeamID='ABCDE12345')
             release.write(path, settings)
             self.assertEqual(release.config(path), settings)
+
+    def test_release_builds_the_embedding_host_from_the_sealed_source(self):
+        pipeline = release.Pipeline({'directory': '/unused', 'configuration': {'modelDirectory': '/model'},
+                                    'version': 'test', 'steps': {}})
+        with patch.object(pipeline, 'run_command') as run, patch.object(release, 'command', return_value='/built'):
+            pipeline.build()
+        self.assertEqual(run.call_count, 3)
+        provider = run.call_args_list[1].args[1]
+        self.assertEqual(provider[provider.index('--package-path') + 1], 'Packages/TractandaEmbeddings')
+        self.assertIn('--disable-automatic-resolution', provider)
+        self.assertEqual(run.call_args_list[2].args[1], ['sh', 'scripts/validate-granite-runtime.sh',
+                                                       '/built/TractandaEmbeddingsHost', '/model'])
+
+    def test_embedding_package_rejects_stale_host_and_modified_or_extra_assets(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            weights = directory / 'model.safetensors'
+            weights.write_bytes(b'fixture weights')
+            profile = dict(alias='tractanda-granite-embedding-311m-multilingual-r2-vmlx-fp32-44399559',
+                modelRevision='44399559930365213510b1ee2eb15ded83374f0e',
+                vmlxRevision='b7a2b97efc2d8ed44ddf3c4b7af25766b372339f', dimensions=768,
+                pooling='cls', normalization='l2', revision='fixture',
+                assets={'model.safetensors': packager.digest(weights)})
+            with patch.object(packager, 'run', return_value=json.dumps(profile)):
+                self.assertEqual(packager.embedding_descriptor(Path('/helper'), directory)['dimensions'], 768)
+                weights.write_bytes(b'changed')
+                with self.assertRaisesRegex(ValueError, 'pinned hashes'):
+                    packager.embedding_descriptor(Path('/helper'), directory)
+                weights.write_bytes(b'fixture weights')
+                (directory / 'extra.json').write_text('{}')
+                with self.assertRaisesRegex(ValueError, 'pinned hashes'):
+                    packager.embedding_descriptor(Path('/helper'), directory)
+            with patch.object(packager, 'run', return_value=json.dumps({**profile, 'alias': 'old-model'})):
+                with self.assertRaisesRegex(ValueError, 'Granite profile'):
+                    packager.embedding_descriptor(Path('/helper'), directory)
+
+    def test_health_rejects_a_live_server_still_using_the_previous_model(self):
+        pipeline = release.Pipeline({'directory': '/unused', 'version': 'test', 'steps': {},
+            'configuration': {'softwareRoot': '/installed', 'instance': 'production'}})
+        manifest = {'files': [{'path': 'bin/tractanda', 'sha256': 'signed'}],
+                    'embedding': {'model': 'granite'}}
+        native = json.dumps({'server': {'executableSHA256': 'signed'}})
+        with patch.object(release, 'read', return_value=manifest), patch.object(release, 'sha', return_value='same'):
+            for semantic in ({'enabled': False}, {'enabled': True, 'model': 'qwen'}):
+                with patch.object(release, 'command', side_effect=[native, json.dumps(semantic)]):
+                    with self.assertRaisesRegex(RuntimeError, 'bundled model'):
+                        pipeline.health()
+            with patch.object(release, 'command', side_effect=[native, json.dumps({'enabled': True, 'model': 'granite'})]):
+                self.assertEqual(pipeline.health()['semantic']['model'], 'granite')
 
     def test_signing_preflight_requires_both_valid_identities_for_expected_team(self):
         settings = {'applicationIdentity': 'A' * 40, 'installerIdentity': 'B' * 40,

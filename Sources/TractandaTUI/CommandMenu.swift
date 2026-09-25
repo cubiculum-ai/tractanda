@@ -87,7 +87,7 @@ struct CommandMenu: Sendable {
     static let definitions: [Group] = [
         Group(
             id: .application, title: "Tractanda",
-            sections: [[.appearance, .categoryPreferences], [.retry], [.quit]]),
+            sections: [[.about], [.appearance, .categoryPreferences], [.retry], [.quit]]),
         Group(
             id: .file, title: "File",
             sections: [[.newItem, .newView], [.views], [.save, .saveAs], [.cancel]]),

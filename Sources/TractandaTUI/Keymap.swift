@@ -104,7 +104,7 @@ enum KeyContext: String, CaseIterable, Codable, Sendable {
 
 /// Stable command identities are independent of the keys chosen to invoke them.
 enum TUICommand: String, CaseIterable, Codable, Sendable {
-    case help, commands, cancel, quit, retry
+    case about, help, commands, cancel, quit, retry
     case moveUp, moveDown, moveLeft, moveRight, first, last, pageUp, pageDown, activate, toggle
     case nextField, previousField
     case newItem, editItem, editNote, properties, categories, views, filter, sections, columns, sort
@@ -131,6 +131,7 @@ enum TUICommand: String, CaseIterable, Codable, Sendable {
 
     var title: String {
         switch self {
+        case .about: "About Tractanda"
         case .help: "Help"
         case .commands: "Commands"
         case .cancel: "Close / cancel"
@@ -292,7 +293,7 @@ enum TUICommand: String, CaseIterable, Codable, Sendable {
 
     var isMenuAction: Bool {
         switch self {
-        case .help, .cancel, .quit, .retry, .newItem, .editItem, .editNote, .properties,
+        case .about, .help, .cancel, .quit, .retry, .newItem, .editItem, .editNote, .properties,
             .categories, .views, .filter, .sections, .columns, .sort, .include, .exclude, .reset,
             .explain, .history, .refresh, .allItems, .parent, .mark, .unmarkAll, .selectAll, .group,
             .reviewMarks, .done, .deleteItems, .save, .saveAs, .newChild, .newRoot, .moveCategory,

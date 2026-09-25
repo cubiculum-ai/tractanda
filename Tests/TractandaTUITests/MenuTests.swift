@@ -121,6 +121,22 @@ final class MenuTests: XCTestCase {
         XCTAssertEqual(menu.group.id, .file)
     }
 
+    func testAboutShowsClientVersionAndPreservesAnOpenDraft() throws {
+        let fixture = try Fixture()
+        let app = try fixture.app()
+        app.handle(.text("n"))
+        app.handle(.text("Unsaved About draft"))
+        app.handle(.function(10))
+        app.handle(.left)  // File -> Tractanda.
+        XCTAssertTrue(screen(app).contains("About Tractanda"))
+        app.handle(.enter)
+        XCTAssertTrue(screen(app).contains("Tractanda terminal client"))
+        XCTAssertTrue(screen(app).contains("Version: \(RuntimeIdentity.current.version)"))
+        app.handle(.escape)
+        XCTAssertTrue(screen(app).contains("Unsaved About draft"))
+        XCTAssertTrue(try fixture.store.candidates().isEmpty)
+    }
+
     func testMenuOverlayPreservesDraftAndSelectionAcrossResize() throws {
         let fixture = try Fixture()
         let app = try fixture.app()

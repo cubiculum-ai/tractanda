@@ -72,6 +72,7 @@ private struct ErrorEnvelope: Encodable, Sendable {
 private struct HealthResponse: Encodable, Sendable {
     let ready = true
     let model = ModelProfile.alias
+    let pid = ProcessInfo.processInfo.processIdentifier
 }
 
 private actor AdmissionGate {

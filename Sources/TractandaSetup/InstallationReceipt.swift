@@ -23,7 +23,9 @@ struct InstallationReceipt: Codable, Equatable {
     var embedding: EmbeddingPayload?
     var embeddingDefinitionSHA256: String?
     var embeddingConfigured: Bool
-    let embeddingConfigurationID: String
+    var embeddingConfigurationID: String
+    /// A durable, installer-owned rollback record while moving the pilot model to Granite.
+    var embeddingPreviousConfiguration: BundledSemanticConfiguration?
 
     init(options: SetupOptions, roots: SetupRoots, owner: String, release: URL, manifestSHA256: String) throws
     {
@@ -48,5 +50,6 @@ struct InstallationReceipt: Codable, Equatable {
         embeddingDefinitionSHA256 = nil
         embeddingConfigured = false
         embeddingConfigurationID = try UUID.makeVersion1().uuidString.lowercased()
+        embeddingPreviousConfiguration = nil
     }
 }

@@ -17,17 +17,23 @@ public final class SetupEngine {
     let rootCheck: () -> Bool
     let trustedOwnership: Bool
     let readinessCheck: ((String, String, Int) throws -> Void)?
+    let semanticCall: (String, String, String, [String: Any]) throws -> [String: Any]
 
     public init(
         roots: SetupRoots = SetupRoots(), runner: any SetupProcessRunning = FoundationProcessRunner(),
         rootCheck: @escaping () -> Bool = { getuid() == 0 }, trustedOwnership: Bool = true,
-        readinessCheck: ((String, String, Int) throws -> Void)? = nil
+        readinessCheck: ((String, String, Int) throws -> Void)? = nil,
+        semanticCall: ((String, String, String, [String: Any]) throws -> [String: Any])? = nil
     ) {
         self.roots = roots
         self.runner = runner
         self.rootCheck = rootCheck
         self.trustedOwnership = trustedOwnership
         self.readinessCheck = readinessCheck
+        self.semanticCall =
+            semanticCall ?? { socket, user, method, arguments in
+                try SetupNativeClient(socket: socket, serverUser: user).call(method, arguments)
+            }
     }
 
     public func plan(_ options: SetupOptions) throws -> SetupPlan {
@@ -102,7 +108,9 @@ public final class SetupEngine {
             let account = try SystemAccountDirectory().user(named: roots.platform.serviceUser)
             guard account.uid != 0 else { throw SetupError("The server account must be unprivileged.") }
             let release = releaseURL(options, manifest: manifest, digest: digest)
-            if let old = previous?.embedding, manifest.embedding != old {
+            if let old = previous?.embedding, manifest.embedding != old,
+                !(old == .legacyQwen && manifest.embedding == .granite)
+            {
                 throw SetupError(
                     "This installation needs its existing embedding payload; model changes require an explicit reconfiguration."
                 )
@@ -156,6 +164,8 @@ public final class SetupEngine {
             if manifest.embedding != nil {
                 try ensureServiceLog(receipt.instance + "-embeddings", uid: account.uid)
             }
+            let embeddingUpgrade = previous?.embedding == .legacyQwen && manifest.embedding == .granite
+            if embeddingUpgrade { try prepareBundledEmbeddingUpgrade(&receipt) }
             receipt.embedding = manifest.embedding
             receipt.release = release.path
             receipt.manifestSHA256 = digest
@@ -183,6 +193,7 @@ public final class SetupEngine {
                 throw SetupError("An embedding service definition already exists without an owned receipt.")
             }
             let oldProfiles = try globalProfilesSnapshot()
+            let oldSemanticConfiguration = receipt.embeddingPreviousConfiguration
             var profilesPublished = false
             var clientsPublished = false
             do {
@@ -204,12 +215,49 @@ public final class SetupEngine {
                 profilesPublished = true
                 try publishClientLink(receipt)
                 clientsPublished = true
-                receipt.state = .active
-                try writeReceipt(receipt)
                 try publishTUICommand()
+                receipt.state = .active
+                receipt.embeddingPreviousConfiguration = nil
+                try writeReceipt(receipt)
             } catch {
+                var semanticRollbackError: Error?
+                if let oldSemanticConfiguration {
+                    do {
+                        // The native server owns semantic.json; restore through its compare-and-swap
+                        // while it is still running. Restoring after unload would silently strand Qwen
+                        // against the Granite profile.
+                        if try semanticConfigurationSnapshot(receipt) != oldSemanticConfiguration {
+                            try restoreSemanticConfiguration(oldSemanticConfiguration, after: receipt)
+                        }
+                    } catch {
+                        semanticRollbackError = error
+                    }
+                }
                 try? unload(receipt.instance)
                 try? unloadEmbedding(receipt)
+                if profilesPublished { try? restoreGlobalProfiles(oldProfiles) }
+                if clientsPublished {
+                    try? setClientRelease(oldClientRelease)
+                    try? removeTUICommandIfUnused()
+                }
+                if let semanticRollbackError {
+                    let serverDisabled = removeOwnedRegistration(
+                        definition, expectedSHA256: receipt.definitionSHA256)
+                    let embeddingDisabled = removeOwnedRegistration(
+                        embeddingDefinition, expectedSHA256: receipt.embeddingDefinitionSHA256)
+                    receipt.state = .preparing
+                    receipt.embeddingConfigured = false
+                    receipt.definitionSHA256 = nil
+                    receipt.embeddingDefinitionSHA256 = nil
+                    try writeReceipt(receipt)
+                    let definitions =
+                        serverDisabled && embeddingDisabled
+                        ? "Installer-owned service definitions were removed."
+                        : "One or more service definitions changed outside the installer and were not removed."
+                    throw SetupError(
+                        "Installation failed and semantic configuration rollback also failed; services were left stopped and this preparing receipt retains the recovery snapshot for an explicit retry. \(definitions) \(error.localizedDescription) \(semanticRollbackError.localizedDescription)"
+                    )
+                }
                 if let oldDefinition {
                     try writeProtected(oldDefinition, to: definition, mode: 0o644)
                 } else if exists(definition) {
@@ -219,11 +267,6 @@ public final class SetupEngine {
                     try writeProtected(oldEmbeddingDefinition, to: embeddingDefinition, mode: 0o644)
                 } else if exists(embeddingDefinition) {
                     try FileManager.default.removeItem(at: embeddingDefinition)
-                }
-                if profilesPublished { try? restoreGlobalProfiles(oldProfiles) }
-                if clientsPublished {
-                    try? setClientRelease(oldClientRelease)
-                    try? removeTUICommandIfUnused()
                 }
                 if let previous, previous.state == .active {
                     var rollback = previous
@@ -246,6 +289,17 @@ public final class SetupEngine {
                 )
             }
         }
+    }
+
+    /// Do not delete a registration that an administrator changed while recovery was in flight.
+    /// Returning false leaves the receipt preparing, so ordinary start/restart remains blocked.
+    func removeOwnedRegistration(_ url: URL, expectedSHA256: String?) -> Bool {
+        guard exists(url) else { return true }
+        guard let expectedSHA256, (try? sha256(url)) == expectedSHA256 else { return false }
+        do {
+            try FileManager.default.removeItem(at: url)
+            return !exists(url)
+        } catch { return false }
     }
 
     public func start(_ options: SetupOptions) throws {

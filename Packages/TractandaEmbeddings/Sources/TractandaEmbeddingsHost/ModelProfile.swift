@@ -2,40 +2,72 @@ import Crypto
 import Foundation
 
 enum ModelProfile {
-    static let alias = "tractanda-qwen3-embedding-0.6b-vmlx-fp32-97b0c614"
+    static let alias = "tractanda-granite-embedding-311m-multilingual-r2-vmlx-fp32-44399559"
+    static let modelRevision = "44399559930365213510b1ee2eb15ded83374f0e"
+    static let vmlxRevision = "b7a2b97efc2d8ed44ddf3c4b7af25766b372339f"
     static let revision =
-        "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3:weights-bf16:compute-f32:0437e45c94563b09e13cb7a64478fc406947a93cb34a7e05870fc8dcd48e23fd:vmlx-d47c8d0dad91d8c0628a24a5a2c4cada082dc2ee"
+        "\(modelRevision):weights-bf16:compute-f32:dcb6431bfa6e817fe100a2b0521360cec3383963b03fa966b685de18ca310d31:vmlx-\(vmlxRevision)"
+    static let dimensions = 768
+    static let pooling = "cls"
+    static let normalization = "l2"
     static let maximumInputTokens = 32_768
     static let maximumBatchTokens = 32_768
 
-    // The original frozen public model, including tokenizer/configuration
-    // inputs. A mutable tokenizer must not silently retain the same profile.
     static let assets: [String: String] = [
-        "config.json": "b5bf1f51fc45be473a54718cef92448d90a1be001bf9b9a44b8c7f10a19feaa9",
+        "1_Pooling/config.json": "781299da695e58439d70d491840da22ea0935d1d57d9646eb9725f1f19754e89",
+        "config.json": "e1e3fc842a8e0537e25d6e4c93879698b92ae96722e8c162bef334b57978a3b0",
         "config_sentence_transformers.json":
-            "10667c72ddb772627bf1780cb7f86af8e2ae0032b8c243c731172064105c6961",
-        "manifest.json": "c278eabca829cc702380a5b82abf0d37098612a976111da340ca5486f751506a",
-        "merges.txt": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
-        "model.safetensors": "0437e45c94563b09e13cb7a64478fc406947a93cb34a7e05870fc8dcd48e23fd",
-        "tokenizer.json": "def76fb086971c7867b829c23a26261e38d9d74e02139253b38aeb9df8b4b50a",
-        "tokenizer_config.json": "253153d0738ceb4c668d2eff957714dd2bea0b56de772a9fdccd96cbf517e6a0",
-        "vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+            "f09adf93fcf868bb2fc3976a435d810b2ecdffa953d1da091d2a91168abab44b",
+        "model.safetensors": "dcb6431bfa6e817fe100a2b0521360cec3383963b03fa966b685de18ca310d31",
+        "modules.json": "84e40c8e006c9b1d6c122e02cba9b02458120b5fb0c87b746c41e0207cf642cf",
+        "sentence_bert_config.json": "967ef958285e4a7a37d8ff1832473d967edd913b4e48572f31c3d3ea361d5327",
+        "special_tokens_map.json": "cb9e60dcf4d8d314315cb3e761fe4c2e664fda8dbf66d7815372b2639e381182",
+        "tokenizer.json": "0087c868b33bad550a78a08d19798cfd7f713cde4f020803b8f51f405503e15f",
+        "tokenizer_config.json": "7947bdf0378520e69ca412b8c4dacd1cffa8aef099f851fdd5c65aa27c6b36a0",
     ]
+
+    struct Descriptor: Encodable {
+        let alias: String
+        let revision: String
+        let modelRevision: String
+        let vmlxRevision: String
+        let dimensions: Int
+        let pooling: String
+        let normalization: String
+        let maximumInputTokens: Int
+        let maximumBatchTokens: Int
+        let assets: [String: String]
+    }
+
+    static let descriptor = Descriptor(
+        alias: alias, revision: revision, modelRevision: modelRevision, vmlxRevision: vmlxRevision,
+        dimensions: dimensions, pooling: pooling, normalization: normalization,
+        maximumInputTokens: maximumInputTokens, maximumBatchTokens: maximumBatchTokens, assets: assets)
 
     static func validate(directory: URL) throws {
         let manager = FileManager.default
-        let files = try manager.contentsOfDirectory(
-            at: directory, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey])
-        guard Set(files.map(\.lastPathComponent)) == Set(assets.keys) else {
-            throw EmbeddingFailure(status: 500, message: "Model directory differs from the pinned asset set.")
+        guard
+            let enumerator = manager.enumerator(
+                at: directory, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+        else {
+            throw EmbeddingFailure(status: 500, message: "Pinned model directory cannot be read.")
         }
-        for file in files {
+        var files = Set<String>()
+        for case let file as URL in enumerator {
             let values = try file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
-            guard values.isRegularFile == true, values.isSymbolicLink != true,
-                try digest(file) == assets[file.lastPathComponent]
-            else {
+            if values.isSymbolicLink == true {
+                throw EmbeddingFailure(
+                    status: 500, message: "Pinned model assets must not be symbolic links.")
+            }
+            guard values.isRegularFile == true else { continue }
+            let path = file.path.replacingOccurrences(of: directory.path + "/", with: "")
+            files.insert(path)
+            guard let expected = assets[path], try digest(file) == expected else {
                 throw EmbeddingFailure(status: 500, message: "Pinned model asset verification failed.")
             }
+        }
+        guard files == Set(assets.keys) else {
+            throw EmbeddingFailure(status: 500, message: "Model directory differs from the pinned asset set.")
         }
     }
 

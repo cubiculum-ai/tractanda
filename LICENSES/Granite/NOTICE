@@ -1,0 +1,12 @@
+Granite Embedding 311M Multilingual R2
+IBM Granite team; model weights licensed under Apache License 2.0.
+
+Tokenizer derived by IBM from the Google Gemma 3 tokenizer, with further
+multilingual/code training. The distributed IBM files are unmodified.
+
+Gemma is provided under and subject to the Gemma Terms of Use found at ai.google.dev/gemma/terms
+
+Use and redistribution of the bundled tokenizer are governed by the accompanying
+Gemma Terms of Use, including Section 3.2 and the Gemma Prohibited Use Policy.
+These component conditions are incorporated into the terms for using and
+distributing this tokenizer; they do not replace the licenses of other components.

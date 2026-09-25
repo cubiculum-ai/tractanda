@@ -96,7 +96,7 @@ def remove_component_metadata(component, stage, payload, scripts):
                    cwd=expanded, check=True)
 
 
-def license_html(notice, markdown):
+def license_html(notice, markdown, model_notices=None):
     """Render the headings, paragraphs and inline markup used by this license."""
     def inline(text):
         text = html.escape(text)
@@ -118,6 +118,17 @@ def license_html(notice, markdown):
             parts.append('<blockquote>' + inline(block[2:]) + '</blockquote>')
         else:
             parts.append('<p>' + inline(block).replace('\n', ' ') + '</p>')
+    if model_notices:
+        parts.append('<h1>Bundled model and tokenizer</h1>')
+        parts.append('<p>' + inline((model_notices / 'NOTICE').read_text()).replace('\n', '<br>') + '</p>')
+        for name, title in (('Gemma-Terms.html', 'Gemma Terms of Use'),
+                            ('Gemma-Prohibited-Use-Policy.html', 'Gemma Prohibited Use Policy')):
+            document = (model_notices / name).read_text()
+            text = re.search(r'<pre>(.*?)</pre>', document, re.S)
+            if not text:
+                raise ValueError('Missing plain legal text in ' + name)
+            parts.append('<h2>' + title + '</h2><pre style="white-space:pre-wrap;font:inherit">'
+                         + text[1] + '</pre>')
     return '\n'.join(parts) + '\n</html>\n'
 
 
@@ -153,7 +164,9 @@ def main():
         (scripts / 'setup-sha256').write_text(setup_hash + '\n')
         for name in ('Welcome.html', 'Conclusion.html'):
             shutil.copy2(root / 'scripts/macos-package' / name, resources / name)
-        (resources / 'License.html').write_text(license_html((root / 'NOTICE').read_text(), (root / 'LICENSE').read_text()))
+        (resources / 'License.html').write_text(license_html(
+            (root / 'NOTICE').read_text(), (root / 'LICENSE').read_text(),
+            bundle / 'licenses/Granite' if manifest.get('embedding') else None))
         component = stage / 'Tractanda.pkg'
         components = stage / 'components.plist'
         run('/usr/bin/pkgbuild', '--analyze', '--root', payload, components)

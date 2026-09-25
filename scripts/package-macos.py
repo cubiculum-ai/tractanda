@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Assemble a self-contained, signed macOS preview. Does not install, notarize, or publish.
 
-Requires built first-party executables and Apple's command-line tools. Optional Qwen
+Requires built first-party executables and Apple's command-line tools. Optional Granite
 weights/runtime are explicit inputs; this script never downloads or chooses a model.
 """
 import argparse
@@ -32,6 +32,34 @@ def copy_tree(source, target):
         if path.is_symlink():
             raise ValueError(f'Input contains a symbolic link: {path}')
     shutil.copytree(source, target, dirs_exist_ok=True)
+
+
+def embedding_descriptor(host, model_directory):
+    """Require the actual helper's pinned profile and exact verified model inputs."""
+    profile = json.loads(run(str(host), '--describe'))
+    if (profile.get('alias') != 'tractanda-granite-embedding-311m-multilingual-r2-vmlx-fp32-44399559'
+            or profile.get('modelRevision') != '44399559930365213510b1ee2eb15ded83374f0e'
+            or profile.get('vmlxRevision') != 'b7a2b97efc2d8ed44ddf3c4b7af25766b372339f'
+            or profile.get('dimensions') != 768 or profile.get('pooling') != 'cls'
+            or profile.get('normalization') != 'l2'):
+        raise ValueError('The embedding helper does not describe the bundled Granite profile.')
+    assets = profile.get('assets')
+    if not isinstance(assets, dict) or not assets or 'model.safetensors' not in assets:
+        raise ValueError('The embedding helper has no pinned model asset set.')
+    actual = {}
+    for path in model_directory.rglob('*'):
+        if path.is_symlink():
+            raise ValueError('Model assets must not be symbolic links.')
+        if path.is_file():
+            actual[path.relative_to(model_directory).as_posix()] = digest(path)
+    if actual != assets:
+        raise ValueError('Model assets differ from the embedding helper\'s pinned hashes.')
+    return {
+        'backend': 'vmlx-granite-embedding-f32-v1',
+        'modelDirectory': 'models/granite-embedding-311m-multilingual-r2',
+        'model': profile['alias'], 'modelRevision': profile['revision'],
+        'dimensions': profile['dimensions'],
+    }
 
 
 def copy_public_source(root, output):
@@ -80,7 +108,6 @@ def main():
     parser.add_argument('--sign-identity', default='-', help='Developer ID identity, or - for a local ad-hoc build')
     parser.add_argument('--embeddings-host', type=Path)
     parser.add_argument('--model-directory', type=Path)
-    parser.add_argument('--model-notices', type=Path)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     output = args.output.resolve()
@@ -89,8 +116,8 @@ def main():
         parser.error('Output must be a new directory; existing releases are not overwritten.')
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._+-]{0,79}', args.version):
         parser.error('Invalid release version.')
-    if bool(args.embeddings_host) != bool(args.model_directory) or bool(args.model_directory) != bool(args.model_notices):
-        parser.error('Embedding runtime, weights and notices must be supplied together.')
+    if bool(args.embeddings_host) != bool(args.model_directory):
+        parser.error('Embedding runtime and weights must be supplied together.')
     output.mkdir(parents=True)
     (output / 'bin').mkdir()
     (output / 'lib').mkdir()
@@ -109,20 +136,18 @@ def main():
     embedding = None
     if args.embeddings_host:
         host = args.embeddings_host.resolve()
+        embedding = embedding_descriptor(host, args.model_directory.resolve())
         shutil.copy2(host, output / 'bin/tractanda-embeddings')
         identifiers['tractanda-embeddings'] = 'ai.tractanda.embeddings'
         for bundle in host.parent.glob('*.bundle'):
             destination = output / 'bin' / bundle.name
             if not destination.exists():
                 copy_tree(bundle, destination)
-        copy_tree(args.model_directory.resolve(), output / 'models/qwen3-embedding-0.6b')
-        copy_tree(args.model_notices.resolve(), output / 'licenses/Qwen3')
-        embedding = {
-            'backend': 'vmlx-qwen3-f32-v1', 'modelDirectory': 'models/qwen3-embedding-0.6b',
-            'model': 'tractanda-qwen3-embedding-0.6b-vmlx-fp32-97b0c614',
-            'modelRevision': '97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3:weights-bf16:compute-f32:0437e45c94563b09e13cb7a64478fc406947a93cb34a7e05870fc8dcd48e23fd:vmlx-d47c8d0dad91d8c0628a24a5a2c4cada082dc2ee',
-            'dimensions': 1024,
-        }
+        copy_tree(args.model_directory.resolve(), output / embedding['modelDirectory'])
+        # Model/runtime notices come from the same audited source snapshot.
+        for name in ('LICENSE', 'README.md', 'NOTICE', 'Gemma-Terms.html', 'Gemma-Prohibited-Use-Policy.html'):
+            if not (output / 'licenses/Granite' / name).is_file():
+                raise ValueError('Missing bundled Granite/tokenizer notice: ' + name)
     scan = []
     for name in identifiers:
         scan += ['--scan-executable', str(output / 'bin' / name)]

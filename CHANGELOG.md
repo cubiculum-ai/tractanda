@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Bundle Granite Embedding 311M multilingual R2 (768 dimensions, CLS/L2) through the pinned vmlx-swift runtime with tokenizer fixes #487/#514. Rebuild the helper from each sealed release source and verify every model asset before packaging.
+- Upgrade installer-owned Qwen profiles with guarded semantic reconfiguration and recovery; rebuild derived vectors while preserving canonical records. Include Granite and Gemma tokenizer notices.
+- Fit the web Kanban board to the available viewport height, keeping column scrolling and a usable layout in short windows.
+- Add Tractanda → About Tractanda to the terminal client, showing its actual client version without losing an open draft.
+
 External indexes use a private canonical-store UUID instead of treating filesystem device numbers as permanent identity. This fixes startup failures after device renumbering during an OS update or reboot while retaining wrong-store, private-path and writer-lock checks. Rebuilding an index preserves the store UUID. Earlier bindings migrate only on an exact identity match; mismatches still require an explicit index rebuild.
 
 The web integration check waits for the CLI's completed-startup record before inspecting the session file, avoiding a race with final permission setup while retaining the privacy assertion.

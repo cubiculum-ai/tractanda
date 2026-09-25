@@ -48,6 +48,7 @@ final class CategoryWorkspaceInteractionTests: XCTestCase {
     private func openCategoryPreferences(_ app: TerminalApplication) {
         app.handle(.function(10))
         app.handle(.left)
+        app.handle(.down)  // About -> Appearance.
         app.handle(.down)
         app.handle(.enter)
     }

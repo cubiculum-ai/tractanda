@@ -2016,6 +2016,17 @@ public final class TerminalApplication {
             menuID = Identifier.make()
             return
         }
+        if command == .about {
+            let identity = RuntimeIdentity.current
+            panel = (
+                "About Tractanda",
+                "Tractanda terminal client\nVersion: \(identity.version)\n\n"
+                    + "Shared knowledge, connected through categories and views.\n\n"
+                    + "https://tractanda.ai\n\nEsc or F9 closes this panel."
+            )
+            panelOffset = 0
+            return
+        }
         // These actions are global. In particular Appearance suspends a draft instead of replacing
         // it, so opening Preferences from a menu cannot discard an item or category edit.
         if command == .appearance || command == .categoryPreferences {
@@ -2158,6 +2169,7 @@ public final class TerminalApplication {
             return false
         }
         switch command {
+        case .about: return true
         case .appearance, .categoryPreferences:
             return !(form?.purpose.isSettings ?? false)
         case .switchWorkspace, .workspaceViews, .workspaceCategories, .togglePreview, .growPreview,

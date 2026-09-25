@@ -46,7 +46,7 @@ protocol EmbeddingServing: Sendable {
 
 /// All model/tokenizer/MLX values stay inside the library's actor. Returning
 /// evaluated Swift numbers also makes disconnected-request cancellation safe.
-actor QwenEmbedder: EmbeddingServing {
+actor GraniteEmbedder: EmbeddingServing {
     private let container: MLXEmbedders.ModelContainer
 
     init(directory: URL) async throws {
@@ -54,8 +54,8 @@ actor QwenEmbedder: EmbeddingServing {
             from: directory, using: #huggingFaceTokenizerLoader())
         await container.perform { model, _, _ in
             model.train(false)
-            // Use FP32 computation for the initial runtime migration. The
-            // original BF16 weight bytes and their source hash stay unchanged.
+            // The pinned model bytes remain immutable; compute in FP32 so the
+            // serving precision is explicit and independent of device defaults.
             model.update(parameters: model.parameters().mapValues { $0.asType(.float32) })
             eval(model)
         }
@@ -68,9 +68,10 @@ actor QwenEmbedder: EmbeddingServing {
         return try await container.perform { model, tokenizer, pooler in
             try Task.checkCancellation()
             switch pooler.strategy {
-            case .last: break
+            case .cls: break
             default:
-                throw EmbeddingFailure(status: 500, message: "Unexpected pooling for the pinned Qwen model.")
+                throw EmbeddingFailure(
+                    status: 500, message: "Unexpected pooling for the pinned Granite model.")
             }
             let tokens = texts.map { tokenizer.encode(text: $0, addSpecialTokens: true) }
             guard tokens.allSatisfy({ !$0.isEmpty && $0.count <= ModelProfile.maximumInputTokens }),
@@ -94,7 +95,7 @@ actor QwenEmbedder: EmbeddingServing {
                     .asType(.float32)
                 pooled.eval()
                 let raw = pooled.reshaped([-1]).asArray(Float.self)
-                guard raw.count == 1024, raw.allSatisfy(\.isFinite) else {
+                guard raw.count == ModelProfile.dimensions, raw.allSatisfy(\.isFinite) else {
                     throw EmbeddingFailure(status: 500, message: "Invalid embedding dimensions or values.")
                 }
                 let norm = sqrt(raw.reduce(0.0) { $0 + Double($1) * Double($1) })

@@ -484,6 +484,7 @@ final class TUITests: XCTestCase {
             appearanceURL: directory.appendingPathComponent("appearance.json"))
         app.handle(.function(10))
         app.handle(.left)  // File -> Tractanda
+        app.handle(.down)  // About -> Appearance.
         app.handle(.enter)  // Settings / Colors…
         XCTAssertTrue(
             app.render(columns: 80, rows: 25).contains { $0.text.contains("Settings / Appearance") })

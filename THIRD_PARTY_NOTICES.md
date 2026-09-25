@@ -24,12 +24,19 @@ SQLite is supplied by the operating system/package manager. Its FTS5 facility an
 
 System PAM/UUID libraries are dynamically supplied by the platform and have their own package terms. The source package does not bundle those system libraries.
 
-## Optional macOS embedding host
+## Optional embedding host
 
-`Packages/TractandaEmbeddings` pins `osaurus-ai/vmlx-swift` at `d47c8d0dad91d8c0628a24a5a2c4cada082dc2ee`; its resolved dependency graph is recorded separately. License/notice copies collected for that pin are retained under [LICENSES/optional-embedding-host](LICENSES/optional-embedding-host/), including vmlx, MLX-related native components and additional Swift dependencies.
+`Packages/TractandaEmbeddings` pins `rcfa/vmlx-swift` at `b7a2b97efc2d8ed44ddf3c4b7af25766b372339f`: upstream `osaurus-ai/vmlx-swift` main `e07bd67becffb4718004c3db076ee8c153ef7f92` plus tokenizer patches [#487](https://github.com/osaurus-ai/vmlx-swift/pull/487) and [#514](https://github.com/osaurus-ai/vmlx-swift/pull/514); its resolved dependency graph is recorded separately. License/notice copies collected for that pin are retained under [LICENSES/optional-embedding-host](LICENSES/optional-embedding-host/), including vmlx, MLX-related native components and additional Swift dependencies.
 
 Model weights must be obtained separately under the selected model's terms. Do not assume the runtime's license covers a model, tokenizer dataset or unrelated application material. Recheck the applicable notice set when updating a dependency or packaging a binary.
 
-## Optional bundled Qwen embedding model
+## Bundled Granite embedding model
 
-The macOS preview may bundle Qwen3-Embedding-0.6B at revision `97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3`. The weights remain under Apache License 2.0, independently of Tractanda's first-party license. The distribution includes the license, attribution and provenance under `licenses/Qwen3/`. Model weights are not part of the public source repository. See the [pinned model card](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B/blob/97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3/README.md).
+The preview bundles IBM Granite Embedding 311M Multilingual R2 at revision
+`44399559930365213510b1ee2eb15ded83374f0e`. Model weights use Apache License 2.0.
+IBM identifies its tokenizer as derived from Gemma 3, subject to the separate
+Gemma Terms of Use, including the use restrictions in Section 3.2. Those component
+terms apply to use and redistribution of the bundled tokenizer. The distribution
+includes attribution, the model card, the Gemma terms and prohibited-use policy
+under `licenses/Granite/`; their source copies are in [LICENSES/Granite](LICENSES/Granite/).
+The model weights themselves are not in the source repository.

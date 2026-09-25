@@ -103,7 +103,7 @@ def lock():
 def config(path):
     value = read(path)
     required = ('repository', 'branch', 'instance', 'softwareRoot', 'applicationIdentity',
-                'installerIdentity', 'embeddingHost', 'modelDirectory', 'modelNotices',
+                'installerIdentity', 'modelDirectory',
                 'developerTeamID')
     missing = [k for k in required if not isinstance(value.get(k), str) or not value[k]]
     if missing:
@@ -409,17 +409,28 @@ class Pipeline:
     def build(self):
         self.run_command('release-build', ['swift', 'build', '-c', 'release', '--disable-sandbox',
                                         '--disable-automatic-resolution'])
+        # The provider is part of this source snapshot too. Reusing an installed
+        # helper can silently pair an old runtime/model profile with new weights.
+        self.run_command('release-build', ['swift', 'build', '-c', 'release',
+            '--package-path', 'Packages/TractandaEmbeddings', '--disable-sandbox',
+            '--disable-automatic-resolution'])
+        products = command(['swift', 'build', '-c', 'release', '--show-bin-path',
+            '--package-path', 'Packages/TractandaEmbeddings'], cwd=self.source, env=self.environment)
+        self.run_command('release-build', ['sh', 'scripts/validate-granite-runtime.sh',
+            str(Path(products) / 'TractandaEmbeddingsHost'), self.settings['modelDirectory']])
 
     def assemble(self):
         if self.bundle.exists():
             self.bundle.rename(self.bundle.with_name(self.bundle.name + '.incomplete-' + str(os.getpid())))
         products = command(['swift', 'build', '-c', 'release', '--show-bin-path'], cwd=self.source,
                            env=self.environment)
+        embedding_products = command(['swift', 'build', '-c', 'release', '--show-bin-path',
+            '--package-path', 'Packages/TractandaEmbeddings'], cwd=self.source, env=self.environment)
         s = self.settings
         self.run_command('bundle', [sys.executable, 'scripts/package-macos.py', '--build-products', products,
             '--output', self.bundle, '--version', self.state['version'], '--sign-identity', s['applicationIdentity'],
-            '--embeddings-host', s['embeddingHost'], '--model-directory', s['modelDirectory'],
-            '--model-notices', s['modelNotices']])
+            '--embeddings-host', str(Path(embedding_products) / 'TractandaEmbeddingsHost'),
+            '--model-directory', s['modelDirectory']])
         return {'manifestSHA256': sha(self.bundle / 'bundle-manifest.json')}
 
     def build_package(self):
@@ -502,7 +513,14 @@ class Pipeline:
         release = base / 'current'
         if sha(release / 'bundle-manifest.json') != sha(self.bundle / 'bundle-manifest.json'):
             raise RuntimeError('The shared client pin does not match this release.')
-        return {'server': info['server'], 'features': info.get('features'), 'release': str(release.resolve())}
+        semantic = None
+        if manifest.get('embedding'):
+            semantic = json.loads(command([client, 'call', socket, 'TractandaSemantic/status', '{}'],
+                                          env=environment))
+            if not semantic.get('enabled') or semantic.get('model') != manifest['embedding']['model']:
+                raise RuntimeError('The live semantic configuration does not match the bundled model.')
+        return {'server': info['server'], 'features': info.get('features'),
+                'release': str(release.resolve()), 'semantic': semantic}
 
     def push(self):
         self.run_command('push', ['git', 'push', 'origin', self.state['commit'] + ':refs/heads/' + self.settings['branch']], ROOT)

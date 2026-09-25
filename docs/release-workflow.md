@@ -52,12 +52,10 @@ Use Python 3.11+ on the signing Mac. Keep machine-specific paths and signing ide
   "applicationIdentity": "Developer ID Application certificate SHA-1",
   "installerIdentity": "Developer ID Installer certificate SHA-1",
   "developerTeamID": "ABCDEFGHIJ",
-  "embeddingHost": "/absolute/path/to/tractanda-embeddings",
-  "modelDirectory": "/absolute/path/to/pinned/model",
-  "modelNotices": "/absolute/path/to/model/notices"
+  "modelDirectory": "/absolute/path/to/pinned/Granite/model"
 }
 ```
 
-The pinned embedding payload must match the existing installation; changing the model requires separate explicit reconfiguration. Signing keys stay in Keychain. Release logs, prepared payloads, configuration and checkpoint state remain under ignored `work/release-pipeline`; they are not source publication inputs. The bundle manifest records the source commit so source, packages and the active release can be reconciled.
+The core executables and embedding host are both rebuilt from the sealed source. The release build runs multilingual retrieval and vector checks against the newly built helper. Packaging verifies its `--describe` profile and every model asset hash; model/tokenizer notices come from the same reviewed source. Prepare the pinned model directory with `sh scripts/download-granite-runtime-assets.sh DESTINATION`. This preview supports a guarded upgrade from an installer-owned Qwen profile to Granite and rebuilds its derived vector index; unrelated/custom semantic configurations require explicit reconfiguration. Signing keys stay in Keychain. Release logs, prepared payloads, configuration and checkpoint state remain under ignored `work/release-pipeline`; they are not source publication inputs. The bundle manifest records the source commit so source, packages and the active release can be reconciled.
 
 Select the full Xcode installation with `xcode-select`, sign into its Accounts settings, and make the team's valid Developer ID Application and Installer certificates available. The script checks those identities before preparing a release; Xcode manages account authentication during upload. No separate `notarytool` profile, app-specific password, or credential extraction is used. Account renewal and acceptance of changed Apple agreements remain account-holder actions in Xcode or Apple's developer site. See [Apple's notarization overview](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution).
