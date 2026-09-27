@@ -23,6 +23,109 @@ packager = load('packager', 'package-macos.py')
 
 
 class ReleaseTests(unittest.TestCase):
+    def revision_fixture(self, root, old_commit='a' * 40):
+        control = root / 'work/release-pipeline'
+        directory = control / '0.1.0-poc.13'
+        (directory / 'source').mkdir(parents=True)
+        (root / 'VERSION').write_text('0.1.0-poc.13\n')
+        state = {'directory': str(directory), 'version': '0.1.0-poc.13', 'commit': old_commit,
+                 'configuration': {'softwareRoot': str(root / 'installed'),
+                                   'applicationIdentity': 'Developer ID Application: Test',
+                                   'developerTeamID': 'ABCDE12345'}, 'status': 'failed',
+                 'steps': {'package': {'result': {'sha256': '1' * 64}}}}
+
+        def command(args, **_kwargs):
+            if '--output' in args:
+                release.write(Path(args[args.index('--output') + 1]), {'manifest': []})
+            return ''
+
+        next_commit = iter(('b' * 40, 'c' * 40))
+
+        def git(*args, **_kwargs):
+            if args[:2] == ('rev-parse', 'HEAD'):
+                return next(next_commit)
+            if args[:2] == ('rev-parse', 'HEAD^{tree}'):
+                return 'd' * 40
+            return ''
+
+        return control, directory, state, command, git
+
+    def test_revise_archives_uploaded_notarization_with_provenance_and_fresh_attempt(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            control, directory, state, command, git = self.revision_fixture(root)
+            evidence = directory / 'notarization'; evidence.mkdir()
+            receipt = {'inputSHA256': '1' * 64, 'submissionID': 'uploaded-id',
+                       'submissionState': 'uploaded', 'archive': '/private/tmp/old-wrapper.xcarchive'}
+            release.write(evidence / 'notarization.json', receipt)
+            (directory / 'notarization.log').write_text('old account diagnostic')
+            (directory / 'ticket-probe').mkdir()
+            (directory / 'ticket-probe/result.json').write_text('{"ticket": "available"}')
+            with patch.object(release, 'ROOT', root), patch.object(release, 'CONTROL', control), \
+                    patch.object(release, 'command', side_effect=command), patch.object(release, 'git', side_effect=git):
+                revised = release.revise(state, 'tested ticket fallback')
+                old = Path(revised['previousCandidates'][0]['notarizationEvidence'])
+                provenance = release.read(old / 'provenance.json')
+                self.assertEqual(provenance['controllerCommit'], 'a' * 40)
+                self.assertEqual(provenance['receiptOwnerCommit'], 'a' * 40)
+                self.assertEqual(provenance['inputSHA256'], '1' * 64)
+                self.assertEqual(provenance['submissionID'], 'uploaded-id')
+                self.assertEqual(provenance['archive'], '/private/tmp/old-wrapper.xcarchive')
+                self.assertEqual(release.read(old / 'notarization/notarization.json'), receipt)
+                self.assertEqual((old / 'notarization.log').read_text(), 'old account diagnostic')
+                self.assertTrue((old / 'ticket-probe/result.json').exists())
+                self.assertEqual(list((directory / 'notarization').iterdir()), [])
+                self.assertFalse((directory / 'notarization.log').exists())
+                self.assertFalse((directory / 'ticket-probe').exists())
+                self.assertEqual(revised['steps'], {})
+                # A fresh attempt's receipt survives normal resume and is
+                # archived separately if this unpublished candidate is revised again.
+                fresh_input = directory / 'signed/Tractanda-0.1.0-poc.13-arm64.pkg'
+                fresh_input.parent.mkdir()
+                fresh_input.write_bytes(b'new signed package')
+                fresh_output = directory / 'Tractanda-0.1.0-poc.13-arm64.pkg'
+                fresh_output.write_bytes(b'new stapled package')
+                fresh = {'inputSHA256': release.sha(fresh_input), 'submissionID': 'new-id',
+                         'submissionState': 'accepted', 'notarized': True,
+                         'outputSHA256': release.sha(fresh_output), 'teamID': 'ABCDE12345'}
+                release.write(directory / 'notarization/notarization.json', fresh)
+                revised['steps'] = {'package': {'result': {'sha256': release.sha(fresh_input)}}}
+                pipeline = release.Pipeline(revised)
+                with patch.object(pipeline, 'run_command') as run_command:
+                    self.assertEqual(pipeline.notarize_package()['submissionID'], 'new-id')
+                self.assertEqual(run_command.call_args.args[1][-1], directory / 'notarization')
+                self.assertEqual(release.read(directory / 'notarization/notarization.json'), fresh)
+                newer = release.revise(revised, 'second repair')
+                self.assertEqual(release.read(old / 'notarization/notarization.json'), receipt)
+                second = Path(newer['previousCandidates'][1]['notarizationEvidence'])
+                self.assertNotEqual(old, second)
+                self.assertEqual(release.read(second / 'notarization/notarization.json'), fresh)
+                self.assertEqual(release.read(second / 'provenance.json')['receiptOwnerCommit'], 'b' * 40)
+
+    def test_revise_before_notarization_creates_clean_attempt(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            control, directory, state, command, git = self.revision_fixture(root)
+            with patch.object(release, 'ROOT', root), patch.object(release, 'CONTROL', control), \
+                    patch.object(release, 'command', side_effect=command), patch.object(release, 'git', side_effect=git):
+                revised = release.revise(state, 'pre-notary repair')
+            self.assertIsNone(revised['previousCandidates'][0]['notarizationEvidence'])
+            self.assertEqual(list((directory / 'notarization').iterdir()), [])
+
+    def test_notarization_history_collision_preserves_current_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _control, directory, state, _command, _git = self.revision_fixture(root)
+            evidence = directory / 'notarization'; evidence.mkdir()
+            release.write(evidence / 'notarization.json', {'inputSHA256': '1' * 64})
+            collision = directory / ('notarization-history/0001-' + 'a' * 12 + '-to-' + 'b' * 12)
+            collision.mkdir(parents=True)
+            (collision / 'keep').write_text('existing')
+            with self.assertRaises(FileExistsError):
+                release.archive_notarization_evidence(state, 'b' * 40)
+            self.assertTrue((evidence / 'notarization.json').exists())
+            self.assertEqual((collision / 'keep').read_text(), 'existing')
+
     def test_declared_plan_matches_every_executed_stage(self):
         # Run the actual orchestration with side effects replaced, so adding a
         # stage without updating the plan cannot silently misstate progress.

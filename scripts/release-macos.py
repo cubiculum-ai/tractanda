@@ -340,6 +340,47 @@ def prepare(settings, notes):
     return state
 
 
+def archive_notarization_evidence(state, new_commit):
+    """Retain an old attempt before a revised payload creates a new receipt."""
+    directory = Path(state['directory'])
+    names = ('notarization', 'notarization.log', 'ticket-probe')
+    present = [name for name in names if (directory / name).exists() or (directory / name).is_symlink()]
+    if not present:
+        (directory / 'notarization').mkdir(exist_ok=False)
+        return None
+    for name in present:
+        if (directory / name).is_symlink():
+            raise RuntimeError('Notarization evidence path is a symlink; refusing revision.')
+    history = directory / 'notarization-history'
+    if history.is_symlink() or (history.exists() and not history.is_dir()):
+        raise RuntimeError('Notarization history path is unsafe; refusing revision.')
+    history.mkdir(exist_ok=True)
+    number = len(state.get('previousCandidates', [])) + 1
+    destination = history / f'{number:04d}-{state["commit"][:12]}-to-{new_commit[:12]}'
+    receipt = directory / 'notarization/notarization.json'
+    if receipt.is_symlink():
+        raise RuntimeError('Notarization receipt is a symlink; refusing revision.')
+    details = read(receipt) if receipt.is_file() else {}
+    package_sha = details.get('inputSHA256')
+    candidates = [*state.get('previousCandidates', []), state]
+    matching = [entry.get('commit') for entry in candidates
+                if isinstance(package_sha, str) and re.fullmatch(r'[0-9a-f]{64}', package_sha)
+                and entry.get('steps', {}).get('package', {}).get('result', {}).get('sha256') == package_sha]
+    provenance = {
+        'archivedAt': now(), 'controllerCommit': state['commit'], 'nextCommit': new_commit,
+        'receiptOwnerCommit': matching[-1] if matching else None,
+        'inputSHA256': package_sha, 'submissionID': details.get('submissionID'),
+        'submissionState': details.get('submissionState'), 'archive': details.get('archive'),
+        'receiptSHA256': sha(receipt) if receipt.is_file() else None, 'preserved': present,
+    }
+    destination.mkdir(exist_ok=False)
+    write(destination / 'provenance.json', provenance)
+    for name in present:
+        (directory / name).rename(destination / name)
+    (directory / 'notarization').mkdir(exist_ok=False)
+    return str(destination)
+
+
 def revise(state, notes):
     """Repair an unpublished candidate without replacing any live/published release."""
     if any(name in state['steps'] for name in ('install', 'push', 'publish')):
@@ -359,8 +400,10 @@ def revise(state, notes):
         raise RuntimeError('The sealed checkout changed; resolve it before revising the candidate.')
     commit = git('rev-parse', 'HEAD')
     git('checkout', '--detach', commit, cwd=source)
+    notarization_history = archive_notarization_evidence(state, commit)
     state.setdefault('previousCandidates', []).append({
-        'commit': state['commit'], 'steps': state['steps'], 'error': state.get('error')})
+        'commit': state['commit'], 'steps': state['steps'], 'error': state.get('error'),
+        'notarizationEvidence': notarization_history})
     state.update(commit=commit, tree=git('rev-parse', 'HEAD^{tree}'), steps={}, status='ready',
                  plannedSteps=list(RELEASE_STEPS), notes=notes)
     state.pop('error', None)
