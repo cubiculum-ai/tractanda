@@ -1,5 +1,5 @@
-import XCTest
 import CSQLite
+import XCTest
 
 @testable import TractandaCore
 
@@ -43,7 +43,9 @@ final class CoreTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         var store: ItemStore? = try ItemStore(root: root)
         let original = try XCTUnwrap(store).commit(
-            CommitRequest(classID: "Item", changes: ["subject": .text("preserve history")], operationID: "schema-v3-create")
+            CommitRequest(
+                classID: "Item", changes: ["subject": .text("preserve history")],
+                operationID: "schema-v3-create")
         ).revision
         let edited = try XCTUnwrap(store).commit(
             CommitRequest(
@@ -56,7 +58,8 @@ final class CoreTests: XCTestCase {
         let path = root.appendingPathComponent("index/items.sqlite").path
         XCTAssertEqual(sqlite3_open(path, &database), SQLITE_OK)
         defer { if let database { sqlite3_close(database) } }
-        let downgrade = "UPDATE checkpoint_meta SET value='2' WHERE key='schema'; "
+        let downgrade =
+            "UPDATE checkpoint_meta SET value='2' WHERE key='schema'; "
             + "UPDATE checkpoint_meta SET value='tractanda-sqlite-catalogue-v2' WHERE key='engine';"
         let status = downgrade.withCString { sqlite3_exec(database, $0, nil, nil, nil) }
         XCTAssertEqual(status, SQLITE_OK)
