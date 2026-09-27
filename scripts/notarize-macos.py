@@ -225,6 +225,43 @@ def verified_pre_submission_failure(receipt, archive):
     )
 
 
+def export_account_failure(error):
+    """Recognize Xcode's local account failure after an upload is recorded."""
+    if not isinstance(error, subprocess.CalledProcessError) or error.returncode != 65:
+        return False
+    if list(error.cmd)[:2] != ["xcodebuild", "-exportNotarizedApp"]:
+        return False
+    message = "\n".join(str(value) for value in (error.stdout, error.stderr) if value)
+    return bool(re.search(r"IDEProvisioningErrorDomain\s+Code[= ]23\b", message) and "No Accounts" in message)
+
+
+def prepare_ticket_package(package, executable, archive, expected, runner):
+    """Stage the exact uploaded package once, without touching the signed input."""
+    app = archive / "Products/Applications/NotarizationWrapper.app"
+    if (
+        sha256(package) != expected["inputSHA256"]
+        or sha256(executable) != expected["wrapperExecutableSHA256"]
+        or sha256(app / "Contents/Resources" / package.name) != expected["inputSHA256"]
+    ):
+        raise RuntimeError("Notarization inputs or uploaded wrapper payload changed.")
+    runner(["/usr/bin/codesign", "--verify", "--strict", str(app)])
+    staged = archive.parent / "stapled.pkg"
+    if staged.exists() or staged.is_symlink():
+        if staged.is_symlink() or not staged.is_file():
+            raise RuntimeError("Private staged package is unsafe.")
+    with tempfile.NamedTemporaryFile(prefix=".ticket-package-", dir=archive.parent, delete=False) as f:
+        temporary = Path(f.name)
+    try:
+        shutil.copy2(package, temporary)
+        if sha256(temporary) != expected["inputSHA256"]:
+            raise RuntimeError("Private staged package differs from uploaded bytes.")
+        os.replace(temporary, staged)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return staged
+
+
 def make_archive(stage, package, executable, identity, team, runner):
     archive = Path(stage) / "NotarizationWrapper.xcarchive"
     app = archive / "Products/Applications/NotarizationWrapper.app"
@@ -503,6 +540,8 @@ def notarize(
     if not valid_uuid(recorded):
         raise RuntimeError("Recorded Xcode distribution identifier is invalid.")
     export = archive.parent / "notarized-export"
+    ticket_package = archive.parent / "stapled.pkg"
+    ticket_prepared = False
     deadline = clock() + timeout
     while True:
         latest = distribution(archive, expected_team_id)
@@ -512,6 +551,20 @@ def notarize(
             receipt.update(submissionState="rejected", distribution=latest, rejectedAt=now())
             write_json(receipt_path, receipt)
             raise RuntimeError("Apple rejected the Xcode submission; inspect the saved archive in Xcode.")
+        if receipt.get("submissionState") == "accepted" and receipt.get("acceptanceMethod") == "packageTicket":
+            if (
+                not ticket_package.is_file()
+                or ticket_package.is_symlink()
+                or sha256(ticket_package) != receipt.get("ticketPackageSHA256")
+                or sha256(archive / "Products/Applications/NotarizationWrapper.app/Contents/Resources" / package.name)
+                != expected["inputSHA256"]
+            ):
+                raise RuntimeError("Accepted private package or uploaded wrapper payload changed.")
+            observed(["xcrun", "stapler", "validate", str(ticket_package)])
+            observed(["/usr/bin/codesign", "--verify", "--strict", str(archive / "Products/Applications/NotarizationWrapper.app")])
+            package_signature(ticket_package, expected_team_id, observed)
+            assessment(ticket_package, observed)
+            break
         try:
             if receipt.get("submissionState") != "accepted":
                 # Retry a failed export from the same uploaded archive, without
@@ -532,7 +585,10 @@ def notarize(
             if len(apps) != 1:
                 raise RuntimeError("Xcode did not export exactly one notarized wrapper app.")
             observed(["xcrun", "stapler", "validate", str(apps[0])])
-            receipt.update(submissionState="accepted", acceptedAt=now(), exportedApp=str(apps[0]))
+            receipt.update(
+                submissionState="accepted", acceptanceMethod="xcodeExport",
+                acceptedAt=now(), exportedApp=str(apps[0])
+            )
             write_json(receipt_path, receipt)
             break
         except Exception as error:
@@ -540,6 +596,35 @@ def notarize(
                 submissionState="uploaded", exportFailure=diagnostics(error), exportCheckedAt=now()
             )
             write_json(receipt_path, receipt)
+            if export_account_failure(error):
+                if not ticket_prepared:
+                    prepare_ticket_package(package, executable, archive, expected, observed)
+                    ticket_prepared = True
+                try:
+                    observed(["xcrun", "stapler", "staple", str(ticket_package)])
+                except Exception as ticket_error:
+                    # An official ticket may still be processing or temporarily
+                    # unavailable. Other validation failures are terminal.
+                    receipt.update(ticketFailure=diagnostics(ticket_error), ticketCheckedAt=now())
+                    write_json(receipt_path, receipt)
+                else:
+                    observed(["xcrun", "stapler", "validate", str(ticket_package)])
+                    package_signature(ticket_package, expected_team_id, observed)
+                    assessment(ticket_package, observed)
+                    latest = distribution(archive, expected_team_id)
+                    if not latest or latest["identifier"] != recorded:
+                        raise RuntimeError("Xcode distribution changed during package ticket validation.")
+                    if latest["processingState"] in ("error", "failed", "rejected", "invalid"):
+                        receipt.update(submissionState="rejected", distribution=latest, rejectedAt=now())
+                        write_json(receipt_path, receipt)
+                        raise RuntimeError("Apple rejected the Xcode submission; inspect the saved archive in Xcode.")
+                    receipt.update(
+                        submissionState="accepted", acceptanceMethod="packageTicket",
+                        acceptedAt=now(), ticketValidatedAt=now(),
+                        ticketPackageSHA256=sha256(ticket_package), distribution=latest,
+                    )
+                    write_json(receipt_path, receipt)
+                    break
             if clock() >= deadline:
                 raise TimeoutError(
                     "Xcode export or ticket validation did not complete; inspect the saved diagnostics. "
@@ -548,20 +633,20 @@ def notarize(
             sleeper(min(30, max(1, deadline - clock())))
     if sha256(package) != expected["inputSHA256"]:
         raise RuntimeError("Input package changed; refusing to staple different bytes.")
-    stapled = archive.parent / "stapled.pkg"
-    shutil.copy2(package, stapled)
-    observed(["xcrun", "stapler", "staple", str(stapled)])
-    observed(["xcrun", "stapler", "validate", str(stapled)])
-    package_signature(stapled, expected_team_id, observed)
-    assessment(stapled, observed)
-    digest = sha256(stapled)
+    if receipt.get("acceptanceMethod") != "packageTicket":
+        prepare_ticket_package(package, executable, archive, expected, observed)
+        observed(["xcrun", "stapler", "staple", str(ticket_package)])
+        observed(["xcrun", "stapler", "validate", str(ticket_package)])
+        package_signature(ticket_package, expected_team_id, observed)
+        assessment(ticket_package, observed)
+    digest = sha256(ticket_package)
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         prefix="." + output.stem + ".notarized-", suffix=".pkg", dir=output.parent, delete=False
     ) as f:
         publishing = Path(f.name)
     try:
-        shutil.copy2(stapled, publishing)
+        shutil.copy2(ticket_package, publishing)
         if sha256(publishing) != digest:
             raise RuntimeError("Verified package changed while publishing.")
         os.replace(publishing, output)
@@ -572,6 +657,8 @@ def notarize(
         notarized=True, outputSHA256=digest, output=str(output), team=expected_team_id, completedAt=now()
     )
     receipt.pop("failureCategory", None)
+    for key in ("lastFailure", "exportFailure", "ticketFailure", "failedAt"):
+        receipt.pop(key, None)
     write_json(receipt_path, receipt)
     shutil.rmtree(private_stage(archive))
     return receipt

@@ -2,6 +2,7 @@
 import importlib.util, plistlib, subprocess, tempfile, unittest
 import shutil
 from pathlib import Path
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location("n", Path(__file__).with_name("notarize-macos.py"))
 n = importlib.util.module_from_spec(spec)
@@ -92,6 +93,39 @@ class AccountFailure(Apple):
             shutil.rmtree(bundle, ignore_errors=True)
 
 
+class ExportAccountFailure(Apple):
+    def __init__(self, ticket_available=True, valid_ticket=True, tamper=False, reject_after_ticket=False):
+        super().__init__()
+        self.ticket_available = ticket_available
+        self.valid_ticket = valid_ticket
+        self.tamper = tamper
+        self.reject_after_ticket = reject_after_ticket
+
+    def __call__(self, args):
+        if args[:2] == ["xcodebuild", "-exportNotarizedApp"]:
+            self.calls.append(args)
+            if self.tamper:
+                archive = Path(args[args.index("-archivePath") + 1])
+                embedded = archive / "Products/Applications/NotarizationWrapper.app/Contents/Resources/in.pkg"
+                embedded.write_bytes(b"changed")
+            raise subprocess.CalledProcessError(
+                65, args, stderr='error: No Accounts. (Error Domain=IDEProvisioningErrorDomain Code=23 "No Accounts")'
+            )
+        if args[:3] == ["xcrun", "stapler", "staple"]:
+            self.calls.append(args)
+            if not self.ticket_available:
+                raise subprocess.CalledProcessError(65, args, stderr="ticket not found")
+            if self.reject_after_ticket:
+                archive = Path(args[-1]).parent / "NotarizationWrapper.xcarchive"
+                info = plistlib.loads((archive / "Info.plist").read_bytes())
+                info["Distributions"][0]["processingEvent"] = {"state": "rejected"}
+                (archive / "Info.plist").write_bytes(plistlib.dumps(info))
+        if args[:3] == ["xcrun", "stapler", "validate"] and not self.valid_ticket:
+            self.calls.append(args)
+            raise subprocess.CalledProcessError(65, args, stderr="invalid ticket")
+        return super().__call__(args)
+
+
 class T(unittest.TestCase):
     def fixture(self):
         t = tempfile.TemporaryDirectory()
@@ -152,6 +186,111 @@ class T(unittest.TestCase):
             a = Apple()
             self.call(p, e, o, d, a)
             self.assertFalse(any(x[:2] == ["xcodebuild", "-exportArchive"] for x in a.calls))
+
+    def test_uploaded_package_ticket_fallback_succeeds(self):
+        t, p, e, o, d = self.fixture()
+        with t:
+            apple = ExportAccountFailure()
+            receipt = self.call(p, e, o, d, apple)
+            self.assertTrue(receipt["notarized"])
+            self.assertEqual(receipt["acceptanceMethod"], "packageTicket")
+            self.assertEqual(receipt["submissionID"], ID)
+            self.assertTrue(receipt["ticketValidatedAt"])
+            self.assertEqual(receipt["outputSHA256"], n.sha256(o))
+            self.assertEqual(len([x for x in apple.calls if x[:2] == ["xcodebuild", "-exportArchive"]]), 1)
+            self.assertTrue(any(x[:3] == ["xcrun", "stapler", "staple"] for x in apple.calls))
+            self.assertTrue(any(x[0] == "/usr/sbin/spctl" for x in apple.calls))
+
+    def test_ticket_unavailable_stays_uploaded_and_resumes_without_reupload(self):
+        t, p, e, o, d = self.fixture()
+        with t:
+            with self.assertRaises(TimeoutError):
+                self.call(p, e, o, d, ExportAccountFailure(ticket_available=False), 0)
+            pending = n.read_json(d / "notarization.json")
+            self.assertEqual(pending["submissionState"], "uploaded")
+            self.assertFalse(pending["notarized"])
+            self.assertFalse(o.exists())
+            apple = ExportAccountFailure()
+            receipt = self.call(p, e, o, d, apple)
+            self.assertTrue(receipt["notarized"])
+            self.assertFalse(any(x[:2] == ["xcodebuild", "-exportArchive"] for x in apple.calls))
+
+    def test_ticket_fallback_rejects_changed_wrapper_or_rejected_submission(self):
+        for cause in ("tamper", "rejected"):
+            with self.subTest(cause=cause):
+                t, p, e, o, d = self.fixture()
+                with t:
+                    apple = ExportAccountFailure(tamper=cause == "tamper", reject_after_ticket=cause == "rejected")
+                    if cause == "tamper":
+                        with self.assertRaisesRegex(RuntimeError, "uploaded wrapper payload changed"):
+                            self.call(p, e, o, d, apple, 0)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "rejected"):
+                            self.call(p, e, o, d, apple, 0)
+                    receipt = n.read_json(d / "notarization.json")
+                    self.assertFalse(receipt["notarized"])
+                    self.assertFalse(o.exists())
+                    if cause == "tamper":
+                        self.assertFalse(any(x[:3] == ["xcrun", "stapler", "staple"] for x in apple.calls))
+                    else:
+                        self.assertEqual(receipt["submissionState"], "rejected")
+
+    def test_invalid_ticket_never_publishes(self):
+        t, p, e, o, d = self.fixture()
+        with t:
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.call(p, e, o, d, ExportAccountFailure(valid_ticket=False), 0)
+            receipt = n.read_json(d / "notarization.json")
+            self.assertEqual(receipt["submissionState"], "uploaded")
+            self.assertFalse(receipt["notarized"])
+            self.assertFalse(o.exists())
+
+    def test_ticket_fallback_requires_installer_signature_and_gatekeeper(self):
+        for gate in ("signature", "gatekeeper"):
+            with self.subTest(gate=gate):
+                t, p, e, o, d = self.fixture()
+                with t:
+                    class InvalidGate(ExportAccountFailure):
+                        def __call__(self, args):
+                            if gate == "signature" and args[0] == "/usr/sbin/pkgutil" and any(
+                                str(value).endswith("stapled.pkg") for value in args
+                            ):
+                                self.calls.append(args)
+                                return "Developer ID Installer: Wrong (ZZZZZ99999)"
+                            if gate == "gatekeeper" and args[0] == "/usr/sbin/spctl":
+                                self.calls.append(args)
+                                raise subprocess.CalledProcessError(1, args, stderr="rejected")
+                            return super().__call__(args)
+
+                    failure = RuntimeError if gate == "signature" else subprocess.CalledProcessError
+                    with self.assertRaises(failure):
+                        self.call(p, e, o, d, InvalidGate(), 0)
+                    receipt = n.read_json(d / "notarization.json")
+                    self.assertEqual(receipt["submissionState"], "uploaded")
+                    self.assertFalse(receipt["notarized"])
+                    self.assertFalse(o.exists())
+
+    def test_ticket_accepted_receipt_resumes_without_export_or_upload(self):
+        t, p, e, o, d = self.fixture()
+        with t:
+            original_replace = n.os.replace
+
+            def fail_publish(source, destination):
+                if Path(destination).resolve() == o.resolve():
+                    raise OSError("interrupted before package publication")
+                return original_replace(source, destination)
+
+            with patch.object(n.os, "replace", side_effect=fail_publish):
+                with self.assertRaisesRegex(OSError, "interrupted"):
+                    self.call(p, e, o, d, ExportAccountFailure())
+            receipt = n.read_json(d / "notarization.json")
+            self.assertEqual(receipt["submissionState"], "accepted")
+            self.assertEqual(receipt["acceptanceMethod"], "packageTicket")
+            apple = ExportAccountFailure()
+            finished = self.call(p, e, o, d, apple)
+            self.assertTrue(finished["notarized"])
+            self.assertFalse(any(x[0] == "xcodebuild" for x in apple.calls))
+            self.assertTrue(any(x[:3] == ["xcrun", "stapler", "validate"] for x in apple.calls))
 
     def test_crash_distribution_reconciles(self):
         t, p, e, o, d = self.fixture()
