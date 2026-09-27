@@ -31,7 +31,7 @@ class ReleaseTests(unittest.TestCase):
         state = {'directory': str(directory), 'version': '0.1.0-poc.13', 'commit': old_commit,
                  'configuration': {'softwareRoot': str(root / 'installed'),
                                    'applicationIdentity': 'Developer ID Application: Test',
-                                   'developerTeamID': 'ABCDE12345'}, 'status': 'failed',
+                                   'developerTeamID': 'ABCDE12345', 'repository': 'owner/repo'}, 'status': 'failed',
                  'steps': {'package': {'result': {'sha256': '1' * 64}}}}
 
         def command(args, **_kwargs):
@@ -49,6 +49,101 @@ class ReleaseTests(unittest.TestCase):
             return ''
 
         return control, directory, state, command, git
+
+    def ci_repair_fixture(self, root):
+        control, directory, state, audit, git = self.revision_fixture(root)
+        state['steps'] = {name: {'completedAt': 'verified', 'result': None} for name in (
+            'verify', 'release-build', 'bundle', 'package', 'notarization',
+            'artifacts', 'install', 'health', 'push')}
+        state['activeStep'] = 'ci'
+        state['error'] = 'GitHub verification did not pass'
+        live = root / 'installed/current/bundle-manifest.json'
+        live.parent.mkdir(parents=True)
+        release.write(live, {'version': state['version'], 'files': []})
+        state['steps']['bundle']['result'] = {'manifestSHA256': release.sha(live)}
+        state['steps']['package']['result'] = {'sha256': '1' * 64}
+        release.write(control / 'runner.json', {'pid': 123, 'version': state['version'],
+                                              'status': 'failed', 'stoppedAt': 'verified'})
+
+        def command(args, **kwargs):
+            if args[:3] == ['gh', 'run', 'list']:
+                return json.dumps([{'databaseId': 1, 'headSha': state['commit'],
+                                    'status': 'completed', 'conclusion': 'failure'}])
+            if args == ['gh', 'api', 'repos/owner/repo']:
+                return json.dumps({'permissions': {'push': True}})
+            if args[:3] == ['gh', 'api', '--paginate']:
+                return ''
+            return audit(args, **kwargs)
+
+        return control, directory, state, live, command, git
+
+    def test_terminal_installed_ci_failure_can_revise_without_mutating_live_bundle(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            control, directory, state, live, command, git = self.ci_repair_fixture(root)
+            before = live.read_bytes()
+            old_steps = state['steps'].copy()
+            evidence = directory / 'notarization'; evidence.mkdir()
+            release.write(evidence / 'notarization.json', {'inputSHA256': '1' * 64, 'submissionID': 'old-id'})
+            absent_tag = subprocess.CompletedProcess([], 2, stdout='', stderr='')
+            with patch.object(release, 'ROOT', root), patch.object(release, 'CONTROL', control), \
+                    patch.object(release, 'command', side_effect=command), patch.object(release, 'git', side_effect=git), \
+                    patch.object(release.os, 'kill', side_effect=ProcessLookupError), \
+                    patch.object(release.subprocess, 'run', return_value=absent_tag):
+                revised = release.revise(state, 'portable test fixture')
+            self.assertEqual(revised['version'], '0.1.0-poc.13')
+            self.assertEqual(revised['steps'], {})
+            previous = revised['previousCandidates'][-1]
+            self.assertEqual(previous['steps'], old_steps)
+            self.assertIn('install', previous['steps'])
+            self.assertIn('push', previous['steps'])
+            self.assertEqual(previous['unpublishedCIRepair']['failedCI']['conclusion'], 'failure')
+            self.assertTrue(Path(previous['notarizationEvidence']).is_dir())
+            self.assertEqual(list((directory / 'notarization').iterdir()), [])
+            self.assertEqual(live.read_bytes(), before)
+
+    def test_installed_ci_repair_denies_active_tagged_released_or_uncertain_state(self):
+        for cause in ('active', 'unobservable', 'tagged', 'release', 'network', 'pending-ci', 'no-push', 'live-drift'):
+            with self.subTest(cause=cause), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                control, _directory, state, live, command, _git = self.ci_repair_fixture(root)
+                if cause == 'live-drift':
+                    live.write_text('{"version":"0.1.0-poc.13","changed":true}')
+
+                def remote(args, **kwargs):
+                    if cause == 'network':
+                        raise subprocess.CalledProcessError(1, args, stderr='network unavailable')
+                    if cause == 'release' and args[:3] == ['gh', 'api', '--paginate']:
+                        return 'v0.1.0-poc.13'
+                    if cause == 'pending-ci' and args[:3] == ['gh', 'run', 'list']:
+                        return json.dumps([{'headSha': state['commit'], 'status': 'in_progress', 'conclusion': None}])
+                    if cause == 'no-push' and args == ['gh', 'api', 'repos/owner/repo']:
+                        return json.dumps({'permissions': {'push': False}})
+                    return command(args, **kwargs)
+
+                kill_error = None if cause == 'active' else (PermissionError if cause == 'unobservable' else ProcessLookupError)
+                tag = subprocess.CompletedProcess([], 0 if cause == 'tagged' else 2, stdout='', stderr='')
+                with patch.object(release, 'CONTROL', control), patch.object(release, 'command', side_effect=remote), \
+                        patch.object(release.os, 'kill', side_effect=kill_error), \
+                        patch.object(release.subprocess, 'run', return_value=tag):
+                    with self.assertRaises((RuntimeError, subprocess.CalledProcessError)):
+                        release.require_unpublished_ci_repair(state)
+
+    def test_published_or_non_ci_deployment_cannot_be_revised(self):
+        for cause in ('published', 'complete', 'not-ci'):
+            with self.subTest(cause=cause), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                control, _directory, state, _live, _command, _git = self.ci_repair_fixture(root)
+                if cause == 'published':
+                    state['steps']['publish'] = {'result': {}}
+                elif cause == 'complete':
+                    state['status'] = 'complete'
+                else:
+                    state['activeStep'] = 'health'
+                with patch.object(release, 'CONTROL', control), patch.object(release, 'git') as git:
+                    with self.assertRaises(RuntimeError):
+                        release.revise(state, 'must refuse')
+                git.assert_not_called()
 
     def test_revise_archives_uploaded_notarization_with_provenance_and_fresh_attempt(self):
         with tempfile.TemporaryDirectory() as temporary:

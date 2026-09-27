@@ -276,7 +276,8 @@ final class CategoryEvaluationContextTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
             "tractanda-category-relevant-deltas-\(Identifier.make())")
         defer { try? FileManager.default.removeItem(at: root) }
-        let store = try ItemStore(root: root)
+        let accounts = Accounts()
+        let store = try ItemStore(root: root, accounts: accounts)
         func category(_ name: String) throws -> Revision {
             try create(
                 store, uid: getuid(),
