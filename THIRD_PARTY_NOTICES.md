@@ -26,7 +26,7 @@ System PAM/UUID libraries are dynamically supplied by the platform and have thei
 
 ## Optional embedding host
 
-`Packages/TractandaEmbeddings` pins `rcfa/vmlx-swift` at `b7a2b97efc2d8ed44ddf3c4b7af25766b372339f`: upstream `osaurus-ai/vmlx-swift` main `e07bd67becffb4718004c3db076ee8c153ef7f92` plus tokenizer patches [#487](https://github.com/osaurus-ai/vmlx-swift/pull/487) and [#514](https://github.com/osaurus-ai/vmlx-swift/pull/514); its resolved dependency graph is recorded separately. License/notice copies collected for that pin are retained under [LICENSES/optional-embedding-host](LICENSES/optional-embedding-host/), including vmlx, MLX-related native components and additional Swift dependencies.
+`Packages/TractandaEmbeddings` pins upstream `osaurus-ai/vmlx-swift` at `61a4b20d4ad01b10466e8fc94c50402a9f994430`, which includes the merged tokenizer fixes [#487](https://github.com/osaurus-ai/vmlx-swift/pull/487) and [#514](https://github.com/osaurus-ai/vmlx-swift/pull/514); its resolved dependency graph is recorded separately. License/notice copies collected for that pin are retained under [LICENSES/optional-embedding-host](LICENSES/optional-embedding-host/), including vmlx, MLX-related native components and additional Swift dependencies.
 
 Model weights must be obtained separately under the selected model's terms. Do not assume the runtime's license covers a model, tokenizer dataset or unrelated application material. Recheck the applicable notice set when updating a dependency or packaging a binary.
 

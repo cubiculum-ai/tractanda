@@ -351,8 +351,9 @@ uint32_t tractanda_uid(void) { return (uint32_t)geteuid(); }
 
 int tractanda_file_metadata(
     const char *path, uint32_t *mode, uint32_t *uid, uint32_t *gid, uint64_t *size,
-    uint64_t *inode, uint64_t *device) {
-    if (!path || !*path || !mode || !uid || !gid || !size || !inode || !device) {
+    uint64_t *inode, uint64_t *device, int64_t *mtime_seconds, int32_t *mtime_nanoseconds) {
+    if (!path || !*path || !mode || !uid || !gid || !size || !inode || !device
+        || !mtime_seconds || !mtime_nanoseconds) {
         errno = EINVAL;
         return -1;
     }
@@ -364,6 +365,13 @@ int tractanda_file_metadata(
     *size = (uint64_t)metadata.st_size;
     *inode = (uint64_t)metadata.st_ino;
     *device = (uint64_t)metadata.st_dev;
+#ifdef __APPLE__
+    *mtime_seconds = (int64_t)metadata.st_mtimespec.tv_sec;
+    *mtime_nanoseconds = (int32_t)metadata.st_mtimespec.tv_nsec;
+#else
+    *mtime_seconds = (int64_t)metadata.st_mtim.tv_sec;
+    *mtime_nanoseconds = (int32_t)metadata.st_mtim.tv_nsec;
+#endif
     return 0;
 }
 

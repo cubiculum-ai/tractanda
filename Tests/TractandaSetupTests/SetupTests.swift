@@ -146,6 +146,28 @@ final class SetupTests: XCTestCase {
         installer.legacyConfiguration(for: receipt)
     }
 
+    private func poc11GranitePayload() -> EmbeddingPayload {
+        EmbeddingPayload(
+            backend: "vmlx-granite-embedding-f32-v1",
+            modelDirectory: "models/granite-embedding-311m-multilingual-r2",
+            model: "tractanda-granite-embedding-311m-multilingual-r2-vmlx-fp32-44399559",
+            modelRevision:
+                "44399559930365213510b1ee2eb15ded83374f0e:weights-bf16:compute-f32:dcb6431bfa6e817fe100a2b0521360cec3383963b03fa966b685de18ca310d31:vmlx-b7a2b97efc2d8ed44ddf3c4b7af25766b372339f",
+            dimensions: 768)
+    }
+
+    private func poc11GraniteConfiguration(_ receipt: InstallationReceipt, payload: EmbeddingPayload)
+        -> BundledSemanticConfiguration
+    {
+        BundledSemanticConfiguration(
+            formatVersion: 2, configurationID: receipt.embeddingConfigurationID,
+            operationID: "setup-embedding-v2-" + receipt.instance,
+            endpoint: "http://127.0.0.1:\(receipt.port + 1)/v1/embeddings",
+            model: payload.model, modelRevision: payload.modelRevision, dimensions: payload.dimensions,
+            documentPrefix: "", queryPrefix: "", chunkBytes: 384, overlapBytes: 64,
+            pooling: "cls", normalization: "l2", inputEncoding: "item-text-utf8-v2")
+    }
+
     private func recordLegacyEmbeddingRegistration(
         _ installer: SetupEngine, _ receipt: inout InstallationReceipt
     ) throws {
@@ -307,28 +329,30 @@ final class SetupTests: XCTestCase {
         XCTAssertEqual(try installer.readReceipt("preview")?.state, .preparing)
     }
 
-    func testManagedQwenConfigurationUpgradesToGraniteAndIsIdempotent() throws {
+    func testManagedPoc11GraniteConfigurationUpgradesAndRetriesIdempotently() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
         let runner = Runner()
         let initial = engine(f, runner: runner)
-        try initial.install(f.options)
-        var receipt = try XCTUnwrap(initial.readReceipt("preview"))
-        receipt.embedding = .legacyQwen
+        let options = SetupOptions(name: "production", owner: f.owner, bundle: f.bundle)
+        try initial.install(options)
+        var receipt = try XCTUnwrap(initial.readReceipt("production"))
+        let poc11Payload = poc11GranitePayload()
+        receipt.embedding = poc11Payload
         receipt.embeddingConfigured = true
         try recordLegacyEmbeddingRegistration(initial, &receipt)
         try initial.writeReceipt(receipt)
-        var semantic = try legacySemanticConfiguration(initial, receipt)
-        semantic.operationID = "pilot-semantic-cutover"
-        try JSONEncoder().encode(semantic).write(
-            to: URL(fileURLWithPath: receipt.store).appendingPathComponent("semantic.json"))
+        var semantic = poc11GraniteConfiguration(receipt, payload: poc11Payload)
+        let oldSemantic = semantic
+        let semanticURL = URL(fileURLWithPath: receipt.store).appendingPathComponent("semantic.json")
+        try JSONEncoder().encode(semantic).write(to: semanticURL)
         try addGranitePayload(to: f)
         var configureCalls = 0
         let installer = SetupEngine(
             roots: f.roots, runner: runner, rootCheck: { true }, trustedOwnership: false,
             readinessCheck: { _, _, _ in },
             semanticCall: { _, _, method, arguments in
-                guard runner.jobs.contains("system/ai.tractanda.server.preview") else {
+                guard runner.jobs.contains("system/ai.tractanda.server.production") else {
                     throw SetupError("Native server is not running.")
                 }
                 if method == "TractandaSemantic/status" {
@@ -340,36 +364,53 @@ final class SetupTests: XCTestCase {
                 let data = try JSONSerialization.data(
                     withJSONObject: try XCTUnwrap(arguments["configuration"]))
                 let candidate = try JSONDecoder().decode(BundledSemanticConfiguration.self, from: data)
-                if semantic.operationID == candidate.operationID, semantic == candidate {
+                if semantic == candidate {
                     return ["enabled": true, "configurationID": semantic.configurationID]
+                }
+                if semantic.operationID == candidate.operationID {
+                    throw SetupError("operationMismatch")
                 }
                 XCTAssertEqual(arguments["expectedConfigurationID"] as? String, semantic.configurationID)
                 semantic = candidate
+                try JSONEncoder().encode(semantic).write(to: semanticURL)
                 return ["enabled": true, "configurationID": semantic.configurationID]
             })
-        try installer.install(f.options, upgrade: true)
-        let upgraded = try XCTUnwrap(installer.readReceipt("preview"))
+        try installer.install(options, upgrade: true)
+        let upgraded = try XCTUnwrap(installer.readReceipt("production"))
         XCTAssertEqual(upgraded.embedding, .granite)
         XCTAssertTrue(upgraded.embeddingConfigured)
         XCTAssertNil(upgraded.embeddingPreviousConfiguration)
         XCTAssertEqual(semantic, installer.graniteConfiguration(for: upgraded, payload: .granite))
+        XCTAssertNotEqual(semantic.operationID, oldSemantic.operationID)
+        XCTAssertTrue(semantic.operationID.hasSuffix(upgraded.embeddingConfigurationID))
         let callsAfterUpgrade = configureCalls
-        try installer.install(f.options, upgrade: true)
+        var retry = upgraded
+        retry.state = .preparing
+        retry.embeddingConfigured = false
+        retry.embeddingPreviousConfiguration = oldSemantic
+        try installer.writeReceipt(retry)
+        try installer.install(options, upgrade: true)
+        XCTAssertEqual(configureCalls, callsAfterUpgrade)
+        XCTAssertEqual(try installer.readReceipt("production")?.state, .active)
+        XCTAssertTrue(try XCTUnwrap(installer.readReceipt("production")).embeddingConfigured)
+        XCTAssertNil(try XCTUnwrap(installer.readReceipt("production")).embeddingPreviousConfiguration)
+        try installer.install(options, upgrade: true)
         XCTAssertEqual(configureCalls, callsAfterUpgrade)
     }
 
-    func testGraniteUpgradeRefusesChangedSemanticConfiguration() throws {
+    func testGraniteRuntimeUpgradeRefusesChangedSemanticConfiguration() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
         let runner = Runner()
         let installer = engine(f, runner: runner)
         try installer.install(f.options)
         var receipt = try XCTUnwrap(installer.readReceipt("preview"))
-        receipt.embedding = .legacyQwen
+        let poc11Payload = poc11GranitePayload()
+        receipt.embedding = poc11Payload
         receipt.embeddingConfigured = true
         try recordLegacyEmbeddingRegistration(installer, &receipt)
         try installer.writeReceipt(receipt)
-        var changed = try legacySemanticConfiguration(installer, receipt)
+        var changed = poc11GraniteConfiguration(receipt, payload: poc11Payload)
         changed.queryPrefix = "administrator-selected-prefix"
         try JSONEncoder().encode(changed).write(
             to: URL(fileURLWithPath: receipt.store).appendingPathComponent("semantic.json"))
@@ -377,24 +418,25 @@ final class SetupTests: XCTestCase {
         XCTAssertThrowsError(try installer.install(f.options, upgrade: true)) { error in
             XCTAssertTrue(error.localizedDescription.contains("different semantic configuration"))
         }
-        XCTAssertEqual(try installer.readReceipt("preview")?.embedding, .legacyQwen)
+        XCTAssertEqual(try installer.readReceipt("preview")?.embedding, poc11Payload)
         XCTAssertEqual(
             try Data(contentsOf: URL(fileURLWithPath: receipt.store).appendingPathComponent("semantic.json")),
             try JSONEncoder().encode(changed))
     }
 
-    func testPostConfigurationFailureRestoresManagedQwenConfiguration() throws {
+    func testPostConfigurationFailureRestoresManagedPoc11GraniteConfiguration() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
         let runner = Runner()
         let initial = engine(f, runner: runner)
         try initial.install(f.options)
         var receipt = try XCTUnwrap(initial.readReceipt("preview"))
-        receipt.embedding = .legacyQwen
+        let poc11Payload = poc11GranitePayload()
+        receipt.embedding = poc11Payload
         receipt.embeddingConfigured = true
         try recordLegacyEmbeddingRegistration(initial, &receipt)
         try initial.writeReceipt(receipt)
-        var semantic = try legacySemanticConfiguration(initial, receipt)
+        var semantic = poc11GraniteConfiguration(receipt, payload: poc11Payload)
         let semanticURL = URL(fileURLWithPath: receipt.store).appendingPathComponent("semantic.json")
         try JSONEncoder().encode(semantic).write(to: semanticURL)
         try addGranitePayload(to: f)
@@ -424,8 +466,8 @@ final class SetupTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: badProfiles).write(
             to: f.roots.configuration.appendingPathComponent("connections.json"))
         XCTAssertThrowsError(try installer.install(f.options, upgrade: true))
-        XCTAssertEqual(semantic, try legacySemanticConfiguration(initial, receipt))
-        XCTAssertEqual(try installer.readReceipt("preview")?.embedding, .legacyQwen)
+        XCTAssertEqual(semantic, poc11GraniteConfiguration(receipt, payload: poc11Payload))
+        XCTAssertEqual(try installer.readReceipt("preview")?.embedding, poc11Payload)
         XCTAssertTrue(runner.jobs.contains("system/ai.tractanda.server.preview"))
     }
 

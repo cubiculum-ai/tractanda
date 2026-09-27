@@ -1,5 +1,9 @@
 import Foundation
 
+func savedViewClockKey(at date: Date, timeZone: String) -> String {
+    String(date.timeIntervalSinceReferenceDate.bitPattern, radix: 16) + "\0" + timeZone
+}
+
 /// The initial portable profile is deliberately smaller than Spotlight's grammar.
 /// It evaluates typed metadata; lexical phrase retrieval uses SQLite FTS5 separately.
 public struct SpotlightQuery: Sendable {
@@ -14,6 +18,18 @@ public struct SpotlightQuery: Sendable {
     {
         expression.matches(revision, at: date, calendar: calendar)
     }
+    /// A safe candidate restriction only. The full expression is still evaluated on each
+    /// candidate, so type and wildcard semantics remain those of SpotlightQuery.
+    var indexClassEquals: String? { expression.indexClassEquals }
+    var indexExactClassEquals: String? {
+        if case .comparison = expression { return expression.indexClassEquals }
+        return nil
+    }
+    var indexDependencies: (fields: Set<String>, usesClock: Bool) { expression.indexDependencies }
+    var indexCandidateRestrictions: [IndexCandidateRestriction] { expression.indexCandidateRestrictions }
+    /// True only when the parsed expression proves that no canonical item can match.
+    /// Item IDs are validated nonempty, so this exact comparison is impossible.
+    var isManualOnlyImpossible: Bool { expression.isManualOnlyImpossible }
 
     private enum Literal: Sendable {
         case text(String)
@@ -24,10 +40,80 @@ public struct SpotlightQuery: Sendable {
         case relative(String, Int)
         case date(Date)
     }
+    struct IndexCandidateRestriction: Sendable {
+        let field: String
+        let operation: String
+        let value: String
+    }
     private indirect enum Expression: Sendable {
         case and(Expression, Expression)
         case or(Expression, Expression)
         case comparison(String, String, String, Literal)
+        var indexClassEquals: String? {
+            switch self {
+            case .and(let left, let right):
+                return left.indexClassEquals ?? right.indexClassEquals
+            case .or:
+                return nil
+            case .comparison(let field, let op, let flags, let literal):
+                guard ["classID", "kMDItemContentType"].contains(field), op == "==", flags.isEmpty,
+                    case .text(let value) = literal,
+                    !value.contains("*"), !value.contains("?"), !value.contains("\\")
+                else { return nil }
+                return value
+            }
+        }
+        var indexDependencies: (fields: Set<String>, usesClock: Bool) {
+            switch self {
+            case .and(let left, let right), .or(let left, let right):
+                let a = left.indexDependencies
+                let b = right.indexDependencies
+                return (a.fields.union(b.fields), a.usesClock || b.usesClock)
+            case .comparison(let field, _, _, let literal):
+                let key = field == "kMDItemContentTypeTree" ? "classID" : metadataKey(field)
+                if case .relative = literal { return ([key], true) }
+                return ([key], false)
+            }
+        }
+        var indexCandidateRestrictions: [IndexCandidateRestriction] {
+            switch self {
+            case .and(let left, let right):
+                return left.indexCandidateRestrictions + right.indexCandidateRestrictions
+            case .or:
+                return []
+            case .comparison(let field, let op, let flags, let literal):
+                guard flags.isEmpty else { return [] }
+                if field == "itemID", op == "==", case .text(let value) = literal,
+                    let uuid = UUID(uuidString: value), uuid.uuidString.lowercased() == value
+                {
+                    return [.init(field: "itemID", operation: "=", value: value)]
+                }
+                let key = metadataKey(field)
+                guard ["createdAt", "modifiedAt"].contains(key),
+                    ["==", "<", "<=", ">", ">="].contains(op),
+                    case .date(let date) = literal,
+                    date.timeIntervalSinceReferenceDate.isFinite
+                else { return [] }
+                return [
+                    .init(
+                        field: key, operation: op == "==" ? "=" : op,
+                        value: String(date.timeIntervalSinceReferenceDate))
+                ]
+            }
+        }
+        var isManualOnlyImpossible: Bool {
+            switch self {
+            case .and(let left, let right):
+                return left.isManualOnlyImpossible || right.isManualOnlyImpossible
+            case .or:
+                return false
+            case .comparison(let field, let op, let flags, let literal):
+                guard field == "itemID", op == "==", flags.isEmpty,
+                    case .text(let value) = literal
+                else { return false }
+                return value.isEmpty
+            }
+        }
         func matches(_ revision: Revision, at date: Date, calendar: Calendar) -> Bool {
             switch self {
             case .and(let a, let b):
@@ -361,6 +447,55 @@ public struct SpotlightQuery: Sendable {
     }
 }
 
+/// Parsed, immutable work for a bounded ad hoc query. Evaluation touches only the
+/// caller-authorized revisions captured on the coordinator queue.
+struct PreparedReadQuery: Sendable {
+    let expression: SpotlightQuery?
+    let sort: [ItemSort]
+    let evaluatedAt: Date
+    let timeZone: String
+    let position: Int
+    let limit: Int
+
+    init(
+        expression: String?, sort: [ItemSort], evaluatedAt: Date, timeZone: String,
+        position: Int, limit: Int
+    ) throws {
+        guard !sort.isEmpty, sort.allSatisfy({ $0.property != nil && $0.categoryRootID == nil }),
+            position >= 0, (1...256).contains(limit)
+        else {
+            throw TractandaError(
+                "invalidArguments", "Prepared reads require a custom property sort and bounded page.")
+        }
+        try ItemSort.validate(sort)
+        self.expression = try expression.map(SpotlightQuery.init)
+        self.sort = sort
+        self.evaluatedAt = evaluatedAt
+        self.timeZone = timeZone
+        self.position = position
+        self.limit = limit
+    }
+
+    func evaluate(_ snapshot: ImmutableReadSnapshot) throws -> PreparedReadPage {
+        let calendar = try QueryCalendar.make(timeZone: timeZone)
+        let matching = snapshot.revisions.filter {
+            expression?.matches($0, at: evaluatedAt, calendar: calendar) ?? true
+        }
+        let ordered = try ItemSort.ordered(matching, by: sort)
+        return PreparedReadPage(
+            ids: Array(ordered.dropFirst(position).prefix(limit).map(\.itemID)), total: ordered.count,
+            state: snapshot.state, evaluatedAt: evaluatedAt, timeZone: timeZone)
+    }
+}
+
+struct PreparedReadPage: Sendable {
+    let ids: [String]
+    let total: Int
+    let state: String
+    let evaluatedAt: Date
+    let timeZone: String
+}
+
 public struct Membership: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case itemID, categoryID, reason, inheritancePath, sourceReason
@@ -499,6 +634,167 @@ public struct CategoryMembershipProjection: Codable, Equatable, Sendable {
 }
 
 public enum Categories {
+    private static func categoryCacheDependencies(
+        store: ItemStore, categoryPath: [String], excludedCategoryIDs: [String]
+    ) throws -> Set<String>? {
+        guard !categoryPath.isEmpty || !excludedCategoryIDs.isEmpty,
+            !store.hasLivePersonalStateItems()
+        else { return nil }
+        let hierarchy: CategoryHierarchy
+        do { hierarchy = try CategoryHierarchy(store.readableCategoryHeads()) } catch { return nil }
+        var pending = categoryPath + excludedCategoryIDs
+        var visited: Set<String> = []
+        var dependencies: Set<String> = []
+        while let id = pending.popLast() {
+            guard visited.insert(id).inserted else { continue }
+            guard let category = hierarchy.items[id],
+                let rule = try? Categories.rule(category), !rule.indexDependencies.usesClock,
+                category.fields["selection"]?.map?["timeWindow"] == nil,
+                (try? QueryCalendar.make(
+                    timeZone: category.fields["selection"]?.map?["timeZone"]?.string ?? "UTC")) != nil
+            else { return nil }
+            dependencies.formUnion(rule.indexDependencies.fields.map { "filter:field:" + $0 })
+            dependencies.insert("override:\(id)")
+            pending.append(contentsOf: hierarchy.children[id] ?? [])
+            guard
+                let exclusions = try? CategoryHierarchy.excludedCategories(
+                    category.fields["selection"]?.map?["excludedCategoryIDs"]),
+                exclusions.allSatisfy({ hierarchy.items[$0] != nil }),
+                (try? CategoryHierarchy.parents(of: category))?.allSatisfy({ hierarchy.items[$0] != nil })
+                    == true
+            else { return nil }
+            pending.append(contentsOf: exclusions)
+        }
+        return dependencies
+    }
+
+    static func page(
+        store: ItemStore, expression: String?, text: String?, categoryPath: [String],
+        excludedCategoryIDs: [String], sort: [ItemSort], position: Int, limit: Int,
+        at date: Date, timeZone: String, savedViewID: String? = nil
+    ) throws -> ItemIndex.Page {
+        let indexedOrder: ItemIndex.IndexedOrder?
+        if sort.isEmpty {
+            indexedOrder = .modifiedAt
+        } else if sort.count == 1, sort[0].categoryRootID == nil, !sort[0].isAscending {
+            switch sort[0].property.map(metadataKey) {
+            case "modifiedAt": indexedOrder = .modifiedAt
+            case "createdAt": indexedOrder = .createdAt
+            default: indexedOrder = nil
+            }
+        } else {
+            indexedOrder = nil
+        }
+        let defaultOrder = indexedOrder != nil
+        let ready = try savedViewID.map { try store.savedViewIndexIsReady($0) } ?? true
+        guard defaultOrder, categoryPath.isEmpty, excludedCategoryIDs.isEmpty, ready,
+            text == nil || savedViewID == nil
+        else {
+            _ = try QueryCalendar.make(timeZone: timeZone)
+            for id in categoryPath + excludedCategoryIDs {
+                _ = try rule(store.get(id))
+            }
+            let manualCategoryDependencies: Set<String>?
+            if savedViewID != nil {
+                manualCategoryDependencies = try categoryCacheDependencies(
+                    store: store, categoryPath: categoryPath, excludedCategoryIDs: excludedCategoryIDs)
+            } else {
+                manualCategoryDependencies = nil
+            }
+            let clockDependent =
+                expression?.contains("$time.") == true
+                || ((!categoryPath.isEmpty || !excludedCategoryIDs.isEmpty
+                    || sort.contains {
+                        $0.categoryRootID != nil
+                    }) && manualCategoryDependencies == nil && store.savedViewRulesUseClock)
+            let timeKey = clockDependent ? savedViewClockKey(at: date, timeZone: timeZone) : "static"
+            let selectionValue: [String: ItemValue] = [
+                "hasExpression": .boolean(expression != nil),
+                "expression": .text(expression ?? ""),
+                "hasText": .boolean(text != nil), "text": .text(text ?? ""),
+                "categoryPath": .list(categoryPath.map(ItemValue.text)),
+                "excludedCategoryIDs": .list(excludedCategoryIDs.map(ItemValue.text)),
+                "sort": .list(sort.map(\.value)),
+            ]
+            let selectionKey = String(
+                decoding: (try? JSON.encode(selectionValue)) ?? Data(), as: UTF8.self)
+            let parsedExpression = expression.flatMap { try? SpotlightQuery($0) }
+            let expressionIsSupported = expression == nil || parsedExpression != nil
+            var cacheDependencies: Set<String>
+            if expressionIsSupported,
+                !sort.contains(where: { $0.categoryRootID != nil }),
+                categoryPath.isEmpty && excludedCategoryIDs.isEmpty || manualCategoryDependencies != nil
+            {
+                cacheDependencies = Set(
+                    parsedExpression?.indexDependencies.fields.map { "filter:field:" + $0 } ?? []
+                )
+                .union(sort.compactMap(\.property).map { "sort:field:" + metadataKey($0) })
+                if sort.isEmpty { cacheDependencies.insert("sort:field:modifiedAt") }
+                cacheDependencies.formUnion(manualCategoryDependencies ?? [])
+                if text != nil { cacheDependencies.insert("text:corpus") }
+            } else {
+                cacheDependencies = []
+            }
+            let reusableAcrossCommits =
+                savedViewID != nil
+                && !sort.contains(where: { $0.categoryRootID != nil })
+                && expressionIsSupported
+                && (categoryPath.isEmpty && excludedCategoryIDs.isEmpty
+                    || manualCategoryDependencies != nil)
+            let cacheKey = savedViewID.map {
+                store.savedViewPageKey(
+                    $0, selectionKey: selectionKey, timeKey: timeKey,
+                    reusableAcrossCommits: reusableAcrossCommits)
+            }
+            if let cacheKey,
+                let cached = try store.cachedSavedViewPage(key: cacheKey, position: position, limit: limit)
+            {
+                return cached
+            }
+            let result = try query(
+                store: store, expression: expression, text: text, categoryPath: categoryPath,
+                excludedCategoryIDs: excludedCategoryIDs, sort: sort, at: date, timeZone: timeZone)
+            let ids = result.map(\.itemID)
+            if let cacheKey { store.saveViewPageIDs(ids, key: cacheKey, dependencies: cacheDependencies) }
+            return .init(ids: Array(ids.dropFirst(position).prefix(limit)), total: ids.count)
+        }
+        let predicate = try expression.map(SpotlightQuery.init)
+        let calendar = try QueryCalendar.make(timeZone: timeZone)
+        let candidateRestrictions = predicate?.indexCandidateRestrictions ?? []
+        return try store.indexedPage(
+            text: text, classEquals: predicate?.indexClassEquals, order: indexedOrder!,
+            position: position, limit: limit,
+            exactIndexPredicate: (predicate == nil || predicate?.indexExactClassEquals != nil)
+                && candidateRestrictions.isEmpty,
+            needsFullRevision: predicate != nil && predicate?.indexExactClassEquals == nil
+                || !candidateRestrictions.isEmpty,
+            candidateRestrictions: candidateRestrictions
+        ) { revision in
+            predicate?.matches(revision, at: date, calendar: calendar) ?? true
+        }
+    }
+    static func savedViewPage(
+        store: ItemStore, id: String, sectionID: String?, position: Int, limit: Int,
+        at date: Date, timeZone: String
+    ) throws -> ItemIndex.Page {
+        let item = try store.get(id)
+        guard !item.isDeleted, let value = item.fields["viewDefinition"] else {
+            throw TractandaError("notView", "Item has no available saved view definition.")
+        }
+        let definition = try SavedViewDefinition(value)
+        var path = definition.categoryPath
+        if let sectionID {
+            guard definition.presentation.sectionIDs.contains(sectionID) else {
+                throw TractandaError("invalidArguments", "The category is not a section of this view.")
+            }
+            if !path.contains(sectionID) { path.append(sectionID) }
+        }
+        return try page(
+            store: store, expression: definition.expression, text: definition.text,
+            categoryPath: path, excludedCategoryIDs: definition.excludedCategoryIDs,
+            sort: definition.sort, position: position, limit: limit, at: date, timeZone: timeZone,
+            savedViewID: id)
+    }
     static func rule(_ category: Revision) throws -> SpotlightQuery {
         guard !category.isDeleted, let selection = category.fields["selection"]?.map,
             let expression = selection["expression"]?.string
@@ -513,7 +809,8 @@ public enum Categories {
         -> Membership
     {
         _ = try rule(category)
-        let evaluator = try CategoryEvaluator(store?.candidates() ?? [category], store: store, at: date)
+        let evaluator = try CategoryEvaluator(
+            store?.readableCategoryHeads() ?? [category], store: store, at: date)
         var cache: [String: Membership] = [:]
         return try evaluator.membership(item, categoryID: category.itemID, cache: &cache, trace: true)
     }
@@ -555,11 +852,37 @@ public enum Categories {
         for id in categorySortIDs { _ = try readableCategoryRoot(store, id) }
         let evaluator =
             try categoryPath.isEmpty && excludedCategoryIDs.isEmpty && categorySortIDs.isEmpty
-            ? nil : CategoryEvaluator(store.candidates(), store: store, at: date)
+            ? nil : CategoryEvaluator(store.readableCategoryHeads(), store: store, at: date)
+        var indexedCategoryCandidates: Set<String>?
+        if let evaluator, !categoryPath.isEmpty {
+            for rootID in categoryPath {
+                var closure = Set<String>()
+                var pending = [rootID]
+                while let categoryID = pending.popLast() {
+                    guard closure.insert(categoryID).inserted else { continue }
+                    pending.append(contentsOf: evaluator.hierarchy.children[categoryID] ?? [])
+                }
+                guard closure.allSatisfy({ evaluator.rules[$0]?.isManualOnlyImpossible == true }) else {
+                    continue
+                }
+                let candidates = try store.categoryIncludeCandidates(categoryIDs: closure)
+                if let existing = indexedCategoryCandidates {
+                    indexedCategoryCandidates = existing.intersection(candidates)
+                } else {
+                    indexedCategoryCandidates = candidates
+                }
+            }
+        }
         // Each level intersects the candidates from the preceding level. Retain the same
         // per-item cache for category sorting so manual/personal decisions and time rules
         // are evaluated exactly once for each category.
-        let evaluated = try store.candidates(text: text).compactMap {
+        let queryCandidates: [Revision]
+        if let indexedCategoryCandidates {
+            queryCandidates = try store.candidates(text: text, restrictedTo: indexedCategoryCandidates)
+        } else {
+            queryCandidates = try store.candidates(text: text)
+        }
+        let evaluated = try queryCandidates.compactMap {
             item -> (Revision, [String: Membership])? in
             if let query, !query.matches(item, at: date, calendar: calendar) { return nil }
             var cache: [String: Membership] = [:]

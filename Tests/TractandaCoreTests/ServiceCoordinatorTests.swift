@@ -2,6 +2,12 @@ import XCTest
 
 @testable import TractandaCore
 
+#if canImport(Darwin)
+    import Darwin
+#else
+    import Glibc
+#endif
+
 final class ServiceCoordinatorTests: XCTestCase {
     private final class Accounts: AccountDirectory, @unchecked Sendable {
         let service = UInt32(getuid())
@@ -61,6 +67,38 @@ final class ServiceCoordinatorTests: XCTestCase {
             "tractanda-coordinator-\(Identifier.make())")
         defer { try? FileManager.default.removeItem(at: root) }
         try await body(root, Accounts())
+    }
+
+    private func guardBoundedFixture(_ root: URL, nextItems: Int) throws {
+        let gib = UInt64(1024 * 1024 * 1024)
+        let cap = gib
+        let reserve = 10 * gib
+        let perItem = UInt64(128 * 1024)
+        let nextEstimate = UInt64(nextItems) * perItem
+        var status = statvfs()
+        guard root.path.withCString({ statvfs($0, &status) }) == 0 else {
+            throw TractandaError("insufficientDisk", "Cannot determine genuine fixture free capacity.")
+        }
+        let (available, overflow) = UInt64(status.f_bavail)
+            .multipliedReportingOverflow(by: UInt64(status.f_frsize))
+        guard !overflow, available >= reserve + nextEstimate else {
+            throw TractandaError("insufficientDisk", "Fixture would cross the available-space reserve.")
+        }
+        var actual: UInt64 = 0
+        if let entries = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [
+                .isRegularFileKey, .fileSizeKey,
+            ])
+        {
+            for case let url as URL in entries {
+                let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+                if values.isRegularFile == true { actual += UInt64(values.fileSize ?? 0) }
+            }
+        }
+        guard actual <= cap, nextEstimate <= cap - actual else {
+            throw TractandaError("insufficientDisk", "Fixture would exceed its 1 GiB cap.")
+        }
     }
 
     private func assertCode(
@@ -254,6 +292,241 @@ final class ServiceCoordinatorTests: XCTestCase {
             await assertCode("serviceClosed") {
                 _ = try await coordinator.accountIdentity(forUID: accounts.service)
             }
+        }
+    }
+
+    private actor PreparedReadGate {
+        private var arrivals = 0
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+
+        func pause() async {
+            arrivals += 1
+            await withCheckedContinuation { waiters.append($0) }
+        }
+
+        func count() -> Int { arrivals }
+
+        func release() {
+            let pending = waiters
+            waiters.removeAll()
+            for waiter in pending { waiter.resume() }
+        }
+    }
+
+    private func nativeRequest(_ method: String, _ arguments: [String: Any], id: String = "read") throws
+        -> Data
+    {
+        try JSONSerialization.data(withJSONObject: [
+            "using": [ItemService.capability], "methodCalls": [[method, arguments, id]],
+        ])
+    }
+
+    private func nativePage(_ data: Data) throws -> (ids: [String], total: Int) {
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let calls = try XCTUnwrap(object["methodResponses"] as? [[Any]])
+        let result = try XCTUnwrap(calls.first?[1] as? [String: Any])
+        return (try XCTUnwrap(result["ids"] as? [String]), try XCTUnwrap(result["total"] as? Int))
+    }
+
+    private func waitForPreparedReads(_ count: Int, gate: PreparedReadGate) async throws {
+        for _ in 0..<100 {
+            if await gate.count() >= count { return }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTFail("Prepared evaluations did not overlap")
+    }
+
+    func testBoundedPreparedQueriesActuallyOverlap() async throws {
+        try await fixture { root, accounts in
+            var seed: ItemStore? = try ItemStore(root: root, accounts: accounts)
+            let first = try seed!.commit(
+                CommitRequest(
+                    classID: "Item", changes: ["subject": .text("Alpha")], operationID: "parallel-a")
+            ).revision
+            let second = try seed!.commit(
+                CommitRequest(classID: "Item", changes: ["subject": .text("Beta")], operationID: "parallel-b")
+            ).revision
+            seed = nil
+            let coordinator = try await ServiceCoordinator(opening: root, makeAccountDirectory: { accounts })
+            let gate = PreparedReadGate()
+            await coordinator.setPreparedReadHookForTesting { await gate.pause() }
+            let request = try nativeRequest(
+                "TractandaItem/query", ["sort": [["property": "subject", "isAscending": true]]])
+            async let firstResponse = coordinator.handle(request, forUID: accounts.service)
+            async let secondResponse = coordinator.handle(request, forUID: accounts.service)
+            try await waitForPreparedReads(2, gate: gate)
+            await gate.release()
+            let pageA = try nativePage(await firstResponse)
+            let pageB = try nativePage(await secondResponse)
+            XCTAssertEqual(pageA.ids, [first.itemID, second.itemID])
+            XCTAssertEqual(pageB.ids, pageA.ids)
+            XCTAssertEqual(pageA.total, 2)
+            await coordinator.close()
+        }
+    }
+
+    func testSelectiveIndexedParallelQueryWorksBeyondFullScanBound() async throws {
+        try await fixture { root, accounts in
+            var seed: ItemStore? = try ItemStore(root: root, accounts: accounts)
+            var target: Revision?
+            try guardBoundedFixture(root, nextItems: 513)
+            for index in 0..<513 {
+                if index.isMultiple(of: 64) {
+                    try guardBoundedFixture(root, nextItems: min(64, 513 - index))
+                }
+                let item = try seed!.commit(
+                    CommitRequest(
+                        classID: "Item", changes: ["subject": .text("row-\(index)")],
+                        operationID: "selective-parallel-\(index)")
+                ).revision
+                if index == 509 { target = item }
+            }
+            let selected = try XCTUnwrap(target)
+            seed = nil
+
+            let coordinator = try await ServiceCoordinator(opening: root, makeAccountDirectory: { accounts })
+            let counter = ReadCounter()
+            await coordinator.setPreparedReadHookForTesting { await counter.record() }
+            let request = try nativeRequest(
+                "TractandaItem/query",
+                [
+                    "expression": "itemID == \"\(selected.itemID)\"",
+                    "sort": [["property": "subject", "isAscending": true]],
+                ])
+            let page = try nativePage(try await coordinator.handle(request, forUID: accounts.service))
+            XCTAssertEqual(page.ids, [selected.itemID])
+            XCTAssertEqual(page.total, 1)
+            let evaluations = await counter.count()
+            XCTAssertEqual(evaluations, 1)
+            await coordinator.close()
+        }
+    }
+
+    func testPreparedQueryRechecksRevokedAccessBeforeDelivery() async throws {
+        try await fixture { root, accounts in
+            accounts.users[accounts.bob] = AccountIdentity(
+                uid: accounts.bob, name: "bob", primaryGroupName: "staff", groupIDs: [71_001])
+            let shared: (Int64) -> ItemValue = { mode in
+                .object([
+                    "profile": .text(ItemPermissions.profile), "owner": .text("alice"),
+                    "group": .text("staff"), "mode": .integer(mode), "acl": .object([:]),
+                ])
+            }
+            var seed: ItemStore? = try ItemStore(root: root, accounts: accounts)
+            _ = try seed!.configureAccess(systemConfiguration(), operationID: "parallel-policy")
+            let item = try seed!.withAccess(forUID: accounts.alice) {
+                try seed!.commit(
+                    CommitRequest(
+                        classID: "Item",
+                        changes: ["subject": .text("Shared"), "permissions": shared(0o640)],
+                        operationID: "parallel-shared")
+                ).revision
+            }
+            seed = nil
+            let coordinator = try await ServiceCoordinator(opening: root, makeAccountDirectory: { accounts })
+            let gate = PreparedReadGate()
+            await coordinator.setPreparedReadHookForTesting { await gate.pause() }
+            let request = try nativeRequest(
+                "TractandaItem/query", ["sort": [["property": "subject", "isAscending": true]]])
+            let reading = Task { try await coordinator.handle(request, forUID: accounts.bob) }
+            try await waitForPreparedReads(1, gate: gate)
+            let changes = CommitRequest(
+                action: .revise, itemID: item.itemID, expectedRevisionID: item.revisionID,
+                changes: ["permissions": shared(0o600)], operationID: "parallel-revoke")
+            let arguments = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: JSON.encode(changes)) as? [String: Any])
+            let committed = try await coordinator.handle(
+                nativeRequest("TractandaItem/commit", arguments, id: "write"), forUID: accounts.alice)
+            XCTAssertTrue(String(decoding: committed, as: UTF8.self).contains("parallel-revoke"))
+            await gate.release()
+            let page = try nativePage(await reading.value)
+            XCTAssertEqual(page.ids, [])
+            XCTAssertEqual(page.total, 0)
+
+            let admissionGate = PreparedReadGate()
+            await coordinator.setPreparedReadHookForTesting { await admissionGate.pause() }
+            let rejected = Task { try await coordinator.handle(request, forUID: accounts.bob) }
+            try await waitForPreparedReads(1, gate: admissionGate)
+            accounts.users[accounts.bob] = AccountIdentity(
+                uid: accounts.bob, name: "bob", primaryGroupName: "service", groupIDs: [71_003])
+            await admissionGate.release()
+            let rejectedData = try await rejected.value
+            let rejectedObject = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: rejectedData) as? [String: Any])
+            XCTAssertEqual(rejectedObject["code"] as? String, "forbidden")
+            await coordinator.close()
+        }
+    }
+
+    func testPreparedQueryReportsCanonicalDamageAsMethodError() async throws {
+        try await fixture { root, accounts in
+            var seed: ItemStore? = try ItemStore(root: root, accounts: accounts)
+            let item = try seed!.commit(
+                CommitRequest(
+                    classID: "Item", changes: ["subject": .text("Record")],
+                    operationID: "parallel-integrity")
+            ).revision
+            seed = nil
+            let coordinator = try await ServiceCoordinator(opening: root, makeAccountDirectory: { accounts })
+            let gate = PreparedReadGate()
+            await coordinator.setPreparedReadHookForTesting { await gate.pause() }
+            let request = try nativeRequest(
+                "TractandaItem/query", ["sort": [["property": "subject", "isAscending": true]]])
+            let reading = Task { try await coordinator.handle(request, forUID: accounts.service) }
+            try await waitForPreparedReads(1, gate: gate)
+            let files =
+                FileManager.default.enumerator(
+                    at: root.appendingPathComponent("items"), includingPropertiesForKeys: nil)?.allObjects
+                as? [URL] ?? []
+            let record = try XCTUnwrap(
+                files.first {
+                    $0.lastPathComponent == item.revisionID + ".tractanda"
+                })
+            XCTAssertEqual(record.path.withCString { chmod($0, mode_t(0o600)) }, 0)
+            let handle = try FileHandle(forWritingTo: record)
+            try handle.truncate(atOffset: 0)
+            try handle.write(contentsOf: Data("changed".utf8))
+            try handle.close()
+            XCTAssertEqual(record.path.withCString { chmod($0, mode_t(0o400)) }, 0)
+            await gate.release()
+            let response = try await reading.value
+            let object = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: response) as? [String: Any])
+            let calls = try XCTUnwrap(object["methodResponses"] as? [[Any]])
+            XCTAssertEqual(calls.first?[0] as? String, "error")
+            XCTAssertEqual((calls.first?[1] as? [String: Any])?["type"] as? String, "recoveryError")
+            await coordinator.close()
+        }
+    }
+
+    private actor ReadCounter {
+        private var value = 0
+        func record() { value += 1 }
+        func count() -> Int { value }
+    }
+
+    func testOversizedPreparedSnapshotUsesSerialQuery() async throws {
+        try await fixture { root, accounts in
+            var seed: ItemStore? = try ItemStore(root: root, accounts: accounts)
+            let item = try seed!.commit(
+                CommitRequest(
+                    classID: "Item",
+                    changes: [
+                        "subject": .text("Large"), "body": .text(String(repeating: "x", count: 1_000_000)),
+                    ],
+                    operationID: "parallel-large")
+            ).revision
+            seed = nil
+            let coordinator = try await ServiceCoordinator(opening: root, makeAccountDirectory: { accounts })
+            let counter = ReadCounter()
+            await coordinator.setPreparedReadHookForTesting { await counter.record() }
+            let request = try nativeRequest(
+                "TractandaItem/query", ["sort": [["property": "subject", "isAscending": true]]])
+            let page = try nativePage(try await coordinator.handle(request, forUID: accounts.service))
+            XCTAssertEqual(page.ids, [item.itemID])
+            let parallelEvaluations = await counter.count()
+            XCTAssertEqual(parallelEvaluations, 0)
+            await coordinator.close()
         }
     }
 }

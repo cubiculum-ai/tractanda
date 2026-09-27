@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- Keep cross-request query results live: clients restart or reject relevant edits and apply current permissions on every page; internal caches may reconcile incrementally without exposing a frozen cursor.
+- Narrow safe conjunctive managed item-ID/date queries before exact Spotlight and ACL evaluation, and use the same proven restrictions to admit bounded parallel custom-sort reads from larger stores. Reject malformed v3 item tables and rebuild the disposable index from canonical records.
+- Stream full current heads and catalogue rows during index rebuild, and reuse bounded saved-view results after edits proven irrelevant to parsed clock-independent category rules or the exact FTS corpus.
+- Pin the official Swift 6.4.0 multiarch Debian 12 image for Linux CI/test containers and active toolchain instructions.
+
+- Index descending creation-time pages and eligible saved views with exact ItemID ties and authorization-aware totals; advance the disposable checkpoint catalogue to v3, rebuilding older catalogues from canonical records.
+- Reuse bounded saved-view IDs after provably irrelevant edits, including manual-only category sections without personal-state overlays. Keep exact fallback and current ACL checks for dynamic or ambiguous views.
+- Keep ordinary current-head `body` and replay intent behind verified canonical hydration and a 16 MiB record-byte cache; retain typed ACL/category metadata, use root-relative revision paths, and avoid a full current-catalogue copy when reconciling clean background verification.
+- Pair web and TUI query/get pages in one native request. Batch independent web membership queries, and preserve complete TUI 64-item navigation when oversized pages retry in smaller chunks.
+- Evaluate bounded category-free custom-sort queries from immutable, caller-authorized snapshots off the store queue, then recheck current permissions, state and canonical digests before delivery. Other requests retain the serial path.
+
+- Add a versioned disposable SQLite startup catalogue bound to canonical store identity without filesystem device numbers, a prepublication dirty marker, canonical file/ancestor synchronization before marker clearing, and post-readiness background file verification. Clean startup validates current heads and defers historical reads; changed metadata indicators trigger digest checks. Explicit rebuild is required after store restore or unsupported external edits. The repaired guarded 1k × 2 startup comparison and limits are recorded in `outputs/Tractanda-Query-Scaling.md`.
+
+- Pin vmlx-swift directly to upstream after tokenizer fixes #487/#514 merged; support guarded installer-owned Granite runtime upgrades with distinct, retry-safe configuration operation IDs.
+
+- Improve bounded query paging, saved-view repeated reads, category evaluation and historical loading; a guarded 10k-head benchmark showed an ~87× faster first saved-category page. See `outputs/Tractanda-Query-Scaling.md` for measured scope and limits.
+
+- Reduce recovery peak memory while retaining full record validation, add a rebuildable category include-candidate index with indexed source updates and exact ACL/rule checks, and instrument startup phases. Guarded 1k × 2 measurements and limits are recorded in `outputs/Tractanda-Query-Scaling.md`.
+
+- Avoid repeated semantic corpus scans while the store is unchanged; preserve queue progress after edits, deletions and failed jobs. Metadata-only revisions rebind only changed heads.
+- Reduce web project-load requests and payloads by reusing the checked category graph within a refresh, projecting category metadata and retrieving IDs alone for membership checks.
+
+## 0.1.0-poc.11
+
 - Bundle Granite Embedding 311M multilingual R2 (768 dimensions, CLS/L2) through the pinned vmlx-swift runtime with tokenizer fixes #487/#514. Rebuild the helper from each sealed release source and verify every model asset before packaging.
 - Upgrade installer-owned Qwen profiles with guarded semantic reconfiguration and recovery; rebuild derived vectors while preserving canonical records. Include Granite and Gemma tokenizer notices.
 - Fit the web Kanban board to the available viewport height, keeping column scrolling and a usable layout in short windows.

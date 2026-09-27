@@ -109,10 +109,10 @@ public final class SetupEngine {
             guard account.uid != 0 else { throw SetupError("The server account must be unprivileged.") }
             let release = releaseURL(options, manifest: manifest, digest: digest)
             if let old = previous?.embedding, manifest.embedding != old,
-                !(old == .legacyQwen && manifest.embedding == .granite)
+                !isSupportedBundledEmbeddingTransition(from: old, to: manifest.embedding)
             {
                 throw SetupError(
-                    "This installation needs its existing embedding payload; model changes require an explicit reconfiguration."
+                    "This installation needs its existing embedding payload; this bundled embedding transition requires an explicit reconfiguration."
                 )
             }
             if manifest.embedding != nil && (previous?.port ?? options.port) == 65535 {
@@ -164,7 +164,11 @@ public final class SetupEngine {
             if manifest.embedding != nil {
                 try ensureServiceLog(receipt.instance + "-embeddings", uid: account.uid)
             }
-            let embeddingUpgrade = previous?.embedding == .legacyQwen && manifest.embedding == .granite
+            let embeddingUpgrade =
+                previous.flatMap { previous in
+                    guard let old = previous.embedding, old != manifest.embedding else { return false }
+                    return isSupportedBundledEmbeddingTransition(from: old, to: manifest.embedding)
+                } ?? false
             if embeddingUpgrade { try prepareBundledEmbeddingUpgrade(&receipt) }
             receipt.embedding = manifest.embedding
             receipt.release = release.path
@@ -224,8 +228,8 @@ public final class SetupEngine {
                 if let oldSemanticConfiguration {
                     do {
                         // The native server owns semantic.json; restore through its compare-and-swap
-                        // while it is still running. Restoring after unload would silently strand Qwen
-                        // against the Granite profile.
+                        // while it is still running. Restoring after unload would silently strand the
+                        // previous embedding profile against the candidate runtime.
                         if try semanticConfigurationSnapshot(receipt) != oldSemanticConfiguration {
                             try restoreSemanticConfiguration(oldSemanticConfiguration, after: receipt)
                         }

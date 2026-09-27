@@ -70,7 +70,7 @@ Imported source times belong in ordinary `originalCreatedAt` and `originalModifi
 
 Get/history support `full`, `content`, `summary`, or explicit top-level `properties`. Get is byte-bounded: follow ordered `remainingIDs`, handle `oversizedIDs` with a narrower projection, and compare state. An omitted projected property is not an unset field.
 
-`state`/`queryState` cover the administrator's store, or an ordinary caller's readable revision set and group context. They are not scoped to the query result or a pinned snapshot. Keep `at` and `timeZone` fixed across relative-date pages. Per-item revision guards decide whether an edit conflicts; an unrelated state change does not require repeating committed imports or abandoning a batch of known item IDs.
+`state`/`queryState` cover the administrator's store, or an ordinary caller's readable revision set and group context. Pages are **live**, never a frozen cross-request result. Keep `at` and `timeZone` fixed across relative-date pages; if intervening edits change the relevant state, restart or reject the traversal and read current results. Every page and count applies current permissions, including after access is revoked. Per-item revision guards decide whether an edit conflicts; an unrelated state change does not require repeating committed imports or abandoning a batch of known item IDs.
 
 `tractanda_get` and `TractandaItem/get` take an `ids` array, even for one item. Single-item explain/history/revision/resolve calls take `itemID`; `itemIDs` is not an alias.
 

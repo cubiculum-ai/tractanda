@@ -4,7 +4,7 @@ project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$project_dir"
 mkdir -p work/runtime work/linux-build
 run_dir=$(mktemp -d "$project_dir/work/runtime/managed-linux-XXXXXXXX")
-image_ref=tractanda-service-test:swift6.4-snapshot-20260908-bookworm
+image_ref=tractanda-service-test:swift6.4.0-bookworm
 container_name="tractanda-$(basename "$run_dir")"
 container build --file containers/service-test/Containerfile --tag "$image_ref" containers/service-test \
   > "$run_dir/image-build.log" 2>&1

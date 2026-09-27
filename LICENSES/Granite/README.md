@@ -22,7 +22,7 @@ https://ai.google.dev/gemma/prohibited_use_policy
 Google Developers page content is provided under CC BY 4.0 unless otherwise noted;
 local notice copies preserve the legal text and link to its source.
 
-Runtime: osaurus-ai/vmlx-swift main `e07bd67becffb4718004c3db076ee8c153ef7f92`
-with PR #487 and #514, pinned through rcfa/vmlx-swift at
-`b7a2b97efc2d8ed44ddf3c4b7af25766b372339f`. Runtime notices are separately
-retained under `licenses/optional-embedding-host/`.
+Runtime: upstream osaurus-ai/vmlx-swift at
+`61a4b20d4ad01b10466e8fc94c50402a9f994430`, including the merged tokenizer
+fixes #487 and #514. No separate patch stack or fork is required.
+Runtime notices are retained under `licenses/optional-embedding-host/`.

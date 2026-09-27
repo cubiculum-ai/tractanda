@@ -4,7 +4,7 @@ project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$project_dir"
 mkdir -p work/runtime work/linux-build
 run_dir=$(mktemp -d "$project_dir/work/runtime/browser-login-linux-XXXXXXXX")
-image_ref=tractanda-test:swift6.4-snapshot-20260908-bookworm
+image_ref=tractanda-test:swift6.4.0-bookworm
 container build --file containers/test/Containerfile --tag "$image_ref" containers/test
 container image inspect "$image_ref" > "$run_dir/image.json"
 container run --rm --name "tractanda-build-$(basename "$run_dir")" --cpus 4 --memory 4G \

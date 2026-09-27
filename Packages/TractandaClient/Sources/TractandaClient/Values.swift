@@ -138,6 +138,30 @@ public indirect enum ItemValue: Codable, Equatable, Sendable {
 }
 
 public enum Timestamp {
+    /// ISO8601DateFormatter is mutable and isn't safe for concurrent use. Keep
+    /// the two configured parsers behind one lock so callers retain the
+    /// synchronous API without rebuilding formatters for every value.
+    private final class Parser: @unchecked Sendable {
+        private let lock = NSLock()
+        private let fractional: ISO8601DateFormatter
+        private let wholeSeconds: ISO8601DateFormatter
+
+        init() {
+            fractional = ISO8601DateFormatter()
+            fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            wholeSeconds = ISO8601DateFormatter()
+            wholeSeconds.formatOptions = [.withInternetDateTime]
+        }
+
+        func parse(_ string: String) -> Date? {
+            lock.lock()
+            defer { lock.unlock() }
+            return fractional.date(from: string) ?? wholeSeconds.date(from: string)
+        }
+    }
+
+    private static let parser = Parser()
+
     public static func now() -> String { format(Date()) }
     public static func format(_ date: Date) -> String {
         let formatter = ISO8601DateFormatter()
@@ -145,11 +169,7 @@ public enum Timestamp {
         return formatter.string(from: date)
     }
     public static func parse(_ string: String) -> Date? {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = formatter.date(from: string) { return date }
-        formatter.formatOptions = [.withInternetDateTime]
-        return formatter.date(from: string)
+        parser.parse(string)
     }
 }
 public enum Identifier {

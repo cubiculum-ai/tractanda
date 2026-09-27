@@ -148,6 +148,20 @@ final class AccessControlTests: XCTestCase {
         assertCode("invalidPermissions") { _ = try ItemPermissions(permissions(mode: 0o755)) }
     }
 
+    func testImmutableReadSnapshotAppliesFreshCallerPermissionsBeforeCapture() throws {
+        try fixture { store, accounts in
+            let aliceItem = try create(
+                store, uid: accounts.alice, fields: ["subject": .text("alice private")])
+            let bobItem = try create(
+                store, uid: accounts.bob, fields: ["subject": .text("bob private")])
+            let snapshot = try store.withAccess(forUID: accounts.bob) {
+                try XCTUnwrap(store.immutableReadSnapshot())
+            }
+            XCTAssertEqual(snapshot.revisions.map(\.itemID), [bobItem.itemID])
+            XCTAssertFalse(snapshot.revisions.contains { $0.itemID == aliceItem.itemID })
+        }
+    }
+
     func testExtractedTextDoesNotDiscloseDeniedRecordsAndHonorsRevocation() throws {
         try fixture { store, accounts in
             let secret = try create(
@@ -417,6 +431,133 @@ final class AccessControlTests: XCTestCase {
             let after = try response(service, uid: accounts.bob, method: "TractandaItem/query", args: args)
             XCTAssertEqual(after["ids"] as? [String], first["ids"] as? [String])
             XCTAssertEqual(after["queryState"] as? String, first["queryState"] as? String)
+        }
+    }
+
+    func testIndexedSavedViewRespectsRevocationEditsAndRebuild() throws {
+        try fixture { store, accounts in
+            let older = try create(
+                store, uid: accounts.alice, fields: ["permissions": permissions()], classID: "RoleItem")
+            Thread.sleep(forTimeInterval: 0.002)
+            let newer = try create(
+                store, uid: accounts.alice, fields: ["permissions": permissions()], classID: "RoleItem")
+            _ = try create(
+                store, uid: accounts.alice,
+                fields: ["permissions": permissions(mode: 0o600)], classID: "RoleItem")
+            let definition: ItemValue = .object([
+                "language": .text(SpotlightQuery.profile),
+                "expression": .text("classID == \"RoleItem\""),
+            ])
+            let view = try create(
+                store, uid: accounts.alice,
+                fields: ["permissions": permissions(), "viewDefinition": definition])
+            XCTAssertTrue(try store.savedViewIndexIsReady(view.itemID))
+            let service = ItemService(store: store)
+            func page(_ arguments: [String: Any]) throws -> ([String], Int) {
+                let result = try response(
+                    service, uid: accounts.bob, method: "TractandaItem/query", args: arguments)
+                return (result["ids"] as? [String] ?? [], result["total"] as? Int ?? -1)
+            }
+            XCTAssertEqual(try page(["viewID": view.itemID, "limit": 1]).0, [newer.itemID])
+            XCTAssertEqual(try page(["viewID": view.itemID, "position": 1, "limit": 1]).0, [older.itemID])
+            XCTAssertEqual(try page(["viewID": view.itemID, "limit": 1]).1, 2)
+            XCTAssertEqual(
+                try page(["expression": "classID == \"RoleItem\"", "limit": 1]).0,
+                [newer.itemID])
+            let renamed = try edit(
+                store, uid: accounts.alice, base: view, fields: ["subject": .text("New layout name")])
+            XCTAssertTrue(try store.savedViewIndexIsReady(renamed.itemID))
+            _ = try edit(
+                store, uid: accounts.alice, base: newer,
+                fields: ["permissions": permissions(mode: 0o600)])
+            XCTAssertEqual(try page(["viewID": view.itemID, "limit": 1]).0, [older.itemID])
+            XCTAssertEqual(try page(["viewID": view.itemID, "limit": 1]).1, 1)
+            try store.rebuildIndex()
+            XCTAssertTrue(try store.savedViewIndexIsReady(view.itemID))
+            XCTAssertEqual(try page(["viewID": view.itemID, "limit": 1]).0, [older.itemID])
+        }
+    }
+
+    func testIndexedCandidatePageTotalsRespectCurrentPrivateAndSharedAccess() throws {
+        try fixture { store, accounts in
+            let privateItem = try create(
+                store, uid: accounts.alice,
+                fields: ["permissions": permissions(mode: 0o600), "subject": .text("private")])
+            let sharedItem = try create(
+                store, uid: accounts.alice,
+                fields: ["permissions": permissions(mode: 0o644), "subject": .text("shared")])
+            guard case .date(let createdTimestamp)? = privateItem.fields["createdAt"] else {
+                return XCTFail("Created time must be a typed date.")
+            }
+            let date = try XCTUnwrap(Timestamp.parse(createdTimestamp))
+            let expression = "createdAt >= $time.iso(\"\(Timestamp.format(date))\")"
+
+            func assertParity(uid: UInt32, query: String, expectedTotal: Int) throws {
+                try store.withAccess(forUID: uid) {
+                    let expected = try Categories.query(store: store, expression: query).map(\.itemID)
+                    let page = try Categories.page(
+                        store: store, expression: query, text: nil, categoryPath: [],
+                        excludedCategoryIDs: [], sort: [], position: 0, limit: 20,
+                        at: Date(), timeZone: "UTC")
+                    XCTAssertEqual(page.ids, expected)
+                    XCTAssertEqual(page.total, expectedTotal)
+                }
+            }
+
+            try assertParity(
+                uid: accounts.bob, query: expression, expectedTotal: 1)
+            try assertParity(
+                uid: accounts.bob, query: "itemID == \"\(privateItem.itemID)\"", expectedTotal: 0)
+            try assertParity(
+                uid: accounts.alice, query: "itemID == \"\(privateItem.itemID)\"", expectedTotal: 1)
+            XCTAssertTrue(try store.get(sharedItem.itemID).fields["subject"]?.string == "shared")
+        }
+    }
+
+    func testSavedCategoryCacheRecountsAfterAccountGroupChange() throws {
+        try fixture { store, accounts in
+            let category = try create(
+                store, uid: accounts.alice,
+                fields: [
+                    "permissions": permissions(mode: 0o644),
+                    "selection": .object([
+                        "language": .text(SpotlightQuery.profile),
+                        "expression": .text("cacheMarker == \"yes\""),
+                    ]),
+                ])
+            let item = try create(
+                store, uid: accounts.alice,
+                fields: ["cacheMarker": .text("yes"), "permissions": permissions(mode: 0o640)])
+            let view = try create(
+                store, uid: accounts.alice,
+                fields: [
+                    "permissions": permissions(mode: 0o644),
+                    "viewDefinition": .object([
+                        "language": .text(SpotlightQuery.profile),
+                        "categoryPath": .list([.reference(ItemReference(category.itemID))]),
+                    ]),
+                ])
+            let service = ItemService(store: store)
+            let args: [String: Any] = ["viewID": view.itemID, "limit": 1]
+            let before = try response(service, uid: accounts.bob, method: "TractandaItem/query", args: args)
+            XCTAssertEqual(before["ids"] as? [String], [item.itemID])
+            XCTAssertEqual(before["total"] as? Int, 1)
+            // No canonical edit occurs here: the fresh account snapshot alone must invalidate
+            // cached membership, offset and count for Bob.
+            accounts.users[accounts.bob] = AccountIdentity(
+                uid: accounts.bob, name: "bob", primaryGroupName: "staff", groupIDs: [])
+            let after = try response(service, uid: accounts.bob, method: "TractandaItem/query", args: args)
+            XCTAssertEqual(after["ids"] as? [String], [])
+            XCTAssertEqual(after["total"] as? Int, 0)
+            _ = try store.configureAccess(
+                .object([
+                    "profile": .text(AccessConfiguration.profile),
+                    "users": .list([.text("alice")]),
+                ]), operationID: "revoke-bob-admission")
+            XCTAssertEqual(
+                try response(service, uid: accounts.bob, method: "TractandaItem/query", args: args)["code"]
+                    as? String,
+                "forbidden")
         }
     }
 

@@ -173,14 +173,15 @@
     } finally {$('sign-out').disabled=false;}
   }
 
-  async function nativeCall(method, argumentsObject = {}) {
+  async function nativeCalls(calls) {
+    if(!calls.length||calls.length>8)throw apiError('invalidRequest','A native read batch must contain one to eight calls.');
     let response, envelope;
     const requestToken=accessToken;
     try {
       response = await fetch('/api', {
         method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+requestToken},
-        body:JSON.stringify({using:[nativeCapability],methodCalls:[[method,argumentsObject,'web']]}),
-        signal:AbortSignal.timeout(18000), cache:'no-store', credentials:'omit'
+        body:JSON.stringify({using:[nativeCapability],methodCalls:calls.map(([method,args],index)=>[method,args,'web-'+index])}),
+        signal:AbortSignal.timeout(Math.min(18000*calls.length,60000)), cache:'no-store', credentials:'omit'
       });
       envelope = await response.json();
     } catch {
@@ -193,12 +194,18 @@
       throw apiError(envelope.code || 'httpError', envelope.message || 'The web connection failed.');
     }
     if (envelope.code) throw apiError(envelope.code,envelope.message,envelope.code !== 'responseTooLarge');
-    const call = envelope.methodResponses?.[0];
-    if (!call || call[2] !== 'web') throw apiError('invalidResponse','The server response could not be matched to this request.');
-    if (call[0] === 'error') throw apiError(call[1].type,call[1].description,true);
-    if (call[0] !== method) throw apiError('invalidResponse','The server returned an unexpected method.');
-    if (method==='TractandaStore/info') showServerVersion(call[1]?.server?.version);
-    return call[1];
+    if(!Array.isArray(envelope.methodResponses)||envelope.methodResponses.length!==calls.length)throw apiError('invalidResponse','The server response could not be matched to this request.');
+    return envelope.methodResponses.map((call,index)=>{
+      if (!call || call[2] !== 'web-'+index) throw apiError('invalidResponse','The server response could not be matched to this request.');
+      if (call[0] === 'error') throw apiError(call[1].type,call[1].description,true);
+      if (call[0] !== calls[index][0]) throw apiError('invalidResponse','The server returned an unexpected method.');
+      if (call[0]==='TractandaStore/info') showServerVersion(call[1]?.server?.version);
+      return call[1];
+    });
+  }
+
+  async function nativeCall(method, argumentsObject = {}) {
+    return (await nativeCalls([[method,argumentsObject]]))[0];
   }
 
   function plain(value) {
@@ -269,29 +276,63 @@
     visit(rootID,[fieldText(graph.categories.get(rootID).fields,'subject')||'Category']);
     return result;
   }
-  async function queryRevisions(argumentsObject, state) {
-    const at=argumentsObject.at||currentDate();
-    const ids=[];
+  async function queryIDGroups(argumentsList,state) {
+    const positions=argumentsList.map(()=>0),groups=argumentsList.map(()=>[]),at=currentDate();
+    let pending=argumentsList.map((_,index)=>index);
+    while(pending.length) {
+      const current=pending.slice(0,8);
+      pending=pending.slice(8);
+      const pages=await nativeCalls(current.map(index=>['TractandaItem/query',{
+        ...argumentsList[index],at:argumentsList[index].at||at,position:positions[index],limit:64
+      }]));
+      for(let offset=0;offset<current.length;offset++) {
+        const index=current[offset],page=pages[offset];
+        if(page.queryState!==state)return null;
+        groups[index].push(...page.ids);positions[index]+=page.ids.length;
+        if(positions[index]<page.total) {
+          if(!page.ids.length)throw apiError('invalidResponse','An incomplete query page was empty.');
+          pending.push(index);
+        }
+      }
+    }
+    return groups;
+  }
+  async function queryPageWithRevisions(argumentsObject,position,projection) {
+    let limit=64;
+    while(true) {
+      try {
+        return await nativeCalls([
+          ['TractandaItem/query',{...argumentsObject,position,limit}],
+          ['TractandaItem/get',{'#ids':{resultOf:'web-0',name:'TractandaItem/query',path:'/ids'},...projection}]
+        ]);
+      } catch(error) {
+        if(error.code!=='responseTooLarge'||limit===1)throw error;
+        limit=Math.max(1,Math.floor(limit/2));
+      }
+    }
+  }
+  async function queryRevisions(argumentsObject, state, properties) {
+    const at=argumentsObject.at||currentDate(),revisions=[];
     for(let position=0;;) {
-      const page=await nativeCall('TractandaItem/query',{...argumentsObject,at,position,limit:64});
-      if(page.queryState!==state)return null;
-      ids.push(...page.ids);position+=page.ids.length;
-      if(position>=page.total)break;
-      if(!page.ids.length)throw apiError('invalidResponse','An incomplete query page was empty.');
+      // The get uses this request's query IDs, so each page is coherent and keeps
+      // full editor content without the server's replay receipt.
+      const projection=properties?{properties}:{projection:'content'};
+      const [query,page]=await queryPageWithRevisions({...argumentsObject,at},position,projection);
+      if(query.queryState!==state||page.state!==state||page.notFound.length)return null;
+      revisions.push(...page.list);position+=query.ids.length;
+      if(position>=query.total)return revisions;
+      if(!query.ids.length)throw apiError('invalidResponse','An incomplete query page was empty.');
     }
-    const revisions=[];
-    for(let index=0;index<ids.length;index+=64) {
-      const page=await nativeCall('TractandaItem/get',{ids:ids.slice(index,index+64)});
-      if(page.state!==state||page.notFound.length)return null;
-      revisions.push(...page.list);
-    }
-    return revisions;
   }
   async function projectGraph(state) {
-    const revisions=await queryRevisions({expression:'selection == *'},state);
+    const revisions=await queryRevisions({expression:'selection == *'},state,[
+      'subject','isDeleted','selection','categoryParents','categoryOrder','viewDefinition',
+      'filterCategories','defaultCategory','completionCategory','maintenance','sequenceStatus',
+      'originalSequence','recommendedSequence','activity'
+    ]);
     return revisions===null?null:categoryGraph(revisions);
   }
-  async function discoverProjects(viewID,generation) {
+  async function discoverProjects(viewID,generation,snapshot) {
     const state=(await nativeCall('TractandaStore/info')).state;
     const graph=await projectGraph(state);
     if(!graph||!selectionIsCurrent(viewID,generation))return null;
@@ -299,12 +340,14 @@
     if(!graph.categories.has(root))throw apiError('projectRootUnavailable','The project root category is unavailable.');
     const projects=categoryDescendants(root,graph).map(entry=>({id:entry.id,name:entry.id===root?'All projects':entry.path.join(' / '),path:entry.path}));
     if((await nativeCall('TractandaStore/info')).state!==state||!selectionIsCurrent(viewID,generation))return null;
+    // This snapshot belongs to one refresh, never a later login or selection.
+    if(snapshot)Object.assign(snapshot,{state,graph});
     return projects;
   }
-  async function readProjectBoard(projectID) {
+  async function readProjectBoard(projectID,snapshot) {
     for(let attempt=0;attempt<3;attempt++) {
       const info=await nativeCall('TractandaStore/info'),at=currentDate();
-      const graph=await projectGraph(info.state);
+      const graph=snapshot?.state===info.state?snapshot.graph:await projectGraph(info.state);
       if(!graph)continue;
       const projectRootID=projectBoard.projectRootID,statusRootID=projectBoard.statusRootID;
       const project=graph.categories.get(projectID),statusRoot=graph.categories.get(statusRootID);
@@ -320,20 +363,17 @@
       const viewSort=definition.sort;
       const revisions=await queryRevisions({at,categoryPath:[projectID,statusRootID],...(viewSort.length?{sort:viewSort}:{})},info.state);
       if(revisions===null)continue;
-      const memberships=new Map();let changed=false;
-      for(const status of statusEntries) {
-        const matches=await queryRevisions({at,categoryPath:[projectID,status.id]},info.state);
-        if(matches===null){changed=true;break;}
-        for(const item of matches) {const id=fieldText(item.fields,'itemID');memberships.set(id,[...(memberships.get(id)||[]),status.id]);}
-      }
+      const memberships=new Map();
       const filterIDs=categoryReferences(project.fields.filterCategories).filter(id=>graph.categories.has(id));
       const filters=new Map();
-      for(const filterID of filterIDs) {
-        const matches=await queryRevisions({at,categoryPath:[projectID,filterID]},info.state);
-        if(matches===null){changed=true;break;}
-        for(const item of matches) {const id=fieldText(item.fields,'itemID');filters.set(id,[...(filters.get(id)||[]),filterID]);}
-      }
-      if(changed||(await nativeCall('TractandaStore/info')).state!==info.state)continue;
+      const membershipIDs=[...statusEntries.map(status=>status.id),...filterIDs];
+      const membershipGroups=await queryIDGroups(membershipIDs.map(id=>({at,categoryPath:[projectID,id]})),info.state);
+      if(membershipGroups===null)continue;
+      membershipGroups.forEach((matches,index)=>{
+        const map=index<statusEntries.length?memberships:filters,id=membershipIDs[index];
+        for(const itemID of matches)map.set(itemID,[...(map.get(itemID)||[]),id]);
+      });
+      if((await nativeCall('TractandaStore/info')).state!==info.state)continue;
       const axes=await readCategoryAxes(revisions,definition,info.state,at);
       const statusIDs=new Set(statusEntries.map(entry=>entry.id));
       const reference=(category,key)=>{const id=category.fields[key]?.value?.itemID;return statusIDs.has(id)?id:undefined;};
@@ -351,12 +391,12 @@
     }
     throw apiError('stateChanged','The project board changed during refresh. Try again; an open draft is kept.');
   }
-  async function discoverProjectViews(viewID, generation) {
-    return projectBoard ? discoverProjects(viewID,generation) : null;
+  async function discoverProjectViews(viewID, generation, snapshot) {
+    return projectBoard ? discoverProjects(viewID,generation,snapshot) : null;
   }
 
-  async function readLiveBoard(viewID=selectedViewID) {
-    if(projectBoard)return readProjectBoard(viewID);
+  async function readLiveBoard(viewID=selectedViewID,snapshot) {
+    if(projectBoard)return readProjectBoard(viewID,snapshot);
     for (let attempt=0;attempt<3;attempt++) {
       const info=await nativeCall('TractandaStore/info'),at=currentDate();
       const result=await nativeCall('TractandaItem/get',{ids:[viewID]});
@@ -371,31 +411,31 @@
       if (categoryResult.state!==info.state) continue;
       const categories=new Map(categoryResult.list.filter(r=>!r.fields.isDeleted?.value && r.fields.selection).map(r=>[fieldText(r.fields,'itemID'),r]));
       let hasChanged=false;
-      async function idsFor(argumentsObject) {
-        const ids=[];let position=0;
-        while(true) {
-          const page=await nativeCall('TractandaItem/query',{...argumentsObject,at,position,limit:64});
-          if(page.queryState!==info.state){hasChanged=true;return [];}
-          ids.push(...page.ids);position+=page.ids.length;
-          if(position>=page.total)return ids;
-          if(!page.ids.length)throw apiError('invalidResponse','An incomplete query page was empty.');
-        }
-      }
-      const ids=await idsFor({viewID}), revisions=[];
-      for(let index=0;index<ids.length;index+=64){
-        const page=await nativeCall('TractandaItem/get',{ids:ids.slice(index,index+64)});
-        if(page.state!==info.state||page.notFound.length){hasChanged=true;break;}
-        revisions.push(...page.list);
+      const revisions=[];
+      for(let position=0;;){
+        const [query,page]=await queryPageWithRevisions({viewID,at},position,{projection:'content'});
+        if(query.queryState!==info.state||page.state!==info.state||page.notFound.length){hasChanged=true;break;}
+        revisions.push(...page.list);position+=query.ids.length;
+        if(position>=query.total)break;
+        if(!query.ids.length)throw apiError('invalidResponse','An incomplete query page was empty.');
       }
       const memberships=new Map(), filters=new Map();
-      for(const id of columnIDs.filter(id=>categories.has(id)))for(const itemID of await idsFor({viewID,sectionID:id})) memberships.set(itemID,[...(memberships.get(itemID)||[]),id]);
-      for(const id of filterIDs.filter(id=>categories.has(id))) {
+      const visibleColumns=columnIDs.filter(id=>categories.has(id)),visibleFilters=filterIDs.filter(id=>categories.has(id));
+      const membershipQueries=visibleColumns.map(id=>({viewID,sectionID:id}));
+      for(const id of visibleFilters) {
         const args={categoryPath:[...new Set([...categoryReferences(definition.categoryPath),id])]};
         if(definition.expression)args.expression=plain(definition.expression);
         if(definition.text)args.text=plain(definition.text);
         if(definition.excludedCategoryIDs)args.excludedCategoryIDs=categoryReferences(definition.excludedCategoryIDs);
-        for(const itemID of await idsFor(args))filters.set(itemID,[...(filters.get(itemID)||[]),id]);
+        membershipQueries.push(args);
       }
+      const membershipGroups=await queryIDGroups(membershipQueries.map(args=>({...args,at})),info.state);
+      if(membershipGroups===null)continue;
+      membershipGroups.forEach((matches,index)=>{
+        const map=index<visibleColumns.length?memberships:filters;
+        const categoryID=index<visibleColumns.length?visibleColumns[index]:visibleFilters[index-visibleColumns.length];
+        for(const itemID of matches)map.set(itemID,[...(map.get(itemID)||[]),categoryID]);
+      });
       if(hasChanged||(await nativeCall('TractandaStore/info')).state!==info.state)continue;
       const axes=await readCategoryAxes(revisions,plain(fields.viewDefinition),info.state,at);
       const descriptors=ids=>ids.filter(id=>categories.has(id)).map(id=>({id,name:fieldText(categories.get(id).fields,'subject')}));
@@ -435,12 +475,12 @@
     if (isRefreshing&&!force) return false;
     const refreshID=++refreshGeneration;
     isRefreshing=true;updateConnectionState();
-    const viewID=selectedViewID,generation=viewGeneration;
+    const viewID=selectedViewID,generation=viewGeneration,snapshot={};
     try {
       if(projectBoard) {
         // Discovery precedes the selected-board read.  A deleted bookmark can therefore clear
         // stale cards while still offering every readable replacement project.
-        const views=await discoverProjectViews(viewID,generation);
+        const views=await discoverProjectViews(viewID,generation,snapshot);
         if(!selectionIsCurrent(viewID,generation))return false;
         if(views){projectViews=views;renderProjectViews();}
         if(!views||!views.some(view=>view.id===viewID)) {
@@ -448,7 +488,7 @@
           return false;
         }
       }
-      const refreshed=await readLiveBoard(viewID);
+      const refreshed=await readLiveBoard(viewID,snapshot);
       if (!selectionIsCurrent(viewID,generation)) return false;
       data=refreshed.data;revisionsByID=refreshed.revisions;isConnected=true;
       render();showWorkspace();

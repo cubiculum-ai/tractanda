@@ -7,7 +7,7 @@ uint32_t tractanda_uid(void);
 // both the file type and permission bits. All output pointers are required.
 int tractanda_file_metadata(
     const char *path, uint32_t *mode, uint32_t *uid, uint32_t *gid, uint64_t *size,
-    uint64_t *inode, uint64_t *device);
+    uint64_t *inode, uint64_t *device, int64_t *mtime_seconds, int32_t *mtime_nanoseconds);
 // Opaque immediate-directory iterator. Names exclude . and ..; 1 = entry, 0 = end, -1 = error.
 // Callers must close a non-null handle. The iterator never follows child symlinks.
 void *tractanda_directory_open(const char *path);

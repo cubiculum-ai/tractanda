@@ -278,4 +278,105 @@ final class NavigationHistoryTests: XCTestCase {
         XCTAssertEqual(map.command(for: .modified(.left, .option), in: .text), .wordLeft)
         XCTAssertNil(map.command(for: .modified(.left, .option), in: .pending))
     }
+
+    func testSectionQueryAndGetShareEnvelopeAndRejectChangedStateBetweenSections() throws {
+        let f = try Fixture()
+        let first = try f.category("First")
+        let second = try f.category("Second")
+        _ = try f.item("Initial", ["rank": .integer(1)])
+        var queryEnvelopes: [[String: Any]] = []
+        var changedStore = false
+        let client = ItemClient(transport: { data in
+            let request = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+            let calls = request["methodCalls"] as! [[Any]]
+            if calls.first?[0] as? String == "TractandaItem/query" {
+                queryEnvelopes.append(request)
+                XCTAssertEqual(calls.map { $0[0] as? String }, ["TractandaItem/query", "TractandaItem/get"])
+                XCTAssertEqual(calls.map { $0[2] as? String }, ["query", "get"])
+                XCTAssertEqual(
+                    (calls[1][1] as! [String: Any])["#ids"] as? [String: String],
+                    ["resultOf": "query", "name": "TractandaItem/query", "path": "/ids"])
+            }
+            let response = f.service.handle(data, peerUID: f.store.ownerUID)
+            if calls.first?[0] as? String == "TractandaItem/query", !changedStore {
+                changedStore = true
+                _ = try f.client.commit(
+                    CommitRequest(
+                        classID: "Item", changes: ["subject": .text("Change between sections")],
+                        operationID: Identifier.make()))
+            }
+            return response
+        })
+        let workspace = Workspace(client: client)
+        workspace.sectionCategories = [first, second]
+        XCTAssertThrowsError(try workspace.refresh()) {
+            XCTAssertEqual(($0 as? TractandaError)?.code, "stateChanged")
+        }
+        XCTAssertEqual(queryEnvelopes.count, 2)
+        XCTAssertTrue(workspace.sections.isEmpty)
+        XCTAssertNil(workspace.queryState)
+    }
+
+    func testOversizedSectionPageShrinksAndPagingAdvancesByReturnedCount() throws {
+        let f = try Fixture()
+        for rank in 0..<80 { _ = try f.item("Item \(rank)", ["rank": .integer(Int64(rank))]) }
+        var queryArguments: [[String: Any]] = []
+        let client = ItemClient(transport: { data in
+            let request = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+            let calls = request["methodCalls"] as! [[Any]]
+            if calls.first?[0] as? String == "TractandaItem/query" {
+                let arguments = calls[0][1] as! [String: Any]
+                queryArguments.append(arguments)
+                if (arguments["limit"] as? Int ?? 64) > 32 {
+                    throw TractandaError("responseTooLarge", "Simulated native response bound.")
+                }
+            }
+            return f.service.handle(data, peerUID: f.store.ownerUID)
+        })
+        let workspace = Workspace(client: client)
+        workspace.sort = [try ItemSort(property: "rank")]
+        try workspace.refresh()
+        XCTAssertEqual(workspace.sections[0].items.count, 64)
+        XCTAssertEqual(workspace.sections[0].total, 80)
+        try workspace.loadPage(in: 0, forward: true)
+        XCTAssertEqual(workspace.sections[0].position, 64)
+        XCTAssertEqual(
+            workspace.sections[0].items.map { $0.fields["subject"]?.string },
+            (64..<80).map { "Item \($0)" })
+        try workspace.loadPage(in: 0, forward: false)
+        XCTAssertEqual(workspace.sections[0].position, 0)
+        XCTAssertEqual(workspace.sections[0].items.count, 64)
+        XCTAssertTrue(queryArguments.allSatisfy { $0["timeZone"] as? String == "UTC" })
+        XCTAssertEqual(Set(queryArguments.compactMap { $0["at"] as? String }).count, 1)
+    }
+
+    func testEmptyNonFinalPairedPageFailsClosed() throws {
+        let f = try Fixture()
+        _ = try f.item("Expected result", ["rank": .integer(1)])
+        let client = ItemClient(transport: { data in
+            let response = f.service.handle(data, peerUID: f.store.ownerUID)
+            let request = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+            guard (request["methodCalls"] as! [[Any]]).first?[0] as? String == "TractandaItem/query" else {
+                return response
+            }
+            var envelope = try JSONSerialization.jsonObject(with: response) as! [String: Any]
+            var calls = envelope["methodResponses"] as! [[Any]]
+            var query = calls[0][1] as! [String: Any]
+            query["ids"] = [String]()
+            query["total"] = 1
+            calls[0][1] = query
+            var get = calls[1][1] as! [String: Any]
+            get["list"] = [Any]()
+            get["notFound"] = [String]()
+            calls[1][1] = get
+            envelope["methodResponses"] = calls
+            return try JSONSerialization.data(withJSONObject: envelope)
+        })
+        let workspace = Workspace(client: client)
+        XCTAssertThrowsError(try workspace.refresh()) {
+            XCTAssertEqual(($0 as? TractandaError)?.code, "protocolError")
+        }
+        XCTAssertTrue(workspace.sections.isEmpty)
+        XCTAssertNil(workspace.queryState)
+    }
 }

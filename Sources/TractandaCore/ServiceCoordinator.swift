@@ -1,14 +1,18 @@
 import Dispatch
 import Foundation
+import TractandaClient
 
-/// Owns the one mutable store/service pair used by all transports. Every operation runs on
-/// a private serial GCD queue so SQLite and filesystem work never occupies a Swift executor.
+/// Owns the one mutable store/service pair used by all transports. Store, authority and SQLite
+/// work runs on a private serial GCD queue. A bounded immutable query snapshot may be evaluated
+/// concurrently off-queue, then rechecked on the owner queue before delivery.
 /// Closures submitted to this type must not suspend while ItemStore has an access context.
 public actor ServiceCoordinator {
     private let core: CoreBox
     private var accepting = true
     private var pending = 0
     private var closeWaiters: [CheckedContinuation<Void, Never>] = []
+    private var verificationTask: Task<Void, Never>?
+    private var preparedReadHookForTesting: (@Sendable () async -> Void)?
     private static let maximumPending = 64
 
     /// Opens one exclusive store writer outside the cooperative executor.
@@ -34,7 +38,40 @@ public actor ServiceCoordinator {
     public func handle(_ request: Data, forUID uid: UInt32) async throws -> Data {
         try beginWork()
         defer { finishWork() }
+        let prepared: PreparedNativeRead?
+        do {
+            prepared = try await submit { service in
+                return try service.prepareNativeRead(request, peerUID: uid)
+            }
+        } catch {
+            prepared = nil
+        }
+        if let prepared {
+            let hook = preparedReadHookForTesting
+            let evaluated = try? await Task.detached(priority: .userInitiated) {
+                if let hook { await hook() }
+                return try prepared.query.evaluate(prepared.snapshot)
+            }.value
+            if let evaluated {
+                do {
+                    let response = try await submit { service -> Data? in
+                        defer { service.maintainSemanticIndex() }
+                        return try service.finishNativeRead(prepared, page: evaluated, peerUID: uid)
+                    }
+                    if let response { return response }
+                } catch {
+                    let failure =
+                        error as? TractandaError
+                        ?? TractandaError("invalidRequest", String(describing: error))
+                    return (try? JSON.encode(failure)) ?? Data("{\"code\":\"serverError\"}".utf8)
+                }
+            }
+        }
         return try await submit { service in service.handle(request, peerUID: uid) }
+    }
+
+    func setPreparedReadHookForTesting(_ hook: (@Sendable () async -> Void)?) {
+        preparedReadHookForTesting = hook
     }
 
     public func accountIdentity(forUID uid: UInt32) async throws -> AccountIdentity {
@@ -60,10 +97,50 @@ public actor ServiceCoordinator {
         }
     }
 
+    /// Starts periodic auditing only after daemon readiness. The detached scanner sees an
+    /// immutable Sendable snapshot; all SQLite access and finding reconciliation use `queue`.
+    public func startCanonicalVerification(every interval: Duration = .seconds(900)) {
+        guard accepting, verificationTask == nil else { return }
+        verificationTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.verifyCanonicalOnce()
+                do { try await Task.sleep(for: interval) } catch { break }
+            }
+        }
+    }
+
+    private func verifyCanonicalOnce() async {
+        guard accepting else { return }
+        do {
+            try beginWork()
+            defer { finishWork() }
+            let (snapshot, generation) = try await submit { try $0.store.verificationSnapshot() }
+            let worker = Task.detached(priority: .background) { await CanonicalVerifier.scan(snapshot) }
+            let findings = await withTaskCancellationHandler {
+                await worker.value
+            } onCancel: {
+                worker.cancel()
+            }
+            if Task.isCancelled { return }
+            try await submit { service in
+                try service.store.applyVerification(findings, scannedGeneration: generation)
+            }
+        } catch {
+            guard !Task.isCancelled else { return }
+            let message = String(describing: error)
+            try? await submit { service in
+                service.store.noteVerificationFailure(message)
+            }
+        }
+    }
+
     /// Stops future admission, drains already accepted queue entries, and releases the writer lock.
     public func close() async {
         guard accepting else { return }
         accepting = false
+        verificationTask?.cancel()
+        _ = await verificationTask?.result
+        verificationTask = nil
         while pending > 0 {
             await withCheckedContinuation { closeWaiters.append($0) }
         }

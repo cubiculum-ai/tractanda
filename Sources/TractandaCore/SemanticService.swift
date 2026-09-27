@@ -171,6 +171,10 @@ final class SemanticService {
     private var retryAfter: [String: Date] = [:]
     private var storageProfile: String?
     private var storageProblem: TractandaError?
+    /// `ItemStore.state` is the service-wide generation while maintenance has
+    /// no caller context. It changes after every published head or index
+    /// rebuild, so an idle request must not rescan every canonical item.
+    private var reconciledStoreState: String?
     private var epoch = 0
 
     private let queryLifetime: TimeInterval = 120
@@ -516,6 +520,10 @@ final class SemanticService {
             if let itemID = work.snapshot?.itemID, documentJobs[itemID] == work.jobID {
                 documentJobs.removeValue(forKey: itemID)
                 documentTasks.removeValue(forKey: itemID)
+                // The canonical heads may have changed while this document
+                // occupied the sole embedding slot. Reconcile even if the
+                // completion is now stale and cannot be written.
+                reconciledStoreState = nil
             }
             if let queryID = work.queryID, queryJobs[queryID] == work.jobID {
                 queryJobs.removeValue(forKey: queryID)
@@ -564,19 +572,30 @@ final class SemanticService {
     }
 
     private func reconcile(_ configuration: SemanticConfiguration, profileID: String) throws {
+        let storeState = store.state
+        let canRetry = documentJobs.isEmpty && documentTasks.isEmpty && hasDueDocumentRetry
+        guard reconciledStoreState != storeState || canRetry else { return }
         let snapshots = try allSnapshots(configuration: configuration, profileID: profileID)
-        try storage.prune(profileID: profileID, keeping: Set(snapshots.map(\.itemID)))
+        let indexableIDs = Set(snapshots.map(\.itemID))
+        retryAfter = retryAfter.filter { indexableIDs.contains($0.key) }
+        try storage.prune(profileID: profileID, keeping: indexableIDs)
+        reconciledStoreState = storeState
         guard documentJobs.isEmpty, documentTasks.isEmpty else { return }
         for snapshot in snapshots {
-            if try storage.hasCurrent(
-                itemID: snapshot.itemID, profileID: profileID, contentHash: snapshot.contentHash)
+            if let indexed = try storage.identity(itemID: snapshot.itemID, profileID: profileID),
+                indexed.contentHash == snapshot.contentHash
             {
+                guard indexed.revisionID != snapshot.revisionID else { continue }
                 try storage.rebind(snapshot)
             } else if retryAfter[snapshot.itemID, default: .distantPast] <= Date() {
                 scheduleDocument(snapshot, configuration)
                 break
             }
         }
+    }
+
+    private var hasDueDocumentRetry: Bool {
+        retryAfter.values.contains { $0 <= Date() }
     }
 
     private func scheduleDocument(_ snapshot: SemanticSnapshot, _ configuration: SemanticConfiguration) {
@@ -724,10 +743,12 @@ final class SemanticService {
     }
 
     private func ensureStorage(_ configuration: SemanticConfiguration, profileID: String) throws {
+        let requiresReconciliation = storageProfile != profileID || storageProblem != nil
         if hasInjectedStorage {
             if let storageProfile, storageProfile != profileID { try storage.reset() }
             storageProfile = profileID
             storageProblem = nil
+            if requiresReconciliation { reconciledStoreState = nil }
             return
         }
         guard storageProfile != profileID || storageProblem != nil || storage is SemanticMemoryStorage else {
@@ -735,6 +756,7 @@ final class SemanticService {
         }
         storage = SemanticMemoryStorage()
         storageProfile = nil
+        reconciledStoreState = nil
         do {
             storage = try SemanticVec1Storage(
                 path: semanticIndexURL.path, dimensions: configuration.dimensions, profileID: profileID)
@@ -757,6 +779,7 @@ final class SemanticService {
         if hasInjectedStorage { try storage.reset() } else { storage = SemanticMemoryStorage() }
         storageProfile = nil
         storageProblem = nil
+        reconciledStoreState = nil
         let fileManager = FileManager.default
         for suffix in ["", "-wal", "-shm"] {
             let path = URL(fileURLWithPath: semanticIndexURL.path + suffix)
@@ -790,6 +813,7 @@ final class SemanticService {
         documentTasks.removeAll()
         queryTasks.removeAll()
         retryAfter.removeAll()
+        reconciledStoreState = nil
     }
 
     private func expireQueries() {

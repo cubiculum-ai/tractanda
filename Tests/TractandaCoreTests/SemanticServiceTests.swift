@@ -72,6 +72,36 @@ final class SemanticServiceTests: XCTestCase {
         }
     }
 
+    private final class EmbeddingGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var started = false
+        private var released = false
+
+        func begin() {
+            lock.lock()
+            started = true
+            lock.unlock()
+        }
+
+        func hasStarted() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return started
+        }
+
+        func release() {
+            lock.lock()
+            released = true
+            lock.unlock()
+        }
+
+        func isReleased() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return released
+        }
+    }
+
     private func fixture(_ body: (ItemStore, URL) throws -> Void) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
             "semantic-\(Identifier.make())")
@@ -143,6 +173,151 @@ final class SemanticServiceTests: XCTestCase {
             -> [SemanticIndexedPassage]
         { [] }
         func reset() throws {}
+    }
+
+    private final class CountingStorage: SemanticVectorStorage {
+        private let backing = SemanticMemoryStorage()
+        private(set) var identityCalls = 0
+        private(set) var pruneCalls = 0
+        private(set) var rebindCalls = 0
+        private(set) var replaceCalls = 0
+
+        func resetCounts() {
+            identityCalls = 0
+            pruneCalls = 0
+            rebindCalls = 0
+            replaceCalls = 0
+        }
+
+        func identity(itemID: String, profileID: String) throws -> SemanticIndexedIdentity? {
+            identityCalls += 1
+            return try backing.identity(itemID: itemID, profileID: profileID)
+        }
+
+        func hasCurrent(itemID: String, profileID: String, contentHash: String) throws -> Bool {
+            try backing.hasCurrent(itemID: itemID, profileID: profileID, contentHash: contentHash)
+        }
+
+        func rebind(_ snapshot: SemanticSnapshot) throws {
+            rebindCalls += 1
+            try backing.rebind(snapshot)
+        }
+
+        func replace(_ snapshot: SemanticSnapshot, chunks: [SemanticChunk], vectors: [[Double]]) throws {
+            replaceCalls += 1
+            try backing.replace(snapshot, chunks: chunks, vectors: vectors)
+        }
+
+        func prune(profileID: String, keeping itemIDs: Set<String>) throws {
+            pruneCalls += 1
+            try backing.prune(profileID: profileID, keeping: itemIDs)
+        }
+
+        func search(
+            vector: [Double], profileID: String, current: [SemanticSnapshot], limit: Int
+        ) throws -> [SemanticIndexedPassage] {
+            try backing.search(vector: vector, profileID: profileID, current: current, limit: limit)
+        }
+
+        func reset() throws { try backing.reset() }
+    }
+
+    func testMaintenanceSkipsUnchangedHundredItemStoreAndOnlyRebindsNewHead() throws {
+        try fixture { store, _ in
+            let storage = CountingStorage()
+            let service = SemanticService(store: store, storage: storage) { _, inputs, query in
+                inputs.map { _ in query ? [0, 1] : [1, 0] }
+            }
+            let config = configuration(operationID: "maintenance-generation")
+            let profile = try SemanticSource.profileID(config)
+            var revisions: [Revision] = []
+            for index in 0..<100 {
+                let revision = try note(
+                    store, subject: "Item \(index)", body: "body \(index)", operation: "item-\(index)")
+                revisions.append(revision)
+                let corpus = ItemTextContent.corpus(for: revision)
+                let snapshot = SemanticSnapshot(
+                    itemID: revision.itemID, revisionID: revision.revisionID, subject: corpus.subject,
+                    body: corpus.body, sourceText: corpus.sourceText, profileID: profile,
+                    contentHash: try SemanticSource.contentHash(sourceText: corpus.sourceText))
+                let chunks = try SemanticChunker.chunks(
+                    snapshot.sourceText, chunkBytes: config.chunkBytes, overlapBytes: config.overlapBytes)
+                try storage.replace(snapshot, chunks: chunks, vectors: chunks.map { _ in [1.0, 0.0] })
+            }
+            _ = try service.configure(config, expectedConfigurationID: nil)
+            service.maintain()
+            XCTAssertEqual(storage.pruneCalls, 1)
+            XCTAssertEqual(storage.identityCalls, 100)
+
+            storage.resetCounts()
+            for _ in 0..<5 { service.maintain() }
+            XCTAssertEqual(storage.pruneCalls, 0)
+            XCTAssertEqual(storage.identityCalls, 0)
+            XCTAssertEqual(storage.rebindCalls, 0)
+            XCTAssertEqual(storage.replaceCalls, 0)
+
+            let original = try XCTUnwrap(revisions.first)
+            let revised = try store.commit(
+                CommitRequest(
+                    action: .revise, itemID: original.itemID, expectedRevisionID: original.revisionID,
+                    changes: ["dueAt": .date("2030-01-01T00:00:00Z")], operationID: "metadata-head")
+            )
+            .revision
+            service.maintain()
+            XCTAssertEqual(storage.pruneCalls, 1)
+            XCTAssertEqual(storage.identityCalls, 100)
+            XCTAssertEqual(storage.rebindCalls, 1)
+            XCTAssertEqual(storage.replaceCalls, 0)
+            XCTAssertEqual(
+                try storage.identity(itemID: revised.itemID, profileID: profile)?.revisionID,
+                revised.revisionID)
+
+            storage.resetCounts()
+            service.maintain()
+            XCTAssertEqual(storage.pruneCalls, 0)
+            XCTAssertEqual(storage.identityCalls, 0)
+            XCTAssertEqual(storage.rebindCalls, 0)
+        }
+    }
+
+    func testStaleInFlightDocumentCompletionResumesMaintenanceDrain() throws {
+        try fixture { store, _ in
+            let calls = Counter()
+            let gate = EmbeddingGate()
+            let service = SemanticService(store: store) { _, inputs, query in
+                calls.increment()
+                if !query, calls.read() == 1 {
+                    gate.begin()
+                    while !gate.isReleased() { try await Task.sleep(for: .milliseconds(5)) }
+                }
+                return inputs.map { _ in query ? [0, 1] : [1, 0] }
+            }
+            let first = try note(store, subject: "stale", body: "first", operation: "stale-first")
+            _ = try service.configure(
+                configuration(operationID: "stale-in-flight"), expectedConfigurationID: nil)
+            service.maintain()
+            for _ in 0..<50 where !gate.hasStarted() { usleep(10_000) }
+            XCTAssertTrue(gate.hasStarted())
+
+            _ = try note(store, subject: "pending", body: "second", operation: "stale-second")
+            _ = try store.commit(
+                CommitRequest(
+                    action: .revise, itemID: first.itemID, expectedRevisionID: first.revisionID,
+                    changes: ["isDeleted": .boolean(true)], operationID: "stale-delete"))
+            // This records the latest generation while the original slot remains occupied.
+            service.maintain()
+            gate.release()
+            for _ in 0..<100 where calls.read() < 2 {
+                service.maintain()
+                usleep(10_000)
+            }
+            XCTAssertGreaterThanOrEqual(
+                calls.read(), 2, "the pending head must be scheduled after stale work")
+            drain(service)
+            let status = try store.withAccess(forUID: store.ownerUID) { try service.status() }
+            XCTAssertEqual(status["indexableItems"] as? Int, 1)
+            XCTAssertEqual(status["indexedItems"] as? Int, 1)
+        }
     }
 
     func testTextDiagnosticsPendingAndFailuresStayLocalAndNonDisclosing() throws {

@@ -190,7 +190,9 @@ final class Workspace {
     }
 
     private func queryArguments(category: Revision?, position: Int, limit: Int) -> [String: Any] {
-        var arguments: [String: Any] = ["position": position, "limit": limit, "at": queryDate]
+        var arguments: [String: Any] = [
+            "position": position, "limit": limit, "at": queryDate, "timeZone": "UTC",
+        ]
         if let view {
             arguments["viewID"] = view.itemID
             if let category { arguments["sectionID"] = category.itemID }
@@ -251,6 +253,8 @@ final class Workspace {
             let list: [Revision]
             let notFound: [String]
             let state: String
+            let remainingIDs: [String]?
+            let oversizedIDs: [String]?
         }
         do {
             // Refresh names through authorization too; a hidden category must not remain a heading.
@@ -263,35 +267,80 @@ final class Workspace {
             var initialState = state
             for (index, category) in targets.enumerated() {
                 var offset = positions.indices.contains(index) ? max(0, positions[index]) : 0
-                func query(_ position: Int) throws -> ItemPage {
-                    return try JSON.decode(
-                        ItemPage.self,
-                        client.call(
-                            "TractandaItem/query",
-                            arguments: queryArguments(
-                                category: category, position: position, limit: Self.pageSize)))
+                func queryAndGet(_ position: Int, limit: Int) throws -> (ItemPage, Response) {
+                    do {
+                        let pair = try client.queryThenGet(
+                            arguments: queryArguments(category: category, position: position, limit: limit))
+                        let page = try JSON.decode(ItemPage.self, pair.query)
+                        let result = try JSON.decode(Response.self, pair.get)
+                        guard (result.remainingIDs ?? []).isEmpty, (result.oversizedIDs ?? []).isEmpty else {
+                            throw TractandaError(
+                                "responseTooLarge", "The get response contains continuation IDs.")
+                        }
+                        return (page, result)
+                    } catch let error as TractandaError where error.code == "responseTooLarge" && limit > 1 {
+                        return try queryAndGet(position, limit: max(1, limit / 2))
+                    }
                 }
-                var page = try query(offset)
+                func loadSectionPage(at start: Int) throws -> (ItemPage, [Revision]) {
+                    var pageIDs: [String] = []
+                    var itemsByID: [String: Revision] = [:]
+                    var pageState: String?
+                    var total = 0
+                    var firstPage: ItemPage?
+                    while pageIDs.count < Self.pageSize {
+                        let position = start + pageIDs.count
+                        let limit = Self.pageSize - pageIDs.count
+                        let (page, result) = try queryAndGet(position, limit: limit)
+                        if firstPage == nil { firstPage = page }
+                        guard result.state == page.queryState, result.notFound.isEmpty else {
+                            throw TractandaError(
+                                "stateChanged", "Items changed while loading; refresh the view.")
+                        }
+                        if let pageState, pageState != page.queryState {
+                            throw TractandaError(
+                                "stateChanged", "Items changed while loading; refresh the view.")
+                        }
+                        pageState = page.queryState
+                        total = page.total
+                        let returnedIDs = result.list.map(\.itemID)
+                        guard returnedIDs.count == page.ids.count,
+                            Set(returnedIDs).count == returnedIDs.count,
+                            Set(returnedIDs) == Set(page.ids)
+                        else {
+                            throw TractandaError("protocolError", "Get results do not match query IDs.")
+                        }
+                        let byID = Dictionary(uniqueKeysWithValues: result.list.map { ($0.itemID, $0) })
+                        pageIDs.append(contentsOf: page.ids)
+                        itemsByID.merge(byID) { _, newer in newer }
+                        if page.ids.isEmpty {
+                            guard position >= page.total else {
+                                throw TractandaError("protocolError", "Empty non-final section page.")
+                            }
+                            break
+                        }
+                        if pageIDs.count >= total { break }
+                    }
+                    guard firstPage != nil, let pageState else {
+                        throw TractandaError("protocolError", "Missing section query result.")
+                    }
+                    return (
+                        ItemPage(ids: pageIDs, position: start, total: total, queryState: pageState),
+                        pageIDs.compactMap { itemsByID[$0] }
+                    )
+                }
+                var (page, pageItems) = try loadSectionPage(at: offset)
                 if offset > 0 && page.ids.isEmpty {
                     offset = 0
-                    page = try query(0)
+                    (page, pageItems) = try loadSectionPage(at: 0)
                 }
                 if let initialState, initialState != page.queryState {
                     throw TractandaError("stateChanged", "Items changed; refresh from the first page.")
                 }
                 initialState = page.queryState
-                let result = try JSON.decode(
-                    Response.self, client.call("TractandaItem/get", arguments: ["ids": page.ids]))
-                guard result.state == page.queryState, result.notFound.isEmpty else {
-                    throw TractandaError("stateChanged", "Items changed while loading; refresh the view.")
-                }
-                let byID = Dictionary(uniqueKeysWithValues: result.list.map { ($0.itemID, $0) })
-                guard page.ids.allSatisfy({ byID[$0] != nil }) else {
-                    throw TractandaError("protocolError", "Missing query result.")
-                }
                 loaded.append(
                     WorkspaceSection(
-                        category: category, items: page.ids.compactMap { byID[$0] }, position: offset,
+                        category: category, items: pageItems, position: offset,
                         total: page.total))
             }
             let navigation = try categoryPath.isEmpty ? nil : CategoryHierarchy(self.categories())
@@ -339,7 +388,8 @@ final class Workspace {
     func loadPage(in sectionIndex: Int, forward: Bool) throws {
         guard sections.indices.contains(sectionIndex) else { return }
         var positions = sections.map(\.position)
-        positions[sectionIndex] = max(0, positions[sectionIndex] + (forward ? Self.pageSize : -Self.pageSize))
+        let step = forward ? max(1, sections[sectionIndex].items.count) : Self.pageSize
+        positions[sectionIndex] = max(0, positions[sectionIndex] + (forward ? step : -step))
         try loadSections(positions: positions, requiring: queryState)
     }
 

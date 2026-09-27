@@ -2,6 +2,12 @@ import CTractandaPlatform
 import Foundation
 import TractandaClient
 
+struct PreparedNativeRead: Sendable {
+    let query: PreparedReadQuery
+    let snapshot: ImmutableReadSnapshot
+    let callID: String
+}
+
 /// Local experimental binding with JMAP-shaped method calls. This is not a
 /// conforming JMAP server: discovery, HTTP/auth and the complete Core contract are pending.
 public final class ItemService {
@@ -576,32 +582,31 @@ public final class ItemService {
                     return date
                 } ?? Date()
             let timeZone = try args["timeZone"].map { _ in try string(args, "timeZone") } ?? "UTC"
-            let result: [Revision]
+            let page: ItemIndex.Page
             if args["viewID"] != nil {
                 guard args["expression"] == nil, args["text"] == nil, args["categoryPath"] == nil,
                     args["sort"] == nil, args["excludedCategoryIDs"] == nil
                 else {
                     throw TractandaError("invalidArguments", "Use either viewID or inline query criteria.")
                 }
-                result = try Categories.savedView(
+                page = try Categories.savedViewPage(
                     store: store, id: string(args, "viewID"),
-                    sectionID: args["sectionID"].map { _ in try string(args, "sectionID") }, at: evaluatedAt,
-                    timeZone: timeZone)
+                    sectionID: args["sectionID"].map { _ in try string(args, "sectionID") },
+                    position: position, limit: limit, at: evaluatedAt, timeZone: timeZone)
             } else {
                 guard args["sectionID"] == nil else {
                     throw TractandaError("invalidArguments", "sectionID requires a saved viewID.")
                 }
                 let sort = try args["sort"].map { try decode([ItemSort].self, $0) } ?? []
                 try ItemSort.validate(sort)
-                result = try Categories.query(
+                page = try Categories.page(
                     store: store, expression: args["expression"] as? String,
                     text: args["text"] as? String, categoryPath: strings(args, "categoryPath", default: []),
                     excludedCategoryIDs: strings(args, "excludedCategoryIDs", default: []),
-                    sort: sort, at: evaluatedAt, timeZone: timeZone)
+                    sort: sort, position: position, limit: limit, at: evaluatedAt, timeZone: timeZone)
             }
-            let ids = Array(result.dropFirst(position).prefix(limit).map(\.itemID))
             return [
-                "ids": ids, "position": position, "total": result.count, "queryState": store.state,
+                "ids": page.ids, "position": position, "total": page.total, "queryState": store.state,
                 "evaluatedAt": Timestamp.format(evaluatedAt),
             ]
         case "TractandaItem/commit":
@@ -678,6 +683,8 @@ public final class ItemService {
                 "state": store.state, "ownerUID": store.ownerUID, "queryProfile": SpotlightQuery.profile,
                 "binding": "local experimental; not JMAP conformant", "capability": Self.capability,
                 "warnings": store.isAdministrator ? store.recoveryWarnings : [],
+                "startupRecovery": store.isAdministrator ? store.startupRecovery : [:],
+                "canonicalVerification": store.isAdministrator ? store.canonicalVerificationStatus : [:],
                 "accessMode": store.isMultiUser ? "multi-user" : "single-user",
                 "accessScope": store.accessScope,
                 "callerIsAdministrator": store.isAdministrator,
@@ -729,6 +736,101 @@ public final class ItemService {
         semantic.maintain()
     }
 
+    /// Recognizes only one unindexed, category-free, read-only query. Every other
+    /// envelope goes through the ordinary handler and retains its existing errors.
+    func prepareNativeRead(_ data: Data, peerUID: UInt32) throws -> PreparedNativeRead? {
+        guard data.count <= 8 * 1024 * 1024,
+            let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            Set(request.keys) == ["using", "methodCalls"],
+            let using = request["using"] as? [String], using.contains(Self.capability),
+            Set(using).isSubset(of: [Self.capability, "urn:ietf:params:jmap:core"]),
+            let calls = request["methodCalls"] as? [[Any]], calls.count == 1,
+            calls[0].count == 3, calls[0][0] as? String == "TractandaItem/query",
+            let args = calls[0][1] as? [String: Any],
+            let callID = calls[0][2] as? String, !callID.isEmpty,
+            Set(args.keys).isSubset(of: ["expression", "sort", "position", "limit", "at", "timeZone"]),
+            let rawSort = args["sort"],
+            let sortData = try? JSONSerialization.data(withJSONObject: rawSort),
+            let sort = try? JSON.decode([ItemSort].self, sortData)
+        else { return nil }
+        if args["expression"] != nil && !(args["expression"] is String) { return nil }
+        if args["at"] != nil && !(args["at"] is String) { return nil }
+        if args["timeZone"] != nil && !(args["timeZone"] is String) { return nil }
+        guard let position = try? integer(args, "position", default: 0, range: 0...Int.max),
+            let limit = try? integer(args, "limit", default: 100, range: 1...256)
+        else { return nil }
+        let date: Date
+        if let instant = args["at"] as? String {
+            guard let parsed = Timestamp.parse(instant) else { return nil }
+            date = parsed
+        } else {
+            date = Date()
+        }
+        let timeZone = args["timeZone"] as? String ?? "UTC"
+        guard (try? QueryCalendar.make(timeZone: timeZone)) != nil,
+            let query = try? PreparedReadQuery(
+                expression: args["expression"] as? String, sort: sort, evaluatedAt: date,
+                timeZone: timeZone, position: position, limit: limit)
+        else { return nil }
+        // Indexed one-key time sorts are already cheaper on the serial SQL path.
+        if sort.count == 1, !sort[0].isAscending,
+            ["modifiedAt", "createdAt"].contains(sort[0].property.map(metadataKey) ?? "")
+        {
+            return nil
+        }
+        semantic.maintain()
+        guard
+            let snapshot = try store.withAccess(
+                forUID: peerUID,
+                {
+                    try store.immutableReadSnapshot(
+                        candidateRestrictions: query.expression?.indexCandidateRestrictions ?? [])
+                })
+        else { return nil }
+        return PreparedNativeRead(query: query, snapshot: snapshot, callID: callID)
+    }
+
+    /// Returns nil only when the captured result became stale; the caller then runs the
+    /// ordinary serial handler. Integrity failures are errors and never return stale data.
+    func finishNativeRead(_ prepared: PreparedNativeRead, page: PreparedReadPage, peerUID: UInt32)
+        throws -> Data?
+    {
+        try store.withAccess(forUID: peerUID) {
+            do {
+                guard try store.verifyImmutableReadSnapshot(prepared.snapshot) else { return nil }
+                let currentState = store.state
+                guard currentState == page.state else { return nil }
+                let result: [String: Any] = [
+                    "ids": page.ids, "position": prepared.query.position, "total": page.total,
+                    "queryState": currentState, "evaluatedAt": Timestamp.format(page.evaluatedAt),
+                ]
+                let response = try JSONSerialization.data(
+                    withJSONObject: [
+                        "methodResponses": [["TractandaItem/query", result, prepared.callID]],
+                        "sessionState": currentState,
+                    ], options: [.sortedKeys, .prettyPrinted])
+                guard response.count <= 8 * 1024 * 1024 else {
+                    throw TractandaError("responseTooLarge", "Use smaller query pages.")
+                }
+                return response
+            } catch {
+                let failure =
+                    error as? TractandaError
+                    ?? TractandaError("invalidArguments", String(describing: error))
+                return try JSONSerialization.data(
+                    withJSONObject: [
+                        "methodResponses": [
+                            [
+                                "error", ["type": failure.code, "description": failure.message],
+                                prepared.callID,
+                            ]
+                        ],
+                        "sessionState": store.state,
+                    ], options: [.sortedKeys, .prettyPrinted])
+            }
+        }
+    }
+
     private func handleAuthorized(_ data: Data, peerUID: UInt32) throws -> Data {
         guard data.count <= 8 * 1024 * 1024,
             let request = try JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -764,6 +866,13 @@ public final class ItemService {
             let method = call[0] as! String
             let id = call[2] as! String
             do {
+                if !store.isCanonicalTrusted,
+                    !["TractandaStore/info", "TractandaStore/rebuild"].contains(method)
+                {
+                    throw TractandaError(
+                        "recoveryRequired",
+                        "Canonical verification found an inconsistency; rebuild the store before access.")
+                }
                 var args = call[1] as! [String: Any]
                 for key in args.keys.filter({ $0.hasPrefix("#") }).sorted() {
                     let name = String(key.dropFirst())

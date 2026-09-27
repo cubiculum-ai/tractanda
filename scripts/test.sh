@@ -8,8 +8,9 @@ mkdir -p work/verification
 sh scripts/check-style.sh
 if command -v node >/dev/null 2>&1; then
     node scripts/test-kanban-order.js
+    node scripts/test-kanban-loading.js
 else
-    echo 'Node.js unavailable; browser ordering check must run on the macOS release host.'
+    echo 'Node.js unavailable; browser logic checks must run on the macOS release host.'
 fi
 python3 scripts/test-release-pipeline.py
 python3 scripts/test-notarize-macos.py

@@ -1,4 +1,5 @@
 import XCTest
+import CSQLite
 
 @testable import TractandaCore
 
@@ -35,6 +36,44 @@ final class CoreTests: XCTestCase {
         let fixture = try DemoFixture.seed(store)
         XCTAssertEqual(fixture.count, 9)
         XCTAssertEqual(try store.candidates().count, 9)
+    }
+
+    func testVersionTwoCatalogueForcesCanonicalRebuild() throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var store: ItemStore? = try ItemStore(root: root)
+        let original = try XCTUnwrap(store).commit(
+            CommitRequest(classID: "Item", changes: ["subject": .text("preserve history")], operationID: "schema-v3-create")
+        ).revision
+        let edited = try XCTUnwrap(store).commit(
+            CommitRequest(
+                action: .revise, itemID: original.itemID, expectedRevisionID: original.revisionID,
+                changes: ["subject": .text("latest")], operationID: "schema-v3-revise")
+        ).revision
+        store = nil
+
+        var database: OpaquePointer?
+        let path = root.appendingPathComponent("index/items.sqlite").path
+        XCTAssertEqual(sqlite3_open(path, &database), SQLITE_OK)
+        defer { if let database { sqlite3_close(database) } }
+        let downgrade = "UPDATE checkpoint_meta SET value='2' WHERE key='schema'; "
+            + "UPDATE checkpoint_meta SET value='tractanda-sqlite-catalogue-v2' WHERE key='engine';"
+        let status = downgrade.withCString { sqlite3_exec(database, $0, nil, nil, nil) }
+        XCTAssertEqual(status, SQLITE_OK)
+        sqlite3_close(database)
+        database = nil
+
+        store = try ItemStore(root: root)
+        XCTAssertEqual(store?.startupRecovery["mode"], "fullRecovery")
+        XCTAssertEqual(try XCTUnwrap(store).get(original.itemID), edited)
+        XCTAssertEqual(
+            try XCTUnwrap(store).history(original.itemID).map(\.revisionID),
+            [edited.revisionID, original.revisionID])
+        store = nil
+
+        store = try ItemStore(root: root)
+        XCTAssertEqual(store?.startupRecovery["mode"], "checkpoint")
+        XCTAssertEqual(try XCTUnwrap(store).get(original.itemID), edited)
     }
 
     func testGenericItemIsConcreteAndRootAncestryDoesNotRepeat() throws {
@@ -354,15 +393,145 @@ final class CoreTests: XCTestCase {
             branch.revisionID + ".tractanda")
         try RecordCodec.encode(branch).write(to: branchPath)
         try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: branchPath.path)
+        // Offline edits require an explicit full rebuild under the checkpoint trust policy.
+        assertCode("recoveryError") { try store!.rebuildIndex() }
         store = nil
         assertCode("recoveryError") { _ = try ItemStore(root: root) }
         XCTAssertEqual(files(root).count, 3)  // Diagnosis leaves canonical evidence intact.
         try FileManager.default.removeItem(at: branchPath)
         store = try ItemStore(root: root)
         XCTAssertEqual(try store!.history(first.itemID).count, 2)
-        store = nil
         try FileManager.default.removeItem(at: firstPath)
+        assertCode("recoveryError") { try store!.rebuildIndex() }
+        store = nil
         assertCode("recoveryError") { _ = try ItemStore(root: root) }
+    }
+
+    func testRecoveryRejectsFeedbackOperationAndFilenameCorruption() throws {
+        do {
+            let root = root()
+            defer { try? FileManager.default.removeItem(at: root) }
+            var store: ItemStore? = try ItemStore(root: root)
+            let first = try store!.commit(
+                CommitRequest(classID: "Item", operationID: "feedback-root")
+            ).revision
+            let feedback = ItemValue.object([
+                "action": .text("accept"), "revisionID": .text(Identifier.make()),
+            ])
+            var fields = first.fields
+            fields["revisionID"] = .text(Identifier.make())
+            fields["supersedes"] = .text(first.revisionID)
+            fields["operationID"] = .text("feedback-revision")
+            fields["learningFeedback"] = .object([Identifier.make(): feedback])
+            let corrupt = try Revision(fields: fields)
+            let path = root.appendingPathComponent("items/\(corrupt.revisionID).tractanda")
+            try RecordCodec.encode(corrupt).write(to: path)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
+            assertCode("recoveryError") { try store!.rebuildIndex() }
+            store = nil
+            assertCode("recoveryError") { _ = try ItemStore(root: root) }
+        }
+
+        do {
+            let root = root()
+            defer { try? FileManager.default.removeItem(at: root) }
+            var store: ItemStore? = try ItemStore(root: root)
+            let first = try store!.commit(
+                CommitRequest(classID: "Item", operationID: "duplicate-operation")
+            ).revision
+            var fields = first.fields
+            fields["itemID"] = .text(Identifier.make())
+            fields["revisionID"] = .text(Identifier.make())
+            let duplicate = try Revision(fields: fields)
+            let duplicateURL = root.appendingPathComponent(
+                "items/\(duplicate.revisionID).tractanda")
+            try RecordCodec.encode(duplicate).write(to: duplicateURL)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600], ofItemAtPath: duplicateURL.path)
+            assertCode("recoveryError") { try store!.rebuildIndex() }
+            store = nil
+            assertCode("recoveryError") { _ = try ItemStore(root: root) }
+        }
+
+        do {
+            let root = root()
+            defer { try? FileManager.default.removeItem(at: root) }
+            var store: ItemStore? = try ItemStore(root: root)
+            let revision = try store!.commit(
+                CommitRequest(classID: "Item", operationID: "filename-identity")
+            ).revision
+            let original = try XCTUnwrap(files(root).first)
+            let mismatched = original.deletingLastPathComponent()
+                .appendingPathComponent("\(Identifier.make()).tractanda")
+            try FileManager.default.moveItem(at: original, to: mismatched)
+            assertCode("recoveryError") { try store!.rebuildIndex() }
+            store = nil
+            assertCode("recoveryError") { _ = try ItemStore(root: root) }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: original.path))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: mismatched.path))
+            XCTAssertEqual(
+                try RecordCodec.decode(Data(contentsOf: mismatched)).revisionID, revision.revisionID)
+        }
+    }
+
+    func testRecoveryRetainsOversizedCurrentHeadAfterValidatingHistory() throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var store: ItemStore? = try ItemStore(root: root)
+        let first = try store!.commit(
+            CommitRequest(
+                classID: "Item", changes: ["body": .text(String(repeating: "x", count: 1_100_000))],
+                operationID: "large-head-root")
+        ).revision
+        let latest = try edit(store!, first, ["subject": .text("latest head")])
+        store = nil
+
+        let recovered = try ItemStore(root: root)
+        XCTAssertEqual(try recovered.get(first.itemID), latest)
+        XCTAssertEqual(try recovered.history(first.itemID), [latest, first])
+    }
+
+    func testRecoverySelectsValidatedHeadWhenDirectoryOrderIsReversed() throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var store: ItemStore? = try ItemStore(root: root)
+        let first = try store!.commit(
+            CommitRequest(classID: "Item", operationID: "order-root")
+        ).revision
+        let writtenLatest = try edit(store!, first, ["subject": .text("latest")])
+        var latestFields = writtenLatest.fields
+        latestFields["modifiedAt"] = .date("2000-01-01T00:00:00Z")
+        let latest = try Revision(fields: latestFields)
+        let items = root.appendingPathComponent("items", isDirectory: true)
+        let directories = ["recovery-a", "recovery-b"].map {
+            items.appendingPathComponent($0, isDirectory: true)
+        }
+        for directory in directories {
+            try FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: false,
+                attributes: [.posixPermissions: 0o700])
+        }
+        let entries = try POSIXDirectory.entries(at: items)
+        let firstPosition = try XCTUnwrap(entries.firstIndex(of: directories[0].lastPathComponent))
+        let secondPosition = try XCTUnwrap(entries.firstIndex(of: directories[1].lastPathComponent))
+        let earlier = firstPosition < secondPosition ? directories[0] : directories[1]
+        let later = firstPosition < secondPosition ? directories[1] : directories[0]
+        let firstPath = try XCTUnwrap(
+            files(root).first { $0.lastPathComponent == first.revisionID + ".tractanda" })
+        let latestPath = try XCTUnwrap(
+            files(root).first { $0.lastPathComponent == latest.revisionID + ".tractanda" })
+        try RecordCodec.encode(latest).write(to: latestPath, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600], ofItemAtPath: latestPath.path)
+        try FileManager.default.moveItem(
+            at: firstPath, to: earlier.appendingPathComponent(firstPath.lastPathComponent))
+        try FileManager.default.moveItem(
+            at: latestPath, to: later.appendingPathComponent(latestPath.lastPathComponent))
+        store = nil
+
+        let recovered = try ItemStore(root: root)
+        XCTAssertEqual(try recovered.get(first.itemID), latest)
+        XCTAssertEqual(try recovered.history(first.itemID), [latest, first])
     }
 
     func testAbandonedPublicationAndCorruptIndexRecovery() throws {
@@ -449,6 +618,7 @@ final class CoreTests: XCTestCase {
                 to: root.appendingPathComponent("index/items.sqlite" + suffix))
         }
         store = try ItemStore(root: root)
+        try store!.rebuildIndex()
         XCTAssertEqual(try store!.candidates().map(\.itemID), [first.itemID])
         for suffix in ["-journal", "-wal", "-shm"] {
             XCTAssertFalse(

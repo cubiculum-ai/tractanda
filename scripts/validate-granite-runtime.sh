@@ -34,6 +34,10 @@ jq -e '
 "$host" --model "$model" --port "$port" >"$temporary/host.log" 2>&1 &
 process=$!
 for attempt in $(seq 1 90); do
+    if ! kill -0 "$process" 2>/dev/null; then
+        cat "$temporary/host.log" >&2
+        exit 1
+    fi
     if curl --max-time 2 --fail --silent --show-error "http://127.0.0.1:$port/health" >"$temporary/health.json"; then
         if kill -0 "$process" 2>/dev/null && jq -e --argjson expected_pid "$process" '.pid == $expected_pid' "$temporary/health.json" >/dev/null; then
             break

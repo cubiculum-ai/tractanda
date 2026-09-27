@@ -39,7 +39,7 @@ def embedding_descriptor(host, model_directory):
     profile = json.loads(run(str(host), '--describe'))
     if (profile.get('alias') != 'tractanda-granite-embedding-311m-multilingual-r2-vmlx-fp32-44399559'
             or profile.get('modelRevision') != '44399559930365213510b1ee2eb15ded83374f0e'
-            or profile.get('vmlxRevision') != 'b7a2b97efc2d8ed44ddf3c4b7af25766b372339f'
+            or profile.get('vmlxRevision') != '61a4b20d4ad01b10466e8fc94c50402a9f994430'
             or profile.get('dimensions') != 768 or profile.get('pooling') != 'cls'
             or profile.get('normalization') != 'l2'):
         raise ValueError('The embedding helper does not describe the bundled Granite profile.')

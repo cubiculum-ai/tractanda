@@ -6,11 +6,12 @@ requests to its loopback `/v1/embeddings` endpoint. The server keeps the Vec1 in
 separate from its metadata/FTS index; model work does not change canonical item
 files or block keyword/category access.
 
-The model is pinned to `44399559930365213510b1ee2eb15ded83374f0e`. The runtime uses
-upstream `osaurus-ai/vmlx-swift` main `e07bd67becffb4718004c3db076ee8c153ef7f92`,
-plus tokenizer fixes [#487](https://github.com/osaurus-ai/vmlx-swift/pull/487) and
-[#514](https://github.com/osaurus-ai/vmlx-swift/pull/514), through the exact
-`rcfa/vmlx-swift` commit `b7a2b97efc2d8ed44ddf3c4b7af25766b372339f`.
+The model is pinned to `44399559930365213510b1ee2eb15ded83374f0e`. The runtime is
+pinned directly to upstream `osaurus-ai/vmlx-swift` commit
+`61a4b20d4ad01b10466e8fc94c50402a9f994430`, which includes the merged tokenizer
+fixes [#487](https://github.com/osaurus-ai/vmlx-swift/pull/487) and
+[#514](https://github.com/osaurus-ai/vmlx-swift/pull/514). No fork or separate
+patch application is required for this pin.
 
 The host verifies all nine original model/tokenizer/configuration files before
 loading. It computes in FP32, uses CLS pooling and L2 normalization, and returns
@@ -23,7 +24,10 @@ retention and representative retrieval-quality benchmarks remain separate work.
 ## Build and check
 
 The source requires Swift 6.4. On macOS use Apple's full command-line developer
-toolchain with Metal support. On Debian-family Linux, install the CPU build and
+toolchain with Metal support. Linux checks use the official Swift 6.4.0 Debian 12
+image, pinned to manifest digest `sha256:4f4120422396f62788ef459c75fe1a47f8746471c224fdc2a7dd8dd2e07f7efd`,
+with amd64 and arm64 variants.
+On Debian-family Linux, install the CPU build and
 check prerequisites (in addition to Swift):
 
 ```sh
@@ -54,8 +58,12 @@ supported Linux installer and runtime dependency bundle remain in development.
 
 ## Verification for this integration
 
-The same pinned model passed real HTTP inference on macOS/Metal and in a Debian
-aarch64 CPU container using Swift 6.4.2-dev. The ten-input check includes
+For poc.11, this model passed real HTTP inference on macOS/Metal and in a Debian
+aarch64 CPU container using Swift 6.4.2-dev, with the then-unmerged fixes pinned
+through fork commit `b7a2b97efc2d8ed44ddf3c4b7af25766b372339f`. The upstream
+repin retains byte-identical embedding, tokenizer and MLX core sources; unrelated
+language-model cache changes also entered upstream. Revalidate the newly built
+provider with the script above when packaging or changing platforms. The ten-input check includes
 English/German/Japanese retrieval pairs, Devanagari and Bengali combining text,
 and indented code. Native Tractanda/Vec1 integration also passed on both systems:
 three disposable items indexed, English and German queries found the expected
@@ -64,8 +72,8 @@ validation; physical NAS/x86_64 performance and broader quality remain unmeasure
 
 ## Upgrade and permissions
 
-The macOS installer can replace its own Qwen pilot configuration with the pinned
-Granite profile. It uses a fresh UUIDv1 configuration identity and a guarded
+The macOS installer can update its own Qwen pilot or earlier Granite runtime
+configuration to the pinned Granite profile. It uses a fresh UUIDv1 configuration identity and a guarded
 update; derived vectors are rebuilt for the new embedding space. It refuses to
 overwrite a custom configuration. Failed recovery retains its configuration
 snapshot and blocks normal managed startup until an explicit installer retry.

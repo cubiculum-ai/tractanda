@@ -65,6 +65,7 @@ public actor SharedDaemon {
             }
             guard claimStartupReadiness() else { throw CancellationError() }
             await readiness.activate()
+            await coordinator.startCanonicalVerification()
             return SharedDaemon(
                 coordinator: coordinator, sessions: sessions, application: application, group: group,
                 unix: unix!, http: http, readiness: readiness,

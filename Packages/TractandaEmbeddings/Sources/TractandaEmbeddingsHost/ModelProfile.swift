@@ -4,7 +4,7 @@ import Foundation
 enum ModelProfile {
     static let alias = "tractanda-granite-embedding-311m-multilingual-r2-vmlx-fp32-44399559"
     static let modelRevision = "44399559930365213510b1ee2eb15ded83374f0e"
-    static let vmlxRevision = "b7a2b97efc2d8ed44ddf3c4b7af25766b372339f"
+    static let vmlxRevision = "61a4b20d4ad01b10466e8fc94c50402a9f994430"
     static let revision =
         "\(modelRevision):weights-bf16:compute-f32:dcb6431bfa6e817fe100a2b0521360cec3383963b03fa966b685de18ca310d31:vmlx-\(vmlxRevision)"
     static let dimensions = 768

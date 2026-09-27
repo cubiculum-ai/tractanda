@@ -26,6 +26,8 @@ struct FileMetadata: Equatable, Sendable {
     let size: UInt64
     let inode: UInt64
     let device: UInt64
+    let modificationSeconds: Int64
+    let modificationNanoseconds: Int32
 
     var type: FileType {
         switch mode & 0o170000 {
@@ -48,10 +50,17 @@ struct FileMetadata: Equatable, Sendable {
         var size: UInt64 = 0
         var inode: UInt64 = 0
         var device: UInt64 = 0
+        var modificationSeconds: Int64 = 0
+        var modificationNanoseconds: Int32 = 0
         let result = path.withCString {
-            tractanda_file_metadata($0, &mode, &uid, &gid, &size, &inode, &device)
+            tractanda_file_metadata(
+                $0, &mode, &uid, &gid, &size, &inode, &device,
+                &modificationSeconds, &modificationNanoseconds)
         }
         guard result == 0 else { throw FileMetadataError.posix(errno) }
-        return Self(mode: mode, uid: uid, gid: gid, size: size, inode: inode, device: device)
+        return Self(
+            mode: mode, uid: uid, gid: gid, size: size, inode: inode, device: device,
+            modificationSeconds: modificationSeconds,
+            modificationNanoseconds: modificationNanoseconds)
     }
 }

@@ -18,7 +18,11 @@ import MLX
             switch arguments[offset] {
             case "--model":
                 guard modelDirectory == nil else { throw usageError() }
-                modelDirectory = URL(fileURLWithPath: arguments[offset + 1], isDirectory: true)
+                // Resolve the selected directory once, including the installer's `current` link.
+                // Asset entries themselves must still be regular, hash-verified files.
+                modelDirectory =
+                    URL(fileURLWithPath: arguments[offset + 1], isDirectory: true)
+                    .resolvingSymlinksInPath().standardizedFileURL
             case "--port":
                 guard let value = Int(arguments[offset + 1]), (1024...65535).contains(value) else {
                     throw usageError()

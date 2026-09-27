@@ -69,7 +69,7 @@ class ReleaseTests(unittest.TestCase):
             weights.write_bytes(b'fixture weights')
             profile = dict(alias='tractanda-granite-embedding-311m-multilingual-r2-vmlx-fp32-44399559',
                 modelRevision='44399559930365213510b1ee2eb15ded83374f0e',
-                vmlxRevision='b7a2b97efc2d8ed44ddf3c4b7af25766b372339f', dimensions=768,
+                vmlxRevision='61a4b20d4ad01b10466e8fc94c50402a9f994430', dimensions=768,
                 pooling='cls', normalization='l2', revision='fixture',
                 assets={'model.safetensors': packager.digest(weights)})
             with patch.object(packager, 'run', return_value=json.dumps(profile)):

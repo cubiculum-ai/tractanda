@@ -41,6 +41,50 @@ public final class ItemClient {
         return try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
     }
 
+    /// Runs a query and its matching get serially in one native request.
+    /// The service resolves `#ids` from the successful query result under the same caller context.
+    public func queryThenGet(arguments: [String: Any]) throws -> (query: Data, get: Data) {
+        let envelope: [String: Any] = [
+            "using": [ItemService.capability],
+            "methodCalls": [
+                ["TractandaItem/query", arguments, "query"],
+                [
+                    "TractandaItem/get",
+                    ["#ids": ["resultOf": "query", "name": "TractandaItem/query", "path": "/ids"]],
+                    "get",
+                ],
+            ],
+        ]
+        let response = try transport(JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys]))
+        guard let decoded = try JSONSerialization.jsonObject(with: response) as? [String: Any] else {
+            throw TractandaError("protocolError", "Invalid native response.")
+        }
+        if let code = decoded["code"] as? String {
+            throw TractandaError(code, decoded["message"] as? String ?? "")
+        }
+        guard let calls = decoded["methodResponses"] as? [[Any]], calls.count == 2 else {
+            throw TractandaError("protocolError", "Missing paired query/get response.")
+        }
+        func result(_ call: [Any], method: String, callID: String) throws -> Data {
+            guard call.count == 3, call[2] as? String == callID,
+                let value = call[1] as? [String: Any]
+            else { throw TractandaError("protocolError", "Malformed paired query/get response.") }
+            if call[0] as? String == "error" {
+                throw TractandaError(
+                    value["type"] as? String ?? "error", value["description"] as? String ?? "")
+            }
+            guard call[0] as? String == method else {
+                throw TractandaError("protocolError", "Unexpected paired query/get result.")
+            }
+            return try JSONSerialization.data(
+                withJSONObject: value, options: [.sortedKeys])
+        }
+        return (
+            try result(calls[0], method: "TractandaItem/query", callID: "query"),
+            try result(calls[1], method: "TractandaItem/get", callID: "get")
+        )
+    }
+
     public func revision(for itemID: String) throws -> Revision {
         struct Result: Decodable { let list: [Revision] }
         let result = try JSON.decode(Result.self, call("TractandaItem/get", arguments: ["ids": [itemID]]))

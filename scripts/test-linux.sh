@@ -11,7 +11,7 @@ else
   export_root=$(mktemp -d "${TMPDIR:-/private/tmp}/tractanda-linux-XXXXXXXX")
 fi
 container_bin=${TRACTANDA_CONTAINER_BIN:-/usr/local/bin/container}
-image_ref=tractanda-test:swift6.4-snapshot-20260908-bookworm
+image_ref=tractanda-test:swift6.4.0-bookworm
 test_uid=${TRACTANDA_TEST_UID:-$(id -u)}
 test_gid=${TRACTANDA_TEST_GID:-$(id -g)}
 category_only=${TRACTANDA_LINUX_CATEGORY_ONLY:-0}

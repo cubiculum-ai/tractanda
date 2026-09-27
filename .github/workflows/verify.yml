@@ -16,9 +16,9 @@ jobs:
   linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
-    # Same multi-platform Swift 6.4 Debian image as containers/test/Containerfile.
+    # Official Swift 6.4.0 Debian 12 release image; supports amd64 and arm64.
     container:
-      image: docker.io/swiftlang/swift@sha256:8554bb765eac670fb9900a933bd5a695b949bbaabbd388b7a6ba4ad943647efe
+      image: docker.io/library/swift@sha256:4f4120422396f62788ef459c75fe1a47f8746471c224fdc2a7dd8dd2e07f7efd
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:

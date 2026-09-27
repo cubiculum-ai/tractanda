@@ -6,8 +6,8 @@ let package = Package(
     platforms: [.macOS(.v14)],
     dependencies: [
         .package(
-            url: "https://github.com/rcfa/vmlx-swift.git",
-            revision: "b7a2b97efc2d8ed44ddf3c4b7af25766b372339f"),
+            url: "https://github.com/osaurus-ai/vmlx-swift.git",
+            revision: "61a4b20d4ad01b10466e8fc94c50402a9f994430"),
         .package(url: "https://github.com/apple/swift-nio.git", exact: "2.101.3"),
         .package(url: "https://github.com/apple/swift-crypto.git", exact: "4.5.2"),
     ],

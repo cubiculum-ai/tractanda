@@ -101,7 +101,7 @@ struct CategoryEvaluator {
     let rules: [String: SpotlightQuery]
     let windows: [String: CategoryTimeWindow]
     let calendars: [String: Calendar]
-    let store: ItemStore?
+    let categoryOverrides: CategoryOverrideIndex?
     let date: Date
     let exclusions: [String: [String]]
 
@@ -119,7 +119,7 @@ struct CategoryEvaluator {
         calendars = try hierarchy.items.mapValues {
             try QueryCalendar.make(timeZone: $0.fields["selection"]?.map?["timeZone"]?.string ?? "UTC")
         }
-        self.store = store
+        categoryOverrides = store?.categoryOverrideIndex()
         self.date = date
     }
 
@@ -130,7 +130,7 @@ struct CategoryEvaluator {
         guard let rule = rules[categoryID] else {
             throw TractandaError("notCategory", "This item has no available selection criteria.")
         }
-        let decision = try store?.categoryOverride(for: item, categoryID: categoryID)
+        let decision = try categoryOverrides?.decision(for: item, categoryID: categoryID)
         let override = decision?.decision ?? item.fields["categoryOverrides"]?.map?[categoryID]?.string
         let included: Bool
         let reason: String

@@ -22,7 +22,7 @@ public struct EmbeddingPayload: Codable, Equatable, Sendable {
         modelDirectory: "models/granite-embedding-311m-multilingual-r2",
         model: "tractanda-granite-embedding-311m-multilingual-r2-vmlx-fp32-44399559",
         modelRevision:
-            "44399559930365213510b1ee2eb15ded83374f0e:weights-bf16:compute-f32:dcb6431bfa6e817fe100a2b0521360cec3383963b03fa966b685de18ca310d31:vmlx-b7a2b97efc2d8ed44ddf3c4b7af25766b372339f",
+            "44399559930365213510b1ee2eb15ded83374f0e:weights-bf16:compute-f32:dcb6431bfa6e817fe100a2b0521360cec3383963b03fa966b685de18ca310d31:vmlx-61a4b20d4ad01b10466e8fc94c50402a9f994430",
         dimensions: 768)
 
     func validate(files: [BundleManifest.File]) throws {

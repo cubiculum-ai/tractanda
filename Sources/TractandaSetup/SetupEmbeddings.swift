@@ -2,8 +2,8 @@ import Crypto
 import Foundation
 
 /// The bounded operational configuration that a managed installer may recognize and restore.
-/// It is deliberately separate from canonical items and is only used for the one Qwen-to-Granite
-/// migration guarded by the receipt configuration ID and the native service's compare-and-swap.
+/// It is deliberately separate from canonical items and is only used for an installer-owned bundled
+/// embedding transition guarded by the receipt configuration ID and the native service's compare-and-swap.
 struct BundledSemanticConfiguration: Codable, Equatable {
     var formatVersion: Int
     var configurationID: String
@@ -156,10 +156,52 @@ extension SetupEngine {
             inputEncoding: "item-text-utf8-v2")
     }
 
-    func isInstallerOwnedLegacyConfiguration(
+    func isSupportedBundledEmbeddingTransition(
+        from previous: EmbeddingPayload, to candidate: EmbeddingPayload?
+    ) -> Bool {
+        guard candidate == .granite else { return false }
+        return knownBundledEmbeddingRecipe(for: previous) != nil
+    }
+
+    private func knownBundledEmbeddingRecipe(for payload: EmbeddingPayload)
+        -> (documentPrefix: String, queryPrefix: String, pooling: String)?
+    {
+        if payload == .legacyQwen {
+            return (
+                "", "Instruct: Given a Tractanda retrieval query, retrieve relevant item passages\nQuery:",
+                "last"
+            )
+        }
+        guard payload.backend == EmbeddingPayload.granite.backend,
+            payload.modelDirectory == EmbeddingPayload.granite.modelDirectory,
+            payload.model == EmbeddingPayload.granite.model,
+            payload.dimensions == EmbeddingPayload.granite.dimensions
+        else { return nil }
+        return ("", "", "cls")
+    }
+
+    private func receiptConfiguration(for receipt: InstallationReceipt, payload: EmbeddingPayload)
+        -> BundledSemanticConfiguration?
+    {
+        guard let recipe = knownBundledEmbeddingRecipe(for: payload) else { return nil }
+        return BundledSemanticConfiguration(
+            formatVersion: 2, configurationID: receipt.embeddingConfigurationID,
+            operationID: payload == .legacyQwen
+                ? "setup-embedding-v1-" + receipt.instance
+                : "setup-embedding-v2-" + receipt.instance,
+            endpoint: "http://127.0.0.1:\(receipt.port + 1)/v1/embeddings",
+            model: payload.model, modelRevision: payload.modelRevision, dimensions: payload.dimensions,
+            documentPrefix: recipe.documentPrefix, queryPrefix: recipe.queryPrefix, chunkBytes: 384,
+            overlapBytes: 64, pooling: recipe.pooling, normalization: "l2", inputEncoding: "item-text-utf8-v2"
+        )
+    }
+
+    func isInstallerOwnedBundledConfiguration(
         _ current: BundledSemanticConfiguration, receipt: InstallationReceipt
     ) -> Bool {
-        let expected = legacyConfiguration(for: receipt)
+        guard let payload = receipt.embedding,
+            let expected = receiptConfiguration(for: receipt, payload: payload)
+        else { return false }
         return current.formatVersion == expected.formatVersion
             && current.configurationID == expected.configurationID
             && current.endpoint == expected.endpoint
@@ -180,7 +222,7 @@ extension SetupEngine {
     {
         BundledSemanticConfiguration(
             formatVersion: 2, configurationID: receipt.embeddingConfigurationID,
-            operationID: "setup-embedding-v2-" + receipt.instance,
+            operationID: "setup-embedding-v2-" + receipt.instance + "-" + receipt.embeddingConfigurationID,
             endpoint: "http://127.0.0.1:\(receipt.port + 1)/v1/embeddings",
             model: payload.model, modelRevision: payload.modelRevision, dimensions: payload.dimensions,
             documentPrefix: "", queryPrefix: "", chunkBytes: 384, overlapBytes: 64,
@@ -188,9 +230,9 @@ extension SetupEngine {
     }
 
     func prepareBundledEmbeddingUpgrade(_ receipt: inout InstallationReceipt) throws {
-        guard receipt.embedding == .legacyQwen, receipt.embeddingPreviousConfiguration == nil,
+        guard receipt.embeddingPreviousConfiguration == nil,
             let current = try semanticConfigurationSnapshot(receipt),
-            isInstallerOwnedLegacyConfiguration(current, receipt: receipt)
+            isInstallerOwnedBundledConfiguration(current, receipt: receipt)
         else {
             throw SetupError("A different semantic configuration exists; the installer did not replace it.")
         }
@@ -216,6 +258,14 @@ extension SetupEngine {
         let expected = receipt.embeddingPreviousConfiguration?.configurationID
         let current = try semanticCall(
             receipt.socket, roots.platform.serviceUser, "TractandaSemantic/status", [:])
+        if current["enabled"] as? Bool == true,
+            current["configurationID"] as? String == receipt.embeddingConfigurationID,
+            try semanticConfigurationSnapshot(receipt) == candidate
+        {
+            receipt.embeddingConfigured = true
+            try writeReceipt(receipt)
+            return
+        }
         if current["enabled"] as? Bool == true,
             current["configurationID"] as? String != receipt.embeddingConfigurationID,
             current["configurationID"] as? String != expected

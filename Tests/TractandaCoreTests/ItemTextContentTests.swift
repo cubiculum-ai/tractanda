@@ -57,6 +57,87 @@ final class ItemTextContentTests: XCTestCase {
         }
     }
 
+    func testIndexRebuildMatchesEditedAndDeletedHeadsAndSavedViewTargets() throws {
+        try fixture { store in
+            let definition: ItemValue = .object([
+                "language": .text(SpotlightQuery.profile),
+                "expression": .text("classID == \"Note\""),
+            ])
+            func savedView() throws -> Revision {
+                try store.commit(
+                    CommitRequest(
+                        classID: "Item", changes: ["viewDefinition": definition],
+                        operationID: Identifier.make())
+                ).revision
+            }
+            var note = try store.commit(
+                CommitRequest(
+                    classID: "Note", changes: ["body": .text("before-rebuild-needle")],
+                    operationID: Identifier.make())
+            ).revision
+            let activeView = try savedView()
+            var removedView = try savedView()
+            XCTAssertTrue(try store.savedViewIndexIsReady(activeView.itemID))
+            XCTAssertTrue(try store.savedViewIndexIsReady(removedView.itemID))
+
+            note = try store.commit(
+                CommitRequest(
+                    action: .revise, itemID: note.itemID, expectedRevisionID: note.revisionID,
+                    changes: ["body": .text("after-edit-needle")], operationID: Identifier.make())
+            ).revision
+            XCTAssertTrue(try store.candidates(text: "before-rebuild-needle").isEmpty)
+            XCTAssertEqual(
+                try store.candidates(text: "after-edit-needle").map(\.revisionID), [note.revisionID])
+            let editedTextRow = try XCTUnwrap(store.ftsTextRow(for: note.itemID))
+            XCTAssertEqual(editedTextRow.revisionID, note.revisionID)
+            XCTAssertEqual(editedTextRow.body, "after-edit-needle")
+
+            removedView = try store.commit(
+                CommitRequest(
+                    action: .revise, itemID: removedView.itemID, expectedRevisionID: removedView.revisionID,
+                    changes: ["isDeleted": .boolean(true)], operationID: Identifier.make())
+            ).revision
+            note = try store.commit(
+                CommitRequest(
+                    action: .revise, itemID: note.itemID, expectedRevisionID: note.revisionID,
+                    changes: ["isDeleted": .boolean(true)], operationID: Identifier.make())
+            ).revision
+            XCTAssertTrue(try store.candidates(text: "after-edit-needle").isEmpty)
+            let deletedTextRow = try XCTUnwrap(store.ftsTextRow(for: note.itemID))
+            XCTAssertEqual(deletedTextRow.revisionID, note.revisionID)
+            XCTAssertEqual(deletedTextRow.body, "after-edit-needle")
+            XCTAssertTrue(try store.savedViewIndexIsReady(activeView.itemID))
+            XCTAssertFalse(try store.savedViewIndexIsReady(removedView.itemID))
+
+            let service = ItemService(store: store)
+            let client = ItemClient(transport: { service.handle($0, peerUID: store.ownerUID) })
+            struct Page: Decodable {
+                let ids: [String]
+                let total: Int
+            }
+            func activePage() throws -> Page {
+                try JSON.decode(
+                    Page.self,
+                    client.call(
+                        "TractandaItem/query", arguments: ["viewID": activeView.itemID, "limit": 10]))
+            }
+            XCTAssertEqual(try activePage().total, 0)
+
+            try FileManager.default.removeItem(at: store.root.appendingPathComponent("index/items.sqlite"))
+            try store.rebuildIndex()
+            XCTAssertTrue(try store.savedViewIndexIsReady(activeView.itemID))
+            XCTAssertFalse(try store.savedViewIndexIsReady(removedView.itemID))
+            XCTAssertTrue(try store.candidates(text: "before-rebuild-needle").isEmpty)
+            XCTAssertTrue(try store.candidates(text: "after-edit-needle").isEmpty)
+            let rebuiltTextRow = try XCTUnwrap(store.ftsTextRow(for: note.itemID))
+            XCTAssertEqual(rebuiltTextRow.revisionID, deletedTextRow.revisionID)
+            XCTAssertEqual(rebuiltTextRow.body, deletedTextRow.body)
+            let rebuiltPage = try activePage()
+            XCTAssertEqual(rebuiltPage.ids, [])
+            XCTAssertEqual(rebuiltPage.total, 0)
+        }
+    }
+
     private func fixture(_ body: (ItemStore) throws -> Void) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
             "item-text-\(Identifier.make())")
