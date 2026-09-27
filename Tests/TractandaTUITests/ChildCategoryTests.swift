@@ -79,11 +79,14 @@ final class ChildCategoryTests: XCTestCase {
                     operationID: Identifier.make()))
         }
         var calls: [(String, [String: Any])] = []
+        var envelopes: [[(String, [String: Any], String)]] = []
         let client = ItemClient(transport: { data in
             let request = try JSONSerialization.jsonObject(with: data) as! [String: Any]
-            for call in request["methodCalls"] as! [[Any]] {
-                calls.append((call[0] as! String, call[1] as! [String: Any]))
+            let methods = (request["methodCalls"] as! [[Any]]).map { call in
+                (call[0] as! String, call[1] as! [String: Any], call[2] as! String)
             }
+            envelopes.append(methods)
+            calls.append(contentsOf: methods.map { ($0.0, $0.1) })
             return f.service.handle(data, peerUID: f.store.ownerUID)
         })
         let workspace = Workspace(client: client)
@@ -102,11 +105,20 @@ final class ChildCategoryTests: XCTestCase {
         XCTAssertNil(workspace.categoryNavigation)
         XCTAssertEqual(calls.filter { $0.0 == "TractandaItem/query" }.count, 1)
         XCTAssertFalse(calls.contains { $0.1["expression"] as? String == "selection == *" })
+        let firstPageEnvelope = try XCTUnwrap(
+            envelopes.first {
+                $0.first?.0 == "TractandaItem/query"
+            })
+        XCTAssertEqual(firstPageEnvelope.map(\.0), ["TractandaItem/query", "TractandaItem/get"])
+        XCTAssertEqual(firstPageEnvelope.map(\.2), ["query", "get"])
         XCTAssertEqual(
-            calls.first { $0.0 == "TractandaItem/get" }?.1["ids"] as? [String], Array(expected.prefix(64)))
+            firstPageEnvelope[1].1["#ids"] as? [String: String],
+            ["resultOf": "query", "name": "TractandaItem/query", "path": "/ids"])
+        XCTAssertNil(firstPageEnvelope[1].1["ids"])
         try workspace.loadPage(in: 0, forward: true)
         XCTAssertEqual(workspace.items.map(\.itemID), Array(expected.dropFirst(64)))
         XCTAssertEqual(workspace.sections[0].position, 64)
+        XCTAssertEqual(calls.filter { $0.0 == "TractandaItem/query" }.count, 2)
         XCTAssertFalse(calls.contains { $0.1["expression"] as? String == "selection == *" })
         XCTAssertEqual(try workspace.childCategories(at: nil, expectedPath: []).count, 1)
         XCTAssertTrue(calls.contains { $0.1["expression"] as? String == "selection == *" })

@@ -319,7 +319,7 @@ final class Workspace {
                             }
                             break
                         }
-                        if pageIDs.count >= total { break }
+                        if start + pageIDs.count >= total { break }
                     }
                     guard firstPage != nil, let pageState else {
                         throw TractandaError("protocolError", "Missing section query result.")
