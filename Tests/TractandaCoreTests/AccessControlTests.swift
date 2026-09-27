@@ -15,6 +15,7 @@ final class AccessControlTests: XCTestCase {
         let bob: UInt32 = 50002
         let agent: UInt32 = 50003
         var users: [UInt32: AccountIdentity] = [:]
+        var nameMappings: [String: UInt32] = [:]
         let groups: [String: UInt32] = ["staff": 70001, "readers": 70002, "writers": 70003]
 
         init() {
@@ -28,6 +29,7 @@ final class AccessControlTests: XCTestCase {
             return user
         }
         func user(named name: String) throws -> AccountIdentity {
+            if let uid = nameMappings[name], let user = users[uid] { return user }
             guard let user = users.values.first(where: { $0.name == name }) else {
                 throw TractandaError("unresolvedPrincipal", "Unknown user")
             }
@@ -146,6 +148,94 @@ final class AccessControlTests: XCTestCase {
             _ = try ItemPermissions(permissions(mode: 0o644, acl: ["users": .object(["bob": .integer(4)])]))
         }
         assertCode("invalidPermissions") { _ = try ItemPermissions(permissions(mode: 0o755)) }
+    }
+
+    func testCoveredVisibleStateIgnoresHiddenCreateAndDetectsLaterPrincipalRemap() throws {
+        try fixture { store, accounts in
+            let initial = try store.withAccess(forUID: accounts.alice) { store.state }
+            let bobItem = try create(store, uid: accounts.bob)
+            let afterPrivateCreate = try store.withAccess(forUID: accounts.alice) { store.state }
+            XCTAssertEqual(afterPrivateCreate, initial, "A private create must not perturb Alice's state.")
+            XCTAssertEqual(store.stateFullHeadScanCountForTesting, 0)
+
+            accounts.nameMappings["future"] = accounts.agent
+            let acl = ItemValue.object([
+                "profile": .text(ItemPermissions.profile), "owner": .text("bob"),
+                "group": .text("staff"), "mode": .integer(0o640),
+                "acl": .object([
+                    "mask": .integer(4), "owningGroup": .integer(0),
+                    "users": .object(["future": .integer(4)]),
+                ]),
+            ])
+            _ = try edit(store, uid: accounts.bob, base: bobItem, fields: ["permissions": acl])
+            let afterNewHiddenName = try store.withAccess(forUID: accounts.alice) { store.state }
+            XCTAssertEqual(
+                afterNewHiddenName, afterPrivateCreate,
+                "Adding an invisible principal name records its baseline without changing state.")
+
+            accounts.nameMappings["future"] = accounts.alice
+            _ = try create(store, uid: accounts.bob)
+            let afterRemap = try store.withAccess(forUID: accounts.alice) { store.state }
+            XCTAssertNotEqual(
+                afterRemap, afterNewHiddenName,
+                "A name remapped before the next request can make an old head visible.")
+            accounts.nameMappings["future"] = accounts.agent
+            let afterRevoke = try store.withAccess(forUID: accounts.alice) { store.state }
+            XCTAssertNotEqual(
+                afterRevoke, afterRemap,
+                "A current named-user revocation must invalidate the visible state too.")
+            XCTAssertEqual(store.stateFullHeadScanCountForTesting, 0)
+        }
+    }
+
+    func testPublicPersonalOverlayOwnerRemapRotatesVisibleState() throws {
+        try fixture { store, accounts in
+            accounts.nameMappings["overlayOwner"] = accounts.alice
+            let category = try create(
+                store, uid: accounts.alice,
+                fields: [
+                    "permissions": permissions(mode: 0o644),
+                    "selection": .object([
+                        "language": .text(SpotlightQuery.profile),
+                        "expression": .text("subject == \"never\""),
+                    ]),
+                ])
+            let target = try create(
+                store, uid: accounts.alice,
+                fields: ["permissions": permissions(mode: 0o644), "subject": .text("shared")])
+            let overlay = try create(
+                store, uid: accounts.alice,
+                fields: [
+                    "permissions": permissions(owner: "overlayOwner", mode: 0o644),
+                    "target": .reference(ItemReference(target.itemID)),
+                    "personalOverrides": .object([category.itemID: .text("include")]),
+                ], classID: "PersonalStateItem")
+            let aliceBefore = try store.withAccess(forUID: accounts.alice) { store.state }
+            let bobBefore = try store.withAccess(forUID: accounts.bob) { store.state }
+            try store.withAccess(forUID: accounts.alice) {
+                XCTAssertNotNil(try store.get(overlay.itemID))
+                XCTAssertEqual(
+                    try Categories.query(store: store, categoryPath: [category.itemID]).map(\.itemID),
+                    [target.itemID])
+            }
+            try store.withAccess(forUID: accounts.bob) {
+                XCTAssertNotNil(try store.get(overlay.itemID))
+                XCTAssertTrue(try Categories.query(store: store, categoryPath: [category.itemID]).isEmpty)
+            }
+
+            accounts.nameMappings["overlayOwner"] = accounts.bob
+            XCTAssertNotEqual(try store.withAccess(forUID: accounts.alice) { store.state }, aliceBefore)
+            XCTAssertNotEqual(try store.withAccess(forUID: accounts.bob) { store.state }, bobBefore)
+            try store.withAccess(forUID: accounts.alice) {
+                XCTAssertNotNil(try store.get(overlay.itemID), "The public overlay remains readable.")
+                XCTAssertTrue(try Categories.query(store: store, categoryPath: [category.itemID]).isEmpty)
+            }
+            try store.withAccess(forUID: accounts.bob) {
+                XCTAssertEqual(
+                    try Categories.query(store: store, categoryPath: [category.itemID]).map(\.itemID),
+                    [target.itemID])
+            }
+        }
     }
 
     func testImmutableReadSnapshotAppliesFreshCallerPermissionsBeforeCapture() throws {
@@ -434,6 +524,88 @@ final class AccessControlTests: XCTestCase {
         }
     }
 
+    func testIndexedACLPrecedenceAliasesGroupsAndSQLBindOrder() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "tractanda-acl-index-\(Identifier.make())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let accounts = Accounts()
+        accounts.users[accounts.bob] = AccountIdentity(
+            uid: accounts.bob, name: "bob", primaryGroupName: "staff", groupIDs: [70001, 70002])
+        var store: ItemStore? = try ItemStore(root: root, accounts: accounts)
+        _ = try store!.configureAccess(config(["bobby": .text("bob")]), operationID: "configure-acl-index")
+        func acl(_ mode: Int64, _ entries: [String: ItemValue]) -> ItemValue {
+            permissions(mode: mode, acl: entries)
+        }
+        _ = try create(
+            store!, uid: accounts.alice,
+            fields: [
+                "subject": .text("needle"),
+                "permissions": acl(
+                    0o640,
+                    [
+                        "mask": .integer(4), "owningGroup": .integer(0),
+                        "users": .object(["bobby": .integer(4)]),
+                    ]),
+            ])
+        _ = try create(
+            store!, uid: accounts.alice,
+            fields: [
+                "subject": .text("needle"),
+                "permissions": acl(
+                    0o640,
+                    [
+                        "mask": .integer(4), "owningGroup": .integer(0),
+                        "groups": .object(["readers": .integer(4)]),
+                    ]),
+            ])
+        _ = try create(
+            store!, uid: accounts.alice,
+            fields: [
+                "subject": .text("needle"),
+                "permissions": acl(
+                    0o644,
+                    [
+                        "mask": .integer(4), "owningGroup": .integer(0),
+                    ]),
+            ])
+        _ = try create(
+            store!, uid: accounts.alice,
+            fields: [
+                "subject": .text("needle"), "permissions": permissions(mode: 0o604),
+            ])
+
+        var service: ItemService? = ItemService(store: store!)
+        let args: [String: Any] = [
+            "text": "needle", "expression": "classID == \"Item\"", "limit": 20,
+        ]
+        let before = store!.aclSwiftReadCheckCount
+        let withGroups = try response(service!, uid: accounts.bob, method: "TractandaItem/query", args: args)
+        XCTAssertEqual(withGroups["total"] as? Int, 2)
+        XCTAssertLessThanOrEqual(store!.aclSwiftReadCheckCount - before, 2)
+
+        accounts.users[accounts.bob] = AccountIdentity(
+            uid: accounts.bob, name: "bob", primaryGroupName: "staff", groupIDs: [])
+        let withoutGroups = try response(
+            service!, uid: accounts.bob, method: "TractandaItem/query", args: args)
+        XCTAssertEqual(withoutGroups["total"] as? Int, 3)
+        try store!.withAccess(forUID: accounts.bob) {
+            let nestedAdmin = try response(
+                service!, uid: getuid(), method: "TractandaItem/query", args: args)
+            XCTAssertEqual(nestedAdmin["total"] as? Int, 4)
+            let resumed = try Categories.page(
+                store: store!, expression: "classID == \"Item\"", text: "needle",
+                categoryPath: [], excludedCategoryIDs: [], sort: [], position: 0, limit: 20,
+                at: Date(), timeZone: "UTC")
+            XCTAssertEqual(resumed.total, 3)
+        }
+        service = nil
+        store = nil
+        store = try ItemStore(root: root, accounts: accounts)
+        let reopened = try response(
+            ItemService(store: store!), uid: accounts.bob, method: "TractandaItem/query", args: args)
+        XCTAssertEqual(reopened["total"] as? Int, 3)
+    }
+
     func testIndexedSavedViewRespectsRevocationEditsAndRebuild() throws {
         try fixture { store, accounts in
             let older = try create(
@@ -482,10 +654,16 @@ final class AccessControlTests: XCTestCase {
         try fixture { store, accounts in
             let privateItem = try create(
                 store, uid: accounts.alice,
-                fields: ["permissions": permissions(mode: 0o600), "subject": .text("private")])
+                fields: [
+                    "permissions": permissions(mode: 0o600), "subject": .text("private"),
+                    "candidateMarker": .boolean(true),
+                ])
             let sharedItem = try create(
                 store, uid: accounts.alice,
-                fields: ["permissions": permissions(mode: 0o644), "subject": .text("shared")])
+                fields: [
+                    "permissions": permissions(mode: 0o644), "subject": .text("shared"),
+                    "candidateMarker": .boolean(true),
+                ])
             guard case .date(let createdTimestamp)? = privateItem.fields["createdAt"] else {
                 return XCTFail("Created time must be a typed date.")
             }
@@ -506,6 +684,10 @@ final class AccessControlTests: XCTestCase {
 
             try assertParity(
                 uid: accounts.bob, query: expression, expectedTotal: 1)
+            try assertParity(
+                uid: accounts.bob, query: "candidateMarker == true", expectedTotal: 1)
+            try assertParity(
+                uid: accounts.alice, query: "candidateMarker == true", expectedTotal: 2)
             try assertParity(
                 uid: accounts.bob, query: "itemID == \"\(privateItem.itemID)\"", expectedTotal: 0)
             try assertParity(

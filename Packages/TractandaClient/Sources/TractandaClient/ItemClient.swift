@@ -14,10 +14,14 @@ public struct ItemQuery: Codable, Equatable, Sendable {
     public var position: Int
     public var limit: Int
     public var sort: [ItemSort]
+    public var cursor: String?
+    public var at: String?
+    public var timeZone: String?
 
     public init(
         expression: String? = nil, text: String? = nil, categoryPath: [String] = [],
-        position: Int = 0, limit: Int = 64, sort: [ItemSort] = [], excludedCategoryIDs: [String] = []
+        position: Int = 0, limit: Int = 64, sort: [ItemSort] = [], excludedCategoryIDs: [String] = [],
+        cursor: String? = nil, at: String? = nil, timeZone: String? = nil
     ) {
         self.expression = expression
         self.text = text
@@ -26,6 +30,28 @@ public struct ItemQuery: Codable, Equatable, Sendable {
         self.position = position
         self.limit = limit
         self.sort = sort
+        self.cursor = cursor
+        self.at = at
+        self.timeZone = timeZone
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case expression, text, categoryPath, excludedCategoryIDs, position, limit, sort, cursor, at, timeZone
+    }
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(expression, forKey: .expression)
+        try container.encodeIfPresent(text, forKey: .text)
+        if !categoryPath.isEmpty { try container.encode(categoryPath, forKey: .categoryPath) }
+        if !excludedCategoryIDs.isEmpty {
+            try container.encode(excludedCategoryIDs, forKey: .excludedCategoryIDs)
+        }
+        if cursor == nil { try container.encode(position, forKey: .position) }
+        try container.encode(limit, forKey: .limit)
+        if !sort.isEmpty { try container.encode(sort, forKey: .sort) }
+        try container.encodeIfPresent(cursor, forKey: .cursor)
+        try container.encodeIfPresent(at, forKey: .at)
+        try container.encodeIfPresent(timeZone, forKey: .timeZone)
     }
 }
 
@@ -34,6 +60,8 @@ public struct ItemPage: Sendable, Equatable {
     public let position: Int
     public let total: Int
     public let state: String
+    public let nextCursor: String?
+    public let previousCursor: String?
     public var hasNextPage: Bool { position + items.count < total }
 }
 
@@ -92,7 +120,8 @@ public struct ItemClient: Sendable {
         try ItemSort.validate(query.sort)
         let page: QueryResult = try await call(
             "TractandaItem/query", arguments: query, returning: QueryResult.self)
-        guard page.position == query.position, page.total >= 0, !page.queryState.isEmpty,
+        guard query.cursor != nil || page.position == query.position, page.total >= 0,
+            !page.queryState.isEmpty,
             page.ids.count <= query.limit, Set(page.ids).count == page.ids.count,
             page.ids.isEmpty || (page.position <= page.total && page.ids.count <= page.total - page.position),
             !page.ids.isEmpty || page.position >= page.total
@@ -111,7 +140,7 @@ public struct ItemClient: Sendable {
         let byID = Dictionary(uniqueKeysWithValues: result.list.map { ($0.itemID, $0) })
         return ItemPage(
             items: page.ids.compactMap { byID[$0] }, position: page.position, total: page.total,
-            state: page.queryState)
+            state: page.queryState, nextCursor: page.nextCursor, previousCursor: page.previousCursor)
     }
 
     public func commit(_ request: CommitRequest) async throws -> CommitResult {
@@ -134,6 +163,8 @@ private struct QueryResult: Decodable, Sendable {
     let position: Int
     let total: Int
     let queryState: String
+    let nextCursor: String?
+    let previousCursor: String?
 }
 
 private struct MethodRequest<Arguments: Encodable>: Encodable {

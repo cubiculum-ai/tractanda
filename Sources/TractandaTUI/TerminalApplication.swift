@@ -2816,7 +2816,7 @@ public final class TerminalApplication {
                 ? "No readable categories are available." : "This category has no readable child categories."
             return
         }
-        let parent = index.flatMap { workspace.categoryNavigation?.items[expectedPath[$0]] }
+        let parent = index.flatMap { workspace.categoryNavigation?.sourceRevisions[expectedPath[$0]] }
         menu = nil
         menuContext = .browser
         var popup = CategoryChildrenMenu(
@@ -2852,14 +2852,14 @@ public final class TerminalApplication {
         let hierarchy = try CategoryHierarchy(workspace.categories())
         let parentID = index.flatMap { expectedPath.indices.contains($0) ? expectedPath[$0] : nil }
         let ids = parentID.map { hierarchy.children[$0] ?? [] } ?? hierarchy.roots
-        let children = ids.compactMap { hierarchy.items[$0] }
+        let children = ids.compactMap { hierarchy.sourceRevisions[$0] }
         guard !children.isEmpty else {
             status =
                 parentID == nil
                 ? "No readable categories are available." : "This category has no readable child categories."
             return
         }
-        let parent = parentID.flatMap { hierarchy.items[$0] }
+        let parent = parentID.flatMap { hierarchy.sourceRevisions[$0] }
         var popup = CategoryChildrenMenu(
             parentIndex: index, path: expectedPath, parent: parent, children: children, anchorColumn: anchor)
         popup.index = children.firstIndex { $0.itemID == popup.activeChildID } ?? 0

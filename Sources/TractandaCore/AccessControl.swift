@@ -221,6 +221,7 @@ final class PrincipalResolver {
     let configuration: AccessConfiguration?
     private var users: [String: UInt32] = [:]
     private var groups: [String: UInt32] = [:]
+    var cachedPrincipalCount: Int { users.count + groups.count }
 
     init(directory: any AccountDirectory, configuration: AccessConfiguration?) {
         self.directory = directory

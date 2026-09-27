@@ -72,23 +72,25 @@ public final class KanbanRepository {
     private static func descendants(
         of rootID: String, hierarchy: CategoryHierarchy, includeRoot: Bool = true
     ) -> [(id: String, path: [String])] {
-        guard hierarchy.items[rootID] != nil else { return [] }
+        guard hierarchy.sourceRevisions[rootID] != nil else { return [] }
         var results: [(String, [String])] = []
         var seen: Set<String> = []
         func visit(_ id: String, _ path: [String]) {
             guard seen.insert(id).inserted else { return }
             results.append((id, path))
             for child in hierarchy.children[id] ?? [] {
-                let name = hierarchy.items[child]?.fields["subject"]?.string ?? "Category"
+                let name = hierarchy.sourceRevisions[child]?.fields["subject"]?.string ?? "Category"
                 visit(child, path + [name])
             }
         }
-        let rootName = hierarchy.items[rootID]?.fields["subject"]?.string ?? "Category"
+        let rootName = hierarchy.sourceRevisions[rootID]?.fields["subject"]?.string ?? "Category"
         if includeRoot {
             visit(rootID, [rootName])
         } else {
             for child in hierarchy.children[rootID] ?? [] {
-                visit(child, [rootName, hierarchy.items[child]?.fields["subject"]?.string ?? "Category"])
+                visit(
+                    child,
+                    [rootName, hierarchy.sourceRevisions[child]?.fields["subject"]?.string ?? "Category"])
             }
         }
         return results
@@ -98,7 +100,7 @@ public final class KanbanRepository {
     /// projects choice; descendants retain one stable readable display path.
     public func projects(projectRootID: String) throws -> [[String: JSONValue]] {
         let graph = try categories()
-        guard graph.hierarchy.items[projectRootID] != nil else {
+        guard graph.hierarchy.sourceRevisions[projectRootID] != nil else {
             throw TractandaError("projectRootUnavailable", "The project root category is unavailable.")
         }
         return Self.descendants(of: projectRootID, hierarchy: graph.hierarchy).map { entry in
@@ -119,15 +121,16 @@ public final class KanbanRepository {
         for _ in 0..<3 {
             do {
                 let graph = try categories()
-                guard graph.hierarchy.items[projectRootID] != nil,
-                    graph.hierarchy.items[statusRootID] != nil
+                guard graph.hierarchy.sourceRevisions[projectRootID] != nil,
+                    graph.hierarchy.sourceRevisions[statusRootID] != nil
                 else {
                     throw TractandaError(
                         "boardRootUnavailable", "A configured board category is unavailable.")
                 }
                 let projectIDs = Set(
                     Self.descendants(of: projectRootID, hierarchy: graph.hierarchy).map(\.id))
-                guard projectIDs.contains(projectID), let project = graph.hierarchy.items[projectID] else {
+                guard projectIDs.contains(projectID), let project = graph.hierarchy.sourceRevisions[projectID]
+                else {
                     throw TractandaError(
                         "projectUnavailable", "The selected project category is unavailable.")
                 }
@@ -142,7 +145,7 @@ public final class KanbanRepository {
                 let projectDefinition = project.fields["viewDefinition"].flatMap {
                     try? SavedViewDefinition($0)
                 }
-                let rootDefinition = graph.hierarchy.items[projectRootID]?.fields["viewDefinition"]
+                let rootDefinition = graph.hierarchy.sourceRevisions[projectRootID]?.fields["viewDefinition"]
                     .flatMap { try? SavedViewDefinition($0) }
                 let projectDefinitionFields = project.fields["viewDefinition"]?.map
                 let presentation =
@@ -177,7 +180,7 @@ public final class KanbanRepository {
                     }
                 }
                 let filterIDs = try Self.references(project.fields["filterCategories"])
-                    .filter { graph.hierarchy.items[$0] != nil }
+                    .filter { graph.hierarchy.sourceRevisions[$0] != nil }
                 var filters: [String: [String]] = [:]
                 for filterID in filterIDs {
                     for item in try client.revisions(query: ["categoryPath": [projectID, filterID]]) {
@@ -192,7 +195,7 @@ public final class KanbanRepository {
                     }
                     return id
                 }
-                let statusRoot = graph.hierarchy.items[statusRootID]!
+                let statusRoot = graph.hierarchy.sourceRevisions[statusRootID]!
                 let defaultID =
                     validStatusReference("defaultCategory")
                     ?? (statusRoot.fields["defaultCategory"]?.link?.itemID).flatMap {
@@ -204,7 +207,7 @@ public final class KanbanRepository {
                         statusIDs.contains($0) ? $0 : nil
                     }
                 let duplicateStatusNames = Dictionary(grouping: statuses) {
-                    graph.hierarchy.items[$0.id]?.fields["subject"]?.string ?? "Category"
+                    graph.hierarchy.sourceRevisions[$0.id]?.fields["subject"]?.string ?? "Category"
                 }.filter { $0.value.count > 1 }.map(\.key)
                 var document: [String: JSONValue] = [
                     "schemaVersion": .integer(3), "projectID": .string(projectID),
@@ -234,7 +237,7 @@ public final class KanbanRepository {
                         }),
                     "filters": .array(
                         filterIDs.compactMap { id in
-                            graph.hierarchy.items[id].map { category in
+                            graph.hierarchy.sourceRevisions[id].map { category in
                                 .object([
                                     "id": .string(id),
                                     "name": .string(category.fields["subject"]?.string ?? "Category"),

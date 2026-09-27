@@ -158,6 +158,9 @@ final class ExternalIndexDirectoryTests: XCTestCase {
 
         try FileManager.default.copyItem(at: moved, to: restored)
         store = try ItemStore(root: restored, indexDirectory: external)
+        // A copied/restored canonical tree needs an explicit derived-index rebuild:
+        // the sealed catalogue still records the source tree's file identities.
+        try store!.rebuildIndex()
         XCTAssertEqual(try store!.get(revision.itemID).revisionID, revision.revisionID)
         XCTAssertEqual(try Data(contentsOf: identityURL(restored)), identity)
         refreshed = try binding(external)

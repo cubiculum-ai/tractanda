@@ -6,6 +6,8 @@ struct ItemPage: Decodable {
     let position: Int
     let total: Int
     let queryState: String
+    let nextCursor: String?
+    let previousCursor: String?
 }
 
 struct WorkspaceSection {
@@ -13,6 +15,8 @@ struct WorkspaceSection {
     let items: [Revision]
     let position: Int
     let total: Int
+    let nextCursor: String?
+    let previousCursor: String?
 }
 struct WorkspaceRow {
     enum Content {
@@ -189,10 +193,13 @@ final class Workspace {
         categoryMembershipLabels = [:]
     }
 
-    private func queryArguments(category: Revision?, position: Int, limit: Int) -> [String: Any] {
+    private func queryArguments(
+        category: Revision?, position: Int, limit: Int, cursor: String? = nil
+    ) -> [String: Any] {
         var arguments: [String: Any] = [
-            "position": position, "limit": limit, "at": queryDate, "timeZone": "UTC",
+            "limit": limit, "at": queryDate, "timeZone": "UTC",
         ]
+        if let cursor { arguments["cursor"] = cursor } else { arguments["position"] = position }
         if let view {
             arguments["viewID"] = view.itemID
             if let category { arguments["sectionID"] = category.itemID }
@@ -201,7 +208,7 @@ final class Workspace {
             if !text.isEmpty { arguments["text"] = text }
             var path = categoryPath.map(\.itemID)
             if let category, !path.contains(category.itemID) { path.append(category.itemID) }
-            arguments["categoryPath"] = path
+            if !path.isEmpty { arguments["categoryPath"] = path }
             if !excludedCategoryIDs.isEmpty { arguments["excludedCategoryIDs"] = excludedCategoryIDs }
             if !sort.isEmpty {
                 arguments["sort"] = sort.map {
@@ -248,7 +255,10 @@ final class Workspace {
         return page.ids.compactMap { byID[$0] }
     }
 
-    private func loadSections(positions: [Int], requiring state: String? = nil) throws {
+    private func loadSections(
+        positions: [Int], cursors: [String?] = [], previousCursors: [Bool] = [],
+        requiring state: String? = nil
+    ) throws {
         struct Response: Decodable {
             let list: [Revision]
             let notFound: [String]
@@ -267,10 +277,12 @@ final class Workspace {
             var initialState = state
             for (index, category) in targets.enumerated() {
                 var offset = positions.indices.contains(index) ? max(0, positions[index]) : 0
-                func queryAndGet(_ position: Int, limit: Int) throws -> (ItemPage, Response) {
+                func queryAndGet(_ position: Int, limit: Int, cursor: String?) throws -> (ItemPage, Response)
+                {
                     do {
                         let pair = try client.queryThenGet(
-                            arguments: queryArguments(category: category, position: position, limit: limit))
+                            arguments: queryArguments(
+                                category: category, position: position, limit: limit, cursor: cursor))
                         let page = try JSON.decode(ItemPage.self, pair.query)
                         let result = try JSON.decode(Response.self, pair.get)
                         guard (result.remainingIDs ?? []).isEmpty, (result.oversizedIDs ?? []).isEmpty else {
@@ -279,20 +291,28 @@ final class Workspace {
                         }
                         return (page, result)
                     } catch let error as TractandaError where error.code == "responseTooLarge" && limit > 1 {
-                        return try queryAndGet(position, limit: max(1, limit / 2))
+                        return try queryAndGet(position, limit: max(1, limit / 2), cursor: cursor)
                     }
                 }
-                func loadSectionPage(at start: Int) throws -> (ItemPage, [Revision]) {
+                func loadSectionPage(at start: Int, cursor initialCursor: String?) throws
+                    -> (ItemPage, [Revision])
+                {
                     var pageIDs: [String] = []
                     var itemsByID: [String: Revision] = [:]
                     var pageState: String?
                     var total = 0
                     var firstPage: ItemPage?
+                    var lastPage: ItemPage?
+                    var continuation = initialCursor
+                    let reverse =
+                        previousCursors.indices.contains(index) && previousCursors[index]
+                        && initialCursor != nil
                     while pageIDs.count < Self.pageSize {
-                        let position = start + pageIDs.count
+                        let position = reverse ? max(0, start) : start + pageIDs.count
                         let limit = Self.pageSize - pageIDs.count
-                        let (page, result) = try queryAndGet(position, limit: limit)
+                        let (page, result) = try queryAndGet(position, limit: limit, cursor: continuation)
                         if firstPage == nil { firstPage = page }
+                        lastPage = page
                         guard result.state == page.queryState, result.notFound.isEmpty else {
                             throw TractandaError(
                                 "stateChanged", "Items changed while loading; refresh the view.")
@@ -311,28 +331,39 @@ final class Workspace {
                             throw TractandaError("protocolError", "Get results do not match query IDs.")
                         }
                         let byID = Dictionary(uniqueKeysWithValues: result.list.map { ($0.itemID, $0) })
-                        pageIDs.append(contentsOf: page.ids)
+                        if reverse {
+                            pageIDs.insert(contentsOf: page.ids, at: 0)
+                        } else {
+                            pageIDs.append(contentsOf: page.ids)
+                        }
                         itemsByID.merge(byID) { _, newer in newer }
+                        continuation = reverse ? page.previousCursor : page.nextCursor
                         if page.ids.isEmpty {
                             guard position >= page.total else {
                                 throw TractandaError("protocolError", "Empty non-final section page.")
                             }
                             break
                         }
-                        if start + pageIDs.count >= total { break }
+                        if reverse ? page.position == 0 : start + pageIDs.count >= total { break }
                     }
                     guard firstPage != nil, let pageState else {
                         throw TractandaError("protocolError", "Missing section query result.")
                     }
                     return (
-                        ItemPage(ids: pageIDs, position: start, total: total, queryState: pageState),
+                        ItemPage(
+                            ids: pageIDs,
+                            position: reverse ? lastPage?.position ?? start : firstPage?.position ?? start,
+                            total: total, queryState: pageState,
+                            nextCursor: reverse ? firstPage?.nextCursor : lastPage?.nextCursor,
+                            previousCursor: reverse ? lastPage?.previousCursor : firstPage?.previousCursor),
                         pageIDs.compactMap { itemsByID[$0] }
                     )
                 }
-                var (page, pageItems) = try loadSectionPage(at: offset)
+                let cursor = cursors.indices.contains(index) ? cursors[index] : nil
+                var (page, pageItems) = try loadSectionPage(at: offset, cursor: cursor)
                 if offset > 0 && page.ids.isEmpty {
                     offset = 0
-                    (page, pageItems) = try loadSectionPage(at: 0)
+                    (page, pageItems) = try loadSectionPage(at: 0, cursor: nil)
                 }
                 if let initialState, initialState != page.queryState {
                     throw TractandaError("stateChanged", "Items changed; refresh from the first page.")
@@ -340,8 +371,8 @@ final class Workspace {
                 initialState = page.queryState
                 loaded.append(
                     WorkspaceSection(
-                        category: category, items: pageItems, position: offset,
-                        total: page.total))
+                        category: category, items: pageItems, position: page.position,
+                        total: page.total, nextCursor: page.nextCursor, previousCursor: page.previousCursor))
             }
             let navigation = try categoryPath.isEmpty ? nil : CategoryHierarchy(self.categories())
             if navigation != nil, try client.state() != initialState {
@@ -390,7 +421,22 @@ final class Workspace {
         var positions = sections.map(\.position)
         let step = forward ? max(1, sections[sectionIndex].items.count) : Self.pageSize
         positions[sectionIndex] = max(0, positions[sectionIndex] + (forward ? step : -step))
-        try loadSections(positions: positions, requiring: queryState)
+        var cursors = [String?](repeating: nil, count: sections.count)
+        var previousCursors = Array(repeating: false, count: sections.count)
+        cursors[sectionIndex] =
+            forward ? sections[sectionIndex].nextCursor : sections[sectionIndex].previousCursor
+        previousCursors[sectionIndex] = !forward
+        let expectedState = queryState
+        do {
+            try loadSections(
+                positions: positions, cursors: cursors, previousCursors: previousCursors,
+                requiring: expectedState)
+        } catch let error as TractandaError
+            where
+            cursors[sectionIndex] != nil && ["invalidCursor", "unsupportedCursor"].contains(error.code)
+        {
+            try loadSections(positions: positions, requiring: expectedState)
+        }
     }
 
     func toggleSection(_ index: Int, isCollapsed: Bool? = nil) throws {
@@ -538,7 +584,7 @@ final class Workspace {
             }
             categoryNavigation = graph
             let ids = index.map { graph.children[expectedPath[$0]] ?? [] } ?? graph.roots
-            return ids.compactMap { graph.items[$0] }
+            return ids.compactMap { graph.sourceRevisions[$0] }
         } catch {
             categoryNavigation = nil
             sections = []
@@ -556,7 +602,7 @@ final class Workspace {
         }
         // Explicitly combined paths can already include this child. Keep one filter per identity.
         let prefix = expectedPath.prefix(index.map { $0 + 1 } ?? 0)
-            .filter { $0 != childID }.compactMap { graph.items[$0] }
+            .filter { $0 != childID }.compactMap { graph.sourceRevisions[$0] }
         try browse(path: prefix + [child])
     }
 

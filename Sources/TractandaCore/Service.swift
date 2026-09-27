@@ -8,6 +8,347 @@ struct PreparedNativeRead: Sendable {
     let callID: String
 }
 
+struct PreparedPooledQuery: Sendable {
+    let callID: String
+    let argumentsJSON: Data
+    let sourceSQL: String
+    let bindings: [SQLiteReadValue]
+    let authority: PooledReadAuthority
+    let orderColumn: String
+    let position: Int
+    let limit: Int
+    let evaluatedAt: Date
+    let evaluatedAtString: String
+    let timeZone: String
+    let queryDigest: String
+    let residual: SpotlightQuery?
+    let category: PooledCategorySelection?
+    let viewID: String?
+    let viewRevisionID: String?
+
+    func evaluate(
+        in pool: SQLiteReadPool, cancellation: SQLiteReadCancellation = SQLiteReadCancellation(),
+        afterLease: (@Sendable () -> Void)? = nil
+    ) throws
+        -> ItemIndex.Page
+    {
+        let lease = try pool.lease(principal: authority.principals, cancellation: cancellation)
+        defer { lease.finish() }
+        afterLease?()
+        return try lease.withReadTransaction {
+            if residual != nil || category != nil {
+                let calendar = try QueryCalendar.make(timeZone: timeZone)
+                let evaluator = try category.map {
+                    try CategoryEvaluator(definitions: $0.definitions, store: nil, at: evaluatedAt)
+                }
+                var total = 0
+                var ids: [String] = []
+                let personalSQL: String
+                var personalBindings: [SQLiteReadValue] = []
+                if let category, !category.ownerNames.isEmpty {
+                    let owners = Array(repeating: "?", count: category.ownerNames.count)
+                        .joined(separator: ",")
+                    let categories = category.definitions.map(\.itemID).sorted()
+                    let categoryIDs = Array(repeating: "?", count: categories.count)
+                        .joined(separator: ",")
+                    personalSQL =
+                        ",CASE WHEN (SELECT COUNT(*) FROM personal_overlay_targets p "
+                        + "WHERE p.target_id=items.id AND p.owner_name IN (\(owners)))>1 "
+                        + "OR EXISTS (SELECT 1 FROM personal_category_delta d "
+                        + "WHERE d.target_id=items.id AND d.owner_name IN (\(owners)) "
+                        + "AND d.category_id IN (\(categoryIDs))) THEN 1 ELSE 0 END"
+                    personalBindings =
+                        category.ownerNames.map(SQLiteReadValue.text)
+                        + category.ownerNames.map(SQLiteReadValue.text)
+                        + categories.map(SQLiteReadValue.text)
+                } else {
+                    personalSQL = ",0"
+                }
+                _ = try lease.stream(
+                    "SELECT items.id,items.fields" + personalSQL + sourceSQL
+                        + " ORDER BY items.\(orderColumn) DESC, items.id",
+                    bindings: personalBindings + bindings, maximumRows: Int.max,
+                    maximumRowBytes: 9 * 1024 * 1024,
+                    cancellation: cancellation,
+                    onRow: { row in
+                        guard row.count == 3, case .text(let id) = row[0],
+                            case .text(let fieldsJSON) = row[1]
+                        else { throw TractandaError("indexError", "Pooled candidate row is invalid.") }
+                        guard case .integer(let personal) = row[2], personal == 0 else {
+                            throw TractandaError(
+                                "unsupportedPersonal", "Personal decisions require exact serial evaluation.")
+                        }
+                        let fields = try JSON.decode(
+                            [String: ItemValue].self, Data(fieldsJSON.utf8))
+                        let revision = try Revision(fields: fields)
+                        guard revision.itemID == id else {
+                            throw TractandaError("indexError", "Pooled candidate identity differs.")
+                        }
+                        guard residual?.matches(revision, at: evaluatedAt, calendar: calendar) ?? true
+                        else { return }
+                        if let category, let evaluator {
+                            var cache: [String: Membership] = [:]
+                            for id in category.path
+                            where try !evaluator.membership(
+                                revision, categoryID: id, cache: &cache
+                            ).isIncluded { return }
+                            for id in category.excluded
+                            where try evaluator.membership(
+                                revision, categoryID: id, cache: &cache
+                            ).isIncluded { return }
+                        }
+                        guard total < Int.max else {
+                            throw TractandaError("resourceLimit", "Pooled query count overflowed.")
+                        }
+                        if total >= position && ids.count < limit { ids.append(id) }
+                        total += 1
+                    })
+                return .init(ids: ids, total: total)
+            }
+            let counts = try lease.query(
+                "SELECT COUNT(*)" + sourceSQL, bindings: bindings,
+                limits: .init(maximumRows: 1, maximumBytes: 256), cancellation: cancellation)
+            guard counts.count == 1, counts[0].count == 1,
+                case .integer(let totalValue) = counts[0][0], totalValue >= 0,
+                let total = Int(exactly: totalValue)
+            else { throw TractandaError("indexError", "Pooled query count is invalid.") }
+            let rows = try lease.query(
+                "SELECT items.id" + sourceSQL
+                    + " ORDER BY items.\(orderColumn) DESC, items.id LIMIT ? OFFSET ?",
+                bindings: bindings + [.integer(Int64(limit)), .integer(Int64(position))],
+                limits: .init(maximumRows: limit, maximumBytes: 128 * 1024),
+                cancellation: cancellation)
+            let ids = try rows.map { row -> String in
+                guard row.count == 1, case .text(let id) = row[0] else {
+                    throw TractandaError("indexError", "Pooled query returned an invalid item ID.")
+                }
+                return id
+            }
+            return .init(ids: ids, total: total)
+        }
+    }
+}
+
+struct PooledCategorySelection: Sendable {
+    let definitions: [CategoryDefinition]
+    let path: [String]
+    let excluded: [String]
+    let ownerNames: [String]
+}
+
+struct PreparedPooledGet: Sendable {
+    let callID: String
+    let argumentsJSON: Data
+    let rows: [ItemIndex.CatalogueRow]
+    let notFound: [String]
+    let authority: PooledReadAuthority
+    let root: URL
+    let ownerUID: UInt32
+    let resourceLimited: Bool
+
+    func evaluate(
+        in pool: SQLiteReadPool, cancellation: SQLiteReadCancellation = SQLiteReadCancellation(),
+        afterLease: (@Sendable () -> Void)? = nil
+    ) throws
+        -> [PooledCanonicalRecord]
+    {
+        if resourceLimited { return [] }
+        let lease = try pool.lease(principal: authority.principals, cancellation: cancellation)
+        afterLease?()
+        do {
+            try lease.withReadTransaction {
+                for row in rows {
+                    let digest = row.digest.map { String(format: "%02x", $0) }.joined()
+                    let found = try lease.query(
+                        "SELECT 1 FROM revision_catalog WHERE revision=? AND item=? AND digest=?",
+                        bindings: [.text(row.revisionID), .text(row.itemID), .text(digest)],
+                        limits: .init(maximumRows: 1, maximumBytes: 128), cancellation: cancellation)
+                    guard found.count == 1 else {
+                        throw TractandaError("recoveryError", "A pooled canonical row changed.")
+                    }
+                }
+            }
+        } catch {
+            lease.finish()
+            throw error
+        }
+        // No SQLite read snapshot is retained during canonical filesystem I/O.
+        lease.finish()
+        return try rows.map {
+            try Task.checkCancellation()
+            return try PooledCanonicalRecord.read(row: $0, root: root, ownerUID: ownerUID)
+        }
+    }
+}
+
+struct PooledHistoryResult: Sendable {
+    let rows: [ItemIndex.CatalogueRow]
+    let records: [PooledCanonicalRecord]
+    let total: Int
+}
+
+struct PreparedPooledHistory: Sendable {
+    let callID: String
+    let argumentsJSON: Data
+    let itemID: String
+    let headRevisionID: String
+    let position: Int
+    let limit: Int
+    let authority: PooledReadAuthority
+    let root: URL
+    let ownerUID: UInt32
+    let maximumSerializedBytes: Int
+    let batchLimit: Int
+
+    func evaluate(
+        in pool: SQLiteReadPool, cancellation: SQLiteReadCancellation = SQLiteReadCancellation(),
+        afterLease: (@Sendable () -> Void)? = nil,
+        afterSnapshot: (@Sendable () -> Void)? = nil
+    ) throws
+        -> PooledHistoryResult
+    {
+        let lease = try pool.lease(principal: authority.principals, cancellation: cancellation)
+        defer { lease.finish() }
+        afterLease?()
+        let capturedCount = try lease.withReadTransaction { () -> Int in
+            let snapshot = try lease.query(
+                "SELECT items.revision,(SELECT COUNT(*) FROM revision_catalog WHERE item=?) "
+                    + "FROM items WHERE items.id=?",
+                bindings: [.text(itemID), .text(itemID)],
+                limits: .init(maximumRows: 1, maximumBytes: 512), cancellation: cancellation)
+            guard snapshot.count == 1, snapshot[0].count == 2,
+                case .text(let currentHead) = snapshot[0][0],
+                case .integer(let count) = snapshot[0][1],
+                let result = Int(exactly: count), result > 0
+            else { throw TractandaError("recoveryError", "Historical admission snapshot is invalid.") }
+            guard currentHead == headRevisionID else {
+                throw TractandaError("stateChanged", "History head changed before SQL admission.")
+            }
+            return result
+        }
+        afterSnapshot?()
+        func parent(of revisionID: String?) throws -> String? {
+            guard let revisionID else { return nil }
+            let rows = try lease.query(
+                "SELECT parent FROM revision_catalog WHERE revision=? AND item=?",
+                bindings: [.text(revisionID), .text(itemID)],
+                limits: .init(maximumRows: 1, maximumBytes: 256), cancellation: cancellation)
+            guard rows.count == 1, rows[0].count == 1 else {
+                throw TractandaError("recoveryError", "Historical parent is unavailable.")
+            }
+            switch rows[0][0] {
+            case .null: return nil
+            case .text(let parent): return parent
+            default: throw TractandaError("recoveryError", "Historical parent is invalid.")
+            }
+        }
+        func fullRow(_ revisionID: String) throws -> ItemIndex.CatalogueRow {
+            let values = try lease.query(
+                "SELECT revision,item,path,parent,actor,operation,size,inode,uid,mode,"
+                    + "mtime_seconds,mtime_nanoseconds,digest,created_at "
+                    + "FROM revision_catalog WHERE revision=? AND item=?",
+                bindings: [.text(revisionID), .text(itemID)],
+                limits: .init(maximumRows: 1, maximumBytes: 2 * 1024), cancellation: cancellation)
+            guard values.count == 1 else {
+                throw TractandaError("recoveryError", "Historical page row is unavailable.")
+            }
+            return try ItemIndex.CatalogueRow.fromPooledValues(values[0])
+        }
+        var current: String? = headRevisionID
+        var slow: String? = headRevisionID
+        var fast: String? = headRevisionID
+        var total = 0
+        var rows: [ItemIndex.CatalogueRow] = []
+        var serializedBytes = 0
+        while current != nil {
+            try Task.checkCancellation()
+            try lease.withReadTransaction {
+                for _ in 0..<batchLimit {
+                    guard let revisionID = current else { break }
+                    let next = try parent(of: revisionID)
+                    if total >= position && rows.count < limit {
+                        let row = try fullRow(revisionID)
+                        guard row.size <= UInt64(maximumSerializedBytes - serializedBytes) else {
+                            throw TractandaError(
+                                "resourceLimit", "History page exceeds its byte window.")
+                        }
+                        serializedBytes += Int(row.size)
+                        rows.append(row)
+                    }
+                    guard total < Int.max else {
+                        throw TractandaError("resourceLimit", "History count overflowed.")
+                    }
+                    total += 1
+                    current = next
+                    slow = try parent(of: slow)
+                    fast = try parent(of: try parent(of: fast))
+                    if let slow, slow == fast {
+                        throw TractandaError("recoveryError", "Historical chain contains a cycle.")
+                    }
+                }
+            }
+        }
+        guard total == capturedCount else {
+            throw TractandaError("recoveryError", "Historical catalogue has disconnected rows.")
+        }
+        // Release the read lease before filesystem hydration; the owner rechecks the
+        // current head/authority and immutable catalogue rows before delivery.
+        lease.finish()
+        let records = try rows.map {
+            try Task.checkCancellation()
+            return try PooledCanonicalRecord.read(row: $0, root: root, ownerUID: ownerUID)
+        }
+        return .init(
+            rows: rows, records: records, total: total)
+    }
+}
+
+extension ItemIndex.CatalogueRow {
+    fileprivate static func fromPooledValues(_ values: [SQLiteReadValue]) throws -> Self {
+        guard values.count == 14 else {
+            throw TractandaError("indexError", "Pooled catalogue row has wrong width.")
+        }
+        func text(_ index: Int) -> String? {
+            if case .text(let value) = values[index] { return value }
+            return nil
+        }
+        func number(_ index: Int) -> Int64? {
+            if case .integer(let value) = values[index] { return value }
+            return nil
+        }
+        guard let revision = text(0), let item = text(1), let path = text(2),
+            let actor = text(4), let operation = text(5), let digestHex = text(12),
+            let createdAt = text(13), digestHex.count == 64,
+            let size = number(6), size >= 0, let inode = number(7), inode >= 0,
+            let uid = number(8), let owner = UInt32(exactly: uid),
+            let modeValue = number(9), let mode = UInt32(exactly: modeValue),
+            let seconds = number(10), let nanosecondsValue = number(11),
+            let nanoseconds = Int32(exactly: nanosecondsValue)
+        else { throw TractandaError("indexError", "Pooled catalogue row is invalid.") }
+        let parent: String?
+        switch values[3] {
+        case .null: parent = nil
+        case .text(let value): parent = value
+        default: throw TractandaError("indexError", "Pooled catalogue parent is invalid.")
+        }
+        var digest = Data()
+        var cursor = digestHex.startIndex
+        for _ in 0..<32 {
+            let next = digestHex.index(cursor, offsetBy: 2)
+            guard let byte = UInt8(digestHex[cursor..<next], radix: 16) else {
+                throw TractandaError("indexError", "Pooled catalogue digest is invalid.")
+            }
+            digest.append(byte)
+            cursor = next
+        }
+        return .init(
+            revisionID: revision, itemID: item, path: path, parentID: parent,
+            actor: actor, operationID: operation, size: UInt64(size), inode: UInt64(inode),
+            uid: owner, mode: mode, modificationSeconds: seconds,
+            modificationNanoseconds: nanoseconds, digest: digest, createdAt: createdAt)
+    }
+}
+
 /// Local experimental binding with JMAP-shaped method calls. This is not a
 /// conforming JMAP server: discovery, HTTP/auth and the complete Core contract are pending.
 public final class ItemService {
@@ -55,6 +396,44 @@ public final class ItemService {
                 "invalidArguments",
                 "Unknown arguments: \(Set(args.keys).subtracting(allowed).sorted().joined(separator: ", ")).")
         }
+    }
+    private func makeInitialCursor(
+        args: [String: Any], ids: [String], total: Int, position: Int,
+        evaluatedAt: Date, evaluatedAtString: String, timeZone: String, digest: String
+    ) throws -> Any {
+        let allowed = Set(["expression", "sort", "position", "limit", "at", "timeZone"])
+        guard Set(args.keys).isSubset(of: allowed), let last = ids.last,
+            ids.count > 0, total > position + ids.count
+        else { return NSNull() }
+        let sort = try args["sort"].map { try decode([ItemSort].self, $0) } ?? []
+        let field: String
+        if sort.isEmpty {
+            field = "modifiedAt"
+        } else if sort.count == 1, sort[0].categoryRootID == nil, !sort[0].isAscending,
+            let property = sort[0].property,
+            ["createdAt", "modifiedAt"].contains(metadataKey(property))
+        {
+            field = metadataKey(property)
+        } else {
+            return NSNull()
+        }
+        if let expression = args["expression"] as? String {
+            guard let predicate = try? SpotlightQuery(expression),
+                predicate.indexExactClassEquals != nil || !predicate.boundedIndexCandidatePlan.isAll
+            else { return NSNull() }
+        }
+        let storeID = try store.cursorStoreIdentity
+        let state = store.state
+        let totalReference = LiveQueryCursor.retainTotal(
+            total: total, storeID: storeID, actorUID: store.cursorActorUID, queryDigest: digest, state: state)
+        return try LiveQueryCursor.encode(
+            .init(
+                domain: LiveQueryCursor.tokenDomain, version: 1,
+                storeID: storeID, actorUID: store.cursorActorUID,
+                queryDigest: digest, state: state, orderField: field,
+                boundary: try store.cursorSortValue(itemID: last, field: field), boundaryID: last,
+                position: position + ids.count, totalReference: totalReference, previous: false,
+                evaluatedAt: evaluatedAtString, timeZone: timeZone))
     }
     private enum RetrievalProjection {
         case full, content, summary
@@ -180,7 +559,11 @@ public final class ItemService {
                 fts["status"] = "missing"
             }
         } catch {
-            // An unavailable derived cache does not prevent canonical extraction.
+            // A transient cache failure may leave canonical extraction usable. A persistent
+            // index fault has already gated the store; do not deliver part of that request.
+            guard store.isCanonicalTrusted else {
+                throw TractandaError("recoveryRequired", "Rebuild the disposable index before reading.")
+            }
             // Never return SQLite messages, filenames or old index text.
             fts["status"] = "unavailable"
         }
@@ -534,15 +917,28 @@ public final class ItemService {
                     ids: ids, projection: projection,
                     maxBytes: integer(args, "maxBytes", default: 8_192, range: 8_192...524_288))
             }
-            var list: [Revision] = []
+            var list: [Any] = []
             var notFound: [String] = []
+            var retainedBytes = 0
             for id in ids {
-                do { list.append(try store.get(id)) } catch let error as TractandaError
+                do {
+                    let value = try projectedRevision(store.get(id), projection: projection)
+                    let size = try JSONSerialization.data(
+                        withJSONObject: value, options: [.fragmentsAllowed]
+                    ).count
+                    let budget = min(8 * 1024 * 1024 - 16 * 1024, store.pooledRecordByteLimit)
+                    guard size <= budget - retainedBytes else {
+                        throw TractandaError(
+                            "responseTooLarge", "Use fewer IDs or a narrower projection.")
+                    }
+                    retainedBytes += size
+                    list.append(value)
+                } catch let error as TractandaError
                     where error.code == "notFound" || error.code == "forbidden"
                 { notFound.append(id) }
             }
             return [
-                "list": try list.map { try projectedRevision($0, projection: projection) },
+                "list": list,
                 "notFound": notFound, "state": store.state,
             ]
         case "TractandaItem/extractedText":
@@ -566,22 +962,121 @@ public final class ItemService {
                 args,
                 allowed: [
                     "expression", "text", "categoryPath", "excludedCategoryIDs", "position", "limit",
-                    "viewID", "sort", "sectionID",
+                    "viewID", "sort", "sectionID", "cursor",
                     "at", "timeZone",
                 ])
             for key in ["expression", "text"] where args[key] != nil && !(args[key] is String) {
                 throw TractandaError("invalidArguments", "\(key) must be text.")
             }
+            let cursor = try args["cursor"].map { _ in try LiveQueryCursor.decode(try string(args, "cursor"))
+            }
+            guard cursor == nil || args["position"] == nil else {
+                throw TractandaError("invalidArguments", "Use cursor or position, not both.")
+            }
             let position = try integer(args, "position", default: 0, range: 0...Int.max)
             let limit = try integer(args, "limit", default: 100, range: 1...256)
-            let evaluatedAt =
-                try args["at"].map { _ -> Date in
-                    guard let date = Timestamp.parse(try string(args, "at")) else {
-                        throw TractandaError("invalidArguments", "Invalid query timestamp.")
-                    }
-                    return date
-                } ?? Date()
-            let timeZone = try args["timeZone"].map { _ in try string(args, "timeZone") } ?? "UTC"
+            let evaluatedAtString =
+                try args["at"].map { _ in try string(args, "at") }
+                ?? cursor?.evaluatedAt ?? Timestamp.format(Date())
+            guard let evaluatedAt = Timestamp.parse(evaluatedAtString) else {
+                throw TractandaError("invalidArguments", "Invalid query timestamp.")
+            }
+            let timeZone =
+                try args["timeZone"].map { _ in try string(args, "timeZone") }
+                ?? cursor?.timeZone ?? "UTC"
+            let queryCalendar = try QueryCalendar.make(timeZone: timeZone)
+            let queryDigest = try LiveQueryCursor.digest(args)
+            if let cursor {
+                guard cursor.storeID == (try store.cursorStoreIdentity),
+                    cursor.actorUID == store.cursorActorUID, cursor.queryDigest == queryDigest,
+                    cursor.state == store.state, cursor.evaluatedAt == evaluatedAtString,
+                    cursor.timeZone == timeZone
+                else {
+                    throw TractandaError(
+                        "invalidCursor", "The live query cursor is invalid or no longer current.")
+                }
+            }
+            if let cursor {
+                let allowed = Set(["cursor", "limit", "at", "timeZone", "sort", "expression"])
+                guard Set(args.keys).isSubset(of: allowed) else {
+                    throw TractandaError("unsupportedCursor", "This query shape uses position paging.")
+                }
+                let sort = try args["sort"].map { try decode([ItemSort].self, $0) } ?? []
+                let field: String
+                if sort.isEmpty {
+                    field = "modifiedAt"
+                } else if sort.count == 1, sort[0].categoryRootID == nil, !sort[0].isAscending,
+                    let property = sort[0].property,
+                    ["createdAt", "modifiedAt"].contains(metadataKey(property))
+                {
+                    field = metadataKey(property)
+                } else {
+                    throw TractandaError("unsupportedCursor", "This ordering uses position paging.")
+                }
+                let predicate = try (args["expression"] as? String).map(SpotlightQuery.init)
+                guard
+                    args["expression"] == nil || predicate?.indexExactClassEquals != nil
+                        || predicate.map({ !$0.boundedIndexCandidatePlan.isAll }) == true
+                else {
+                    throw TractandaError("unsupportedCursor", "This expression uses position paging.")
+                }
+                guard cursor.orderField == field else {
+                    throw TractandaError(
+                        "invalidCursor", "The live query cursor is invalid or no longer current.")
+                }
+                guard
+                    let exactTotal = LiveQueryCursor.exactTotal(
+                        reference: cursor.totalReference, storeID: cursor.storeID, actorUID: cursor.actorUID,
+                        queryDigest: queryDigest, state: cursor.state)
+                else {
+                    throw TractandaError(
+                        "invalidCursor", "The live query cursor is invalid or no longer current.")
+                }
+                let seek = try store.indexedSeekPage(
+                    order: field == "createdAt" ? .createdAt : .modifiedAt,
+                    classEquals: predicate?.indexExactClassEquals,
+                    boundary: cursor.boundary, boundaryID: cursor.boundaryID,
+                    previous: cursor.previous, limit: limit, knownTotal: exactTotal,
+                    candidatePlan: predicate?.boundedIndexCandidatePlan ?? .all,
+                    needsFullRevision: predicate != nil && predicate?.indexExactClassEquals == nil,
+                    accepts: { revision in
+                        predicate?.matches(revision, at: evaluatedAt, calendar: queryCalendar)
+                            ?? true
+                    })
+                let currentState = store.state
+                let pagePosition =
+                    cursor.previous ? max(0, cursor.position - seek.ids.count) : cursor.position
+                var next: String?
+                var previous: String?
+                if let last = seek.ids.last, pagePosition + seek.ids.count < seek.total {
+                    next = try LiveQueryCursor.encode(
+                        .init(
+                            domain: LiveQueryCursor.tokenDomain, version: 1,
+                            storeID: cursor.storeID, actorUID: cursor.actorUID,
+                            queryDigest: queryDigest, state: currentState, orderField: field,
+                            boundary: try store.cursorSortValue(itemID: last, field: field),
+                            boundaryID: last, position: pagePosition + seek.ids.count,
+                            totalReference: cursor.totalReference, previous: false,
+                            evaluatedAt: evaluatedAtString, timeZone: timeZone))
+                }
+                if let first = seek.ids.first, pagePosition > 0 {
+                    previous = try LiveQueryCursor.encode(
+                        .init(
+                            domain: LiveQueryCursor.tokenDomain, version: 1,
+                            storeID: cursor.storeID, actorUID: cursor.actorUID,
+                            queryDigest: queryDigest, state: currentState, orderField: field,
+                            boundary: try store.cursorSortValue(itemID: first, field: field),
+                            boundaryID: first, position: pagePosition,
+                            totalReference: cursor.totalReference, previous: true,
+                            evaluatedAt: evaluatedAtString, timeZone: timeZone))
+                }
+                return [
+                    "ids": seek.ids, "position": pagePosition, "total": seek.total,
+                    "queryState": currentState,
+                    "evaluatedAt": evaluatedAtString,
+                    "nextCursor": next as Any? ?? NSNull(), "previousCursor": previous as Any? ?? NSNull(),
+                ]
+            }
             let page: ItemIndex.Page
             if args["viewID"] != nil {
                 guard args["expression"] == nil, args["text"] == nil, args["categoryPath"] == nil,
@@ -607,7 +1102,12 @@ public final class ItemService {
             }
             return [
                 "ids": page.ids, "position": position, "total": page.total, "queryState": store.state,
-                "evaluatedAt": Timestamp.format(evaluatedAt),
+                "evaluatedAt": evaluatedAtString,
+                "nextCursor": try makeInitialCursor(
+                    args: args, ids: page.ids, total: page.total, position: position,
+                    evaluatedAt: evaluatedAt, evaluatedAtString: evaluatedAtString,
+                    timeZone: timeZone, digest: queryDigest),
+                "previousCursor": NSNull(),
             ]
         case "TractandaItem/commit":
             try check(
@@ -619,14 +1119,15 @@ public final class ItemService {
             return try object(store.commit(request, actorUID: uid)) as! [String: Any]
         case "TractandaItem/history":
             try check(args, allowed: ["itemID", "position", "limit", "projection", "properties"])
-            let versions = try store.history(string(args, "itemID"))
             let position = try integer(args, "position", default: 0, range: 0...Int.max)
             let limit = try integer(args, "limit", default: 100, range: 1...256)
+            let page = try store.historyPageBounded(
+                string(args, "itemID"), position: position, limit: limit)
             return [
-                "list": try Array(versions.dropFirst(position).prefix(limit)).map {
+                "list": try page.list.map {
                     try projectedRevision($0, projection: retrievalProjection(args))
                 },
-                "total": versions.count,
+                "total": page.total,
             ]
         case "TractandaRevision/get":
             try check(args, allowed: ["itemID", "revisionID", "projection", "properties"])
@@ -678,6 +1179,7 @@ public final class ItemService {
                     ServerFeature.categoryMembershipSort.rawValue,
                     ServerFeature.categoryMembershipProjection.rawValue,
                     ServerFeature.extractedTextDiagnostics.rawValue,
+                    ServerFeature.liveSeekCursor.rawValue,
                 ],
                 "server": try JSONSerialization.jsonObject(with: JSON.encode(RuntimeIdentity.current)),
                 "state": store.state, "ownerUID": store.ownerUID, "queryProfile": SpotlightQuery.profile,
@@ -734,6 +1236,383 @@ public final class ItemService {
 
     func maintainSemanticIndex() {
         semantic.maintain()
+    }
+
+    /// One ordinary indexed query may run its SQL count/page on an isolated read lease.
+    /// Unsupported or mixed envelopes retain the serial method implementation.
+    func preparePooledQuery(_ data: Data, peerUID: UInt32) throws -> PreparedPooledQuery? {
+        guard data.count <= 8 * 1024 * 1024,
+            let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            Set(request.keys) == ["using", "methodCalls"],
+            let using = request["using"] as? [String], using.contains(Self.capability),
+            Set(using).isSubset(of: [Self.capability, "urn:ietf:params:jmap:core"]),
+            let calls = request["methodCalls"] as? [[Any]], calls.count == 1,
+            calls[0].count == 3, calls[0][0] as? String == "TractandaItem/query",
+            let args = calls[0][1] as? [String: Any],
+            let callID = calls[0][2] as? String, !callID.isEmpty,
+            Set(args.keys).isSubset(of: [
+                "expression", "sort", "position", "limit", "at", "timeZone",
+                "categoryPath", "excludedCategoryIDs",
+            ]),
+            args["expression"] == nil || args["expression"] is String,
+            args["at"] == nil || args["at"] is String,
+            args["timeZone"] == nil || args["timeZone"] is String,
+            args["categoryPath"] == nil || args["categoryPath"] is [String],
+            args["excludedCategoryIDs"] == nil || args["excludedCategoryIDs"] is [String],
+            let position = try? integer(args, "position", default: 0, range: 0...Int.max),
+            let limit = try? integer(args, "limit", default: 100, range: 1...256)
+        else { return nil }
+        let predicate: SpotlightQuery?
+        if let expression = args["expression"] as? String {
+            guard let parsed = try? SpotlightQuery(expression),
+                parsed.indexExactClassEquals != nil || !parsed.boundedIndexCandidatePlan.isAll
+            else { return nil }
+            predicate = parsed
+        } else {
+            predicate = nil
+        }
+        let sort: [ItemSort]
+        if let value = args["sort"] {
+            guard let parsed = try? decode([ItemSort].self, value) else { return nil }
+            sort = parsed
+        } else {
+            sort = []
+        }
+        let orderColumn: String
+        if sort.isEmpty {
+            orderColumn = "modified"
+        } else if sort.count == 1,
+            !sort[0].isAscending, sort[0].categoryRootID == nil,
+            let property = sort[0].property
+        {
+            switch metadataKey(property) {
+            case "modifiedAt": orderColumn = "modified"
+            case "createdAt": orderColumn = "created"
+            default: return nil
+            }
+        } else {
+            return nil
+        }
+        let evaluatedAtString = args["at"] as? String ?? Timestamp.format(Date())
+        guard let evaluatedAt = Timestamp.parse(evaluatedAtString) else { return nil }
+        let timeZone = args["timeZone"] as? String ?? "UTC"
+        guard (try? QueryCalendar.make(timeZone: timeZone)) != nil else { return nil }
+        let categoryPath = args["categoryPath"] as? [String] ?? []
+        let excludedCategoryIDs = args["excludedCategoryIDs"] as? [String] ?? []
+        guard categoryPath.count <= 32, excludedCategoryIDs.count <= 32,
+            excludedCategoryIDs.isEmpty || !categoryPath.isEmpty
+        else { return nil }
+        let digest = try LiveQueryCursor.digest(args)
+        let argumentsJSON = try JSONSerialization.data(withJSONObject: args)
+        return try store.withAccess(forUID: peerUID) {
+            guard let authority = try store.pooledReadAuthority() else { return nil }
+            var category: PooledCategorySelection?
+            var categoryPlan: SpotlightQuery.IndexCandidatePlan = .all
+            if !categoryPath.isEmpty {
+                let requested = Set(categoryPath + excludedCategoryIDs)
+                for id in requested { _ = try Categories.rule(store.get(id)) }
+                guard try store.categoryGraphIsFullyReadable(requestedCategoryIDs: requested)
+                else { return nil }
+                let definitions = try store.readableCategoryDefinitions(requestedCategoryIDs: requested)
+                guard
+                    let positive = try Categories.manualCategoryPositiveSeeds(
+                        store: store, definitions: definitions, requested: requested)
+                else { return nil }
+                categoryPlan = positive
+                let ownerNames = try store.pooledApplicablePersonalOwnerNames(authority: authority)
+                    .sorted()
+                guard ownerNames.count <= 400 else { return nil }
+                category = .init(
+                    definitions: definitions, path: categoryPath, excluded: excludedCategoryIDs,
+                    ownerNames: ownerNames)
+            }
+            let source = try store.pooledQuerySource(
+                classEquals: predicate?.indexClassEquals,
+                candidatePlan: .and(predicate?.boundedIndexCandidatePlan ?? .all, categoryPlan),
+                authority: authority)
+            return PreparedPooledQuery(
+                callID: callID, argumentsJSON: argumentsJSON, sourceSQL: source.sql,
+                bindings: source.arguments.map(SQLiteReadValue.text), authority: authority,
+                orderColumn: orderColumn, position: position, limit: limit,
+                evaluatedAt: evaluatedAt, evaluatedAtString: evaluatedAtString,
+                timeZone: timeZone, queryDigest: digest,
+                residual: predicate?.indexExactClassEquals == nil ? predicate : nil,
+                category: category, viewID: nil, viewRevisionID: nil)
+        }
+    }
+
+    func preparePooledSavedViewQuery(_ data: Data, peerUID: UInt32) throws -> PreparedPooledQuery? {
+        guard data.count <= 8 * 1024 * 1024,
+            let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            Set(request.keys) == ["using", "methodCalls"],
+            let using = request["using"] as? [String], using.contains(Self.capability),
+            Set(using).isSubset(of: [Self.capability, "urn:ietf:params:jmap:core"]),
+            let calls = request["methodCalls"] as? [[Any]], calls.count == 1,
+            calls[0].count == 3, calls[0][0] as? String == "TractandaItem/query",
+            let args = calls[0][1] as? [String: Any],
+            let callID = calls[0][2] as? String, !callID.isEmpty,
+            Set(args.keys).isSubset(of: [
+                "viewID", "sectionID", "position", "limit", "at", "timeZone",
+            ]),
+            let viewID = args["viewID"] as? String, !viewID.isEmpty,
+            args["sectionID"] == nil || args["sectionID"] is String
+        else { return nil }
+        let view = try store.withAccess(forUID: peerUID) { try store.get(viewID) }
+        guard !view.isDeleted, let value = view.fields["viewDefinition"],
+            let definition = try? SavedViewDefinition(value), definition.text == nil
+        else { return nil }
+        var path = definition.categoryPath
+        if let sectionID = args["sectionID"] as? String {
+            guard definition.presentation.sectionIDs.contains(sectionID) else { return nil }
+            if !path.contains(sectionID) { path.append(sectionID) }
+        }
+        var effective = args
+        effective.removeValue(forKey: "viewID")
+        effective.removeValue(forKey: "sectionID")
+        if let expression = definition.expression { effective["expression"] = expression }
+        if !path.isEmpty { effective["categoryPath"] = path }
+        if !definition.excludedCategoryIDs.isEmpty {
+            effective["excludedCategoryIDs"] = definition.excludedCategoryIDs
+        }
+        if !definition.sort.isEmpty {
+            effective["sort"] = try JSONSerialization.jsonObject(with: JSON.encode(definition.sort))
+        }
+        let synthetic = try JSONSerialization.data(withJSONObject: [
+            "using": using, "methodCalls": [["TractandaItem/query", effective, callID]],
+        ])
+        guard let prepared = try preparePooledQuery(synthetic, peerUID: peerUID) else { return nil }
+        return PreparedPooledQuery(
+            callID: callID, argumentsJSON: try JSONSerialization.data(withJSONObject: args),
+            sourceSQL: prepared.sourceSQL, bindings: prepared.bindings,
+            authority: prepared.authority, orderColumn: prepared.orderColumn,
+            position: prepared.position, limit: prepared.limit,
+            evaluatedAt: prepared.evaluatedAt, evaluatedAtString: prepared.evaluatedAtString,
+            timeZone: prepared.timeZone, queryDigest: try LiveQueryCursor.digest(args),
+            residual: prepared.residual, category: prepared.category,
+            viewID: viewID, viewRevisionID: view.revisionID)
+    }
+
+    func preparePooledGet(_ data: Data, peerUID: UInt32) throws -> PreparedPooledGet? {
+        guard data.count <= 8 * 1024 * 1024,
+            let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            Set(request.keys) == ["using", "methodCalls"],
+            let using = request["using"] as? [String], using.contains(Self.capability),
+            Set(using).isSubset(of: [Self.capability, "urn:ietf:params:jmap:core"]),
+            let calls = request["methodCalls"] as? [[Any]], calls.count == 1,
+            calls[0].count == 3, calls[0][0] as? String == "TractandaItem/get",
+            let args = calls[0][1] as? [String: Any],
+            let callID = calls[0][2] as? String, !callID.isEmpty,
+            Set(args.keys).isSubset(of: ["ids", "projection", "properties"]),
+            let ids = args["ids"] as? [String], (1...64).contains(ids.count),
+            Set(ids).count == ids.count,
+            (try? retrievalProjection(args)) != nil
+        else { return nil }
+        let argumentsJSON = try JSONSerialization.data(withJSONObject: args)
+        return try store.withAccess(forUID: peerUID) {
+            guard let authority = try store.pooledReadAuthority() else { return nil }
+            let admitted = try store.preparePooledGet(ids)
+            var bytes = 0
+            var resourceLimited = false
+            for row in admitted.rows {
+                guard row.size <= UInt64(store.pooledRecordByteLimit - bytes) else {
+                    resourceLimited = true
+                    break
+                }
+                bytes += Int(row.size)
+            }
+            return PreparedPooledGet(
+                callID: callID, argumentsJSON: argumentsJSON,
+                rows: resourceLimited ? [] : admitted.rows,
+                notFound: resourceLimited ? [] : admitted.notFound,
+                authority: authority, root: store.root,
+                ownerUID: store.ownerUID, resourceLimited: resourceLimited)
+        }
+    }
+
+    func finishPooledGet(
+        _ prepared: PreparedPooledGet, records: [PooledCanonicalRecord],
+        peerUID: UInt32
+    ) throws -> Data? {
+        try store.withAccess(forUID: peerUID) {
+            guard store.isCanonicalTrusted,
+                let current = try store.pooledReadAuthority(), current == prepared.authority,
+                try store.verifyPooledGet(records, rows: prepared.rows)
+            else { return nil }
+            do {
+                guard !prepared.resourceLimited else {
+                    throw TractandaError("resourceLimit", "Get exceeds the bounded record byte window.")
+                }
+                guard
+                    let args = try JSONSerialization.jsonObject(
+                        with: prepared.argumentsJSON) as? [String: Any]
+                else { throw TractandaError("invalidRequest", "Pooled get arguments changed.") }
+                let projection = try retrievalProjection(args)
+                let result: [String: Any] = [
+                    "list": try records.map { try projectedRevision($0.revision, projection: projection) },
+                    "notFound": prepared.notFound, "state": current.state,
+                ]
+                let response = try JSONSerialization.data(
+                    withJSONObject: [
+                        "methodResponses": [["TractandaItem/get", result, prepared.callID]],
+                        "sessionState": current.state,
+                    ], options: [.sortedKeys, .prettyPrinted])
+                guard response.count <= 8 * 1024 * 1024 else {
+                    throw TractandaError("responseTooLarge", "Use a smaller item retrieval page.")
+                }
+                return response
+            } catch {
+                let failure =
+                    error as? TractandaError
+                    ?? TractandaError("invalidArguments", String(describing: error))
+                return try JSONSerialization.data(
+                    withJSONObject: [
+                        "methodResponses": [
+                            [
+                                "error", ["type": failure.code, "description": failure.message],
+                                prepared.callID,
+                            ]
+                        ],
+                        "sessionState": store.state,
+                    ], options: [.sortedKeys, .prettyPrinted])
+            }
+        }
+    }
+
+    func preparePooledHistory(_ data: Data, peerUID: UInt32) throws -> PreparedPooledHistory? {
+        guard data.count <= 8 * 1024 * 1024,
+            let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            Set(request.keys) == ["using", "methodCalls"],
+            let using = request["using"] as? [String], using.contains(Self.capability),
+            Set(using).isSubset(of: [Self.capability, "urn:ietf:params:jmap:core"]),
+            let calls = request["methodCalls"] as? [[Any]], calls.count == 1,
+            calls[0].count == 3, calls[0][0] as? String == "TractandaItem/history",
+            let args = calls[0][1] as? [String: Any],
+            let callID = calls[0][2] as? String, !callID.isEmpty,
+            Set(args.keys).isSubset(of: ["itemID", "position", "limit", "projection", "properties"]),
+            let itemID = args["itemID"] as? String, !itemID.isEmpty,
+            let position = try? integer(args, "position", default: 0, range: 0...Int.max),
+            let limit = try? integer(args, "limit", default: 100, range: 1...256),
+            (try? retrievalProjection(args)) != nil
+        else { return nil }
+        let argumentsJSON = try JSONSerialization.data(withJSONObject: args)
+        return try store.withAccess(forUID: peerUID) {
+            guard let authority = try store.pooledReadAuthority() else { return nil }
+            let headID = try store.preparePooledHistory(itemID)
+            return PreparedPooledHistory(
+                callID: callID, argumentsJSON: argumentsJSON, itemID: itemID,
+                headRevisionID: headID, position: position, limit: limit,
+                authority: authority, root: store.root, ownerUID: store.ownerUID,
+                maximumSerializedBytes: store.pooledRecordByteLimit,
+                batchLimit: store.pooledHistoryBatchLimit)
+        }
+    }
+
+    func finishPooledHistory(
+        _ prepared: PreparedPooledHistory, result: PooledHistoryResult, peerUID: UInt32
+    ) throws -> Data? {
+        try store.withAccess(forUID: peerUID) {
+            guard store.isCanonicalTrusted,
+                let current = try store.pooledReadAuthority(), current == prepared.authority,
+                try store.verifyPooledHistory(
+                    result, itemID: prepared.itemID, headRevisionID: prepared.headRevisionID)
+            else { return nil }
+            do {
+                guard
+                    let args = try JSONSerialization.jsonObject(
+                        with: prepared.argumentsJSON) as? [String: Any]
+                else { throw TractandaError("invalidRequest", "Pooled history arguments changed.") }
+                let projection = try retrievalProjection(args)
+                let payload: [String: Any] = [
+                    "list": try result.records.map {
+                        try projectedRevision($0.revision, projection: projection)
+                    },
+                    "total": result.total,
+                ]
+                let response = try JSONSerialization.data(
+                    withJSONObject: [
+                        "methodResponses": [["TractandaItem/history", payload, prepared.callID]],
+                        "sessionState": current.state,
+                    ], options: [.sortedKeys, .prettyPrinted])
+                guard response.count <= 8 * 1024 * 1024 else {
+                    throw TractandaError("responseTooLarge", "Use a smaller history page.")
+                }
+                return response
+            } catch {
+                let failure =
+                    error as? TractandaError
+                    ?? TractandaError("invalidArguments", String(describing: error))
+                return try JSONSerialization.data(
+                    withJSONObject: [
+                        "methodResponses": [
+                            [
+                                "error", ["type": failure.code, "description": failure.message],
+                                prepared.callID,
+                            ]
+                        ],
+                        "sessionState": store.state,
+                    ], options: [.sortedKeys, .prettyPrinted])
+            }
+        }
+    }
+
+    /// Returns nil after any visible or authority change so the coordinator retries through
+    /// the serial exact path. Response construction stays on the owner queue.
+    func finishPooledQuery(_ prepared: PreparedPooledQuery, page: ItemIndex.Page, peerUID: UInt32)
+        throws -> Data?
+    {
+        try store.withAccess(forUID: peerUID) {
+            guard store.isCanonicalTrusted,
+                let current = try store.pooledReadAuthority(), current == prepared.authority,
+                try store.verifyPooledCategorySelection(prepared.category, authority: current)
+            else { return nil }
+            if let viewID = prepared.viewID,
+                try store.get(viewID).revisionID != prepared.viewRevisionID
+            {
+                return nil
+            }
+            for id in page.ids where try !store.canReadCurrentItemForPooledQuery(id) {
+                return nil
+            }
+            do {
+                guard
+                    let args = try JSONSerialization.jsonObject(
+                        with: prepared.argumentsJSON) as? [String: Any]
+                else { throw TractandaError("invalidRequest", "Pooled query arguments changed.") }
+                let result: [String: Any] = [
+                    "ids": page.ids, "position": prepared.position, "total": page.total,
+                    "queryState": current.state, "evaluatedAt": prepared.evaluatedAtString,
+                    "nextCursor": try makeInitialCursor(
+                        args: args, ids: page.ids, total: page.total, position: prepared.position,
+                        evaluatedAt: prepared.evaluatedAt,
+                        evaluatedAtString: prepared.evaluatedAtString,
+                        timeZone: prepared.timeZone, digest: prepared.queryDigest),
+                    "previousCursor": NSNull(),
+                ]
+                let response = try JSONSerialization.data(
+                    withJSONObject: [
+                        "methodResponses": [["TractandaItem/query", result, prepared.callID]],
+                        "sessionState": current.state,
+                    ], options: [.sortedKeys, .prettyPrinted])
+                guard response.count <= 8 * 1024 * 1024 else {
+                    throw TractandaError("responseTooLarge", "Use smaller query pages.")
+                }
+                return response
+            } catch {
+                let failure =
+                    error as? TractandaError
+                    ?? TractandaError("invalidArguments", String(describing: error))
+                return try JSONSerialization.data(
+                    withJSONObject: [
+                        "methodResponses": [
+                            [
+                                "error", ["type": failure.code, "description": failure.message],
+                                prepared.callID,
+                            ]
+                        ],
+                        "sessionState": store.state,
+                    ], options: [.sortedKeys, .prettyPrinted])
+            }
+        }
     }
 
     /// Recognizes only one unindexed, category-free, read-only query. Every other
@@ -862,6 +1741,9 @@ public final class ItemService {
             }
         }
         var responses: [[Any]] = []
+        var retainedResponseBytes = 0
+        let responseBudget = min(
+            8 * 1024 * 1024 - 16 * 1024, max(256, store.pooledRecordByteLimit))
         for call in calls {
             let method = call[0] as! String
             let id = call[2] as! String
@@ -889,12 +1771,29 @@ public final class ItemService {
                     args.removeValue(forKey: key)
                     args[name] = value
                 }
-                responses.append([method, try execute(method, args, uid: peerUID), id])
+                let response: [Any] = [method, try execute(method, args, uid: peerUID), id]
+                let size = try JSONSerialization.data(withJSONObject: response).count
+                guard size <= responseBudget - retainedResponseBytes else {
+                    throw TractandaError(
+                        "responseTooLarge", "Use smaller pages or a narrower projection.")
+                }
+                retainedResponseBytes += size
+                responses.append(response)
             } catch {
                 let failure =
                     error as? TractandaError
                     ?? TractandaError("invalidArguments", String(describing: error))
-                responses.append(["error", ["type": failure.code, "description": failure.message], id])
+                let response: [Any] = [
+                    "error", ["type": failure.code, "description": failure.message], id,
+                ]
+                let size = try JSONSerialization.data(withJSONObject: response).count
+                guard size <= responseBudget - retainedResponseBytes else {
+                    throw TractandaError(
+                        "responseTooLarge",
+                        "The full response exceeds its byte budget; earlier commits may have succeeded.")
+                }
+                retainedResponseBytes += size
+                responses.append(response)
             }
         }
         let result = try JSONSerialization.data(
@@ -907,6 +1806,33 @@ public final class ItemService {
             )
         }
         return result
+    }
+
+    /// Read-only admission for the coordinator's asynchronous verifier drain. Invalid or
+    /// unauthorized envelopes use the ordinary handler and never stop background work.
+    func admittedRebuildRequest(_ data: Data, peerUID: UInt32) -> Bool {
+        guard data.count <= 8 * 1024 * 1024,
+            let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            Set(request.keys) == ["using", "methodCalls"],
+            let using = request["using"] as? [String], using.contains(Self.capability),
+            Set(using).isSubset(of: [Self.capability, "urn:ietf:params:jmap:core"]),
+            let calls = request["methodCalls"] as? [[Any]], calls.count <= 32
+        else { return false }
+        var callIDs: Set<String> = []
+        var hasRebuild = false
+        for call in calls {
+            guard call.count == 3, let method = call[0] as? String,
+                let arguments = call[1] as? [String: Any],
+                let callID = call[2] as? String, !callID.isEmpty,
+                callIDs.insert(callID).inserted
+            else { return false }
+            if method == "TractandaStore/rebuild" {
+                guard arguments.isEmpty else { return false }
+                hasRebuild = true
+            }
+        }
+        guard hasRebuild else { return false }
+        return (try? store.withAccess(forUID: peerUID) { store.isAdministrator }) == true
     }
 }
 

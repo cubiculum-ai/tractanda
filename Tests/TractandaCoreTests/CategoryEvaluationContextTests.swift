@@ -114,6 +114,16 @@ final class CategoryEvaluationContextTests: XCTestCase {
                 "personalOverrides": .object([category.itemID: .text("exclude")]),
                 "permissions": permissions(owner: "bob", mode: 0o600),
             ])
+        for number in 0..<140 {
+            _ = try create(
+                store, uid: accounts.alice,
+                fields: [
+                    "subject": .text("cache pressure \(number)"),
+                    "permissions": permissions(owner: "alice", mode: 0o640),
+                ])
+        }
+        XCTAssertLessThanOrEqual(store.currentHeadCacheEntriesForTesting, 128)
+        XCTAssertLessThanOrEqual(store.currentHeadCacheBytesForTesting, 4 * 1024 * 1024)
 
         var overlayScans = 0
         store.beforeCategoryOverlayScan = { overlayScans += 1 }
@@ -260,5 +270,310 @@ final class CategoryEvaluationContextTests: XCTestCase {
             "Manual category index heads=302 includeCandidates=\(candidates.count) "
                 + "matches=\(indexedPage.total) indexedSeconds=\(indexedSeconds)"
         )
+    }
+
+    func testUnrelatedPersonalDeltasDoNotConsumeRelevantOverlayBudget() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "tractanda-category-relevant-deltas-\(Identifier.make())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try ItemStore(root: root)
+        func category(_ name: String) throws -> Revision {
+            try create(
+                store, uid: getuid(),
+                fields: [
+                    "subject": .text(name),
+                    "selection": .object([
+                        "language": .text(SpotlightQuery.profile), "expression": .text("itemID == \"\""),
+                    ]),
+                ])
+        }
+        let relevant = try category("Relevant")
+        let unrelated = try category("Unrelated")
+        store.personalOverlayWorkingSetLimitForTesting = 8
+        for _ in 0..<9 {
+            let target = try create(store, uid: getuid(), fields: [:])
+            _ = try create(
+                store, uid: getuid(), classID: "PersonalStateItem",
+                fields: [
+                    "target": .reference(ItemReference(target.itemID)),
+                    "personalOverrides": .object([unrelated.itemID: .text("include")]),
+                    "permissions": permissions(owner: "admin", mode: 0o600),
+                ])
+        }
+        XCTAssertTrue(try Categories.query(store: store, categoryPath: [relevant.itemID]).isEmpty)
+    }
+
+    func testManualRootStreamsBeyondResidentHeadCacheCapacity() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "tractanda-category-definition-stream-\(Identifier.make())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try ItemStore(root: root)
+        store.currentHeadCacheEntryLimitForTesting = 4
+        let parent = try create(
+            store, uid: getuid(),
+            fields: [
+                "selection": .object([
+                    "language": .text(SpotlightQuery.profile), "expression": .text("itemID == \"\""),
+                ])
+            ])
+        var matching: [String] = []
+        for index in 0..<300 {
+            let child = try create(
+                store, uid: getuid(),
+                fields: [
+                    "selection": .object([
+                        "language": .text(SpotlightQuery.profile), "expression": .text("itemID == \"\""),
+                    ]),
+                    "categoryParents": .list([.reference(ItemReference(parent.itemID))]),
+                ])
+            if index.isMultiple(of: 75) {
+                let item = try create(
+                    store, uid: getuid(),
+                    fields: [
+                        "categoryOverrides": .object([child.itemID: .text("include")])
+                    ])
+                matching.append(item.itemID)
+            }
+        }
+        let page = try Categories.query(store: store, categoryPath: [parent.itemID])
+        XCTAssertEqual(Set(page.map(\.itemID)), Set(matching))
+        XCTAssertGreaterThan(store.evictedCurrentHeadCount, 0)
+    }
+
+    func testRequestedChildDoesNotLoadItsParentSiblings() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "tractanda-category-child-closure-\(Identifier.make())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try ItemStore(root: root)
+        store.categoryGraphClosureLimitForTesting = 8
+        let parent = try create(
+            store, uid: getuid(),
+            fields: [
+                "selection": .object([
+                    "language": .text(SpotlightQuery.profile), "expression": .text("itemID == \"\""),
+                ])
+            ])
+        var selected: Revision?
+        for index in 0..<20 {
+            let child = try create(
+                store, uid: getuid(),
+                fields: [
+                    "selection": .object([
+                        "language": .text(SpotlightQuery.profile), "expression": .text("itemID == \"\""),
+                    ]),
+                    "categoryParents": .list([.reference(ItemReference(parent.itemID))]),
+                ])
+            if index == 0 { selected = child }
+        }
+        let target = try create(
+            store, uid: getuid(),
+            fields: [
+                "categoryOverrides": .object([selected!.itemID: .text("include")])
+            ])
+        XCTAssertEqual(
+            try Categories.query(store: store, categoryPath: [selected!.itemID]).map(\.itemID),
+            [target.itemID])
+    }
+
+    func testPersonalOwnerRemapFindsCrossCategoryDuplicateOverlay() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "tractanda-category-owner-remap-\(Identifier.make())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let accounts = Accounts()
+        let store = try ItemStore(root: root, accounts: accounts)
+        _ = try store.configureAccess(
+            .object([
+                "profile": .text(AccessConfiguration.profile),
+                "users": .list([.text("alice"), .text("bob")]),
+            ]), operationID: "category-owner-remap-access")
+        let relevant = try create(
+            store, uid: accounts.alice,
+            fields: [
+                "permissions": permissions(owner: "alice", mode: 0o640),
+                "selection": .object([
+                    "language": .text(SpotlightQuery.profile), "expression": .text("itemID == \"\""),
+                ]),
+            ])
+        let unrelated = try create(
+            store, uid: accounts.alice,
+            fields: [
+                "permissions": permissions(owner: "alice", mode: 0o640),
+                "selection": .object([
+                    "language": .text(SpotlightQuery.profile), "expression": .text("itemID == \"\""),
+                ]),
+            ])
+        let target = try create(
+            store, uid: accounts.alice,
+            fields: [
+                "permissions": permissions(owner: "alice", mode: 0o640)
+            ])
+        _ = try create(
+            store, uid: accounts.alice, classID: "PersonalStateItem",
+            fields: [
+                "permissions": permissions(owner: "alice", mode: 0o600),
+                "target": .reference(ItemReference(target.itemID)),
+                "personalOverrides": .object([relevant.itemID: .text("include")]),
+            ])
+        accounts.users[61_003] = AccountIdentity(
+            uid: accounts.bob, name: "remapped-owner", primaryGroupName: "staff", groupIDs: [71_001])
+        _ = try create(
+            store, uid: accounts.bob, classID: "PersonalStateItem",
+            fields: [
+                "permissions": permissions(owner: "remapped-owner", mode: 0o600),
+                "target": .reference(ItemReference(target.itemID)),
+                "personalOverrides": .object([unrelated.itemID: .text("exclude")]),
+            ])
+        try store.withAccess(forUID: accounts.alice) {
+            XCTAssertEqual(
+                try Categories.query(store: store, categoryPath: [relevant.itemID]).map(\.itemID),
+                [target.itemID])
+        }
+        accounts.users[61_003] = AccountIdentity(
+            uid: accounts.alice, name: "remapped-owner", primaryGroupName: "staff", groupIDs: [71_001])
+        try store.withAccess(forUID: accounts.alice) {
+            XCTAssertThrowsError(try Categories.query(store: store, categoryPath: [relevant.itemID])) {
+                XCTAssertEqual(($0 as? TractandaError)?.code, "invalidPersonalState")
+            }
+        }
+    }
+
+    func testPersonalOverlayLookupIsBoundedPerTargetAndEvictsWithoutChangingDecision() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "tractanda-category-overlay-per-target-\(Identifier.make())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let accounts = Accounts()
+        let store = try ItemStore(root: root, accounts: accounts)
+        _ = try store.configureAccess(
+            .object([
+                "profile": .text(AccessConfiguration.profile),
+                "users": .list([.text("alice"), .text("bob")]),
+            ]), operationID: "category-overlay-per-target-access")
+        let category = try create(
+            store, uid: accounts.alice,
+            fields: [
+                "selection": .object([
+                    "language": .text(SpotlightQuery.profile), "expression": .text("itemID == \"\""),
+                ]),
+                "permissions": permissions(owner: "alice", mode: 0o640),
+            ])
+        store.personalOverlayWorkingSetLimitForTesting = 1
+        store.personalOverlayTargetCacheLimitForTesting = 1
+        var targets: [Revision] = []
+        for _ in 0..<5 {
+            let target = try create(
+                store, uid: accounts.alice,
+                fields: ["permissions": permissions(owner: "alice", mode: 0o640)])
+            targets.append(target)
+            _ = try create(
+                store, uid: accounts.alice, classID: "PersonalStateItem",
+                fields: [
+                    "target": .reference(ItemReference(target.itemID)),
+                    "personalOverrides": .object([category.itemID: .text("include")]),
+                    "permissions": permissions(owner: "alice", mode: 0o600),
+                ])
+        }
+        try store.withAccess(forUID: accounts.alice) {
+            let overrides = try store.categoryOverrideIndex(categoryIDs: [category.itemID])
+            for target in targets {
+                XCTAssertEqual(
+                    try overrides.decision(for: target, categoryID: category.itemID)?.decision, "include")
+            }
+            XCTAssertEqual(
+                try overrides.decision(for: targets[0], categoryID: category.itemID)?.decision, "include",
+                "An LRU eviction repeats exact lookup and preserves the result.")
+        }
+    }
+
+    func testRevokedOverlayACLIsCheckedBeforeCanonicalHydration() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "tractanda-category-overlay-acl-before-hydration-\(Identifier.make())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let accounts = Accounts()
+        let store = try ItemStore(root: root, accounts: accounts)
+        _ = try store.configureAccess(
+            .object([
+                "profile": .text(AccessConfiguration.profile),
+                "users": .list([.text("alice"), .text("bob")]),
+            ]), operationID: "category-overlay-acl-access")
+        let category = try create(
+            store, uid: accounts.alice,
+            fields: [
+                "selection": .object([
+                    "language": .text(SpotlightQuery.profile), "expression": .text("itemID == \"\""),
+                ]),
+                "permissions": permissions(owner: "alice", mode: 0o640),
+            ])
+        let target = try create(
+            store, uid: accounts.alice,
+            fields: ["permissions": permissions(owner: "alice", mode: 0o640)])
+        let overlay = try create(
+            store, uid: accounts.alice, classID: "PersonalStateItem",
+            fields: [
+                "target": .reference(ItemReference(target.itemID)),
+                "personalOverrides": .object([category.itemID: .text("include")]),
+                "permissions": permissions(owner: "alice", mode: 0o600),
+            ])
+        var overrides: CategoryOverrideIndex!
+        try store.withAccess(forUID: accounts.alice) {
+            overrides = try store.categoryOverrideIndex(categoryIDs: [category.itemID])
+            XCTAssertEqual(
+                try overrides.decision(for: target, categoryID: category.itemID)?.decision, "include")
+        }
+        _ = try store.commit(
+            CommitRequest(
+                action: .revise, itemID: overlay.itemID, expectedRevisionID: overlay.revisionID,
+                changes: ["permissions": permissions(owner: "alice", mode: 0o000)],
+                operationID: "revoke-overlay-before-hydration"))
+        var hydratedOverlay = false
+        store.onCurrentHeadHydrationForTesting = { if $0 == overlay.itemID { hydratedOverlay = true } }
+        try store.withAccess(forUID: accounts.alice) {
+            XCTAssertNil(try overrides.decision(for: target, categoryID: category.itemID))
+        }
+        XCTAssertFalse(hydratedOverlay, "An unreadable indexed head is filtered before canonical hydration.")
+    }
+
+    func testPersonalExcludeCanRestoreBaseAbsentRootMembership() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "tractanda-category-exclude-seed-\(Identifier.make())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let accounts = Accounts()
+        let store = try ItemStore(root: root, accounts: accounts)
+        _ = try store.configureAccess(
+            .object([
+                "profile": .text(AccessConfiguration.profile),
+                "users": .list([.text("alice"), .text("bob")]),
+            ]), operationID: "category-exclude-seed-access")
+        let child = try create(
+            store, uid: accounts.alice,
+            fields: [
+                "selection": .object([
+                    "language": .text(SpotlightQuery.profile), "expression": .text("itemID != \"\""),
+                ]),
+                "permissions": permissions(owner: "alice", mode: 0o640),
+            ])
+        let rootCategory = try create(
+            store, uid: accounts.alice,
+            fields: [
+                "selection": .object([
+                    "language": .text(SpotlightQuery.profile), "expression": .text("itemID != \"\""),
+                    "excludedCategoryIDs": .list([.reference(ItemReference(child.itemID))]),
+                ]),
+                "permissions": permissions(owner: "alice", mode: 0o640),
+            ])
+        let target = try create(
+            store, uid: accounts.alice,
+            fields: ["permissions": permissions(owner: "alice", mode: 0o640)])
+        _ = try create(
+            store, uid: accounts.alice, classID: "PersonalStateItem",
+            fields: [
+                "target": .reference(ItemReference(target.itemID)),
+                "personalOverrides": .object([child.itemID: .text("exclude")]),
+                "permissions": permissions(owner: "alice", mode: 0o600),
+            ])
+        try store.withAccess(forUID: accounts.alice) {
+            XCTAssertEqual(
+                try Categories.query(store: store, categoryPath: [rootCategory.itemID]).map(\.itemID),
+                [target.itemID])
+        }
     }
 }

@@ -114,13 +114,28 @@ final class Version1UUIDTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
             "trac-uuid-v1-" + Identifier.make())
         defer { try? FileManager.default.removeItem(at: root) }
-        let itemDirectory = root.appendingPathComponent("items")
+        let oldItemID = Identifier.make()
+        let oldRevisionID = Identifier.make()
+        XCTAssertNil(UUID(uuidString: oldItemID)?.version1Components)
+        XCTAssertNil(UUID(uuidString: oldRevisionID)?.version1Components)
+        let now = Timestamp.now()
+        let nowDate = try XCTUnwrap(Timestamp.parse(now))
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let components = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: nowDate)
+        let itemDirectory = root.appendingPathComponent(
+            String(
+                format: "items/%04d/%02d/%02d/%02d/%02d/%@",
+                components.year!, components.month!, components.day!, components.hour!, components.minute!,
+                oldItemID))
         try FileManager.default.createDirectory(
             at: itemDirectory, withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700])
-        let oldItemID = Identifier.make()
-        let oldRevisionID = Identifier.make()
-        let now = Timestamp.now()
+        var directory = itemDirectory
+        while directory.path.hasPrefix(root.path + "/") {
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+            directory.deleteLastPathComponent()
+        }
         let intent = CommitRequest(
             classID: "Item", changes: ["subject": .text("Legacy v4")], operationID: "legacy-v4-fixture")
         let legacy = try Revision(fields: [

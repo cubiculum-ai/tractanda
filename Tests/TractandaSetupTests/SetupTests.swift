@@ -412,16 +412,15 @@ final class SetupTests: XCTestCase {
         try installer.writeReceipt(receipt)
         var changed = poc11GraniteConfiguration(receipt, payload: poc11Payload)
         changed.queryPrefix = "administrator-selected-prefix"
-        try JSONEncoder().encode(changed).write(
-            to: URL(fileURLWithPath: receipt.store).appendingPathComponent("semantic.json"))
+        let semanticURL = URL(fileURLWithPath: receipt.store).appendingPathComponent("semantic.json")
+        let changedBytes = try JSONEncoder().encode(changed)
+        try changedBytes.write(to: semanticURL)
         try addGranitePayload(to: f)
         XCTAssertThrowsError(try installer.install(f.options, upgrade: true)) { error in
             XCTAssertTrue(error.localizedDescription.contains("different semantic configuration"))
         }
         XCTAssertEqual(try installer.readReceipt("preview")?.embedding, poc11Payload)
-        XCTAssertEqual(
-            try Data(contentsOf: URL(fileURLWithPath: receipt.store).appendingPathComponent("semantic.json")),
-            try JSONEncoder().encode(changed))
+        XCTAssertEqual(try Data(contentsOf: semanticURL), changedBytes)
     }
 
     func testPostConfigurationFailureRestoresManagedPoc11GraniteConfiguration() throws {

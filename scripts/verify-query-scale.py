@@ -8,13 +8,13 @@ opt-in and are never run automatically by this script.
 import argparse
 import contextlib
 import concurrent.futures
+import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
 import platform
 import random
-import shutil
 import signal
 import socket
 import struct
@@ -36,6 +36,8 @@ CAPACITY_POLL_SECONDS = 1.0
 ESTIMATED_REVISION_OVERHEAD = 16 * 1024
 ESTIMATED_HEAD_INDEX_OVERHEAD = 8 * 1024
 ESTIMATE_SAFETY_FACTOR = 2.0
+MIXED_AUXILIARY_ITEMS = 5
+HASH_CHUNK_BYTES = 1024 * 1024
 
 
 def estimate_fixture_bytes(items, history_depth, body_bytes, writes=0):
@@ -47,8 +49,18 @@ def estimate_fixture_bytes(items, history_depth, body_bytes, writes=0):
 
 
 def available_bytes(path):
-    """Return genuinely available bytes on the filesystem containing path."""
-    return shutil.disk_usage(path).free
+    """Return unprivileged available bytes on the filesystem containing path."""
+    stats = os.statvfs(path)
+    return stats.f_bavail * stats.f_frsize
+
+
+def sha256_file(path):
+    """Hash a binary in bounded chunks so provenance capture has fixed memory cost."""
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as source:
+        for chunk in iter(lambda: source.read(HASH_CHUNK_BYTES), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def require_capacity(path, used, max_bytes, reserve_bytes, estimate=0, phase="fixture"):
@@ -56,6 +68,8 @@ def require_capacity(path, used, max_bytes, reserve_bytes, estimate=0, phase="fi
         free = available_bytes(path)
     except (OSError, AttributeError) as exc:
         raise RuntimeError(f"Cannot determine available disk capacity during {phase}; refusing to continue") from exc
+    if not isinstance(free, int) or free < 0:
+        raise RuntimeError(f"Cannot determine available disk capacity during {phase}; refusing to continue")
     remaining_budget = max_bytes - used
     headroom = free - reserve_bytes
     if used > max_bytes or estimate > remaining_budget:
@@ -151,6 +165,35 @@ def make_fields(index, rng, body_bytes, private_every):
             "mode": tagged("integer", 0o660),
             "acl": tagged("object", {}),
         })
+    return fields
+
+
+def make_mixed_fields(index, rng, body_bytes, private_every):
+    """Representative synthetic content; profile labels do not grant real ACL access."""
+    fields = make_fields(index, rng, body_bytes, private_every)
+    languages = ("en", "la", "fr", "ja", "ar")
+    snippets = {
+        "en": "A short note for the mixed corpus.",
+        "la": "Memoria brevis de conventu et rebus agendis.",
+        "fr": "Une note sur le projet, les dates et les décisions.",
+        "ja": "会議の要点と次の作業を記録します。",
+        "ar": "ملخص الاجتماع والخطوات التالية للفريق.",
+    }
+    language = languages[index % len(languages)]
+    if index % 3 == 1:
+        # A distinct longer body exercises UTF-8 sizing and indexing.
+        text = (snippets[language] + " ") * max(2, body_bytes // max(len(snippets[language].encode()), 1))
+    else:
+        text = snippets[language]
+    fields["body"] = tagged("text", text)
+    fields["language"] = tagged("text", language)
+    fields["priority"] = tagged("integer", index % 5)
+    fields["reviewed"] = tagged("boolean", index % 2 == 0)
+    fields["labels"] = tagged("list", [tagged("text", language),
+                                        tagged("text", "mixed" if index % 4 else "follow-up")])
+    fields["simulatedProfile"] = tagged("text", f"simulated-user-{chr(65 + index % 3)}")
+    if index % 4 != 0:
+        fields["optionalCode"] = tagged("text", f"MIX-{index % 17:02d}")
     return fields
 
 
@@ -331,9 +374,9 @@ def measured_server(binary, store, endpoint, root, max_disk_bytes,
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path, help="built native tractanda executable")
-    parser.add_argument("--preset", choices=("10k", "100k", "1m", "custom"), default="10k")
+    parser.add_argument("--preset", choices=("mixed", "10k", "100k", "1m", "custom"), default="10k")
     parser.add_argument("--items", type=int, help="logical current heads for custom preset")
-    parser.add_argument("--history-depth", type=int, default=1,
+    parser.add_argument("--history-depth", type=int,
                         help="total revisions per logical item, including its current head")
     parser.add_argument("--body-bytes", type=int, default=1536)
     parser.add_argument("--private-every", type=int, default=5,
@@ -347,6 +390,11 @@ def main():
                         help="explicit bounded run; also caps the selected preset")
     parser.add_argument("--startup-phase-stats", action="store_true",
                         help="opt in to internal recovery/index phase timings and phase RSS samples")
+    parser.add_argument("--comparison-id", help="label for a paired baseline/current run")
+    parser.add_argument("--comparison-phase", choices=("baseline", "current"),
+                        help="phase label for a paired run; does not imply a speedup")
+    parser.add_argument("--source-revision",
+                        help="declared source revision used to build the measured binary")
     parser.add_argument("--compare-checkpoint", action="store_true",
                         help="measure clean reuse and forced full recovery on the same populated fixture")
     parser.add_argument("--max-seconds", type=float, default=1800,
@@ -356,10 +404,14 @@ def main():
     parser.add_argument("--reserve-disk-bytes", type=int, default=10 * 1024**3,
                         help="keep this much genuinely available space free (default: 10 GiB)")
     args = parser.parse_args()
-    counts = {"10k": 10_000, "100k": 100_000, "1m": 1_000_000}
+    if bool(args.comparison_id) != bool(args.comparison_phase):
+        parser.error("--comparison-id and --comparison-phase must be supplied together")
+    counts = {"mixed": 128, "10k": 10_000, "100k": 100_000, "1m": 1_000_000}
     if args.preset == "custom" and not args.items:
         parser.error("--preset custom requires --items")
     count = args.items if args.preset == "custom" else counts[args.preset]
+    args.history_depth = args.history_depth if args.history_depth is not None else (
+        2 if args.preset == "mixed" else 1)
     if args.smoke_items is not None:
         if args.smoke_items < 1:
             parser.error("--smoke-items must be positive")
@@ -376,12 +428,21 @@ def main():
         raise TimeoutError(f"Harness exceeded --max-seconds={args.max_seconds:g}; disposable store is being removed")
     signal.signal(signal.SIGALRM, stop_at_deadline)
     signal.setitimer(signal.ITIMER_REAL, args.max_seconds)
-    estimate = estimate_fixture_bytes(count, args.history_depth, args.body_bytes, args.writes)
+    auxiliary_items = MIXED_AUXILIARY_ITEMS if args.preset == "mixed" else 2
+    category_revisions = (count - (count + 3) // 4) if args.preset == "mixed" else 0
+    estimate = estimate_fixture_bytes(count + auxiliary_items, args.history_depth,
+                                      args.body_bytes, args.writes + category_revisions)
     # Check the temp parent before creating anything, then recheck the actual
     # filesystem after TemporaryDirectory chooses its location.
     initial_free = require_capacity(Path(tempfile.gettempdir()), 0, args.max_disk_bytes,
                      args.reserve_disk_bytes, estimate, "startup estimate")
     binary = str(args.binary.resolve())
+    binary_sha256 = sha256_file(binary)
+    source_revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[1],
+                                     capture_output=True, text=True, check=False).stdout.strip() or None
+    workspace_dirty = bool(subprocess.run(["git", "status", "--porcelain"],
+        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True,
+        check=False).stdout.strip())
     rng = random.Random(7741)
     seed_write_timings = []
     history_write_timings = []
@@ -428,8 +489,9 @@ def main():
                 check_limits("head seeding", min(batch_size, count - first))
                 calls = []
                 for index in range(first, min(first + batch_size, count)):
+                    field_builder = make_mixed_fields if args.preset == "mixed" else make_fields
                     calls.append(["TractandaItem/commit", wire.intent("create", str(uuid.uuid4()),
-                        class_id="Item", changes=make_fields(index, rng, args.body_bytes, args.private_every)),
+                        class_id="Item", changes=field_builder(index, rng, args.body_bytes, args.private_every)),
                         f"create-{index}"])
                 # One bounded native batch keeps each request comfortably below the wire limit.
                 started = time.perf_counter()
@@ -446,20 +508,48 @@ def main():
                     raise RuntimeError("head seeding exceeded --max-seconds; disposable fixture will be removed")
                 if first % (batch_size * 1024) == 0:
                     check_limits("head seeding")
-            check_limits("category and saved-view fixture writes", 2)
+            check_limits("category and saved-view fixture writes", auxiliary_items)
             category_revision = boot_client.commit(wire.intent("create", str(uuid.uuid4()), class_id="Item",
                 changes={"subject": wire.text("Scale sender category"), "selection": {
                     "type": "object", "value": {"language": wire.text("tractanda.spotlight.v0"),
                         "expression": wire.text('sender == "person7@example.invalid"')}}}))
             category_id = wire.item_id(category_revision["revision"])
+            mixed_category_ids = []
+            if args.preset == "mixed":
+                for name in ("Mixed project", "Mixed status", "Mixed ready"):
+                    parent_ids = mixed_category_ids[-1:] if mixed_category_ids else []
+                    result = boot_client.commit(wire.intent("create", str(uuid.uuid4()), class_id="Item",
+                        changes={"subject": wire.text(name),
+                            "selection": {"type": "object", "value": {
+                                "language": wire.text("tractanda.spotlight.v0"),
+                                "expression": wire.text('itemID == ""')}},
+                            "categoryParents": {"type": "list", "value": [
+                                {"type": "reference", "value": {"itemID": parent}}
+                                for parent in parent_ids]}}))
+                    mixed_category_ids.append(wire.item_id(result["revision"]))
+                for index, item_id in enumerate(ids):
+                    if index % 4 == 0:
+                        continue
+                    check_limits("mixed category membership writes", 1)
+                    current = boot_client.get(item_id)
+                    assignments = mixed_category_ids[:]
+                    overrides = {category: wire.text("include") for category in assignments}
+                    boot_client.commit(wire.intent("revise", str(uuid.uuid4()), item_id,
+                        wire.revision_id(current), changes={"categoryOverrides":
+                            {"type": "object", "value": overrides}}))
+                    accounted_store_bytes += (args.body_bytes + ESTIMATED_REVISION_OVERHEAD
+                                              + ESTIMATED_HEAD_INDEX_OVERHEAD) * ESTIMATE_SAFETY_FACTOR
+                    writes_since_size_scan += 1
+            saved_view_path = mixed_category_ids if mixed_category_ids else [category_id]
             view_revision = boot_client.commit(wire.intent("create", str(uuid.uuid4()), class_id="Item",
                 changes={"subject": wire.text("Scale sender saved view"), "viewDefinition": {
                     "type": "object", "value": {"language": wire.text("tractanda.spotlight.v0"),
                         "categoryPath": {"type": "list", "value": [{"type": "reference",
-                            "value": {"itemID": category_id}}]}, "sort": {"type": "list", "value": []}}}}))
-            accounted_store_bytes += 2 * (args.body_bytes + ESTIMATED_REVISION_OVERHEAD
+                            "value": {"itemID": item_id}} for item_id in saved_view_path]},
+                        "sort": {"type": "list", "value": []}}}}))
+            accounted_store_bytes += auxiliary_items * (args.body_bytes + ESTIMATED_REVISION_OVERHEAD
                                            + ESTIMATED_HEAD_INDEX_OVERHEAD) * ESTIMATE_SAFETY_FACTOR
-            writes_since_size_scan += 2
+            writes_since_size_scan += auxiliary_items
             view_id = wire.item_id(view_revision["revision"])
             for index in range(count):
                 for revision in range(1, args.history_depth):
@@ -517,7 +607,8 @@ def main():
                 raise RuntimeError("forced restart did not use full canonical recovery")
             watchdog = process._scale_watchdog
             client = MeteredClient(endpoint)
-            expected_saved_view_total = sum(1 for index in range(count) if index % 97 == 7)
+            expected_saved_view_total = (count - (count + 3) // 4 if args.preset == "mixed"
+                                         else sum(1 for index in range(count) if index % 97 == 7))
             view_args = {"viewID": view_id, "position": 0, "limit": args.page_size}
             first_view_started = time.perf_counter()
             first_view_result = client.call("TractandaItem/query", view_args)
@@ -528,6 +619,23 @@ def main():
             warm_view_result = client.call("TractandaItem/query", view_args)
             warm_saved_view_seconds = time.perf_counter() - warm_view_started
             assert warm_view_result["ids"] == first_view_result["ids"]
+            mixed_query_evidence = []
+            if args.preset == "mixed":
+                cases = [
+                    ("integer-scalar", "priority == 3", sum(i % 5 == 3 for i in range(count))),
+                    ("boolean-scalar", "reviewed == true", sum(i % 2 == 0 for i in range(count))),
+                    ("list-member", 'labels == "la"', sum(i % 5 == 1 for i in range(count))),
+                    ("optional-field-presence", 'optionalCode != ""', count - (count + 3) // 4),
+                    ("multilingual-field", 'language == "ja"', sum(i % 5 == 3 for i in range(count))),
+                ]
+                for name, expression, expected in cases:
+                    started = time.perf_counter()
+                    result = client.call("TractandaItem/query", {"expression": expression,
+                                                                     "position": 0, "limit": 1})
+                    elapsed = time.perf_counter() - started
+                    assert result["total"] == expected, (name, result["total"], expected)
+                    mixed_query_evidence.append({"shape": name, "expression": expression,
+                        "expectedAndObservedTotal": expected, "elapsedSeconds": round(elapsed, 6)})
             concurrent_write_timings = []
             query_args = {"limit": args.page_size, "position": 0}
             for _ in range(args.read_rounds):
@@ -573,9 +681,30 @@ def main():
             concurrency_seconds = time.perf_counter() - concurrent_started
             metrics = {
                 "status": "passed", "platform": platform.platform(), "preset": args.preset,
+                "corpus": {"profile": "mixed representative synthetic corpus" if args.preset == "mixed"
+                           else "standard generated corpus", "languageMix": ["en", "la", "fr", "ja", "ar"]
+                           if args.preset == "mixed" else ["en"],
+                           "customFields": ["language", "priority", "reviewed", "labels",
+                                            "optionalCode", "simulatedProfile"] if args.preset == "mixed" else [],
+                           "historyEnabled": args.history_depth > 1,
+                           "categoryShape": "three-level parent chain, per-item overrides, saved category path"
+                           if args.preset == "mixed" else "single selection category and saved view",
+                           "userProfiles": "simulated-user-A/B/C field labels only; isolated user stores and ACL behavior not tested"
+                           if args.preset == "mixed" else "single-user fixture; ACL behavior not validated"},
+                "comparison": {"id": args.comparison_id, "phase": args.comparison_phase,
+                    "binarySHA256": binary_sha256, "workspaceHead": source_revision,
+                    "declaredSourceRevision": args.source_revision,
+                    "workspaceDirty": workspace_dirty,
+                    "configuration": {"preset": args.preset, "logicalItems": count,
+                        "historyDepth": args.history_depth, "bodyBytes": args.body_bytes,
+                        "privateEvery": args.private_every, "readers": args.readers,
+                        "readRounds": args.read_rounds, "writes": args.writes,
+                        "pageSize": args.page_size, "startupPhaseStats": args.startup_phase_stats,
+                        "maxSeconds": args.max_seconds, "maxDiskBytes": args.max_disk_bytes,
+                        "reserveDiskBytes": args.reserve_disk_bytes}},
                 "logicalItems": count, "historyDepth": args.history_depth,
-                "canonicalCurrentHeadsBeforeConcurrentWrites": count + 2,
-                "canonicalCurrentHeadsAtEnd": count + 2 + args.writes,
+                "canonicalCurrentHeadsBeforeConcurrentWrites": count + auxiliary_items,
+                "canonicalCurrentHeadsAtEnd": count + auxiliary_items + args.writes,
                 "bodyBytes": args.body_bytes,
                 "permissionMix": {
                     "mode": "metadata-only; single-user fixture; ACL behavior not validated",
@@ -611,6 +740,7 @@ def main():
                               "expectedAndObservedTotal": expected_saved_view_total,
                               "firstPageSeconds": round(first_saved_view_seconds, 6),
                               "warmPageSeconds": round(warm_saved_view_seconds, 6)},
+                "mixedQueryEvidence": mixed_query_evidence,
                 "concurrentReadLatencySeconds": {"p50": round(percentile(concurrent_reads, .50), 6),
                                                   "p95": round(percentile(concurrent_reads, .95), 6)},
                 "concurrencyWindowSeconds": round(concurrency_seconds, 3),
@@ -620,7 +750,15 @@ def main():
                 "measurementScope": "query pages and concurrent write/query phase; excludes fixture loading",
                 "populatedServerRSSKiB": rss_kib(process.pid),
                 "unavailable": ["cold page latency", "full index rebuild time", "queue delay/index lag",
-                                "category graph cost", "vector/extraction cost", "canonical disk bytes"],
+                                "category graph cost", "vector/extraction cost", "canonical disk bytes",
+                                "SQLite query plans and VM scan steps (native diagnostics are not exposed)"],
+                "queryDiagnostics": {"queryPlan": {"status": "unavailable",
+                    "reason": "native service does not expose EXPLAIN QUERY PLAN in this harness"},
+                    "scanSteps": {"status": "unavailable",
+                    "reason": "native service does not expose SQLite statement counters"},
+                    "memory": {"status": "measured", "steadyRSSKiB": rss_kib(process.pid),
+                        "startupPeakRSSKiB": populated_startup["startupPeakRSSKiB"],
+                        "startupRSSSampleCount": populated_startup["startupRSSSampleCount"]}},
             }
     signal.setitimer(signal.ITIMER_REAL, 0)
     print(json.dumps(metrics, indent=2))

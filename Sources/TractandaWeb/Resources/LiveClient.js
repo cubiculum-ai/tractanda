@@ -297,12 +297,12 @@
     }
     return groups;
   }
-  async function queryPageWithRevisions(argumentsObject,position,projection) {
+  async function queryPageWithRevisions(argumentsObject,position,projection,cursor) {
     let limit=64;
     while(true) {
       try {
         return await nativeCalls([
-          ['TractandaItem/query',{...argumentsObject,position,limit}],
+          ['TractandaItem/query',{...argumentsObject,...(cursor?{cursor}:{position}),limit}],
           ['TractandaItem/get',{'#ids':{resultOf:'web-0',name:'TractandaItem/query',path:'/ids'},...projection}]
         ]);
       } catch(error) {
@@ -312,14 +312,21 @@
     }
   }
   async function queryRevisions(argumentsObject, state, properties) {
-    const at=argumentsObject.at||currentDate(),revisions=[];
+    const at=argumentsObject.at||currentDate(),revisions=[];let cursor=null;
     for(let position=0;;) {
       // The get uses this request's query IDs, so each page is coherent and keeps
       // full editor content without the server's replay receipt.
       const projection=properties?{properties}:{projection:'content'};
-      const [query,page]=await queryPageWithRevisions({...argumentsObject,at},position,projection);
+      let pair;
+      try { pair=await queryPageWithRevisions({...argumentsObject,at},position,projection,cursor); }
+      catch(error) {
+        if(!cursor||!['invalidCursor','unsupportedCursor'].includes(error.code))throw error;
+        cursor=null;
+        pair=await queryPageWithRevisions({...argumentsObject,at},position,projection,null);
+      }
+      const [query,page]=pair;
       if(query.queryState!==state||page.state!==state||page.notFound.length)return null;
-      revisions.push(...page.list);position+=query.ids.length;
+      revisions.push(...page.list);position=query.position+query.ids.length;cursor=query.nextCursor||null;
       if(position>=query.total)return revisions;
       if(!query.ids.length)throw apiError('invalidResponse','An incomplete query page was empty.');
     }

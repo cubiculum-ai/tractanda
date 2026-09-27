@@ -50,6 +50,12 @@ final class CategoryWorkspaceTests: XCTestCase {
         let b = try fixture.category("B", parents: [a])
         for number in 0..<70 { _ = try fixture.item("item \(number)", categories: [a, b]) }
         _ = try fixture.item("excluded", categories: [a])
+        let direct = try Categories.page(
+            store: fixture.store, expression: nil, text: nil,
+            categoryPath: [a.itemID, b.itemID], excludedCategoryIDs: [],
+            sort: [try ItemSort(property: "modifiedAt", isAscending: false)],
+            position: 0, limit: 64, at: Date(), timeZone: "UTC")
+        XCTAssertEqual(direct.total, 73)
         let first = try CategoryPreviewPage.load(
             using: fixture.client, path: [a.itemID, b.itemID], position: 0,
             sort: [try ItemSort(property: "modifiedAt", isAscending: false)])

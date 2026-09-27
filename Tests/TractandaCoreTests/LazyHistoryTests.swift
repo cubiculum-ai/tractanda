@@ -163,6 +163,38 @@ final class LazyHistoryTests: XCTestCase {
         }
     }
 
+    func testEvictedHeadChecksCurrentACLBeforeCanonicalHydration() throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let accounts = Accounts()
+        let store = try ItemStore(root: root, accounts: accounts)
+        _ = try store.configureAccess(config(), operationID: "evicted-acl-config")
+        let privateItem = try store.withAccess(forUID: accounts.alice) {
+            try store.commit(
+                CommitRequest(
+                    classID: "Item",
+                    changes: [
+                        "subject": .text("private"), "permissions": permissions(owner: "alice", mode: 0o600),
+                    ],
+                    operationID: "evicted-acl-private"
+                )
+            ).revision
+        }
+        for number in 0..<140 {
+            _ = try store.commit(
+                CommitRequest(
+                    classID: "Item", changes: ["subject": .text("pressure \(number)")],
+                    operationID: "evicted-acl-pressure-\(number)"
+                ))
+        }
+        XCTAssertGreaterThan(store.evictedCurrentHeadCount, 0)
+        try store.withAccess(forUID: accounts.bob) {
+            let hydrationsBeforeDeniedRead = store.currentHeadHydrationsForTesting
+            assertCode("forbidden") { _ = try store.get(privateItem.itemID) }
+            XCTAssertEqual(store.currentHeadHydrationsForTesting, hydrationsBeforeDeniedRead)
+        }
+    }
+
     func testCorruptEvictedCurrentHeadFailsClosed() throws {
         let root = root()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -172,7 +204,7 @@ final class LazyHistoryTests: XCTestCase {
                 classID: "Item", changes: ["subject": .text("damaged"), "body": .text("large body")],
                 operationID: "damaged-current-head")
         ).revision
-        XCTAssertEqual(store.evictedCurrentHeadCount, 1)
+        XCTAssertEqual(store.currentHeadHydrationsForTesting, 0)
         let items = root.appendingPathComponent("items")
         let recordURLs =
             FileManager.default.enumerator(at: items, includingPropertiesForKeys: nil)?
@@ -187,7 +219,9 @@ final class LazyHistoryTests: XCTestCase {
             try handle.close()
         }
         XCTAssertEqual(record.path.withCString { chmod($0, mode_t(0o400)) }, 0)
+        let hydrationCount = store.currentHeadHydrationsForTesting
         assertCode("recoveryError") { _ = try store.get(current.itemID) }
+        XCTAssertEqual(store.currentHeadHydrationsForTesting, hydrationCount + 1)
     }
 
     func testCrossItemHistoricalLookupDoesNotReadUnauthorizedDamagedRevision() throws {
@@ -310,7 +344,8 @@ final class LazyHistoryTests: XCTestCase {
                     operationID: "large-head-create")
             ).revision
             itemID = original.itemID
-            XCTAssertEqual(store.evictedCurrentHeadCount, 1)
+            XCTAssertEqual(store.currentHeadCacheEntriesForTesting, 1)
+            XCTAssertLessThan(store.currentHeadCacheBytesForTesting, 4 * 1024)
             XCTAssertEqual(try store.get(itemID).fields["body"]?.string, body)
             XCTAssertLessThanOrEqual(store.historicalCacheBytesForTesting, 16 * 1024 * 1024)
             XCTAssertEqual(try store.candidates(text: "needle").map(\.itemID), [itemID])
@@ -369,8 +404,10 @@ final class LazyHistoryTests: XCTestCase {
                 classID: "Item", changes: ["subject": .text("ordinary"), "body": .text(largeBody)],
                 operationID: "structural-large-ordinary")
         ).revision
-        XCTAssertEqual(store.evictedCurrentHeadCount, 1)
+        XCTAssertLessThanOrEqual(store.currentHeadCacheEntriesForTesting, 128)
         let hydrations = store.currentHeadHydrationsForTesting
+        var hydratedItems: Set<String> = []
+        store.onCurrentHeadHydrationForTesting = { _ = hydratedItems.insert($0) }
         _ = try store.commit(
             CommitRequest(
                 action: .revise, itemID: category.itemID, expectedRevisionID: category.revisionID,
@@ -380,7 +417,9 @@ final class LazyHistoryTests: XCTestCase {
                     ])
                 ], operationID: "structural-category-edit")
         )
-        XCTAssertEqual(store.currentHeadHydrationsForTesting, hydrations)
+        XCTAssertGreaterThan(store.currentHeadHydrationsForTesting, hydrations)
+        XCTAssertTrue(hydratedItems.contains(category.itemID))
+        XCTAssertFalse(hydratedItems.contains(ordinary.itemID))
         XCTAssertEqual(try store.get(ordinary.itemID).fields["body"]?.string, largeBody)
     }
 }

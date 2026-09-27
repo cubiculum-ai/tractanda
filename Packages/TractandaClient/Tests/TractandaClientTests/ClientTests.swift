@@ -68,6 +68,14 @@ func object(_ value: some Encodable) throws -> Any {
     }
 }
 
+@Test func cursorQueryOmitsRandomAccessPosition() throws {
+    let query = ItemQuery(limit: 16, cursor: "opaque", at: "2026-09-27T12:34:56.123Z", timeZone: "UTC")
+    let object = try JSONSerialization.jsonObject(with: JSON.encode(query)) as? [String: Any]
+    #expect(object?["cursor"] as? String == "opaque")
+    #expect(object?["position"] == nil)
+    #expect(object?["categoryPath"] == nil)
+}
+
 @Test func nativeErrorsRetainTheirMeaningAndCheckCorrelation() async throws {
     let request = CommitRequest(operationID: "edit")
     for tag in ["client", "another-call"] {

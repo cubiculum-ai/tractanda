@@ -97,12 +97,43 @@ function savedFixture() {
  const paged=vm.createContext({nativeCalls:async entries=>{
   const limit=entries[0][1].limit;pageLimits.push(limit);
   if(limit>32)throw Object.assign(new Error('large'),{code:'responseTooLarge'});
-  return [{ids:['item'],total:1,queryState:'one'},{list:[task],notFound:[],state:'one'}];
+ return [{ids:['item'],total:1,queryState:'one'},{list:[task],notFound:[],state:'one'}];
  }});
- vm.runInContext(live.slice(live.indexOf('  async function queryPageWithRevisions('),live.indexOf('  async function queryRevisions(')),paged);
- await paged.queryPageWithRevisions({viewID:'view'},0,{projection:'content'});
- assert.deepEqual(pageLimits,[64,32],'An oversized combined response retries a smaller read-only page.');
- const f=fixture(),snapshot={};
+vm.runInContext(live.slice(live.indexOf('  async function queryPageWithRevisions('),live.indexOf('  async function queryRevisions(')),paged);
+await paged.queryPageWithRevisions({viewID:'view'},0,{projection:'content'});
+assert.deepEqual(pageLimits,[64,32],'An oversized combined response retries a smaller read-only page.');
+const cursorArguments=[];
+let cursorAttempt=0;
+const cursorPaged=vm.createContext({nativeCalls:async entries=>{
+  const args=entries[0][1];cursorArguments.push(args);cursorAttempt++;
+  if(cursorAttempt===1)throw Object.assign(new Error('large'),{code:'responseTooLarge'});
+  return [{ids:['item'],position:8,total:20,queryState:'one',nextCursor:'next-token'},{list:[task],notFound:[],state:'one'}];
+}});
+vm.runInContext(live.slice(live.indexOf('  async function queryPageWithRevisions('),live.indexOf('  async function queryRevisions(')),cursorPaged);
+const cursorPage=await cursorPaged.queryPageWithRevisions({expression:'classID == "Item"'},8,{projection:'content'},'opaque-token');
+assert.equal(cursorPage[0].nextCursor,'next-token');
+assert.deepEqual(cursorArguments.map(args=>args.limit),[64,32]);
+assert.ok(cursorArguments.every(args=>args.cursor==='opaque-token'&&args.position===undefined),
+  'An adaptive retry preserves the opaque cursor and omits random-access position.');
+const continuationCalls=[];
+const safeContinuation=vm.createContext({
+ currentDate:()=> '2026-09-26T12:00:00Z',
+ apiError:(code,message)=>Object.assign(new Error(message),{code}),
+ queryPageWithRevisions:async(_args,position,_projection,cursor)=>{
+  continuationCalls.push({position,cursor});
+  if(cursor)throw Object.assign(new Error('expired'),{code:'invalidCursor'});
+  const ids=[position===0?'first':'second'];
+  return [{ids,position,total:2,queryState:'same-state',nextCursor:position===0?'next':null},
+    {list:ids.map(itemID=>({itemID})),state:'same-state',notFound:[]}];
+ }
+});
+vm.runInContext(live.slice(live.indexOf('  async function queryRevisions('),live.indexOf('  async function projectGraph(')),safeContinuation);
+const safelyLoaded=await safeContinuation.queryRevisions({expression:'classID == "Item"'},'same-state',null);
+assert.equal(safelyLoaded.length,2);
+assert.deepEqual(continuationCalls,[
+ {position:0,cursor:null},{position:1,cursor:'next'},{position:1,cursor:null}
+],'An invalid cursor retries at the same absolute position and still uses the caller state guard.');
+const f=fixture(),snapshot={};
  const projects=await f.context.discoverProjectViews('project',0,snapshot);
  assert.deepEqual(Array.from(projects,p=>p.id),['projects','project']);
  const loaded=await f.context.readLiveBoard('project',snapshot);

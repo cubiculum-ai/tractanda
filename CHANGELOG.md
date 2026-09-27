@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add typed scalar/list and current-ACL indexed queries, live seek paging, lazy catalogue reads, streamed recovery, incremental saved-view/category candidates, depth-first canonical verification, and FULL-synchronous WAL with isolated concurrent read leases. Native get/query/history/category results recheck current permissions and state before delivery; unsupported shapes retain exact bounded fallbacks.
+- Fix managed `itemID == *` indexed presence, duplicate saved-view staging during catch-up, no-cursor backward TUI page assembly, and metrics-enabled WAL rebuild startup. Add regression coverage and a guarded 128-item mixed fixture; large-store and real multiuser throughput remain unmeasured.
 - Keep cross-request query results live: clients restart or reject relevant edits and apply current permissions on every page; internal caches may reconcile incrementally without exposing a frozen cursor.
 - Narrow safe conjunctive managed item-ID/date queries before exact Spotlight and ACL evaluation, and use the same proven restrictions to admit bounded parallel custom-sort reads from larger stores. Reject malformed v3 item tables and rebuild the disposable index from canonical records.
 - Stream full current heads and catalogue rows during index rebuild, and reuse bounded saved-view results after edits proven irrelevant to parsed clock-independent category rules or the exact FTS corpus.

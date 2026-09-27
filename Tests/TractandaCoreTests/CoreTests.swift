@@ -79,6 +79,43 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(store).get(original.itemID), edited)
     }
 
+    func testVersionThreeCatalogueForcesScalarIndexRebuildWithoutHistoryLoss() throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var store: ItemStore? = try ItemStore(root: root)
+        let original = try XCTUnwrap(store).commit(
+            CommitRequest(classID: "Item", changes: ["score": .integer(7)], operationID: "schema-v4-create")
+        ).revision
+        let edited = try XCTUnwrap(store).commit(
+            CommitRequest(
+                action: .revise, itemID: original.itemID, expectedRevisionID: original.revisionID,
+                changes: ["score": .integer(8)], operationID: "schema-v4-revise")
+        ).revision
+        store = nil
+
+        var database: OpaquePointer?
+        let path = root.appendingPathComponent("index/items.sqlite").path
+        XCTAssertEqual(sqlite3_open(path, &database), SQLITE_OK)
+        defer { if let database { sqlite3_close(database) } }
+        let downgrade =
+            "UPDATE checkpoint_meta SET value='3' WHERE key='schema'; "
+            + "UPDATE checkpoint_meta SET value='tractanda-sqlite-catalogue-v3' WHERE key='engine';"
+        let status = downgrade.withCString { sqlite3_exec(database, $0, nil, nil, nil) }
+        XCTAssertEqual(status, SQLITE_OK)
+        sqlite3_close(database)
+        database = nil
+
+        store = try ItemStore(root: root)
+        XCTAssertEqual(store?.startupRecovery["mode"], "fullRecovery")
+        XCTAssertEqual(try XCTUnwrap(store).get(original.itemID), edited)
+        XCTAssertEqual(
+            try XCTUnwrap(store).history(original.itemID).map(\.revisionID),
+            [edited.revisionID, original.revisionID])
+        XCTAssertEqual(
+            try Categories.query(store: XCTUnwrap(store), expression: "score == 8").map(\.itemID),
+            [original.itemID])
+    }
+
     func testGenericItemIsConcreteAndRootAncestryDoesNotRepeat() throws {
         let root = root()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -237,12 +274,13 @@ final class CoreTests: XCTestCase {
         let result = try store.commit(request)
         XCTAssertFalse(result.isIndexReady)
         XCTAssertFalse(result.warnings.isEmpty)
-        XCTAssertEqual(try store.get(result.revision.itemID), result.revision)
-        XCTAssertTrue(try store.commit(request).wasReplayed)
+        assertCode("recoveryRequired") { _ = try store.get(result.revision.itemID) }
+        assertCode("recoveryRequired") { _ = try store.commit(request) }
         assertCode("indexUnavailable") { _ = try store.candidates() }
         store.beforeIndexUpdate = nil
         try store.rebuildIndex()
         XCTAssertEqual(try store.candidates(text: "still committed").map(\.itemID), [result.revision.itemID])
+        XCTAssertTrue(try store.commit(request).wasReplayed)
         XCTAssertEqual(files(root).count, 1)
     }
 
@@ -494,7 +532,7 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(try recovered.history(first.itemID), [latest, first])
     }
 
-    func testRecoverySelectsValidatedHeadWhenDirectoryOrderIsReversed() throws {
+    func testRecoverySelectsValidatedHeadWhenRecordsAreNotOrderedByTimestamp() throws {
         let root = root()
         defer { try? FileManager.default.removeItem(at: root) }
         var store: ItemStore? = try ItemStore(root: root)
@@ -505,20 +543,6 @@ final class CoreTests: XCTestCase {
         var latestFields = writtenLatest.fields
         latestFields["modifiedAt"] = .date("2000-01-01T00:00:00Z")
         let latest = try Revision(fields: latestFields)
-        let items = root.appendingPathComponent("items", isDirectory: true)
-        let directories = ["recovery-a", "recovery-b"].map {
-            items.appendingPathComponent($0, isDirectory: true)
-        }
-        for directory in directories {
-            try FileManager.default.createDirectory(
-                at: directory, withIntermediateDirectories: false,
-                attributes: [.posixPermissions: 0o700])
-        }
-        let entries = try POSIXDirectory.entries(at: items)
-        let firstPosition = try XCTUnwrap(entries.firstIndex(of: directories[0].lastPathComponent))
-        let secondPosition = try XCTUnwrap(entries.firstIndex(of: directories[1].lastPathComponent))
-        let earlier = firstPosition < secondPosition ? directories[0] : directories[1]
-        let later = firstPosition < secondPosition ? directories[1] : directories[0]
         let firstPath = try XCTUnwrap(
             files(root).first { $0.lastPathComponent == first.revisionID + ".tractanda" })
         let latestPath = try XCTUnwrap(
@@ -526,13 +550,13 @@ final class CoreTests: XCTestCase {
         try RecordCodec.encode(latest).write(to: latestPath, options: .atomic)
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o600], ofItemAtPath: latestPath.path)
-        try FileManager.default.moveItem(
-            at: firstPath, to: earlier.appendingPathComponent(firstPath.lastPathComponent))
-        try FileManager.default.moveItem(
-            at: latestPath, to: later.appendingPathComponent(latestPath.lastPathComponent))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: firstPath.path))
         store = nil
 
         let recovered = try ItemStore(root: root)
+        // This test changed a canonical file out of band. A clean sealed checkpoint is
+        // trusted until the required explicit rebuild after that external edit.
+        try recovered.rebuildIndex()
         XCTAssertEqual(try recovered.get(first.itemID), latest)
         XCTAssertEqual(try recovered.history(first.itemID), [latest, first])
     }
@@ -572,13 +596,18 @@ final class CoreTests: XCTestCase {
         try FileManager.default.moveItem(at: record, to: nestedRecord)
         store = nil
         store = try ItemStore(root: root)
+        assertCode("recoveryError") { try store!.rebuildIndex() }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: nestedRecord.path))
+        try FileManager.default.moveItem(at: nestedRecord, to: record)
+        try store!.rebuildIndex()
         XCTAssertEqual(try store!.get(revision.itemID), revision)
 
         store = nil
         let link = root.appendingPathComponent("items/forbidden-link")
         try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: nestedRecord.path)
-        assertCode("recoveryError") { _ = try ItemStore(root: root) }
-        XCTAssertTrue(FileManager.default.fileExists(atPath: link.path))
+        store = try ItemStore(root: root)
+        assertCode("recoveryError") { try store!.rebuildIndex() }
+        XCTAssertEqual(try FileMetadata.read(at: link).type, .symbolicLink)
     }
 
     func testIntegerPrecisionAndFailedLiveRecovery() throws {
@@ -623,10 +652,14 @@ final class CoreTests: XCTestCase {
         store = try ItemStore(root: root)
         try store!.rebuildIndex()
         XCTAssertEqual(try store!.candidates().map(\.itemID), [first.itemID])
-        for suffix in ["-journal", "-wal", "-shm"] {
-            XCTAssertFalse(
-                FileManager.default.fileExists(
-                    atPath: root.appendingPathComponent("index/items.sqlite" + suffix).path))
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: root.appendingPathComponent("index/items.sqlite-journal").path))
+        for suffix in ["-wal", "-shm"] {
+            let companion = root.appendingPathComponent("index/items.sqlite" + suffix)
+            if FileManager.default.fileExists(atPath: companion.path) {
+                XCTAssertNotEqual(try Data(contentsOf: companion), Data("obsolete SQLite companion".utf8))
+            }
         }
     }
 

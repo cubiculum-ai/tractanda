@@ -252,9 +252,10 @@ enum ToolCatalog {
         .init(
             "tractanda_query", method: "TractandaItem/query",
             description:
-                "Find readable item IDs with the portable Spotlight expression, literal FTS text and cumulative categoryPath, or a saved viewID. A viewID cannot be combined with inline criteria. Get contents separately. Read tractanda://reference/query for the supported grammar.",
+                "Find readable item IDs with the portable Spotlight expression, literal FTS text and cumulative categoryPath, or a saved viewID. A viewID cannot be combined with inline criteria. With tractanda.live-seek-cursor.v1, cursor paging is available for descending modifiedAt/createdAt order with no filter or a bounded indexed typed scalar/list predicate, including administrator raw-item queries. Category, personal and saved-view results remain on position paging. Cursor binds the live query, actor, store, state and clock; it is not an access grant. Do not send position with cursor. Other query shapes use position. Get contents separately. Read tractanda://reference/query for the supported grammar.",
             properties: page([
                 "expression": text, "text": text, "at": text, "timeZone": text,
+                "cursor": text,
                 "categoryPath": .object(["type": .string("array"), "items": identifier, "maxItems": .int(32)]
                 ),
                 "excludedCategoryIDs": .object([

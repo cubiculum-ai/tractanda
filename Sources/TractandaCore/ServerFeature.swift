@@ -5,4 +5,5 @@ public enum ServerFeature: String, Sendable {
     case categoryMembershipSort = "tractanda.category-membership-sort.v1"
     case categoryMembershipProjection = "tractanda.category-membership-projection.v1"
     case extractedTextDiagnostics = "tractanda.extracted-text.v1"
+    case liveSeekCursor = "tractanda.live-seek-cursor.v1"
 }

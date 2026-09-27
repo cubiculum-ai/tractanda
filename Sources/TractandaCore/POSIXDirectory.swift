@@ -12,29 +12,39 @@ import Foundation
 enum POSIXDirectory {
     private static let maximumNameBytes = 1024
 
-    static func entries(at url: URL) throws -> [String] {
+    /// Visits each immediate child name while keeping only the current name in Swift memory.
+    /// Return `false` from the body to stop early. Child entries are names only; callers remain
+    /// responsible for using lstat when they need to inspect or descend into a child.
+    static func withEntries(
+        at url: URL,
+        body: (String) throws -> Bool
+    ) throws {
         let handle = url.path.withCString { tractanda_directory_open($0) }
         guard let handle else { throw FileMetadataError.posix(errno) }
-        var entries: [String] = []
+
         do {
             while true {
+                try Task.checkCancellation()
                 var name = [CChar](repeating: 0, count: maximumNameBytes)
                 let result = name.withUnsafeMutableBufferPointer {
                     tractanda_directory_next(handle, $0.baseAddress, $0.count)
                 }
                 if result == 0 { break }
                 guard result == 1 else { throw FileMetadataError.posix(errno) }
+
                 let bytes = name.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
                 guard let decoded = String(bytes: bytes, encoding: .utf8) else {
                     throw FileMetadataError.invalidPath
                 }
-                entries.append(decoded)
+                guard try body(decoded) else { break }
             }
         } catch {
             _ = tractanda_directory_close(handle)
             throw error
         }
-        guard tractanda_directory_close(handle) == 0 else { throw FileMetadataError.posix(errno) }
-        return entries
+
+        guard tractanda_directory_close(handle) == 0 else {
+            throw FileMetadataError.posix(errno)
+        }
     }
 }

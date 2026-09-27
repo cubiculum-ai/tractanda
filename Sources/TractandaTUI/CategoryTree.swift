@@ -144,7 +144,7 @@ struct CategoryTree {
         if searching {
             var included: Set<String> = []
             for id in searchOrder
-            where (graph.items[id]?.fields["subject"]?.string ?? "")
+            where (graph.items[id]?.subject ?? "")
                 .localizedCaseInsensitiveContains(filter)
             {
                 var ancestor: String? = id
@@ -175,6 +175,6 @@ struct CategoryTree {
             }
             return result
         }
-        return Rows(items: graph.items, children: graph.children, root: branch(roots, prefix: ""))
+        return Rows(items: graph.sourceRevisions, children: graph.children, root: branch(roots, prefix: ""))
     }
 }

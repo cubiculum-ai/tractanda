@@ -132,6 +132,39 @@ final class ViewTests: XCTestCase {
             savedViewClockKey(at: second, timeZone: "UTC"))
     }
 
+    func testRelativeNowDateRangeUsesClockBoundCandidateWithoutChangingExactResults() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(Identifier.make())
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ItemStore(root: directory)
+        let instant = try XCTUnwrap(Timestamp.parse("2026-09-27T12:00:00.123Z"))
+        let future = try create(store, ["deadline": .date("2026-09-27T12:00:00.124Z")])
+        _ = try create(store, ["deadline": .date("2026-09-27T12:00:00.122Z")])
+        let numeric = try create(
+            store, ["deadline": .integer(Int64(instant.timeIntervalSinceReferenceDate) + 1)])
+        let predicate = try SpotlightQuery("deadline >= $time.now")
+        let calendar = try QueryCalendar.make(timeZone: "Europe/Vienna")
+        guard
+            case .atom(let restriction) = predicate.boundedIndexCandidatePlan(
+                at: instant, calendar: calendar)
+        else { return XCTFail("Expected a safe indexed date-range candidate.") }
+        XCTAssertEqual(restriction.field, "deadline")
+        XCTAssertEqual(restriction.kind, "date")
+        XCTAssertEqual(restriction.operation, ">=")
+
+        let first = try Categories.page(
+            store: store, expression: "deadline >= $time.now", text: nil, categoryPath: [],
+            excludedCategoryIDs: [], sort: [], position: 0, limit: 10, at: instant,
+            timeZone: "Europe/Vienna")
+        XCTAssertEqual(Set(first.ids), Set([future.itemID, numeric.itemID]))
+        XCTAssertEqual(first.total, 2)
+        let later = try Categories.page(
+            store: store, expression: "deadline >= $time.now", text: nil, categoryPath: [],
+            excludedCategoryIDs: [], sort: [], position: 0, limit: 10,
+            at: instant.addingTimeInterval(2), timeZone: "UTC")
+        XCTAssertTrue(later.ids.isEmpty)
+        XCTAssertEqual(later.total, 0)
+    }
+
     func testClockDependentSavedViewCacheSeparatesSubMillisecondDates() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(Identifier.make())
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -229,6 +262,58 @@ final class ViewTests: XCTestCase {
         XCTAssertEqual(page.total, 2)
     }
 
+    func testACLIndexUsesNormalizedRowsAndIndexedAuthorizationPlan() throws {
+        let index = try ItemIndex(path: ":memory:", create: true)
+        let itemID = "00000000-0000-1000-8000-000000000099"
+        let fields: [String: ItemValue] = [
+            "itemID": .text(itemID), "revisionID": .text(Identifier.make()), "classID": .text("Item"),
+            "actor": .text("test"), "operationID": .text("acl-index-test"),
+            "requestIdentity": .text("acl-index-test"), "schemaVersion": .integer(1),
+            "createdAt": .date("2026-09-10T10:00:00Z"), "modifiedAt": .date("2026-09-10T10:00:00Z"),
+            "subject": .text("needle"),
+            "permissions": .object([
+                "profile": .text(ItemPermissions.profile), "owner": .text("alice"),
+                "group": .text("staff"), "mode": .integer(0o640),
+                "acl": .object([
+                    "mask": .integer(4), "owningGroup": .integer(0),
+                    "users": .object(["bobby": .integer(4)]),
+                ]),
+            ]),
+        ]
+        try index.put(Revision(fields: fields))
+        try index.setRequestPrincipals(
+            actorUID: 50002, users: ["alice": 50001, "bobby": 50002],
+            groups: ["staff": (70001, true)])
+        let page = try index.orderedPage(
+            lexicalText: "needle", classEquals: "Item", order: .modifiedAt,
+            position: 0, limit: 10, fastCount: true, aclUserID: 50002
+        ) { _ in true }
+        XCTAssertEqual(page.ids, [itemID])
+        XCTAssertEqual(page.total, 1)
+        let plan = try index.aclQueryPlan(actorUID: 50002).joined(separator: " ").lowercased()
+        XCTAssertTrue(plan.contains("acl_core"))
+        XCTAssertTrue(plan.contains("acl_named") && plan.contains("using covering index"), plan)
+        XCTAssertTrue(plan.contains("acl_owner_lookup"), plan)
+        XCTAssertTrue(plan.contains("search a using index acl_group_lookup (group_name=?)"), plan)
+        XCTAssertTrue(plan.contains("acl_other_lookup"), plan)
+        XCTAssertTrue(plan.contains("search items using index sqlite_autoindex_items_1 (id=?)"), plan)
+        try index.execute("DROP TABLE request_groups")
+        XCTAssertThrowsError(
+            try index.setRequestPrincipals(
+                actorUID: 50003, users: ["alice": 50001], groups: ["staff": (70001, false)]))
+        try index.execute(
+            "CREATE TEMP TABLE request_groups (name TEXT PRIMARY KEY, gid INTEGER NOT NULL, member INTEGER NOT NULL)"
+        )
+        try index.setRequestPrincipals(
+            actorUID: 50003, users: ["alice": 50001], groups: ["staff": (70001, false)])
+        let afterSetupFailure = try index.orderedPage(
+            lexicalText: nil, classEquals: nil, order: .modifiedAt,
+            position: 0, limit: 10, fastCount: true, aclUserID: 50003
+        ) { _ in true }
+        XCTAssertEqual(afterSetupFailure.total, 0)
+        try index.clearRequestPrincipals()
+    }
+
     func testBoundedCandidateIteratorFiltersUnreadableRowsBeforeItsLimit() throws {
         func item(_ index: Int, timestamp: String) throws -> Revision {
             let id = String(format: "00000000-0000-1000-8000-%012x", index)
@@ -322,6 +407,117 @@ final class ViewTests: XCTestCase {
             at: Date(), timeZone: "UTC")
         XCTAssertEqual(rebuilt.ids, expected)
         XCTAssertEqual(rebuilt.total, expected.count)
+    }
+
+    func testManagedItemIDPresenceCandidateKeepsEveryCanonicalItem() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(Identifier.make())
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ItemStore(root: directory)
+        let first = try create(store, ["subject": .text("first")])
+        let second = try create(store, ["subject": .text("second")])
+        let expected: Set<String> = [first.itemID, second.itemID]
+        XCTAssertEqual(
+            Set(try Categories.query(store: store, expression: "itemID == *").map(\.itemID)),
+            expected)
+        let page = try Categories.page(
+            store: store, expression: "itemID == *", text: nil,
+            categoryPath: [], excludedCategoryIDs: [], sort: [], position: 0, limit: 10,
+            at: Date(), timeZone: "UTC")
+        XCTAssertEqual(Set(page.ids), expected)
+        XCTAssertEqual(page.total, 2)
+        XCTAssertTrue(try Categories.query(store: store, expression: "itemID != *").isEmpty)
+    }
+
+    func testScalarCandidateParityForListsMissingNumericBooleanDateAndBooleanAlgebra() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(Identifier.make())
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ItemStore(root: directory)
+        let instant = "2026-09-01T00:00:00Z"
+        let values: [[String: ItemValue]] = [
+            [
+                "numbers": .list([.integer(9_007_199_254_740_992), .integer(9_007_199_254_740_993)]),
+                "flag": .boolean(true), "when": .date(instant),
+            ],
+            [
+                "numbers": .list([.real(9_007_199_254_740_992)]), "flag": .boolean(false),
+                "when": .date("2026-08-31T20:00:00-04:00"),
+            ],
+            ["numbers": .list([]), "emptyObject": .object([:])],
+            ["subject": .text("café λ")],
+            [:],
+            ["kMDItemTitle": .text("alias title"), "kMDItemTextContent": .integer(12)],
+        ]
+        let items = try values.map { try create(store, $0) }
+        let cases = [
+            "numbers == 9007199254740993", "numbers != 4", "numbers == 3", "numbers == *",
+            "numbers != *", "emptyObject == *", "emptyObject != *", "flag == true",
+            "flag == false", "flag != true", "when == $time.iso(\"2026-09-01T00:00:00Z\")",
+            "numbers > 9007199254740992", "numbers < 9007199254740993",
+            "numbers >= 9007199254740993", "when >= $time.iso(\"2026-09-01T00:00:00Z\")",
+            "numbers == 9007199254740992 && flag == true",
+            "numbers == 3 || flag == false", "numbers == 3 || subject == \"café*\"",
+            "subject == \"café\"", "subject == \"café*\"", "subject ==[c] \"CAFÉ*\"",
+            "kMDItemContentTypeTree == *", "subject != *", "body != *", "body == 12",
+        ]
+        for source in cases {
+            let query = try SpotlightQuery(source)
+            let expected = try store.candidates().filter { query.matches($0) }.map(\.itemID).sorted()
+            let actual = try Categories.query(store: store, expression: source).map(\.itemID).sorted()
+            XCTAssertEqual(actual, expected, source)
+            let page = try Categories.page(
+                store: store, expression: source, text: nil, categoryPath: [],
+                excludedCategoryIDs: [], sort: [], position: 0, limit: 20,
+                at: Date(), timeZone: "UTC")
+            XCTAssertEqual(page.ids.sorted(), expected, source)
+            XCTAssertEqual(page.total, expected.count, source)
+        }
+        let unicodeCandidate = try SpotlightQuery("subject == \"café\"").boundedIndexCandidatePlan
+        guard case .atom(let unicodeRestriction) = unicodeCandidate else {
+            return XCTFail("Literal Unicode text should use the safe field-presence superset.")
+        }
+        XCTAssertEqual(unicodeRestriction.kind, "exists")
+        XCTAssertFalse(
+            try SpotlightQuery("flag == true && subject == \"café\"").boundedIndexCandidatePlan.isAll)
+        XCTAssertFalse(
+            try SpotlightQuery("flag == true || subject == \"café\"").boundedIndexCandidatePlan.isAll)
+        XCTAssertEqual(
+            try Categories.query(store: store, expression: "numbers == 9007199254740993").map(\.itemID)
+                .sorted(),
+            [items[0].itemID, items[1].itemID].sorted())
+        XCTAssertTrue(
+            try Categories.query(store: store, expression: "subject != *").contains {
+                $0.fields["kMDItemTitle"]?.string == "alias title"
+            })
+        XCTAssertTrue(
+            try Categories.query(store: store, expression: "body != *").contains {
+                $0.fields["kMDItemTextContent"] == .integer(12)
+            })
+        _ = try store.commit(
+            CommitRequest(
+                action: .revise, itemID: items[0].itemID, expectedRevisionID: items[0].revisionID,
+                changes: ["flag": .boolean(false)], unset: ["numbers"], operationID: Identifier.make()))
+        XCTAssertEqual(
+            try Categories.query(store: store, expression: "numbers == 9007199254740993").map(\.itemID),
+            [items[1].itemID])
+        try store.rebuildIndex()
+        let afterRebuild = try Categories.query(
+            store: store, expression: "when == $time.iso(\"2026-09-01T00:00:00Z\")")
+        XCTAssertEqual(Set(afterRebuild.map(\.itemID)), Set([items[0].itemID, items[1].itemID]))
+    }
+
+    func testScalarCandidatePlansSeekTypedValueIndexes() throws {
+        let index = try ItemIndex(path: ":memory:", create: true)
+        let integer = try index.candidateQueryPlan(
+            SpotlightQuery("score > 42").boundedIndexCandidatePlan)
+        XCTAssertTrue(integer.contains { $0.contains("scalar_int_lookup") && $0.contains("int_value>") })
+        XCTAssertTrue(integer.contains { $0.contains("SEARCH items") })
+        let boolean = try index.candidateQueryPlan(
+            SpotlightQuery("flag == true").boundedIndexCandidatePlan)
+        XCTAssertTrue(boolean.contains { $0.contains("scalar_bool_lookup") && $0.contains("bool_value=") })
+        let date = try index.candidateQueryPlan(
+            SpotlightQuery("deadline >= $time.iso(\"2026-09-01T00:00:00Z\")")
+                .boundedIndexCandidatePlan)
+        XCTAssertTrue(date.contains { $0.contains("scalar_date_lookup") && $0.contains("date_value>") })
     }
 
     func testCandidateRestrictionExtractionRequiresConjunctiveTypedLiterals() throws {
@@ -509,6 +705,92 @@ final class ViewTests: XCTestCase {
                 at: Date(), timeZone: "UTC")
             XCTAssertEqual(second.ids, [older.itemID])
             XCTAssertEqual(second.total, 2)
+        }
+    }
+
+    func testRuleCategoryPageFallsBackForHiddenGraphAndKeepsPersonalMembership() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(Identifier.make())
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let accounts = ViewAccounts()
+        let store = try ItemStore(root: directory, accounts: accounts)
+        _ = try store.configureAccess(
+            .object([
+                "profile": .text(AccessConfiguration.profile),
+                "users": .list([.text("alice"), .text("bob")]),
+                "userAliases": .object([:]),
+            ]), operationID: "hidden-category-view-access")
+        func create(_ uid: UInt32, classID: String = "Item", fields: [String: ItemValue]) throws -> Revision {
+            try store.withAccess(forUID: uid) {
+                try store.commit(
+                    CommitRequest(classID: classID, changes: fields, operationID: Identifier.make())
+                )
+                .revision
+            }
+        }
+        func permissions(owner: String, mode: Int64) -> ItemValue {
+            .object([
+                "profile": .text(ItemPermissions.profile), "owner": .text(owner),
+                "group": .text("staff"), "mode": .integer(mode), "acl": .object([:]),
+            ])
+        }
+        let root = try create(
+            accounts.alice,
+            fields: [
+                "selection": .object([
+                    "language": .text(SpotlightQuery.profile), "expression": .text("itemID == \"\""),
+                ]),
+                "permissions": permissions(owner: "alice", mode: 0o640),
+            ])
+        let hiddenChild = try create(
+            accounts.alice,
+            fields: [
+                "selection": .object([
+                    "language": .text(SpotlightQuery.profile), "expression": .text("subject == \"secret\""),
+                ]),
+                "categoryParents": .list([.reference(ItemReference(root.itemID))]),
+                "permissions": permissions(owner: "alice", mode: 0o600),
+            ])
+        _ = hiddenChild
+        let target = try create(
+            accounts.alice,
+            fields: [
+                "subject": .text("secret"), "permissions": permissions(owner: "alice", mode: 0o640),
+            ])
+        let view = try create(
+            accounts.alice,
+            fields: [
+                "viewDefinition": .object([
+                    "language": .text(SpotlightQuery.profile),
+                    "categoryPath": .list([.reference(ItemReference(root.itemID))]),
+                ]),
+                "permissions": permissions(owner: "alice", mode: 0o640),
+            ])
+
+        try store.withAccess(forUID: accounts.bob) {
+            let expectedBefore = try Categories.query(store: store, categoryPath: [root.itemID]).map(\.itemID)
+            let pageBefore = try Categories.page(
+                store: store, expression: nil, text: nil, categoryPath: [root.itemID],
+                excludedCategoryIDs: [], sort: [], position: 0, limit: 20, at: Date(),
+                timeZone: "UTC", savedViewID: view.itemID)
+            XCTAssertEqual(pageBefore.ids, expectedBefore)
+            XCTAssertTrue(pageBefore.ids.isEmpty)
+            XCTAssertGreaterThan(store.lastIndexCandidateCountForTesting, 0)
+
+            _ = try create(
+                accounts.bob, classID: "PersonalStateItem",
+                fields: [
+                    "target": .reference(ItemReference(target.itemID)),
+                    "personalOverrides": .object([root.itemID: .text("include")]),
+                ])
+            let expectedAfter = try Categories.query(store: store, categoryPath: [root.itemID]).map(\.itemID)
+            let pageAfter = try Categories.page(
+                store: store, expression: nil, text: nil, categoryPath: [root.itemID],
+                excludedCategoryIDs: [], sort: [], position: 0, limit: 20, at: Date(),
+                timeZone: "UTC", savedViewID: view.itemID)
+            XCTAssertEqual(expectedAfter, [target.itemID])
+            XCTAssertEqual(pageAfter.ids, expectedAfter)
+            XCTAssertEqual(pageAfter.total, expectedAfter.count)
+            XCTAssertFalse(store.lastSavedViewBaseAppliedForTesting)
         }
     }
 

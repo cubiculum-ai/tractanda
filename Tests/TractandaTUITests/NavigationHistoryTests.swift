@@ -214,17 +214,30 @@ final class NavigationHistoryTests: XCTestCase {
 
     func testControllerBackForwardAllItemsAndFailedFilter() throws {
         let f = try Fixture()
+        var views: [Revision] = []
         for (name, rank) in [("First view", 1), ("Second view", 2)] {
-            _ = try f.item(
-                name,
-                [
-                    "viewDefinition": .object([
-                        "language": .text(SpotlightQuery.profile), "expression": .text("rank == \(rank)"),
-                    ])
-                ])
+            views.append(
+                try f.item(
+                    name,
+                    [
+                        "viewDefinition": .object([
+                            "language": .text(SpotlightQuery.profile), "expression": .text("rank == \(rank)"),
+                        ])
+                    ]))
         }
-        _ = try f.item("First result", ["rank": .integer(1)])
-        _ = try f.item("Second result", ["rank": .integer(2)])
+        let firstResult = try f.item("First result", ["rank": .integer(1)])
+        let secondResult = try f.item("Second result", ["rank": .integer(2)])
+        XCTAssertTrue(
+            try Categories.savedView(store: f.store, id: views[0].itemID)
+                .contains { $0.itemID == firstResult.itemID })
+        XCTAssertTrue(
+            try Categories.savedView(store: f.store, id: views[1].itemID)
+                .contains { $0.itemID == secondResult.itemID })
+        let firstQuery =
+            try JSONSerialization.jsonObject(
+                with: f.client.call(
+                    "TractandaItem/query", arguments: ["viewID": views[0].itemID])) as! [String: Any]
+        XCTAssertTrue((firstQuery["ids"] as? [String])?.contains(firstResult.itemID) == true)
         let app = try f.app()
         let before = f.store.state
         for name in ["First view", "Second view"] {
@@ -320,6 +333,8 @@ final class NavigationHistoryTests: XCTestCase {
     func testOversizedSectionPageShrinksAndPagingAdvancesByReturnedCount() throws {
         let f = try Fixture()
         for rank in 0..<80 { _ = try f.item("Item \(rank)", ["rank": .integer(Int64(rank))]) }
+        let direct = try Categories.query(store: f.store, sort: [try ItemSort(property: "rank")])
+        XCTAssertEqual(direct.count, 80)
         var queryArguments: [[String: Any]] = []
         let client = ItemClient(transport: { data in
             let request = try JSONSerialization.jsonObject(with: data) as! [String: Any]
@@ -348,6 +363,75 @@ final class NavigationHistoryTests: XCTestCase {
         XCTAssertEqual(workspace.sections[0].items.count, 64)
         XCTAssertTrue(queryArguments.allSatisfy { $0["timeZone"] as? String == "UTC" })
         XCTAssertEqual(Set(queryArguments.compactMap { $0["at"] as? String }).count, 1)
+    }
+
+    func testLiveCursorSurvivesChunkedTUIPageAndNavigatesBack() throws {
+        let f = try Fixture()
+        for rank in 0..<80 { _ = try f.item("Item \(rank)", ["rank": .integer(Int64(rank))]) }
+        var queryArguments: [[String: Any]] = []
+        let client = ItemClient(transport: { data in
+            let request = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+            let calls = request["methodCalls"] as! [[Any]]
+            if calls.first?[0] as? String == "TractandaItem/query" {
+                let arguments = calls[0][1] as! [String: Any]
+                queryArguments.append(arguments)
+                if (arguments["limit"] as? Int ?? 64) > 32 {
+                    throw TractandaError("responseTooLarge", "Simulated native response bound.")
+                }
+            }
+            return f.service.handle(data, peerUID: f.store.ownerUID)
+        })
+        let workspace = Workspace(client: client)
+        workspace.expression = "classID == \"Item\""
+        try workspace.refresh()
+        XCTAssertEqual(workspace.sections[0].items.count, 64)
+        let firstPageSubjects = workspace.sections[0].items.map { $0.fields["subject"]?.string }
+        XCTAssertNotNil(workspace.sections[0].nextCursor)
+        XCTAssertNil(workspace.sections[0].previousCursor)
+        try workspace.loadPage(in: 0, forward: true)
+        XCTAssertEqual(workspace.sections[0].position, 64)
+        XCTAssertEqual(workspace.sections[0].items.count, 16)
+        XCTAssertNil(workspace.sections[0].nextCursor)
+        XCTAssertNotNil(workspace.sections[0].previousCursor)
+        try workspace.loadPage(in: 0, forward: false)
+        XCTAssertEqual(workspace.sections[0].position, 0)
+        XCTAssertEqual(workspace.sections[0].items.count, 64)
+        XCTAssertEqual(workspace.sections[0].items.map { $0.fields["subject"]?.string }, firstPageSubjects)
+        XCTAssertTrue(queryArguments.contains(where: { $0["cursor"] is String && $0["position"] == nil }))
+        XCTAssertTrue(queryArguments.allSatisfy { $0["timeZone"] as? String == "UTC" })
+        XCTAssertEqual(Set(queryArguments.compactMap { $0["at"] as? String }).count, 1)
+    }
+
+    func testInvalidatedTUICursorFallsBackAtSamePositionAndState() throws {
+        let f = try Fixture()
+        for rank in 0..<80 { _ = try f.item("Item \(rank)", ["rank": .integer(Int64(rank))]) }
+        var rejected = false
+        var queryArguments: [[String: Any]] = []
+        let client = ItemClient(transport: { data in
+            let request = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+            let calls = request["methodCalls"] as! [[Any]]
+            if calls.first?[0] as? String == "TractandaItem/query" {
+                let arguments = calls[0][1] as! [String: Any]
+                queryArguments.append(arguments)
+                if arguments["cursor"] is String, !rejected {
+                    rejected = true
+                    throw TractandaError("invalidCursor", "Simulated expired live cursor.")
+                }
+            }
+            return f.service.handle(data, peerUID: f.store.ownerUID)
+        })
+        let workspace = Workspace(client: client)
+        workspace.expression = "classID == \"Item\""
+        try workspace.refresh()
+        let state = workspace.queryState
+        XCTAssertNotNil(workspace.sections[0].nextCursor)
+        try workspace.loadPage(in: 0, forward: true)
+        XCTAssertTrue(rejected)
+        XCTAssertEqual(workspace.queryState, state)
+        XCTAssertEqual(workspace.sections[0].position, 64)
+        XCTAssertEqual(workspace.sections[0].items.count, 16)
+        XCTAssertTrue(queryArguments.contains(where: { $0["cursor"] is String }))
+        XCTAssertTrue(queryArguments.contains(where: { $0["position"] as? Int == 64 && $0["cursor"] == nil }))
     }
 
     func testEmptyNonFinalPairedPageFailsClosed() throws {

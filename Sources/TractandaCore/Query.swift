@@ -26,7 +26,33 @@ public struct SpotlightQuery: Sendable {
         return nil
     }
     var indexDependencies: (fields: Set<String>, usesClock: Bool) { expression.indexDependencies }
-    var indexCandidateRestrictions: [IndexCandidateRestriction] { expression.indexCandidateRestrictions }
+    var indexCandidatePlan: IndexCandidatePlan { expression.indexCandidatePlan }
+    var indexCandidateRestrictions: [IndexCandidateRestriction] { expression.legacyRestrictions }
+    var boundedIndexCandidatePlan: IndexCandidatePlan {
+        let plan = expression.indexCandidatePlan
+        return plan.atomCount <= 16 ? plan : .all
+    }
+    /// A request-clock-specific safe superset for relative date ranges. Only `$time.now`
+    /// has an exact absolute boundary here; calendar windows retain exact fallback.
+    func boundedIndexCandidatePlan(at date: Date, calendar: Calendar) -> IndexCandidatePlan {
+        let plan = expression.indexCandidatePlan(at: date, calendar: calendar)
+        return plan.atomCount <= 16 ? plan : .all
+    }
+    /// One exact, non-clock equality atom has a selective indexed candidate source and
+    /// can be maintained per changed item. More complex expressions stay on the exact path.
+    var supportsPersistentSavedViewMaterialization: Bool {
+        guard case .comparison(_, let operation, let flags, let literal) = expression,
+            operation == "==", flags.isEmpty, !indexDependencies.usesClock,
+            !boundedIndexCandidatePlan.isAll
+        else { return false }
+        if case .text(let value) = literal {
+            return !value.contains("*") && !value.contains("?") && !value.contains("\\")
+        }
+        switch literal {
+        case .integer, .number, .boolean, .date: return true
+        case .text, .exists, .relative: return false
+        }
+    }
     /// True only when the parsed expression proves that no canonical item can match.
     /// Item IDs are validated nonempty, so this exact comparison is impossible.
     var isManualOnlyImpossible: Bool { expression.isManualOnlyImpossible }
@@ -44,6 +70,43 @@ public struct SpotlightQuery: Sendable {
         let field: String
         let operation: String
         let value: String
+        let kind: String
+        init(field: String, operation: String, value: String, kind: String = "") {
+            self.field = field
+            self.operation = operation
+            self.value = value
+            self.kind = kind
+        }
+    }
+    indirect enum IndexCandidatePlan: Sendable {
+        case all
+        case atom(IndexCandidateRestriction)
+        case categoryIncludes(Set<String>)
+        case categoryDecisions(Set<String>)
+        case personalCategoryDeltas(Set<String>)
+        case savedViewBase(String)
+        case and(IndexCandidatePlan, IndexCandidatePlan)
+        case or(IndexCandidatePlan, IndexCandidatePlan)
+        var isAll: Bool {
+            if case .all = self { return true }
+            return false
+        }
+        var containsSavedViewBase: Bool {
+            switch self {
+            case .savedViewBase: true
+            case .and(let left, let right), .or(let left, let right):
+                left.containsSavedViewBase || right.containsSavedViewBase
+            default: false
+            }
+        }
+        var atomCount: Int {
+            switch self {
+            case .all: 0
+            case .atom: 1
+            case .categoryIncludes, .categoryDecisions, .personalCategoryDeltas, .savedViewBase: 1
+            case .and(let left, let right), .or(let left, let right): left.atomCount + right.atomCount
+            }
+        }
     }
     private indirect enum Expression: Sendable {
         case and(Expression, Expression)
@@ -75,29 +138,105 @@ public struct SpotlightQuery: Sendable {
                 return ([key], false)
             }
         }
-        var indexCandidateRestrictions: [IndexCandidateRestriction] {
+        var indexCandidatePlan: IndexCandidatePlan {
             switch self {
             case .and(let left, let right):
-                return left.indexCandidateRestrictions + right.indexCandidateRestrictions
-            case .or:
-                return []
+                let a = left.indexCandidatePlan
+                let b = right.indexCandidatePlan
+                if case .all = a { return b }
+                if case .all = b { return a }
+                return .and(a, b)
+            case .or(let left, let right):
+                let a = left.indexCandidatePlan
+                let b = right.indexCandidatePlan
+                guard !a.isAll, !b.isAll else { return .all }
+                return .or(a, b)
+            case .comparison(let field, let op, let flags, let literal):
+                guard flags.isEmpty else { return .all }
+                // This Spotlight property is synthesized from the item class, not stored
+                // as a top-level field_presence row.
+                if field == "kMDItemContentTypeTree" { return .all }
+                if field == "itemID", op == "==", case .text(let value) = literal,
+                    let uuid = UUID(uuidString: value), uuid.uuidString.lowercased() == value
+                {
+                    return .atom(.init(field: "itemID", operation: "=", value: value, kind: ""))
+                }
+                let key = metadataKey(field)
+                guard !key.isEmpty else { return .all }
+                if case .exists = literal, ["==", "!="].contains(op) {
+                    return .atom(.init(field: key, operation: op, value: "", kind: "exists"))
+                }
+                guard ["==", "!=", "<", "<=", ">", ">="].contains(op) else { return .all }
+                switch literal {
+                case .boolean(let value) where op == "==":
+                    return .atom(.init(field: key, operation: "=", value: value ? "1" : "0", kind: "boolean"))
+                case .integer(let value):
+                    return .atom(.init(field: key, operation: op, value: String(value), kind: "integer"))
+                case .number(let value) where value.isFinite:
+                    return .atom(.init(field: key, operation: op, value: String(value), kind: "real"))
+                case .date(let value) where value.timeIntervalSinceReferenceDate.isFinite:
+                    return .atom(
+                        .init(
+                            field: key, operation: op, value: String(value.timeIntervalSinceReferenceDate),
+                            kind: "date"))
+                case .text(let value)
+                where op == "=="
+                    && !value.contains("*") && !value.contains("?") && !value.contains("\\"):
+                    // The text comparator folds Unicode. Presence is a safe superset;
+                    // exact matching remains in SpotlightQuery.
+                    return .atom(.init(field: key, operation: op, value: "", kind: "exists"))
+                default: return .all
+                }
+            }
+        }
+        func indexCandidatePlan(at date: Date, calendar: Calendar) -> IndexCandidatePlan {
+            switch self {
+            case .and(let left, let right):
+                let a = left.indexCandidatePlan(at: date, calendar: calendar)
+                let b = right.indexCandidatePlan(at: date, calendar: calendar)
+                if a.isAll { return b }
+                if b.isAll { return a }
+                return .and(a, b)
+            case .or(let left, let right):
+                let a = left.indexCandidatePlan(at: date, calendar: calendar)
+                let b = right.indexCandidatePlan(at: date, calendar: calendar)
+                guard !a.isAll, !b.isAll else { return .all }
+                return .or(a, b)
+            case .comparison(let field, let operation, let flags, .relative(let name, let offset)):
+                guard name == "$time.now", flags.isEmpty,
+                    field != "kMDItemContentTypeTree",
+                    ["==", "<", "<=", ">", ">="].contains(operation),
+                    let boundary = calendar.date(byAdding: .second, value: offset, to: date),
+                    boundary.timeIntervalSinceReferenceDate.isFinite
+                else { return .all }
+                return .atom(
+                    .init(
+                        field: metadataKey(field), operation: operation,
+                        value: String(boundary.timeIntervalSinceReferenceDate), kind: "date"))
+            case .comparison:
+                return indexCandidatePlan
+            }
+        }
+        var legacyRestrictions: [IndexCandidateRestriction] {
+            switch self {
+            case .and(let left, let right): return left.legacyRestrictions + right.legacyRestrictions
+            case .or: return []
             case .comparison(let field, let op, let flags, let literal):
                 guard flags.isEmpty else { return [] }
                 if field == "itemID", op == "==", case .text(let value) = literal,
                     let uuid = UUID(uuidString: value), uuid.uuidString.lowercased() == value
                 {
-                    return [.init(field: "itemID", operation: "=", value: value)]
+                    return [.init(field: "itemID", operation: "=", value: value, kind: "")]
                 }
                 let key = metadataKey(field)
                 guard ["createdAt", "modifiedAt"].contains(key),
-                    ["==", "<", "<=", ">", ">="].contains(op),
-                    case .date(let date) = literal,
+                    ["==", "<", "<=", ">", ">="].contains(op), case .date(let date) = literal,
                     date.timeIntervalSinceReferenceDate.isFinite
                 else { return [] }
                 return [
                     .init(
                         field: key, operation: op == "==" ? "=" : op,
-                        value: String(date.timeIntervalSinceReferenceDate))
+                        value: String(date.timeIntervalSinceReferenceDate), kind: "date")
                 ]
             }
         }
@@ -634,6 +773,155 @@ public struct CategoryMembershipProjection: Codable, Equatable, Sendable {
 }
 
 public enum Categories {
+    private static func streamedCategoryPage(
+        store: ItemStore, expression: String?, predicate: SpotlightQuery?, text: String?,
+        categoryPath: [String],
+        excludedCategoryIDs: [String], sort: [ItemSort], order: ItemIndex.IndexedOrder,
+        position: Int, limit: Int, at date: Date, timeZone: String, savedViewID: String? = nil
+    ) throws -> ItemIndex.Page {
+        let calendar = try QueryCalendar.make(timeZone: timeZone)
+        let requested = Set(categoryPath + excludedCategoryIDs)
+        var cacheKey: String?
+        var cacheDependencies: Set<String> = []
+        if let savedViewID, !store.hasLivePersonalStateItems() {
+            let clockDependent =
+                predicate?.indexDependencies.usesClock == true || store.savedViewRulesUseClock
+            let timeKey = clockDependent ? savedViewClockKey(at: date, timeZone: timeZone) : "static"
+            let selectionValue: [String: ItemValue] = [
+                "hasExpression": .boolean(expression != nil),
+                "expression": .text(expression ?? ""),
+                "hasText": .boolean(text != nil), "text": .text(text ?? ""),
+                "categoryPath": .list(categoryPath.map(ItemValue.text)),
+                "excludedCategoryIDs": .list(excludedCategoryIDs.map(ItemValue.text)),
+                "sort": .list(sort.map(\.value)),
+            ]
+            let selectionKey = String(
+                decoding: try JSON.encode(selectionValue), as: UTF8.self)
+            let reusable = try categoryCacheDependencies(
+                store: store, categoryPath: categoryPath, excludedCategoryIDs: excludedCategoryIDs)
+            if let reusable {
+                cacheDependencies.formUnion(reusable)
+                cacheDependencies.formUnion(
+                    predicate?.indexDependencies.fields.map { "filter:field:" + $0 } ?? [])
+                if sort.isEmpty { cacheDependencies.insert("sort:field:modifiedAt") }
+                for comparator in sort {
+                    if let field = comparator.property {
+                        cacheDependencies.insert("sort:field:" + metadataKey(field))
+                    }
+                }
+                if text != nil { cacheDependencies.insert("text:corpus") }
+            }
+            let key = store.savedViewPageKey(
+                savedViewID, selectionKey: selectionKey, timeKey: timeKey,
+                reusableAcrossCommits: reusable != nil)
+            if let cached = try store.cachedSavedViewPage(key: key, position: position, limit: limit) {
+                return cached
+            }
+            cacheKey = key
+        }
+        let definitions = try store.readableCategoryDefinitions(requestedCategoryIDs: requested)
+        let evaluator = try CategoryEvaluator(definitions: definitions, store: store, at: date)
+        let positiveSeeds: SpotlightQuery.IndexCandidatePlan?
+        if categoryPath.isEmpty {
+            positiveSeeds = nil
+        } else {
+            positiveSeeds = try manualCategoryPositiveSeeds(
+                store: store, definitions: definitions, requested: requested)
+        }
+        var results = try BoundedQueryResults<String>(
+            strategy: .orderedStream(position: position, limit: limit),
+            maximumRetainedBytes: ItemStore.exactQueryByteLimit,
+            estimateBytes: { $0.utf8.count },
+            isOrderedBefore: { $0 < $1 })
+        var completeCacheIDs: [String]? = cacheKey == nil ? nil : []
+        // Deliberately stream the full safe indexed candidate superset. Manual and personal
+        // decisions, incomplete category graphs, and hidden related categories can never
+        // remove a candidate before exact membership and current ACL checks.
+        var usePersistedBase = false
+        if let savedViewID,
+            positiveSeeds != nil,
+            try store.categoryGraphIsFullyReadable(requestedCategoryIDs: requested),
+            try store.savedViewIndexIsReady(savedViewID),
+            try store.savedViewCategorySelectionMatches(
+                id: savedViewID, expression: expression, text: text, categoryPath: categoryPath,
+                excludedCategoryIDs: excludedCategoryIDs, sort: sort)
+        {
+            usePersistedBase = true
+        }
+        let categoryCandidatePlan: SpotlightQuery.IndexCandidatePlan
+        if usePersistedBase, let savedViewID {
+            let categoryIDs = Set(definitions.map(\.itemID))
+            categoryCandidatePlan = .or(
+                .savedViewBase(savedViewID),
+                .or(.categoryDecisions(categoryIDs), .personalCategoryDeltas(categoryIDs)))
+        } else {
+            categoryCandidatePlan = positiveSeeds ?? .all
+        }
+        try store.forEachReadableCandidate(
+            text: text,
+            candidatePlan: .and(
+                predicate?.boundedIndexCandidatePlan(at: date, calendar: calendar) ?? .all,
+                categoryCandidatePlan),
+            order: order
+        ) { item in
+            guard predicate?.matches(item, at: date, calendar: calendar) ?? true else { return }
+            var cache: [String: Membership] = [:]
+            for id in categoryPath
+            where
+                try evaluator.membership(item, categoryID: id, cache: &cache).isIncluded != true
+            { return }
+            for id in excludedCategoryIDs
+            where
+                try evaluator.membership(item, categoryID: id, cache: &cache).isIncluded == true
+            { return }
+            try results.append(item.itemID)
+            if completeCacheIDs != nil {
+                if completeCacheIDs!.count < 8_192 {
+                    completeCacheIDs!.append(item.itemID)
+                } else {
+                    completeCacheIDs = nil
+                }
+            }
+        }
+        let page = try results.finish()
+        if let cacheKey, let completeCacheIDs, completeCacheIDs.count == page.totalCount {
+            store.saveViewPageIDs(completeCacheIDs, key: cacheKey, dependencies: cacheDependencies)
+        }
+        return .init(ids: page.elements, total: page.totalCount)
+    }
+
+    /// Returns an indexed positive superset only when the caller can see the complete
+    /// relevant graph and every rule has a bounded indexed candidate plan. Exact membership
+    /// and current ACL checks still run for every candidate.
+    static func manualCategoryPositiveSeeds(
+        store: ItemStore, definitions: [CategoryDefinition], requested: Set<String>
+    ) throws -> SpotlightQuery.IndexCandidatePlan? {
+        guard !definitions.isEmpty,
+            try store.categoryGraphIsFullyReadable(requestedCategoryIDs: requested)
+        else { return nil }
+        let hierarchy = try CategoryHierarchy(definitions: definitions)
+        guard hierarchy.items.count <= 32 else { return nil }
+        var rulePlans: [SpotlightQuery.IndexCandidatePlan] = []
+        var atomCount = 0
+        for category in hierarchy.items.values {
+            guard let expression = category.selection?["expression"]?.string,
+                category.selection?["timeWindow"] == nil,
+                let rule = try? SpotlightQuery(expression), !rule.indexDependencies.usesClock
+            else { return nil }
+            let plan = rule.boundedIndexCandidatePlan
+            guard !plan.isAll else { return nil }
+            atomCount += plan.atomCount
+            guard atomCount <= 16 else { return nil }
+            rulePlans.append(plan)
+        }
+        let categoryIDs = Set(hierarchy.items.keys)
+        var candidates = rulePlans
+        candidates.append(.categoryIncludes(categoryIDs))
+        candidates.append(.categoryDecisions(categoryIDs))
+        candidates.append(.personalCategoryDeltas(categoryIDs))
+        return candidates.dropFirst().reduce(candidates[0]) { .or($0, $1) }
+    }
+
     private static func categoryCacheDependencies(
         store: ItemStore, categoryPath: [String], excludedCategoryIDs: [String]
     ) throws -> Set<String>? {
@@ -641,7 +929,11 @@ public enum Categories {
             !store.hasLivePersonalStateItems()
         else { return nil }
         let hierarchy: CategoryHierarchy
-        do { hierarchy = try CategoryHierarchy(store.readableCategoryHeads()) } catch { return nil }
+        do {
+            hierarchy = try CategoryHierarchy(
+                definitions: store.readableCategoryDefinitions(
+                    requestedCategoryIDs: Set(categoryPath + excludedCategoryIDs)))
+        } catch { return nil }
         var pending = categoryPath + excludedCategoryIDs
         var visited: Set<String> = []
         var dependencies: Set<String> = []
@@ -649,16 +941,16 @@ public enum Categories {
             guard visited.insert(id).inserted else { continue }
             guard let category = hierarchy.items[id],
                 let rule = try? Categories.rule(category), !rule.indexDependencies.usesClock,
-                category.fields["selection"]?.map?["timeWindow"] == nil,
+                category.selection?["timeWindow"] == nil,
                 (try? QueryCalendar.make(
-                    timeZone: category.fields["selection"]?.map?["timeZone"]?.string ?? "UTC")) != nil
+                    timeZone: category.selection?["timeZone"]?.string ?? "UTC")) != nil
             else { return nil }
             dependencies.formUnion(rule.indexDependencies.fields.map { "filter:field:" + $0 })
             dependencies.insert("override:\(id)")
             pending.append(contentsOf: hierarchy.children[id] ?? [])
             guard
                 let exclusions = try? CategoryHierarchy.excludedCategories(
-                    category.fields["selection"]?.map?["excludedCategoryIDs"]),
+                    category.selection?["excludedCategoryIDs"]),
                 exclusions.allSatisfy({ hierarchy.items[$0] != nil }),
                 (try? CategoryHierarchy.parents(of: category))?.allSatisfy({ hierarchy.items[$0] != nil })
                     == true
@@ -686,13 +978,24 @@ public enum Categories {
             indexedOrder = nil
         }
         let defaultOrder = indexedOrder != nil
-        let ready = try savedViewID.map { try store.savedViewIndexIsReady($0) } ?? true
-        guard defaultOrder, categoryPath.isEmpty, excludedCategoryIDs.isEmpty, ready,
-            text == nil || savedViewID == nil
+        if let savedViewID { try store.advanceSavedViewMaterialization(id: savedViewID) }
+        guard defaultOrder, categoryPath.isEmpty, excludedCategoryIDs.isEmpty
         else {
             _ = try QueryCalendar.make(timeZone: timeZone)
             for id in categoryPath + excludedCategoryIDs {
                 _ = try rule(store.get(id))
+            }
+            if defaultOrder,
+                !categoryPath.isEmpty || !excludedCategoryIDs.isEmpty,
+                !sort.contains(where: { $0.categoryRootID != nil })
+            {
+                return try streamedCategoryPage(
+                    store: store, expression: expression,
+                    predicate: try expression.map(SpotlightQuery.init), text: text,
+                    categoryPath: categoryPath, excludedCategoryIDs: excludedCategoryIDs,
+                    sort: sort, order: indexedOrder!, position: position, limit: limit,
+                    at: date, timeZone: timeZone,
+                    savedViewID: savedViewID)
             }
             let manualCategoryDependencies: Set<String>?
             if savedViewID != nil {
@@ -760,15 +1063,16 @@ public enum Categories {
         }
         let predicate = try expression.map(SpotlightQuery.init)
         let calendar = try QueryCalendar.make(timeZone: timeZone)
-        let candidateRestrictions = predicate?.indexCandidateRestrictions ?? []
+        let candidatePlan = predicate?.boundedIndexCandidatePlan(at: date, calendar: calendar) ?? .all
+        let materializedView = try savedViewID.map { try store.savedViewIndexIsReady($0) } ?? false
         return try store.indexedPage(
             text: text, classEquals: predicate?.indexClassEquals, order: indexedOrder!,
             position: position, limit: limit,
-            exactIndexPredicate: (predicate == nil || predicate?.indexExactClassEquals != nil)
-                && candidateRestrictions.isEmpty,
+            exactIndexPredicate: (predicate == nil || predicate?.indexExactClassEquals != nil
+                || materializedView) && (candidatePlan.isAll || materializedView),
             needsFullRevision: predicate != nil && predicate?.indexExactClassEquals == nil
-                || !candidateRestrictions.isEmpty,
-            candidateRestrictions: candidateRestrictions
+                && !materializedView || !candidatePlan.isAll && !materializedView,
+            candidatePlan: candidatePlan, savedViewID: savedViewID
         ) { revision in
             predicate?.matches(revision, at: date, calendar: calendar) ?? true
         }
@@ -803,14 +1107,24 @@ public enum Categories {
         }
         return try SpotlightQuery(expression)
     }
+    static func rule(_ category: CategoryDefinition) throws -> SpotlightQuery {
+        guard !category.isDeleted, let expression = category.selection?["expression"]?.string else {
+            throw TractandaError("notCategory", "This item has no active selection criteria.")
+        }
+        return try SpotlightQuery(expression)
+    }
     public static func explain(
         _ item: Revision, category: Revision, store: ItemStore? = nil, at date: Date = Date()
     ) throws
         -> Membership
     {
         _ = try rule(category)
+        let definitions =
+            try store?.readableCategoryDefinitions(requestedCategoryIDs: [category.itemID])
+            ?? [CategoryDefinition(category)]
         let evaluator = try CategoryEvaluator(
-            store?.readableCategoryHeads() ?? [category], store: store, at: date)
+            definitions: definitions,
+            store: store, at: date)
         var cache: [String: Membership] = [:]
         return try evaluator.membership(item, categoryID: category.itemID, cache: &cache, trace: true)
     }
@@ -852,36 +1166,17 @@ public enum Categories {
         for id in categorySortIDs { _ = try readableCategoryRoot(store, id) }
         let evaluator =
             try categoryPath.isEmpty && excludedCategoryIDs.isEmpty && categorySortIDs.isEmpty
-            ? nil : CategoryEvaluator(store.readableCategoryHeads(), store: store, at: date)
-        var indexedCategoryCandidates: Set<String>?
-        if let evaluator, !categoryPath.isEmpty {
-            for rootID in categoryPath {
-                var closure = Set<String>()
-                var pending = [rootID]
-                while let categoryID = pending.popLast() {
-                    guard closure.insert(categoryID).inserted else { continue }
-                    pending.append(contentsOf: evaluator.hierarchy.children[categoryID] ?? [])
-                }
-                guard closure.allSatisfy({ evaluator.rules[$0]?.isManualOnlyImpossible == true }) else {
-                    continue
-                }
-                let candidates = try store.categoryIncludeCandidates(categoryIDs: closure)
-                if let existing = indexedCategoryCandidates {
-                    indexedCategoryCandidates = existing.intersection(candidates)
-                } else {
-                    indexedCategoryCandidates = candidates
-                }
-            }
-        }
-        // Each level intersects the candidates from the preceding level. Retain the same
-        // per-item cache for category sorting so manual/personal decisions and time rules
-        // are evaluated exactly once for each category.
-        let queryCandidates: [Revision]
-        if let indexedCategoryCandidates {
-            queryCandidates = try store.candidates(text: text, restrictedTo: indexedCategoryCandidates)
-        } else {
-            queryCandidates = try store.candidates(text: text)
-        }
+            ? nil
+            : CategoryEvaluator(
+                definitions: try store.readableCategoryDefinitions(
+                    requestedCategoryIDs: Set(categoryPath + excludedCategoryIDs + categorySortIDs)),
+                store: store, at: date)
+        // Avoid materializing a category decision or personal-target ID set as a prepass.
+        // Every fallback candidate is checked by the exact evaluator below; the restricted
+        // candidate sources remain an optimization only for separately bounded APIs.
+        let queryCandidates = try store.candidates(
+            text: text, restrictedTo: nil,
+            candidatePlan: query?.boundedIndexCandidatePlan(at: date, calendar: calendar) ?? .all)
         let evaluated = try queryCandidates.compactMap {
             item -> (Revision, [String: Membership])? in
             if let query, !query.matches(item, at: date, calendar: calendar) { return nil }
@@ -932,7 +1227,9 @@ public enum Categories {
         // `get` keeps an unreadable root indistinguishable from an unavailable item before
         // constructing the caller-authorized graph.
         for rootID in categoryRootIDs { _ = try readableCategoryRoot(store, rootID) }
-        let evaluator = try CategoryEvaluator(store.candidates(), store: store, at: date)
+        let evaluator = try CategoryEvaluator(
+            definitions: store.readableCategoryDefinitions(requestedCategoryIDs: Set(categoryRootIDs)),
+            store: store, at: date)
         var roots: [CategoryMembershipRoot] = []
         for rootID in categoryRootIDs {
             guard let root = evaluator.hierarchy.items[rootID] else {
@@ -941,10 +1238,10 @@ public enum Categories {
             let children = (evaluator.hierarchy.children[rootID] ?? []).compactMap {
                 childID -> CategoryMembershipRoot.Child? in
                 guard let child = evaluator.hierarchy.items[childID] else { return nil }
-                return .init(id: childID, name: child.fields["subject"]?.string ?? childID)
+                return .init(id: childID, name: child.subject.isEmpty ? childID : child.subject)
             }
             roots.append(
-                .init(id: rootID, name: root.fields["subject"]?.string ?? rootID, children: children))
+                .init(id: rootID, name: root.subject.isEmpty ? rootID : root.subject, children: children))
         }
         var memberships: [String: [String: [String]]] = [:]
         var notFound: [String] = []

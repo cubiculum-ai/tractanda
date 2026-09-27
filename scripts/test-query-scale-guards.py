@@ -15,6 +15,7 @@ SPEC.loader.exec_module(scale)
 
 class FakeProcess:
     def __init__(self, graceful_exit=False):
+        self.pid = 99999999
         self.terminated = False
         self.graceful_exit = graceful_exit
         self.returncode = None
@@ -35,6 +36,20 @@ class CapacityGuardTests(unittest.TestCase):
         with mock.patch.object(scale, "available_bytes", return_value=99):
             with self.assertRaisesRegex(RuntimeError, "Insufficient available disk space"):
                 scale.require_capacity(Path("/tmp"), 0, 1000, 100, 1, "startup")
+
+    def test_unknown_or_invalid_available_capacity_fails_closed(self):
+        for value in (None, -1, "unknown"):
+            with self.subTest(value=value), mock.patch.object(scale, "available_bytes", return_value=value):
+                with self.assertRaisesRegex(RuntimeError, "Cannot determine available disk capacity"):
+                    scale.require_capacity(Path("/tmp"), 0, 1000, 100, 1, "startup")
+
+    def test_estimator_accounts_for_body_history_and_index_copies(self):
+        tiny = scale.estimate_fixture_bytes(2, 1, 10)
+        longer = scale.estimate_fixture_bytes(2, 1, 100)
+        history = scale.estimate_fixture_bytes(2, 3, 10)
+        self.assertGreater(longer, tiny)
+        self.assertGreater(history, tiny)
+        self.assertGreater(tiny, 2 * 10, "estimate includes canonical and index overhead copies")
 
     def test_fixture_budget_and_oversized_batch_are_rejected(self):
         with mock.patch.object(scale, "available_bytes", return_value=10000):
@@ -75,7 +90,8 @@ class CapacityGuardTests(unittest.TestCase):
                     store.mkdir()
                     endpoint = root / "never-ready.sock"
                     with mock.patch.object(scale.subprocess, "Popen", return_value=process), \
-                         mock.patch.object(scale, "available_bytes", return_value=50):
+                         mock.patch.object(scale, "available_bytes", return_value=50), \
+                         mock.patch.object(scale, "rss_kib", return_value=None):
                         with self.assertRaisesRegex(RuntimeError, "Insufficient available disk space"):
                             with scale.measured_server("fake-native", store, endpoint, root,
                                                        1000, 100, ready_timeout_seconds=1):

@@ -117,7 +117,7 @@ final class ExtractedTextTests: XCTestCase {
             XCTAssertEqual(try record(summary)["itemID"] as? String, huge.itemID)
         }
     }
-    func testActualFTSStateIsComparedAndUnavailableIndexStillAllowsExtraction() throws {
+    func testActualFTSStateIsComparedAndMissingIndexGatesExtraction() throws {
         try fixture { store in
             let revision = try item(store, ["subject": .text("canonical")])
             let index = try ItemIndex(
@@ -137,10 +137,14 @@ final class ExtractedTextTests: XCTestCase {
             try index.execute("DELETE FROM text_index WHERE id = ?", [revision.itemID])
             XCTAssertEqual(try status(), "missing")
             try index.execute("DROP TABLE text_index")
-            XCTAssertEqual(try status(), "unavailable")
-            XCTAssertTrue(
-                (try record(call(store, ["ids": [revision.itemID]]))["sourceText"] as? String)?.contains(
-                    "canonical") == true)
+            XCTAssertThrowsError(try status()) {
+                XCTAssertTrue(
+                    ["indexError", "recoveryRequired"].contains(($0 as? TractandaError)?.code ?? ""))
+            }
+            XCTAssertFalse(store.isCanonicalTrusted)
+            XCTAssertThrowsError(try call(store, ["ids": [revision.itemID]])) {
+                XCTAssertEqual(($0 as? TractandaError)?.code, "recoveryRequired")
+            }
             index.close()
             try store.rebuildIndex()
             XCTAssertEqual(try status(), "current")
