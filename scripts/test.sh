@@ -13,6 +13,7 @@ else
     echo 'Node.js unavailable; browser logic checks must run on the macOS release host.'
 fi
 python3 scripts/test-release-pipeline.py
+python3 scripts/test-activate-release.py
 python3 scripts/test-notarize-macos.py
 python3 scripts/test-release-status.py
 python3 scripts/test-docling-packaging.py

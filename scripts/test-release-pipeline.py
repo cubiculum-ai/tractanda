@@ -551,9 +551,9 @@ class ReleaseTests(unittest.TestCase):
                 self.assertNotIn(str((directories['2'] / 'source').resolve()), remaining)
 
     def test_canonical_preservation_accepts_append_only_and_rejects_rewrites(self):
-        before = {'items/old.tractanda': 'a'}
-        activate.require_preserved(before, {**before, 'items/new.tractanda': 'b'})
-        for after in ({}, {'items/old.tractanda': 'changed'}):
+        before = {'entries': {'items/old.tractanda': {'kind': 'file', 'sha256': 'a'}}}
+        activate.require_preserved(before, {'entries': {**before['entries'], 'items/new.tractanda': {'kind': 'file', 'sha256': 'b'}}})
+        for after in ({'entries': {}}, {'entries': {'items/old.tractanda': {'kind': 'file', 'sha256': 'changed'}}}):
             with self.assertRaises(RuntimeError):
                 activate.require_preserved(before, after)
 
