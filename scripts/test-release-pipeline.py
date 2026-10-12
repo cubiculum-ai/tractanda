@@ -23,6 +23,103 @@ packager = load('packager', 'package-macos.py')
 
 
 class ReleaseTests(unittest.TestCase):
+    def descendant_fixture(self, root):
+        control, directory, installed, live, base_command, git = self.ci_repair_fixture(root)
+        executable = live.parent / 'bin/tractanda'
+        executable.parent.mkdir()
+        executable.write_bytes(b'signed ancestor executable')
+        manifest = release.read(live)
+        manifest.update(sourceCommit=installed['commit'], files=[{
+            'path': 'bin/tractanda', 'sha256': release.sha(executable)}])
+        release.write(live, manifest)
+        digest = release.sha(live)
+        installed['steps']['bundle']['result']['manifestSHA256'] = digest
+        ancestor = {'commit': installed['commit'], 'steps': installed['steps'],
+                    'unpublishedCIRepair': {'liveManifestSHA256': digest,
+                        'failedCI': {'headSha': installed['commit']}, 'remoteReleaseAbsent': True,
+                        'remoteTag': 'v' + installed['version']}}
+        pending = {**installed, 'commit': 'b' * 40, 'steps': {}, 'status': 'ready',
+                   'previousCandidates': [ancestor]}
+
+        def command(args, **kwargs):
+            if args[:3] == ['gh', 'run', 'list']:
+                commit = args[args.index('--commit') + 1]
+                return json.dumps([{'databaseId': 1, 'headSha': commit,
+                                    'status': 'completed', 'conclusion': 'failure'}])
+            return base_command(args, **kwargs)
+
+        return control, directory, pending, live, command, git
+
+    def test_ready_source_first_descendant_revalidates_installed_ancestor(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            control, directory, pending, live, command, git = self.descendant_fixture(root)
+            before = live.read_bytes()
+            absent = subprocess.CompletedProcess([], 2, stdout='', stderr='')
+            with patch.object(release, 'ROOT', root), patch.object(release, 'CONTROL', control), \
+                    patch.object(release, 'command', side_effect=command) as calls, \
+                    patch.object(release, 'git', side_effect=git) as git_calls, \
+                    patch.object(release.os, 'kill', side_effect=ProcessLookupError), \
+                    patch.object(release.subprocess, 'run', return_value=absent):
+                proof = release.require_ready_ci_descendant_repair(pending)
+            self.assertEqual(proof['installedAncestorCommit'], 'a' * 40)
+            self.assertEqual(proof['sourceFirstFailedCI']['headSha'], 'b' * 40)
+            self.assertEqual(live.read_bytes(), before)
+            self.assertTrue(any(call.args[0][:3] == ['/usr/bin/codesign', '--verify', '--strict']
+                                for call in calls.call_args_list))
+            git_calls.assert_any_call('merge-base', '--is-ancestor', 'a' * 40, 'b' * 40)
+            self.assertEqual(pending['steps'], {})
+
+    def test_ready_descendant_missing_ambiguous_or_changed_proof_fails_closed(self):
+        for defect in ['state', 'gate', 'missing', 'ambiguous', 'source', 'executable', 'marker']:
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                control, _, pending, live, command, git = self.descendant_fixture(root)
+                if defect == 'state': pending['status'] = 'running'
+                if defect == 'gate': pending['steps'] = {'verify': {}}
+                if defect == 'missing': pending['previousCandidates'] = []
+                if defect == 'ambiguous': pending['previousCandidates'] *= 2
+                if defect == 'marker': pending['previousCandidates'][0]['unpublishedCIRepair']['remoteReleaseAbsent'] = False
+                if defect == 'source':
+                    value = release.read(live); value['sourceCommit'] = 'c' * 40; release.write(live, value)
+                if defect == 'executable': (live.parent / 'bin/tractanda').write_bytes(b'changed')
+                with patch.object(release, 'ROOT', root), patch.object(release, 'CONTROL', control), \
+                        patch.object(release, 'command', side_effect=command), \
+                        patch.object(release, 'git', side_effect=git), \
+                        patch.object(release.os, 'kill', side_effect=ProcessLookupError), \
+                        patch.object(release.subprocess, 'run', return_value=subprocess.CompletedProcess([], 2, stdout='', stderr='')):
+                    with self.assertRaises(RuntimeError): release.require_ready_ci_descendant_repair(pending)
+
+    def test_ready_descendant_fresh_external_gates_fail_closed(self):
+        for defect in ['runner', 'signature', 'ancestry', 'source-ci-green', 'source-ci-running',
+                       'source-ci-wrong', 'offline', 'release', 'tag']:
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                control, _, pending, _, base_command, base_git = self.descendant_fixture(root)
+                def command(args, **kwargs):
+                    if args[0] == '/usr/bin/codesign' and defect == 'signature':
+                        raise subprocess.CalledProcessError(1, args)
+                    if args[:3] == ['gh', 'run', 'list'] and args[args.index('--commit') + 1] == 'b' * 40:
+                        if defect == 'offline': raise RuntimeError('offline')
+                        value = json.loads(base_command(args, **kwargs))
+                        if defect == 'source-ci-green': value[0]['conclusion'] = 'success'
+                        if defect == 'source-ci-running': value[0]['status'] = 'in_progress'
+                        if defect == 'source-ci-wrong': value[0]['headSha'] = 'c' * 40
+                        return json.dumps(value)
+                    if args[:3] == ['gh', 'api', '--paginate'] and defect == 'release': return 'v0.1.0-poc.13'
+                    return base_command(args, **kwargs)
+                def git(*args, **kwargs):
+                    if args[:2] == ('merge-base', '--is-ancestor') and defect == 'ancestry':
+                        raise subprocess.CalledProcessError(1, args)
+                    return base_git(*args, **kwargs)
+                outcome = subprocess.CompletedProcess([], 0 if defect == 'tag' else 2, stdout='', stderr='')
+                with patch.object(release, 'ROOT', root), patch.object(release, 'CONTROL', control), \
+                        patch.object(release, 'command', side_effect=command), patch.object(release, 'git', side_effect=git), \
+                        patch.object(release.os, 'kill', side_effect=None if defect == 'runner' else ProcessLookupError), \
+                        patch.object(release.subprocess, 'run', return_value=outcome):
+                    with self.assertRaises((RuntimeError, subprocess.CalledProcessError)):
+                        release.require_ready_ci_descendant_repair(pending)
+
     def revision_fixture(self, root, old_commit='a' * 40):
         control = root / 'work/release-pipeline'
         directory = control / '0.1.0-poc.13'

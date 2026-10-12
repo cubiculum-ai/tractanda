@@ -27,6 +27,16 @@ final class DocumentWorkerProcessTests: XCTestCase {
         XCTAssertEqual(waitpid(process.pid, &status, WNOHANG), -1)
         XCTAssertEqual(errno, ECHILD)
     }
+    private func finishHarness(_ process: DocumentOwnedProcess, phase: String, seconds: Double = 5) throws {
+        do {
+            try process.finish(deadline: deadline(seconds))
+        } catch {
+            throw TractandaError(
+                "nativeHarnessFailure",
+                "phase=\(phase); status=\(process.terminationStatus.map(String.init) ?? "unknown"); stderr=\(String(decoding: process.stderrTail, as: UTF8.self)); error=\(error)"
+            )
+        }
+    }
     func testChildGroupAndUnrelatedDescriptorIsolation() throws {
         let fd = open("/dev/null", O_RDONLY)
         XCTAssertGreaterThanOrEqual(fd, 0)
@@ -149,17 +159,17 @@ final class DocumentWorkerProcessTests: XCTestCase {
         let compiler = try DocumentOwnedProcess(
             executable: "/usr/bin/cc", arguments: flags, cancellation: .init(), graceSeconds: 0.05)
         while try compiler.nextLine(limit: 4096, deadline: deadline(60)) != nil {}
-        try compiler.finish(deadline: deadline(60))
+        try finishHarness(compiler, phase: "compiler", seconds: 60)
         XCTAssertLessThan(try FileMetadata.read(at: executable).size, 1024 * 1024)
         let epipe = try DocumentOwnedProcess(
             executable: executable.path, arguments: [], cancellation: .init(), graceSeconds: 0.05)
         XCTAssertEqual(try epipe.nextLine(limit: 4096, deadline: deadline()), Data("epipe-handled".utf8))
-        try epipe.finish(deadline: deadline())
+        try finishHarness(epipe, phase: "EPIPE")
         reaped(epipe)
         let stdio = try DocumentOwnedProcess(
             executable: executable.path, arguments: [proof.path], cancellation: .init(), graceSeconds: 0.05)
         XCTAssertNil(try stdio.nextLine(limit: 4096, deadline: deadline()))
-        try stdio.finish(deadline: deadline())
+        try finishHarness(stdio, phase: "closed-stdio")
         XCTAssertEqual(try Data(contentsOf: proof), Data("token\n".utf8))
         reaped(stdio)
     }

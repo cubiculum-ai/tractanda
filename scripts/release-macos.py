@@ -439,6 +439,53 @@ def require_unpublished_ci_repair(state):
             'remoteReleaseAbsent': True, 'liveManifestSHA256': expected}
 
 
+def require_ready_ci_descendant_repair(state):
+    """Continue source-first repair while its proven installed ancestor stays pinned."""
+    if state.get('status') != 'ready' or state.get('steps') != {}:
+        raise RuntimeError('Only a zero-gate READY source-first descendant may continue repair.')
+    if not isinstance(state.get('commit'), str) or not re.fullmatch(r'[0-9a-f]{40}', state['commit']):
+        raise RuntimeError('The source-first descendant commit is invalid.')
+    current = Path(state['configuration']['softwareRoot']) / 'current/bundle-manifest.json'
+    if current.is_symlink() or not current.is_file():
+        raise RuntimeError('The installed ancestor manifest is unavailable.')
+    manifest, digest = read(current), sha(current)
+    ancestors = [entry for entry in state.get('previousCandidates', [])
+                 if entry.get('steps', {}).get('bundle', {}).get('result', {}).get('manifestSHA256') == digest
+                 and isinstance(entry.get('unpublishedCIRepair'), dict)]
+    if len(ancestors) != 1:
+        raise RuntimeError('The installed unpublished-CI ancestor is missing or ambiguous.')
+    ancestor = ancestors[0]
+    saved = ancestor['unpublishedCIRepair']
+    if (saved.get('liveManifestSHA256') != digest
+            or saved.get('failedCI', {}).get('headSha') != ancestor.get('commit')
+            or saved.get('remoteReleaseAbsent') is not True
+            or saved.get('remoteTag') != 'v' + state['version']
+            or manifest.get('sourceCommit') != ancestor.get('commit')):
+        raise RuntimeError('The installed ancestor source identity/proof does not match.')
+    # Reuse the existing terminal-runner, exact live pin and fresh remote absence gates.
+    installed = {**state, 'commit': ancestor['commit'], 'steps': ancestor['steps'],
+                 'status': 'failed', 'activeStep': 'ci'}
+    proof = require_unpublished_ci_repair(installed)
+    git('merge-base', '--is-ancestor', ancestor['commit'], state['commit'])
+    executable = current.parent / 'bin/tractanda'
+    expected = [entry.get('sha256') for entry in manifest.get('files', [])
+                if entry.get('path') == 'bin/tractanda']
+    if (len(expected) != 1 or not isinstance(expected[0], str)
+            or not re.fullmatch(r'[0-9a-f]{64}', expected[0])
+            or executable.is_symlink() or not executable.is_file() or sha(executable) != expected[0]):
+        raise RuntimeError('The installed ancestor executable differs from its signed inventory.')
+    command(['/usr/bin/codesign', '--verify', '--strict', str(executable)])
+    runs = json.loads(command(['gh', 'run', 'list', '--repo', state['configuration']['repository'],
+        '--workflow', 'verify.yml', '--commit', state['commit'], '--event', 'push',
+        '--json', 'databaseId,status,conclusion,headSha']))
+    if (not isinstance(runs, list) or not runs or not isinstance(runs[0], dict)
+            or runs[0].get('headSha') != state['commit'] or runs[0].get('status') != 'completed'
+            or runs[0].get('conclusion') != 'failure'):
+        raise RuntimeError('A terminal source-first CI failure for this exact descendant is unproven.')
+    return {**proof, 'installedAncestorCommit': ancestor['commit'],
+            'sourceFirstFailedCI': runs[0], 'liveExecutableSHA256': expected[0]}
+
+
 def revise(state, notes):
     """Repair an unpublished candidate without replacing any live/published release."""
     if 'publish' in state['steps'] or state.get('status') == 'complete':
@@ -446,7 +493,7 @@ def revise(state, notes):
     repair_proof = require_unpublished_ci_repair(state) if any(name in state['steps'] for name in ('install', 'push')) else None
     current = Path(state['configuration']['softwareRoot']) / 'current/bundle-manifest.json'
     if not repair_proof and current.exists() and read(current).get('version') == state['version']:
-        raise RuntimeError('This candidate is already pinned locally; do not rewrite its source identity.')
+        repair_proof = require_ready_ci_descendant_repair(state)
     if (ROOT / 'VERSION').read_text().strip() != state['version']:
         raise RuntimeError('The pending candidate version must be retained during repair.')
     audit_path = CONTROL / 'repair-audit.json'
