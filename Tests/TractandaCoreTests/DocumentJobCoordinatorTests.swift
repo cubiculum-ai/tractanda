@@ -25,7 +25,7 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         let configuration: DocumentConverterConfiguration
         let request: DocumentJobStart
     }
-    private func capacity(_ root: URL) throws {
+    private func capacity(_ root: URL, beforeMetadata: ((URL) throws -> Void)? = nil) throws {
         var status = statvfs()
         guard statvfs(root.path, &status) == 0, status.f_frsize > 0 else {
             throw TractandaError("resourceLimit", "Cannot inspect genuine fixture capacity.")
@@ -36,22 +36,257 @@ final class DocumentJobCoordinatorTests: XCTestCase {
             throw TractandaError("resourceLimit", "Fixture requires genuine 10 GiB reserve plus 16 MiB cap.")
         }
         guard root.lastPathComponent.hasPrefix("job-coordinator-") else { return }
+        var owner = stat()
+        guard lstat(root.path, &owner) == 0, owner.st_uid == getuid(),
+            owner.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR), owner.st_mode & 0o077 == 0
+        else { throw TractandaError("resourceLimit", "Fixture accounting requires a private owned root.") }
         var bytes: UInt64 = 0
-        if let enumerator = FileManager.default.enumerator(
-            at: root, includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey])
+        func scan(_ directory: URL) throws {
+            func visit(_ directory: URL) throws {
+                try POSIXDirectory.withEntries(at: directory) { name in
+                    let url = directory.appendingPathComponent(name)
+                    try beforeMetadata?(url)
+                    var entry = stat()
+                    let exists = lstat(url.path, &entry) == 0
+                    let failure = exists ? 0 : errno
+                    if !exists && failure != ENOENT {
+                        throw NSError(
+                            domain: NSPOSIXErrorDomain, code: Int(failure),
+                            userInfo: [NSFilePathErrorKey: url.path])
+                    }
+                    if exists, entry.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) {
+                        try scan(url)
+                    } else if !exists, let promoted = promotedEntry(url, root: root),
+                        promoted.1.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR)
+                    {
+                        try scan(promoted.0)
+                    } else {
+                        bytes += try accountedBytes(url, root: root)
+                    }
+                    guard bytes <= cap else {
+                        throw TractandaError("resourceLimit", "Fixture exceeded 16 MiB cap.")
+                    }
+                    return true
+                }
+            }
+            do { try visit(directory) } catch FileMetadataError.posix(ENOENT) {
+                guard let promoted = promotedEntry(directory, root: root),
+                    promoted.1.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR)
+                else { throw FileMetadataError.posix(ENOENT) }
+                try visit(promoted.0)
+            }
+        }
+        try scan(root)
+    }
+
+    func testFixtureCapacityFollowsOnlyOwnedSealedPromotionCounterpart() throws {
+        let root = temporaryDirectory.appendingPathComponent("job-coordinator-" + Identifier.make())
+        try FileManager.default.createDirectory(
+            at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: root) }
+        try capacity(root)
+        let store = root.appendingPathComponent("store")
+        let id = try UUID.makeVersion1().uuidString.lowercased()
+        let stage = store.appendingPathComponent("documents/.staging/" + id)
+        let page = stage.appendingPathComponent("pages/0/92.json")
+        try FileManager.default.createDirectory(
+            at: page.deletingLastPathComponent(), withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        try Data([1]).write(to: page)
+        try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: page.path)
+        let recipe = try DocumentContentStore(root: store, ownerUID: getuid()).directory(id)
+        let canonical = recipe.reduce(store) { $0.appendingPathComponent($1) }
+        try FileManager.default.createDirectory(
+            at: canonical.deletingLastPathComponent(), withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        var moved = false
+        try capacity(root) { url in
+            if url.path == page.path {
+                try FileManager.default.moveItem(at: stage, to: canonical)
+                moved = true
+            }
+        }
+        XCTAssertTrue(moved)
+        XCTAssertEqual(try accountedBytes(page, root: root), 1)
+        let published = canonical.appendingPathComponent("pages/0/92.json")
+        try FileManager.default.removeItem(at: published)
+        XCTAssertThrowsError(
+            try accountedBytes(page, root: root), "A missing canonical counterpart is not a promotion")
+        let elsewhere = root.appendingPathComponent("elsewhere")
+        try Data([1]).write(to: elsewhere)
+        try FileManager.default.createSymbolicLink(at: published, withDestinationURL: elsewhere)
+        XCTAssertThrowsError(
+            try accountedBytes(page, root: root), "Never follow a canonical counterpart symlink")
+    }
+
+    // Staging promotion changes paths, not data. Require the exact dated canonical counterpart
+    // through the existing directory recipe; every component is inspected without following links.
+    private func promotedEntry(_ url: URL, root: URL) -> (URL, stat)? {
+        let staging = root.appendingPathComponent("store/documents/.staging").path + "/"
+        guard url.path.hasPrefix(staging) else { return nil }
+        let parts = url.path.dropFirst(staging.count).split(separator: "/").map(String.init)
+        guard let id = parts.first, UUID(uuidString: id)?.version1Components != nil,
+            parts.allSatisfy({ $0 != "." && $0 != ".." })
+        else { return nil }
+        let store = root.appendingPathComponent("store")
+        guard let destination = try? DocumentContentStore(root: store, ownerUID: getuid()).directory(id)
+        else { return nil }
+        let components = destination + Array(parts.dropFirst())
+        var path = store
+        var metadata = stat()
+        for (index, component) in components.enumerated() {
+            path.appendPathComponent(component)
+            guard lstat(path.path, &metadata) == 0, metadata.st_uid == getuid(), metadata.st_mode & 0o022 == 0
+            else { return nil }
+            if index < components.count - 1 {
+                guard metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else { return nil }
+            }
+        }
+        let directory = metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR)
+        let sealed =
+            metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG)
+            && metadata.st_mode & 0o777 == 0o400 && metadata.st_size > 0
+            && metadata.st_size <= DocumentContentStore.maximumPageBytes
+        return directory || sealed ? (path, metadata) : nil
+    }
+
+    private var temporaryDirectory: URL {
+        #if os(Linux)
+            URL(fileURLWithPath: "/tmp")
+        #else
+            URL(fileURLWithPath: "/private/tmp")
+        #endif
+    }
+
+    private func accountedBytes(_ url: URL, root: URL) throws -> UInt64 {
+        var metadata = stat()
+        if lstat(url.path, &metadata) == 0 {
+            guard metadata.st_size >= 0 else {
+                throw TractandaError("resourceLimit", "Fixture file size is unknown.")
+            }
+            return metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) ? UInt64(metadata.st_size) : 0
+        }
+        let failure = errno
+        if failure == ENOENT, let promoted = promotedEntry(url, root: root),
+            promoted.1.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG)
         {
-            for case let url as URL in enumerator {
-                let value = try url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
-                if value.isRegularFile == true { bytes += UInt64(value.fileSize ?? 0) }
-                guard bytes <= cap else {
-                    throw TractandaError("resourceLimit", "Fixture exceeded 16 MiB cap.")
+            return UInt64(promoted.1.st_size)
+        }
+        let staging = root.appendingPathComponent("store/documents/.staging").path + "/"
+        let name = url.lastPathComponent
+        if failure == ENOENT, url.path.hasPrefix(staging), name.hasPrefix(".dependency-"),
+            name.hasSuffix(".tmp"), UUID(uuidString: String(name.dropFirst(12).dropLast(4))) != nil
+        {
+            let parts = url.path.dropFirst(staging.count).split(separator: "/")
+            let tree = parts.count >= 2 && UUID(uuidString: String(parts[0]))?.version1Components != nil
+            guard parts.count == 1 || tree
+            else {
+                throw NSError(
+                    domain: NSPOSIXErrorDomain, code: Int(failure), userInfo: [NSFilePathErrorKey: url.path])
+            }
+            // DocumentContentFiles.write publishes/unlinks these staging-only files atomically.
+            return UInt64(DocumentContentStore.maximumPageBytes)
+        }
+        if failure == ENOENT, url.deletingLastPathComponent().path + "/" == staging,
+            name.hasSuffix(".publication.json"),
+            UUID(uuidString: String(name.dropLast(17)))?.version1Components != nil
+        {
+            return UInt64(DocumentContentStore.maximumPageBytes)
+        }
+        if failure == ENOENT, name.hasPrefix(".dependency-"), name.hasSuffix(".tmp"),
+            UUID(uuidString: String(name.dropFirst(12).dropLast(4))) != nil
+        {
+            for (namespace, bound) in [("document-job-history", 16 * 1024), ("document-job-operations", 128)]
+            {
+                let parent = url.deletingLastPathComponent()
+                if parent.deletingLastPathComponent().path
+                    == root.appendingPathComponent("store/" + namespace).path,
+                    parent.lastPathComponent.count == 2
+                {
+                    return UInt64(bound)
                 }
             }
         }
+        let jobs = root.appendingPathComponent("store/document-jobs")
+        guard failure == ENOENT, url.path.hasPrefix(jobs.path + "/") else {
+            throw NSError(
+                domain: NSPOSIXErrorDomain, code: Int(failure), userInfo: [NSFilePathErrorKey: url.path])
+        }
+        // Atomic operational checkpoints can be renamed between enumeration and lstat.
+        // Charge their full runtime maximum instead of treating a vanished file as zero.
+        if name.hasPrefix(".checkpoint-"), name.hasSuffix(".tmp"),
+            UUID(uuidString: String(name.dropFirst(12).dropLast(4))) != nil,
+            url.deletingLastPathComponent().deletingLastPathComponent().path == jobs.path
+        {
+            return 16 * 1024
+        }
+        if name == "projection.sqlite-journal",
+            url.deletingLastPathComponent().lastPathComponent.hasPrefix("page-corpus-"),
+            url.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent == "corpus",
+            url.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+                .deletingLastPathComponent().path == jobs.path
+        {
+            let database = url.deletingLastPathComponent().appendingPathComponent("projection.sqlite")
+            var size = stat()
+            guard lstat(database.path, &size) == 0,
+                size.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG), size.st_size >= 0,
+                size.st_size <= 8 * 1024 * 1024
+            else { throw TractandaError("resourceLimit", "Cannot bound a vanished fixture journal.") }
+            // Conservative rollback-journal allowance includes page-record/header overhead.
+            return UInt64(size.st_size) * 2 + 4096
+        }
+        // Missing canonical records/pages, other metadata errors and unknown paths still fail closed.
+        throw NSError(
+            domain: NSPOSIXErrorDomain, code: Int(failure), userInfo: [NSFilePathErrorKey: url.path])
+    }
+
+    func testFixtureCapacityAccountsOnlyVanishedOperationalFiles() throws {
+        let root = temporaryDirectory.appendingPathComponent(
+            "job-coordinator-" + Identifier.make())
+        try FileManager.default.createDirectory(
+            at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: root) }
+        try capacity(root)
+        let job = root.appendingPathComponent("store/document-jobs/" + Identifier.make())
+        let corpus = job.appendingPathComponent("corpus/page-corpus-" + Identifier.make())
+        try FileManager.default.createDirectory(at: corpus, withIntermediateDirectories: true)
+        let checkpoint = job.appendingPathComponent(".checkpoint-" + UUID().uuidString + ".tmp")
+        let journal = corpus.appendingPathComponent("projection.sqlite-journal")
+        let representation = try UUID.makeVersion1().uuidString.lowercased()
+        let pages = root.appendingPathComponent("store/documents/.staging/" + representation + "/pages/0")
+        try FileManager.default.createDirectory(at: pages, withIntermediateDirectories: true)
+        let dependency = pages.appendingPathComponent(".dependency-" + UUID().uuidString + ".tmp")
+        try Data([1]).write(to: checkpoint)
+        try Data([1]).write(to: journal)
+        try Data([1]).write(to: dependency)
+        try Data([1]).write(to: corpus.appendingPathComponent("projection.sqlite"))
+        var removed: Set<String> = []
+        try capacity(root) { url in
+            if [checkpoint.path, journal.path, dependency.path].contains(url.path) {
+                try FileManager.default.removeItem(at: url)
+                removed.insert(url.path)
+            }
+        }
+        XCTAssertEqual(removed, Set([checkpoint.path, journal.path, dependency.path]))
+        XCTAssertEqual(try accountedBytes(checkpoint, root: root), 16 * 1024)
+        XCTAssertEqual(try accountedBytes(journal, root: root), 4098)
+        XCTAssertEqual(
+            try accountedBytes(dependency, root: root), UInt64(DocumentContentStore.maximumPageBytes))
+        XCTAssertThrowsError(
+            try accountedBytes(
+                root.appendingPathComponent(
+                    "store/documents/" + representation + "/pages/0/" + dependency.lastPathComponent),
+                root: root))
+        XCTAssertThrowsError(try accountedBytes(job.appendingPathComponent("record.json"), root: root))
+        XCTAssertThrowsError(try accountedBytes(corpus.appendingPathComponent("page.json"), root: root))
+        XCTAssertThrowsError(
+            try accountedBytes(corpus.appendingPathComponent(checkpoint.lastPathComponent), root: root))
+        try FileManager.default.removeItem(at: corpus.appendingPathComponent("projection.sqlite"))
+        XCTAssertThrowsError(try accountedBytes(journal, root: root))
     }
     private func fixture(delay: Double = 0, pages: Int = 129, heldPage: Int? = nil) throws -> Fixture {
-        try capacity(FileManager.default.temporaryDirectory)
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+        try capacity(temporaryDirectory)
+        let root = temporaryDirectory.appendingPathComponent(
             "job-coordinator-" + Identifier.make())
         try FileManager.default.createDirectory(
             at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -341,8 +576,16 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let first = try await ServiceCoordinator(
             opening: fixture.store, documentConverter: fixture.configuration)
-        let admitted = try await client(first).startDocumentJob(fixture.request)
-        _ = try await wait(client(first), id: admitted.jobID, root: fixture.root) { $0.acceptedPages >= 2 }
+        let admitted: DocumentJobStatus
+        do {
+            admitted = try await client(first).startDocumentJob(fixture.request)
+            _ = try await wait(client(first), id: admitted.jobID, root: fixture.root) {
+                $0.acceptedPages >= 2
+            }
+        } catch {
+            await first.close()
+            throw error
+        }
         await first.close()
         let paused: DocumentJobStatus = try {
             let store = try ItemStore(root: fixture.store)
@@ -352,11 +595,16 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         XCTAssertEqual(paused.reasonCode, "serverShutdown")
         let second = try await ServiceCoordinator(
             opening: fixture.store, documentConverter: fixture.configuration)
-        let resumed = try await wait(client(second), id: admitted.jobID, root: fixture.root) {
-            $0.state == "completed"
+        do {
+            let resumed = try await wait(client(second), id: admitted.jobID, root: fixture.root) {
+                $0.state == "completed"
+            }
+            XCTAssertEqual(resumed.acceptedPages, 129)
+            XCTAssertGreaterThanOrEqual(resumed.acceptedPages, paused.acceptedPages)
+        } catch {
+            await second.close()
+            throw error
         }
-        XCTAssertEqual(resumed.acceptedPages, 129)
-        XCTAssertGreaterThanOrEqual(resumed.acceptedPages, paused.acceptedPages)
         await second.close()
     }
     func testOutstandingPageTimeoutIsDurableAndDistinctFromCancellation() async throws {
@@ -510,19 +758,26 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         let coordinator = try await ServiceCoordinator(
             opening: fixture.store, documentConverter: fixture.configuration)
         let gate = AdmissionGate()
-        await coordinator.setDocumentJobAdmissionHookForTesting { await gate.pause() }
-        let client = client(coordinator)
-        let admitted = try await client.startDocumentJob(fixture.request)
-        try await waitForGate(gate)
-        _ = try await client.cancelDocumentJob(admitted.jobID)
-        let resumed = try await client.resumeDocumentJob(admitted.jobID)
-        XCTAssertEqual(resumed.state, "queued")
-        await coordinator.setDocumentJobAdmissionHookForTesting(nil)
-        await gate.release()
-        let ready = try await wait(client, id: admitted.jobID, root: fixture.root) {
-            $0.state == "completed"
+        do {
+            await coordinator.setDocumentJobAdmissionHookForTesting { await gate.pause() }
+            let client = client(coordinator)
+            let admitted = try await client.startDocumentJob(fixture.request)
+            try await waitForGate(gate)
+            _ = try await client.cancelDocumentJob(admitted.jobID)
+            let resumed = try await client.resumeDocumentJob(admitted.jobID)
+            XCTAssertEqual(resumed.state, "queued")
+            await coordinator.setDocumentJobAdmissionHookForTesting(nil)
+            await gate.release()
+            let ready = try await wait(client, id: admitted.jobID, root: fixture.root) {
+                $0.state == "completed"
+            }
+            XCTAssertEqual(ready.acceptedPages, 129)
+        } catch {
+            await coordinator.setDocumentJobAdmissionHookForTesting(nil)
+            await gate.release()
+            await coordinator.close()
+            throw error
         }
-        XCTAssertEqual(ready.acceptedPages, 129)
         await coordinator.close()
     }
 

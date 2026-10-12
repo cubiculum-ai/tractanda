@@ -17,8 +17,13 @@ final class AttachmentCommandsTests: XCTestCase {
     private let revision = "22222222-2222-1222-8222-222222222222"
 
     override func setUpWithError() throws {
-        try FixtureCapacity.require(at: URL(fileURLWithPath: "/private/tmp"), planned: 16 * 1024 * 1024)
-        root = URL(fileURLWithPath: "/private/tmp").appendingPathComponent(try UUID.makeVersion1().uuidString)
+        #if os(Linux)
+            let temporary = URL(fileURLWithPath: "/tmp")
+        #else
+            let temporary = URL(fileURLWithPath: "/private/tmp")
+        #endif
+        try FixtureCapacity.require(at: temporary, planned: 16 * 1024 * 1024)
+        root = temporary.appendingPathComponent(try UUID.makeVersion1().uuidString)
         try FileManager.default.createDirectory(
             at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         store = AttachmentReceiptStore(
