@@ -1,0 +1,174 @@
+{
+  "syntheticWireFixturesOnly": true,
+  "protocol": "tractanda.native-document-worker.v1",
+  "limits": {
+    "bindingBytes": 65536,
+    "requestLineBytes": 65536,
+    "controlLineBytes": 4096,
+    "pageLineBytes": 2097152,
+    "rawDocTagsBytes": 262144,
+    "logTailBytes": 65536
+  },
+  "positive": [
+    "binding.json",
+    "request-convert.json",
+    "request-close.json",
+    "response-hello.json",
+    "response-progress.json",
+    "response-converted.json",
+    "response-closed.json",
+    "response-error.json",
+    "response-unsupported.json",
+    "response-truncated.json",
+    "response-timeout.json",
+    "response-failed.json"
+  ],
+  "negative": [
+    {
+      "file": "invalid-request-zero-id.json",
+      "reason": "positive checked Int64 requestID"
+    },
+    {
+      "file": "invalid-request-page-overflow.json",
+      "reason": "Int64 pageNumber overflow"
+    },
+    {
+      "file": "invalid-request-unknown-key.json",
+      "reason": "strict unknown-key rejection"
+    },
+    {
+      "file": "invalid-close-with-page.json",
+      "reason": "close must omit pageNumber"
+    },
+    {
+      "file": "invalid-failure-with-page.json",
+      "reason": "failure must omit page payload"
+    },
+    {
+      "file": "invalid-failure-missing-code.json",
+      "reason": "failureCode required"
+    },
+    {
+      "file": "invalid-converted-with-code.json",
+      "reason": "converted must omit failureCode"
+    },
+    {
+      "file": "invalid-hello-model-loaded.json",
+      "reason": "weight-free hello requires modelLoaded=false"
+    },
+    {
+      "file": "invalid-binding-extra-token-field.json",
+      "reason": "strict token has no path"
+    },
+    {
+      "file": "wrong-session-request.json",
+      "reason": "context mismatch, schema-valid"
+    },
+    {
+      "file": "wrong-source-response.json",
+      "reason": "context mismatch, schema-valid"
+    },
+    {
+      "file": "wrong-page-response.json",
+      "reason": "outer/inner/outstanding ordinal mismatch"
+    }
+  ],
+  "files": {
+    "binding.json": {
+      "bytesIncludingNewline": 928,
+      "sha256": "ebc7529c1efcc2dd712be054f834a9ea43e3070829948b2796a3bfc85a47f7be"
+    },
+    "request-convert.json": {
+      "bytesIncludingNewline": 201,
+      "sha256": "90f7c066e4856fefbccc01101d7cffa07294dead783ed604ed75c272fbc89575"
+    },
+    "request-close.json": {
+      "bytesIncludingNewline": 180,
+      "sha256": "d95b271f02c1df1afc6e7a68b87c83858efb3b8f4feb7fbb19f43ff61887e1aa"
+    },
+    "response-hello.json": {
+      "bytesIncludingNewline": 1001,
+      "sha256": "0e2e05be2f0d4ddd38c9d63386fc212b96111c05df6f230abbad57ddde814980"
+    },
+    "response-progress.json": {
+      "bytesIncludingNewline": 1025,
+      "sha256": "eccac0527cf59d7708194eec894cb43027b690943aa11bb3ff8ce06f99e7d2d9"
+    },
+    "response-converted.json": {
+      "bytesIncludingNewline": 1521,
+      "sha256": "7d486e6f9d76c2fd776421aa3038333a6b0067b25f89a060c9d3075d2870c275"
+    },
+    "response-closed.json": {
+      "bytesIncludingNewline": 958,
+      "sha256": "54c11c2ccd8ea19c5e5738b14ed904453f796b05359efa89d6dcccc59b8e84aa"
+    },
+    "response-error.json": {
+      "bytesIncludingNewline": 982,
+      "sha256": "4c82bf45a8d5cda5ad7f63c725d6cc90357d2431ae9f5dca8db3bc5369b37e80"
+    },
+    "response-unsupported.json": {
+      "bytesIncludingNewline": 1035,
+      "sha256": "1bb5f42f6dda39e7134b4309189c96608fd4c18032a0965cead0956298df0833"
+    },
+    "response-truncated.json": {
+      "bytesIncludingNewline": 1032,
+      "sha256": "6e0c1cd4af4aa9a8711d18c9f57ed6a1f4552457aa9b828228ae999249dcc2b5"
+    },
+    "response-timeout.json": {
+      "bytesIncludingNewline": 1022,
+      "sha256": "937cd29614a37f165bca811487aec6d1bba70f53475ac032ddc2547887f92bed"
+    },
+    "response-failed.json": {
+      "bytesIncludingNewline": 1022,
+      "sha256": "255fa682e74344e4227729335374a587c84ad8110b070dd8fcdb0bb0219cf993"
+    },
+    "invalid-request-zero-id.json": {
+      "bytesIncludingNewline": 201,
+      "sha256": "e22f4f78266cf16cb80de01c2ae138e39d997c20b36ba7e7a70eb82c900e717a"
+    },
+    "invalid-request-page-overflow.json": {
+      "bytesIncludingNewline": 219,
+      "sha256": "285b4118b61f826618a2b4d24c4643e48db9b0c9e342193e70697e9e54178793"
+    },
+    "invalid-request-unknown-key.json": {
+      "bytesIncludingNewline": 230,
+      "sha256": "64e0f5e8eece55edd7ef2cf3526ae35101281ca0355abeecd9d3845d0631f33b"
+    },
+    "invalid-close-with-page.json": {
+      "bytesIncludingNewline": 195,
+      "sha256": "6ea5fe0066626995006081116e5a23ea8e7a245516c736dd57f82c9bcacb776b"
+    },
+    "invalid-failure-with-page.json": {
+      "bytesIncludingNewline": 1551,
+      "sha256": "eea9f91fa999bb9c10586c6d64c84404cc8854bda88645f3fcda987b4c899807"
+    },
+    "invalid-failure-missing-code.json": {
+      "bytesIncludingNewline": 989,
+      "sha256": "293a8b3d5046d90700ba3ac4deefbba5700f0059aea0e850dd171e9c0bc5af51"
+    },
+    "invalid-converted-with-code.json": {
+      "bytesIncludingNewline": 1554,
+      "sha256": "9df8aad1f94d2909fb456834ca47fd5d89701c475591073441beb6ad6a59049d"
+    },
+    "invalid-hello-model-loaded.json": {
+      "bytesIncludingNewline": 1000,
+      "sha256": "e1072d676835350ada0450a2acb7e6faa2a96cea40965de066544bf4f16f8954"
+    },
+    "invalid-binding-extra-token-field.json": {
+      "bytesIncludingNewline": 959,
+      "sha256": "78951d35e8a92c190d05e5cbb931125704893a287499bcb445a1fb0ab29a54e2"
+    },
+    "wrong-session-request.json": {
+      "bytesIncludingNewline": 201,
+      "sha256": "d733bb3c221a02276bb207b2d614ecdcaca4fb2010dc6b5e49f249b1d3aadb99"
+    },
+    "wrong-source-response.json": {
+      "bytesIncludingNewline": 1521,
+      "sha256": "50ef84aefb6d18c277b43a10b2feb154db46ecd5cc29394798a69184e743900c"
+    },
+    "wrong-page-response.json": {
+      "bytesIncludingNewline": 1521,
+      "sha256": "dad48dcba593c1ccd8a0ff736b0c54c5c7e334cec189d12d6f0c62a33df527b7"
+    }
+  }
+}

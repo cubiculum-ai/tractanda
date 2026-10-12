@@ -49,7 +49,7 @@ final class DocumentJobCoordinatorTests: XCTestCase {
             }
         }
     }
-    private func fixture(delay: Double = 0, pages: Int = 129) throws -> Fixture {
+    private func fixture(delay: Double = 0, pages: Int = 129, heldPage: Int? = nil) throws -> Fixture {
         try capacity(FileManager.default.temporaryDirectory)
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
             "job-coordinator-" + Identifier.make())
@@ -76,7 +76,7 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         let executable = root.appendingPathComponent("worker.py")
         let script = """
             #!/usr/bin/python3
-            import sys,json,time
+            import sys,json,time,pathlib
             binding=json.load(open(sys.argv[5]))
             def emit(value):
                 result=dict(binding);result.update(value)
@@ -94,6 +94,12 @@ final class DocumentJobCoordinatorTests: XCTestCase {
                 if not loaded:
                     emit(dict(base,type='progress',phase='modelReady',completed=0,total=0));loaded=True
                 emit(dict(base,type='progress',phase='render',completed=0,total=0))
+                if request['pageNumber']==\(heldPage ?? -1):
+                    pathlib.Path(\(String(reflecting: root.appendingPathComponent("held-page").path))).write_text(str(request['pageNumber']))
+                    deadline=time.monotonic()+8
+                    while not pathlib.Path(\(String(reflecting: root.appendingPathComponent("release-page").path))).exists():
+                        if time.monotonic()>deadline: raise RuntimeError('bounded held-page deadline')
+                        time.sleep(0.01)
                 time.sleep(\(delay))
                 emit(dict(base,type='page',status='unsupported',failureCode='unsupportedDocumentInput'))
             """
@@ -265,6 +271,38 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         await coordinator.close()
         try capacity(fixture.root)
     }
+    func testQueuedJobKeepsReadsAndExactAdmissionReplayAvailable() async throws {
+        let fixture = try fixture(pages: 3)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let coordinator = try await ServiceCoordinator(
+            opening: fixture.store, documentConverter: fixture.configuration)
+        let gate = AdmissionGate()
+        await coordinator.setDocumentJobAdmissionHookForTesting { await gate.pause() }
+        let client = client(coordinator)
+        let admitted = try await client.startDocumentJob(fixture.request)
+        try await waitForGate(gate)
+        let info = try JSONSerialization.data(withJSONObject: [
+            "using": [ItemService.capability], "methodCalls": [["TractandaStore/info", [:], "read"]],
+        ])
+        let response = try await coordinator.handle(info, forUID: getuid())
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: response) as? [String: Any])
+        XCTAssertNil(root["code"])
+        XCTAssertNotNil(root["methodResponses"])
+        let replay = try await client.startDocumentJob(fixture.request)
+        XCTAssertEqual(replay.jobID, admitted.jobID)
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: fixture.root.appendingPathComponent("worker-pid").path))
+        await coordinator.setDocumentJobAdmissionHookForTesting(nil)
+        await gate.release()
+        let completed = try await wait(client, id: admitted.jobID, root: fixture.root) {
+            $0.state == "completed"
+        }
+        XCTAssertEqual(completed.acceptedPages, 3)
+        let calls = try String(contentsOf: fixture.root.appendingPathComponent("page-calls"), encoding: .utf8)
+        XCTAssertEqual(calls.split(separator: "\n"), ["1", "2", "3"])
+        await coordinator.close()
+    }
+
     func testRetainedJobsAccessibleWithoutConfiguredConverter() async throws {
         let fixture = try fixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -359,16 +397,51 @@ final class DocumentJobCoordinatorTests: XCTestCase {
     func testRebuildFencesAndJoinsProducerBeforeIndexMaintenance() async throws {
         struct Start: Encodable, Sendable { let operationID: String }
         struct Job: Encodable, Sendable { let jobID: String }
-        let fixture = try fixture(delay: 0.002)
+        let fixture = try fixture(pages: 3, heldPage: 2)
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let coordinator = try await ServiceCoordinator(
             opening: fixture.store, documentConverter: fixture.configuration)
         let client = client(coordinator)
         let admitted = try await client.startDocumentJob(fixture.request)
-        _ = try await wait(client, id: admitted.jobID, root: fixture.root) { $0.acceptedPages >= 2 }
-        var rebuild = try await client.call(
-            "TractandaStore/rebuild", arguments: Start(operationID: "rebuild"),
-            returning: StoreRebuildStatus.self)
+        let active = try await wait(client, id: admitted.jobID, root: fixture.root) {
+            $0.acceptedPages == 1 && $0.state == "running"
+        }
+        XCTAssertNil(active.committed)
+        let held = fixture.root.appendingPathComponent("held-page")
+        for _ in 0..<300 {
+            if FileManager.default.fileExists(atPath: held.path) { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(try String(contentsOf: held, encoding: .utf8), "2")
+        let pidText = try String(
+            contentsOf: fixture.root.appendingPathComponent("worker-pid"), encoding: .utf8)
+        let pid = try XCTUnwrap(Int32(pidText))
+        XCTAssertEqual(kill(pid, 0), 0, "The held-page producer must be alive before rebuild admission")
+        let gate = AdmissionGate()
+        await coordinator.setRebuildAdmissionHookForTesting { await gate.pause() }
+        let started = Task {
+            try await client.call(
+                "TractandaStore/rebuild", arguments: Start(operationID: "rebuild"),
+                returning: StoreRebuildStatus.self)
+        }
+        try await waitForGate(gate)
+        // Hold the exact admission-to-perform window until the original producer has joined.
+        await coordinator.waitForDocumentProducerForTesting()
+        var childStatus: Int32 = 0
+        XCTAssertEqual(waitpid(pid, &childStatus, WNOHANG), -1)
+        XCTAssertEqual(errno, ECHILD)
+        let record = fixture.store.appendingPathComponent("document-jobs/\(admitted.jobID)/record.json")
+        let bytes = try Data(contentsOf: record)
+        let persisted = try JSONDecoder().decode(DocumentJobRecord.self, from: bytes)
+        XCTAssertEqual(persisted.checkpoint.acceptedPages, 1)
+        XCTAssertNotEqual(persisted.checkpoint.state, "completed")
+        XCTAssertFalse(
+            String(decoding: bytes, as: UTF8.self).contains("serviceBusy"),
+            "Admission fencing must retain the lifecycle-resumable checkpoint")
+        try Data().write(to: fixture.root.appendingPathComponent("release-page"))
+        await coordinator.setRebuildAdmissionHookForTesting(nil)
+        await gate.release()
+        var rebuild = try await started.value
         for _ in 0..<600 {
             try capacity(fixture.root)
             if rebuild.isTerminal { break }
@@ -382,8 +455,11 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         let resumed = try await wait(client, id: admitted.jobID, root: fixture.root) {
             $0.state == "completed"
         }
-        XCTAssertEqual(resumed.acceptedPages, 129)
+        XCTAssertEqual(resumed.acceptedPages, 3)
         await coordinator.close()
+        let reopened = try ItemStore(root: fixture.store)
+        XCTAssertEqual(try reopened.documentJobStatus(admitted.jobID).state, "completed")
+        XCTAssertEqual(try reopened.documentJobStatus(admitted.jobID).acceptedPages, 3)
     }
 
     private actor AdmissionGate {
@@ -454,6 +530,12 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         let alice: UInt32 = 61313
         private let lock = NSLock()
         private var deleted = false
+        private var admitted = true
+        func revokeGroup() {
+            lock.lock()
+            admitted = false
+            lock.unlock()
+        }
         func removeAlice() {
             lock.lock()
             deleted = true
@@ -462,13 +544,14 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         func user(forUID uid: UInt32) throws -> AccountIdentity {
             lock.lock()
             let removed = deleted
+            let groups: Set<UInt32> = uid != alice || admitted ? [71313] : []
             lock.unlock()
             guard uid == getuid() || (uid == alice && !removed) else {
                 throw TractandaError("unresolvedPrincipal", "Fixture account disappeared.")
             }
             return AccountIdentity(
                 uid: uid, name: uid == alice ? "alice" : "admin",
-                primaryGroupName: "staff", groupIDs: [71313])
+                primaryGroupName: "staff", groupIDs: groups)
         }
         func user(named name: String) throws -> AccountIdentity {
             guard name == "alice" || name == "admin" else {
@@ -483,6 +566,57 @@ final class DocumentJobCoordinatorTests: XCTestCase {
             return 71313
         }
     }
+    func testFreshGroupRevocationPreventsOffQueueJobPublication() async throws {
+        let fixture = try fixture(pages: 1)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let accounts = Accounts()
+        let request: DocumentJobStart = try {
+            let store = try ItemStore(root: fixture.store, accounts: accounts)
+            _ = try store.configureAccess(
+                .object(["profile": .text(AccessConfiguration.profile), "groups": .list([.text("staff")])]),
+                operationID: "access")
+            let shared = try store.commit(
+                CommitRequest(
+                    action: .revise, itemID: fixture.request.itemID,
+                    expectedRevisionID: fixture.request.expectedRevisionID,
+                    changes: [
+                        "permissions": .object([
+                            "profile": .text(ItemPermissions.profile), "owner": .text("admin"),
+                            "group": .text("staff"), "mode": .integer(0o660), "acl": .object([:]),
+                        ])
+                    ], operationID: "share")
+            ).revision
+            return DocumentJobStart(
+                itemID: shared.itemID, expectedRevisionID: shared.revisionID,
+                attachmentID: fixture.request.attachmentID, operationID: "fresh-group")
+        }()
+        let coordinator = try await ServiceCoordinator(
+            opening: fixture.store, documentConverter: fixture.configuration,
+            makeAccountDirectory: { accounts })
+        let gate = AdmissionGate()
+        await coordinator.setDocumentJobPublicationHookForTesting { await gate.pause() }
+        let alice = client(coordinator, uid: accounts.alice)
+        let admin = client(coordinator)
+        let admitted = try await alice.startDocumentJob(request)
+        try await waitForGate(gate)
+        accounts.revokeGroup()
+        await coordinator.setDocumentJobPublicationHookForTesting(nil)
+        await gate.release()
+        let paused = try await wait(admin, id: admitted.jobID, root: fixture.root) { $0.state == "paused" }
+        XCTAssertEqual(paused.reasonCode, "forbidden")
+        XCTAssertNil(paused.committed)
+        do {
+            _ = try await alice.documentJob(admitted.jobID)
+            XCTFail("Revoked account must not read retained job status")
+        } catch {
+            XCTAssertEqual((error as? TractandaClient.TractandaError)?.code, "forbidden")
+        }
+        await coordinator.close()
+        let store = try ItemStore(root: fixture.store, accounts: accounts)
+        XCTAssertNil(try store.get(request.itemID).fields["attachmentDocument"])
+        XCTAssertEqual(try store.get(request.itemID).revisionID, request.expectedRevisionID)
+    }
+
     func testQueuedDiscardAndRunningFailureFinishAfterOriginalAccountRemoval() async throws {
         let fixture = try fixture(delay: 0.05)
         defer { try? FileManager.default.removeItem(at: fixture.root) }

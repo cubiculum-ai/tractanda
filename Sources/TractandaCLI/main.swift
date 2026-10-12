@@ -55,7 +55,6 @@ let usage = """
       tractanda attachments SOCKET ITEM_ID [REVISION_ID]
       tractanda export-attachment SOCKET ITEM_ID ATTACHMENT_ID DESTINATION [REVISION_ID]
       tractanda extract-attachment SOCKET ITEM_ID BASE_REVISION OPERATION_ID ATTACHMENT_ID
-      tractanda extract-document SOCKET ITEM_ID BASE_REVISION ATTACHMENT_ID OPERATION_ID
       tractanda attachment-document SOCKET ITEM_ID ATTACHMENT_ID [--revision REVISION_ID] [--page N] [--max-bytes N]
       tractanda detach SOCKET ITEM_ID BASE_REVISION OPERATION_ID ATTACHMENT_ID
       tractanda export-item SOCKET ITEM_ID DESTINATION_DIRECTORY
@@ -247,15 +246,6 @@ func run() throws {
                 ItemClient(connection: connection).extractAttachmentText(
                     itemID: args[2],
                     expectedRevisionID: args[3], attachmentID: args[5], operationID: args[4])))
-    case "extract-document":
-        guard args.count == 6 else { throw TractandaError("usage", usage) }
-        output(
-            try call(
-                connection, "TractandaAttachment/extractDocument",
-                [
-                    "itemID": args[2], "expectedRevisionID": args[3],
-                    "attachmentID": args[4], "operationID": args[5],
-                ]))
     case "attachment-document":
         try require(4)
         var revisionID: String?

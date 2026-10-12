@@ -200,16 +200,6 @@ public struct ItemClient: Sendable {
                 expectedRevisionID: expectedRevisionID, attachmentID: attachmentID, operationID: operationID),
             returning: AttachmentCommitResult.self)
     }
-    public func extractAttachmentDocument(
-        itemID: String, expectedRevisionID: String, attachmentID: String, operationID: String
-    ) async throws -> AttachmentCommitResult {
-        try await call(
-            "TractandaAttachment/extractDocument",
-            arguments: AttachmentDocumentExtractRequest(
-                itemID: itemID, expectedRevisionID: expectedRevisionID,
-                attachmentID: attachmentID, operationID: operationID),
-            returning: AttachmentCommitResult.self)
-    }
     public func attachmentDocument(
         itemID: String, attachmentID: String, revisionID: String? = nil,
         pageNumber: Int? = nil, maxBytes: Int = 1_048_576
@@ -398,12 +388,6 @@ private struct AttachmentContentRequest: Encodable, Sendable {
     let limit: Int
 }
 private struct AttachmentDetachRequest: Encodable, Sendable {
-    let itemID: String
-    let expectedRevisionID: String
-    let attachmentID: String
-    let operationID: String
-}
-private struct AttachmentDocumentExtractRequest: Encodable, Sendable {
     let itemID: String
     let expectedRevisionID: String
     let attachmentID: String

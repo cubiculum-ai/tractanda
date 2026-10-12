@@ -1,6 +1,6 @@
 # Resumable attachment and document-job CLI
 
-This interface is unreleased source. Source integration and focused fake-transport checks are independent of native model readiness and installed application deployment.
+Use the current CLI help and connected native feature declarations to confirm availability. Attachment transfer and durable document-job commands use the shared daemon; model readiness is checked separately when a job starts or resumes.
 
 Large originals use a retained regular file descriptor, a bounded SHA-256 pass and chunks of at most 256 KiB. File size and offset use Int64; no original is loaded into one Data value. FIFO, directory and final-component symlink sources are rejected without waiting for a writer. The initial hash reads only the initial stat length plus one EOF sentinel; growth and per-chunk stat changes produce an explicit fileChanged error. Reopening after interruption verifies content size and SHA-256. Device/inode/stat metadata is ephemeral handle verification, never persisted cross-reboot identity.
 

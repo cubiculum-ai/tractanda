@@ -653,7 +653,7 @@ class Pipeline:
                                       if f['path'] == document['converterPath'])
             if (observed.get('state') != 'configured' or observed.get('identity') != document['identity']
                     or observed.get('executableSHA256') != expected_converter
-                    or observed.get('requiresPreparedInput') is not True
+                    or observed.get('requiresPreparedInput') is not False
                     or info.get('documentJobs', {}).get('protocol') != document['workerProtocol']):
                 raise RuntimeError('Running document configuration differs from the signed payload.')
         return {'documentExtraction': info.get('documentExtraction'), 'server': info['server'], 'features': info.get('features'),

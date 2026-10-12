@@ -56,7 +56,6 @@ int tractanda_listen_mode(const char *path, uint32_t mode);
 // Removes only this user's dead Unix socket; refuses live sockets and other file types/owners.
 int tractanda_remove_stale_socket(const char *path);
 int tractanda_connect(const char *path);
-int tractanda_socket_receive_timeout(int fd, uint32_t milliseconds);
 int tractanda_accept(int listener);
 int tractanda_start_signals(void);
 int tractanda_stopping(void);

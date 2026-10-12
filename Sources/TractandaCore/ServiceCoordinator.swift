@@ -61,9 +61,8 @@ public actor ServiceCoordinator {
     private var documentJobPublicationHookForTesting: (@Sendable () async -> Void)?
     private var documentJobAdmissionHookForTesting: (@Sendable () async -> Void)?
     private var documentJobIndexHookForTesting: (@Sendable (IndexCorpusWriteBatch) throws -> Void)?
+    private var rebuildAdmissionHookForTesting: (@Sendable () async -> Void)?
     private var documentJobStartupRecovery: Task<Void, Never>?
-    private var documentConversionInFlight = false
-    private var documentCancellation: DocumentConversionCancellation?
     private var preparedReadHookForTesting: (@Sendable () async -> Void)?
     private var pooledReadLeaseHookForTesting: (@Sendable () -> Void)?
     private var pooledReadBeforeFinishHookForTesting: (@Sendable () async -> Void)?
@@ -741,6 +740,14 @@ public actor ServiceCoordinator {
         try? await submit { try $0.store.pauseDocumentJobs(reasonCode: reasonCode) }
     }
 
+    func waitForDocumentProducerForTesting() async {
+        await documentJobTask?.value
+    }
+
+    func setRebuildAdmissionHookForTesting(_ hook: (@Sendable () async -> Void)?) {
+        rebuildAdmissionHookForTesting = hook
+    }
+
     func setRebuildHookForTesting(
         _ hook: (@Sendable () async throws -> Void)?, noProgressSeconds: Double = 120
     ) {
@@ -805,8 +812,13 @@ public actor ServiceCoordinator {
                     publicationAuthority: { try policy.authorize(uid: uid, accounts: accountFactory()) })
                 rebuildControl = control
                 rebuildPolicy = policy
+                // Pause producer failure publication atomically with the generation fence.
+                // Otherwise a producer can persist serviceBusy before the async drain starts.
                 exclusiveRebuildPending = true
+                documentJobDraining = true
+                documentJobCancellation?.cancel()
                 canonicalWorkGeneration += 1
+                await rebuildAdmissionHookForTesting?()
                 let hook = rebuildHookForTesting
                 rebuildTask = Task { [self] in await performRebuild(control, uid: uid, hook: hook) }
                 return try rebuildResponse(call: call, status: status)
@@ -861,7 +873,6 @@ public actor ServiceCoordinator {
         var failure: Error?
         do {
             // Fence finalization first, then join every accepted producer before marking a checkpoint.
-            documentCancellation?.cancel()
             await drainDocumentJobs(reasonCode: "storeMaintenance")
             try await drainSemanticDocumentWork()
             let copies = attachmentCopyTasks.values.map(\.task)
@@ -1189,7 +1200,6 @@ public actor ServiceCoordinator {
     /// requests cooperative stops; close() retains writer ownership through all accepted drains.
     public func requestBackgroundStop() {
         try? rebuildControl?.cancel()
-        documentCancellation?.cancel()
         documentJobCancellation?.cancel()
         for work in extractedUnitTasks.values { work.task.cancel() }
         for work in attachmentCopyTasks.values { work.task.cancel() }
@@ -1213,7 +1223,6 @@ public actor ServiceCoordinator {
         // Fenced pending lease metadata remains charged/durable for exclusive startup reclamation.
         try? rebuildControl?.cancel()
         await rebuildTask?.value
-        documentCancellation?.cancel()
         let copyTasks = attachmentCopyTasks.values.map(\.task)
         for task in copyTasks { task.cancel() }
         for task in copyTasks { await task.value }

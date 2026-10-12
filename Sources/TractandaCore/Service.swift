@@ -14,13 +14,6 @@ struct PreparedNativeRead: Sendable {
     let callID: String
 }
 
-struct PreparedDocumentNativeCall: Sendable {
-    let callID: String
-    let admission: DocumentExtractionAdmission
-    let configuration: DocumentConverterConfiguration?
-    let executableSHA256: String?
-}
-
 struct PreparedPooledQuery: Sendable {
     let callID: String
     let argumentsJSON: Data
@@ -723,79 +716,6 @@ public final class ItemService {
                         ]
                     ], "sessionState": store.state,
                 ], options: [.sortedKeys])
-        }
-    }
-
-    static func documentExtractionCallID(_ data: Data) -> String? {
-        guard data.count <= 8 * 1024 * 1024,
-            let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let calls = request["methodCalls"] as? [[Any]], calls.count == 1,
-            let call = calls.first, call.count == 3,
-            call[0] as? String == "TractandaAttachment/extractDocument", let id = call[2] as? String
-        else { return nil }
-        return id
-    }
-
-    func prepareDocumentNativeCall(_ data: Data, peerUID: UInt32, busy: Bool) throws
-        -> PreparedDocumentNativeCall
-    {
-        try store.withAccess(forUID: peerUID) {
-            guard store.isCanonicalTrusted else {
-                throw TractandaError("recoveryRequired", "Rebuild the disposable index before extracting.")
-            }
-            guard let id = Self.documentExtractionCallID(data),
-                let request = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                let using = request["using"] as? [String], using.contains(Self.capability),
-                Set(using).isSubset(of: [Self.capability, "urn:ietf:params:jmap:core"]),
-                let calls = request["methodCalls"] as? [[Any]], let args = calls[0][1] as? [String: Any]
-            else {
-                throw TractandaError("invalidArguments", "Use one valid document extraction method call.")
-            }
-            try check(request, allowed: ["using", "methodCalls"])
-            try check(args, allowed: ["itemID", "expectedRevisionID", "attachmentID", "operationID"])
-            let admission = try store.prepareAttachmentDocument(
-                itemID: string(args, "itemID"), expectedRevisionID: string(args, "expectedRevisionID"),
-                attachmentID: string(args, "attachmentID"), operationID: string(args, "operationID"),
-                identity: .init(),
-                unavailableCode: busy
-                    ? "serviceBusy" : (documentConverter == nil ? "documentConverterUnavailable" : nil))
-            return PreparedDocumentNativeCall(
-                callID: id, admission: admission, configuration: documentConverter,
-                executableSHA256: documentExecutableSHA256)
-        }
-    }
-
-    func documentNativeResponse(
-        callID: String, receipt: AttachmentCommitResult, peerUID: UInt32
-    ) throws -> Data {
-        try store.withAccess(forUID: peerUID) {
-            // Re-resolve current admission and item readability even for a completed replay.
-            _ = try store.get(receipt.itemID)
-            return try JSONSerialization.data(
-                withJSONObject: [
-                    "methodResponses": [
-                        ["TractandaAttachment/extractDocument", try object(receipt), callID]
-                    ],
-                    "sessionState": store.state,
-                ], options: [.sortedKeys])
-        }
-    }
-
-    func finishDocumentNativeCall(
-        _ prepared: PreparedDocumentNativeCall, pages: [AttachmentDocumentPage],
-        cancellation: DocumentConversionCancellation, peerUID: UInt32
-    ) throws -> Data {
-        try store.withAccess(forUID: peerUID) {
-            guard store.isCanonicalTrusted else {
-                throw TractandaError(
-                    "recoveryRequired", "Rebuild the disposable index before saving extraction.")
-            }
-            guard case .prepared(let snapshot) = prepared.admission else {
-                throw TractandaError("invalidDocumentOutput", "Document admission changed.")
-            }
-            let receipt = try store.finishAttachmentDocument(
-                snapshot, pages: pages, cancellation: cancellation)
-            return try documentNativeResponse(callID: prepared.callID, receipt: receipt, peerUID: peerUID)
         }
     }
 
@@ -1713,10 +1633,6 @@ public final class ItemService {
             throw TractandaError(
                 "documentJobsRequireCoordinator",
                 "Use one document job call through the shared asynchronous service.")
-        case "TractandaAttachment/extractDocument":
-            throw TractandaError(
-                "documentConverterUnavailable",
-                "Use TractandaDocumentJob/start through the shared asynchronous service.")
         case "TractandaAttachment/document":
             try check(args, allowed: ["itemID", "revisionID", "attachmentID", "pageNumber", "maxBytes"])
             let maximum = try integer(args, "maxBytes", default: 1_048_576, range: 4096...4_194_304)
@@ -1950,7 +1866,7 @@ public final class ItemService {
                     "state": documentConverter == nil ? "unavailable" : "configured",
                     "identity": documentConverter == nil ? NSNull() : try object(DocumentConverterIdentity()),
                     "executableSHA256": documentExecutableSHA256 as Any? ?? NSNull(),
-                    "requiresPreparedInput": documentConverter?.preparationDirectory != nil,
+                    "requiresPreparedInput": false,
                     "mediaTypes": ["image/png", "image/jpeg", "application/pdf"],
                     "inputBytes": "checked Int64 originals through resumable uploads",
                     "pageCounts": "checked Int64 durable jobs; no whole-document page ceiling",
@@ -2623,9 +2539,6 @@ public enum LocalTransport {
             "Cannot connect to \(socket): \(String(cString: strerror(errorCode))) (errno \(errorCode)).",
             osError: errorCode)
     }
-    static func responseTimeoutMilliseconds(for request: Data) -> UInt32 {
-        ItemService.documentExtractionCallID(request) == nil ? 15_000 : 390_000
-    }
     public static func call(socket: String, request: Data, serverUser: String? = nil) throws -> Data {
         guard !request.isEmpty, request.count <= 8 * 1024 * 1024 else {
             throw TractandaError("limit", "Request must contain 1 byte to 8 MiB.")
@@ -2650,12 +2563,6 @@ public enum LocalTransport {
         guard request.withUnsafeBytes({ tractanda_send_frame(fd, $0.baseAddress, UInt32($0.count)) }) == 0
         else {
             throw TractandaError("transportError", "Send failed; retry mutations with the same operationID.")
-        }
-        // Only a single document extraction gets the server360s+cleanup response
-        // wait. Connect and send retain their ordinary15-second defaults.
-        let timeout = responseTimeoutMilliseconds(for: request)
-        if timeout != 15_000, tractanda_socket_receive_timeout(fd, timeout) != 0 {
-            throw TractandaError("transportError", "Cannot configure document response wait.")
         }
         return try receive(fd)
     }

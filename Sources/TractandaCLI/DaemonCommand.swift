@@ -22,7 +22,6 @@ func daemonCommand(_ arguments: [String]) async throws {
     var documentExecutable: String?
     var documentModel: String?
     var documentScratch: String?
-    var documentPreparation: String?
     var rebuildNoProgressSeconds: Double?
     var uploadIdleSeconds: Double?
     var uploadStagedBytes: Int64?
@@ -43,7 +42,7 @@ func daemonCommand(_ arguments: [String]) async throws {
             index += 1
         case "--http-port", "--view", "--project-root", "--status-root", "--project", "--index-directory",
             "--document-converter", "--document-model-directory", "--document-scratch-directory",
-            "--document-preparation-directory", "--attachment-upload-idle-seconds",
+            "--attachment-upload-idle-seconds",
             "--attachment-staged-byte-quota", "--attachment-minimum-free-bytes",
             "--rebuild-no-progress-seconds":
             guard index + 1 < arguments.count, !arguments[index + 1].hasPrefix("--") else {
@@ -99,9 +98,6 @@ func daemonCommand(_ arguments: [String]) async throws {
                     throw TractandaError("usage", usage)
                 }
                 uploadStagedBytes = bytes
-            case "--document-preparation-directory":
-                guard documentPreparation == nil else { throw TractandaError("usage", usage) }
-                documentPreparation = value
             default:
                 guard project == nil else { throw TractandaError("usage", usage) }
                 project = value
@@ -111,13 +107,11 @@ func daemonCommand(_ arguments: [String]) async throws {
         }
     }
     let documentValues = [documentExecutable, documentModel, documentScratch].compactMap { $0 }
-    guard documentValues.isEmpty || documentValues.count == 3,
-        documentPreparation == nil || documentValues.count == 3
+    guard documentValues.isEmpty || documentValues.count == 3
     else { throw TractandaError("usage", usage) }
     let converter = documentExecutable.map {
         DocumentConverterConfiguration(
-            executablePath: $0, modelDirectory: documentModel!, scratchDirectory: documentScratch!,
-            preparationDirectory: documentPreparation)
+            executablePath: $0, modelDirectory: documentModel!, scratchDirectory: documentScratch!)
     }
     let configuration = DaemonConfiguration(
         storePath: store, indexDirectory: indexDirectory, socketPath: socket, httpPort: port,

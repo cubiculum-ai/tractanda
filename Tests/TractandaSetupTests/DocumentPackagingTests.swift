@@ -130,7 +130,6 @@ final class DocumentPackagingTests: XCTestCase {
                         .path
                 ),
                 ("--document-scratch-directory", receipt.documentScratchDirectory!),
-                ("--document-preparation-directory", receipt.documentPreparationDirectory!),
             ] {
                 let index = try XCTUnwrap(arguments.firstIndex(of: flag))
                 XCTAssertEqual(arguments[index + 1], path)
@@ -138,9 +137,10 @@ final class DocumentPackagingTests: XCTestCase {
             var invalid = receipt
             invalid.documentScratchDirectory = receipt.store
             XCTAssertThrowsError(try engine.serviceDefinition(invalid))
-            invalid = receipt
-            invalid.documentPreparationDirectory = receipt.release
-            XCTAssertThrowsError(try engine.serviceDefinition(invalid))
+            XCTAssertFalse(arguments.contains("--document-preparation-directory"))
+            var retained = receipt
+            retained.documentPreparationDirectory = receipt.release
+            XCTAssertNoThrow(try engine.serviceDefinition(retained))
         }
     }
 
@@ -152,7 +152,7 @@ final class DocumentPackagingTests: XCTestCase {
                 .joined()
             let extraction: [String: Any] = [
                 "state": "configured", "identity": identity,
-                "executableSHA256": hash, "requiresPreparedInput": true,
+                "executableSHA256": hash, "requiresPreparedInput": false,
             ]
             let info: [String: Any] = [
                 "documentExtraction": extraction,
@@ -161,7 +161,7 @@ final class DocumentPackagingTests: XCTestCase {
             XCTAssertNoThrow(try engine.verifyDocumentReadiness(receipt, info: info))
             for (key, value) in [
                 ("state", "unavailable" as Any), ("executableSHA256", "wrong" as Any),
-                ("requiresPreparedInput", false as Any),
+                ("requiresPreparedInput", true as Any),
             ] {
                 var bad = extraction
                 bad[key] = value
@@ -262,8 +262,16 @@ final class DocumentPackagingTests: XCTestCase {
             first.documentScratchDirectory = nil
             first.documentPreparationDirectory = nil
             try engine.prepareDocumentState(&first, uid: getuid())
-            let paths = try engine.documentStatePaths(first)
-            for path in [paths.scratch, paths.preparation] {
+            let scratch = try engine.documentStatePaths(first)
+            XCTAssertNil(first.documentPreparationDirectory)
+            let legacyPreparation = engine.roots.configuration.appendingPathComponent(
+                "document-state/preview/prepared")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: legacyPreparation.path))
+            try FileManager.default.createDirectory(
+                at: legacyPreparation, withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700])
+            first.documentPreparationDirectory = legacyPreparation.path
+            for path in [scratch] {
                 let attributes = try FileManager.default.attributesOfItem(atPath: path)
                 XCTAssertEqual(attributes[.type] as? FileAttributeType, .typeDirectory)
                 XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o700)
@@ -272,7 +280,7 @@ final class DocumentPackagingTests: XCTestCase {
                     XCTAssertFalse(reserved.hasPrefix(path + "/"))
                 }
             }
-            let marker = URL(fileURLWithPath: paths.preparation).appendingPathComponent("retained-job")
+            let marker = legacyPreparation.appendingPathComponent("retained-job")
             try Data("prepared job".utf8).write(to: marker)
             try engine.prepareDocumentState(&first, uid: getuid())
             XCTAssertEqual(try Data(contentsOf: marker), Data("prepared job".utf8))
@@ -283,7 +291,8 @@ final class DocumentPackagingTests: XCTestCase {
             second.documentExtraction = .pinned
             try engine.prepareDocumentState(&second, uid: getuid())
             XCTAssertNotEqual(first.documentScratchDirectory, second.documentScratchDirectory)
-            XCTAssertNotEqual(first.documentPreparationDirectory, second.documentPreparationDirectory)
+            XCTAssertNil(second.documentPreparationDirectory)
+            XCTAssertEqual(first.documentPreparationDirectory, legacyPreparation.path)
             let unsafe = URL(fileURLWithPath: second.documentScratchDirectory!)
             try FileManager.default.removeItem(at: unsafe)
             try Data("unexpected file".utf8).write(to: unsafe)
@@ -311,8 +320,12 @@ final class DocumentPackagingTests: XCTestCase {
                 candidate.releases[candidate.release] = candidate.manifestSHA256
                 candidate.documentExtraction = .pinned
                 try installer.prepareDocumentState(&candidate, uid: getuid())
-                let prepared = URL(fileURLWithPath: candidate.documentPreparationDirectory!)
-                    .appendingPathComponent("prepared-job")
+                let legacyPreparation = installer.roots.configuration.appendingPathComponent(
+                    "document-state/preview/prepared")
+                try FileManager.default.createDirectory(
+                    at: legacyPreparation, withIntermediateDirectories: true,
+                    attributes: [.posixPermissions: 0o700])
+                let prepared = legacyPreparation.appendingPathComponent("prepared-job")
                 let job = URL(fileURLWithPath: candidate.documentScratchDirectory!).appendingPathComponent(
                     "job-state")
                 try Data("prepared retained".utf8).write(to: prepared)
@@ -349,8 +362,12 @@ final class DocumentPackagingTests: XCTestCase {
             try installer.prepareDocumentState(&receipt, uid: getuid())
             try installer.replaceRegistration(&receipt)
             let canonical = URL(fileURLWithPath: receipt.store).appendingPathComponent("canonical-marker")
-            let prepared = URL(fileURLWithPath: receipt.documentPreparationDirectory!).appendingPathComponent(
-                "prepared-job")
+            let legacyPreparation = installer.roots.configuration.appendingPathComponent(
+                "document-state/preview/prepared")
+            try FileManager.default.createDirectory(
+                at: legacyPreparation, withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700])
+            let prepared = legacyPreparation.appendingPathComponent("prepared-job")
             let job = URL(fileURLWithPath: receipt.documentScratchDirectory!).appendingPathComponent(
                 "job-state")
             let index = URL(fileURLWithPath: receipt.indexDirectory).appendingPathComponent(

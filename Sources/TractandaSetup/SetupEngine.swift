@@ -284,11 +284,8 @@ public final class SetupEngine {
                 .appendingPathComponent(receipt.instance)
             try ensureRootDirectory(documents)
             let scratch = documents.appendingPathComponent("scratch")
-            let preparation = documents.appendingPathComponent("prepared")
             try ensureServiceDirectory(scratch, uid: uid, mode: 0o700)
-            try ensureServiceDirectory(preparation, uid: uid, mode: 0o700)
             receipt.documentScratchDirectory = scratch.path
-            receipt.documentPreparationDirectory = preparation.path
         }
     }
 
@@ -516,13 +513,12 @@ public final class SetupEngine {
         ]
         if let document = receipt.documentExtraction {
             guard document == .pinned else { throw SetupError("Unsupported document receipt.") }
-            let paths = try documentStatePaths(receipt)
+            let scratch = try documentStatePaths(receipt)
             let release = URL(fileURLWithPath: receipt.release)
             arguments += [
                 "--document-converter", release.appendingPathComponent(document.converterPath).path,
                 "--document-model-directory", release.appendingPathComponent(document.modelDirectory).path,
-                "--document-scratch-directory", paths.scratch,
-                "--document-preparation-directory", paths.preparation,
+                "--document-scratch-directory", scratch,
             ]
         }
         if let project = receipt.board["projectID"], let projects = receipt.board["projectRootID"],
@@ -543,15 +539,13 @@ public final class SetupEngine {
         if let node = receipt.uuidNode { dictionary["EnvironmentVariables"] = ["TRACTANDA_UUID_NODE": node] }
         return try PropertyListSerialization.data(fromPropertyList: dictionary, format: .xml, options: 0)
     }
-    func documentStatePaths(_ receipt: InstallationReceipt) throws -> (scratch: String, preparation: String) {
+    func documentStatePaths(_ receipt: InstallationReceipt) throws -> String {
         let root = roots.configuration.appendingPathComponent("document-state").appendingPathComponent(
             receipt.instance)
         let scratch = root.appendingPathComponent("scratch").path
-        let preparation = root.appendingPathComponent("prepared").path
-        guard receipt.documentScratchDirectory == scratch,
-            receipt.documentPreparationDirectory == preparation
+        guard receipt.documentScratchDirectory == scratch
         else { throw SetupError("Document workspace differs from the owned instance paths.") }
-        return (scratch, preparation)
+        return scratch
     }
 
     /// Configuration readiness only; successful inference is a separate validation gate.
@@ -572,7 +566,7 @@ public final class SetupEngine {
         guard extraction?["state"] as? String == "configured", identity == document.identity,
             extraction?["executableSHA256"] as? String
                 == (try sha256(release.appendingPathComponent(document.converterPath))),
-            extraction?["requiresPreparedInput"] as? Bool == true,
+            extraction?["requiresPreparedInput"] as? Bool == false,
             (info["documentJobs"] as? [String: Any])?["protocol"] as? String == document.workerProtocol
         else { throw SetupError("Running document configuration differs from the owned release.") }
     }

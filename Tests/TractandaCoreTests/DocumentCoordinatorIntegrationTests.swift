@@ -158,85 +158,15 @@ final class DocumentCoordinatorIntegrationTests: XCTestCase {
         return response?[0] as? String == "error" ? (response?[1] as? [String: Any])?["type"] as? String : nil
     }
 
-    func testSlowChildDoesNotBlockReadsBusyGateAndExactReplay() async throws {
-        let fixture = try fixture(handshake: true)
-        defer { try? FileManager.default.removeItem(at: fixture.directory) }
-        let coordinator = try await ServiceCoordinator(
-            opening: fixture.storeRoot, documentConverter: fixture.configuration)
-        let data = try extraction(fixture)
-        let conversion = Task { try await coordinator.handle(data, forUID: getuid()) }
-        try await started(fixture)
-        let info = try await coordinator.handle(request("TractandaStore/info", [:]), forUID: getuid())
-        XCTAssertNil(try errorCode(info))
-        XCTAssertFalse(
-            FileManager.default.fileExists(atPath: fixture.model.appendingPathComponent("finished").path))
-        let busy = try await coordinator.handle(extraction(fixture, operation: "other"), forUID: getuid())
-        XCTAssertEqual(try errorCode(busy), "serviceBusy")
-        try Data().write(to: fixture.model.appendingPathComponent("release"))
-        let complete = try await conversion.value
-        XCTAssertNil(try errorCode(complete))
-        let replay = try await coordinator.handle(data, forUID: getuid())
-        XCTAssertNil(try errorCode(replay))
-        await coordinator.close()
-    }
-
-    func testFreshGroupAdmissionDeniesOffQueueCompletionWithoutStateLeak() async throws {
-        let accounts = Accounts()
-        let fixture = try fixture(accounts: accounts, handshake: true)
-        defer { try? FileManager.default.removeItem(at: fixture.directory) }
-        let coordinator = try await ServiceCoordinator(
-            opening: fixture.storeRoot, documentConverter: fixture.configuration,
-            makeAccountDirectory: { accounts })
-        let data = try extraction(fixture)
-        let conversion = Task { try await coordinator.handle(data, forUID: accounts.alice) }
-        try await started(fixture)
-        accounts.revoke()
-        try Data().write(to: fixture.model.appendingPathComponent("release"))
-        let denied = try await conversion.value
-        XCTAssertEqual(try errorCode(denied), "forbidden")
-        let body = try JSONSerialization.jsonObject(with: denied) as! [String: Any]
-        XCTAssertNil(body["sessionState"])
-        XCTAssertNil(body["methodResponses"])
-        let get = try await coordinator.handle(
-            request("TractandaItem/get", ["ids": [fixture.attached.itemID]]), forUID: getuid())
-        XCTAssertFalse(String(decoding: get, as: UTF8.self).contains("attachmentDocument"))
-        await coordinator.close()
-    }
-
-    func testCancellationAndDeadlineCommitNothingAndLeaveDurableFailure() async throws {
-        for timeout in [0.1, 5.0] {
-            let fixture = try fixture(timeout: timeout, delay: 2)
-            defer { try? FileManager.default.removeItem(at: fixture.directory) }
-            let coordinator = try await ServiceCoordinator(
-                opening: fixture.storeRoot, documentConverter: fixture.configuration)
-            let data = try extraction(fixture)
-            let conversion = Task { try await coordinator.handle(data, forUID: getuid()) }
-            // A deliberately short deadline may expire before Python finishes
-            // startup. Only cancellation needs the observable running-child marker.
-            if timeout > 1 {
-                try await started(fixture)
-                conversion.cancel()
-            }
-            let failed = try await conversion.value
-            XCTAssertEqual(try errorCode(failed), timeout > 1 ? "cancelled" : "documentTimeout")
-            let failures = URL(fileURLWithPath: fixture.configuration.scratchDirectory)
-                .appendingPathComponent("failures")
-            XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: failures.path).isEmpty)
-            let get = try await coordinator.handle(
-                request("TractandaItem/get", ["ids": [fixture.attached.itemID]]), forUID: getuid())
-            XCTAssertFalse(String(decoding: get, as: UTF8.self).contains("attachmentDocument"))
-            await coordinator.close()
-        }
-    }
-
-    func testHistoricalIdentityCannotBeReturnedByActiveConverter() async throws {
+    func testRetiredSynchronousRouteDoesNotStartConverterOrWriteContent() async throws {
         let fixture = try fixture(delay: 0)
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
-        try Data("legacy".utf8).write(to: fixture.model.appendingPathComponent("mode"))
         let coordinator = try await ServiceCoordinator(
             opening: fixture.storeRoot, documentConverter: fixture.configuration)
         let result = try await coordinator.handle(extraction(fixture), forUID: getuid())
-        XCTAssertEqual(try errorCode(result), "unsupportedDocumentConverter")
+        XCTAssertEqual(try errorCode(result), "unknownMethod")
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: fixture.model.appendingPathComponent("started").path))
         let get = try await coordinator.handle(
             request("TractandaItem/get", ["ids": [fixture.attached.itemID]]), forUID: getuid())
         XCTAssertFalse(String(decoding: get, as: UTF8.self).contains("attachmentDocument"))

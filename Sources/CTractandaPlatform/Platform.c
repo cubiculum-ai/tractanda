@@ -537,11 +537,6 @@ static void socket_options(int fd) {
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof(yes));
 #endif
 }
-int tractanda_socket_receive_timeout(int fd, uint32_t milliseconds) {
-    if (milliseconds < 1 || milliseconds > 390000) { errno = EINVAL; return -1; }
-    struct timeval timeout = { milliseconds / 1000, (milliseconds % 1000) * 1000 };
-    return setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-}
 static int socket_address(const char *path, struct sockaddr_un *address) {
     if (strlen(path) >= sizeof(address->sun_path)) { errno = ENAMETOOLONG; return -1; }
     memset(address, 0, sizeof(*address));

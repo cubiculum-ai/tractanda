@@ -4,13 +4,11 @@ import XCTest
 @testable import TractandaCore
 
 final class DocumentWorkerProtocolTests: XCTestCase {
-    private var fixtures: URL {
-        URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent().appendingPathComponent(
-                "work/large-document-pipeline-20261011/native-protocol")
-    }
     private func bytes(_ name: String) throws -> Data {
-        try Data(contentsOf: fixtures.appendingPathComponent(name))
+        let fixtures = try XCTUnwrap(
+            Bundle.module.url(
+                forResource: "NativeDocumentWorker", withExtension: nil, subdirectory: "Fixtures"))
+        return try Data(contentsOf: fixtures.appendingPathComponent(name))
     }
     func testFrozenPositiveAndNegativeWireFixturesMatchCoreIndependently() throws {
         let binding = try NativeWorkerProtocol.binding(bytes("binding.json"))
@@ -74,6 +72,18 @@ final class DocumentWorkerProtocolTests: XCTestCase {
             try NativeWorkerProtocol.validateResponse(
                 Data(booleanCount.utf8), binding: binding, outstanding: nil, pageCount: 128))
     }
+    func testKnownHistoricalIdentityCannotBindActiveNativeWorker() throws {
+        let original = try XCTUnwrap(String(data: bytes("binding.json"), encoding: .utf8))
+        let historical = original.replacingOccurrences(
+            of: "tractanda.docling-native.v2-idefics3-gelu-f32", with: "tractanda.docling-native.v1"
+        )
+        .replacingOccurrences(
+            of: "opaque-rgb-content-crop-hf4561-pillow123-grid-v2", with: "opaque-rgb2048-17tiles-v1")
+        let retained = try JSONDecoder().decode(NativeDocumentBinding.self, from: Data(historical.utf8))
+        XCTAssertNoThrow(try retained.identity.validate(), "Known history remains readable")
+        XCTAssertThrowsError(try NativeWorkerProtocol.binding(Data(historical.utf8)))
+    }
+
     func testOnlyRealCountersAndPhaseTransitionsAdvanceLiveness() throws {
         var progress = DocumentMeaningfulProgress()
         XCTAssertTrue(try progress.observe(phase: "modelVerify", completed: 0, total: 100))

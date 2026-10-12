@@ -111,7 +111,7 @@ notarization and verification pipeline as the other executables. Model Apache 2.
 runtime notices and Pillow licensing accompany the payload.
 
 The installer owns the daemon's converter/model paths inside the immutable release. Each
-instance receives private `document-state/NAME/scratch` and `document-state/NAME/prepared`
+instance receives a private `document-state/NAME/scratch`
 directories under the installation configuration root, owned by `daemon` with mode 0700.
 They are separate from canonical records, indexes and immutable software. These workspaces
 and durable job metadata survive uninstall; existing unused-release deletion rules still apply.

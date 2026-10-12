@@ -13,10 +13,7 @@ final class DoclingDocTagsParserTests: XCTestCase {
         """
 
     func testParsesRetainedSuccessfulSampleAndTable() throws {
-        let fixture = try String(
-            contentsOfFile:
-                "work/docling-integration-20261007/parser/retained-sample.doctags", encoding: .utf8)
-        XCTAssertEqual(fixture, retainedSample)
+        let fixture = retainedSample
         let page = try DoclingDocTagsParser.parse(fixture)
         XCTAssertEqual(page.rawDocTags.utf8.count, 320)
         XCTAssertEqual(page.blocks.count, 4)
