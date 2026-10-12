@@ -35,7 +35,10 @@ public actor SharedDaemon {
         let page = try Self.page(configuration: configuration, nonce: nonce, fallback: manual)
         let coordinator = try await ServiceCoordinator(
             opening: URL(fileURLWithPath: configuration.storePath),
-            indexDirectory: configuration.indexDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) })
+            indexDirectory: configuration.indexDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) },
+            documentConverter: configuration.documentConverter,
+            attachmentUploadPolicy: configuration.attachmentUploadPolicy ?? AttachmentUploadPolicy(),
+            rebuildNoProgressTimeoutSeconds: configuration.rebuildNoProgressTimeoutSeconds ?? 120)
         let sessions = SessionAuthority(coordinator: coordinator, authenticator: authenticator)
         let application = DaemonApplication(
             coordinator: coordinator, sessions: sessions, page: page, manual: manual, nonce: nonce)
@@ -106,6 +109,11 @@ public actor SharedDaemon {
         }
     }
 
+    func coordinatorForTesting() -> ServiceCoordinator { coordinator }
+    func setMaintenanceForTesting(_ task: Task<Void, Never>) {
+        maintenance?.cancel()
+        maintenance = task
+    }
     public func endpoints() -> DaemonEndpoints { endpointsValue }
 
     public func close() async {
@@ -119,6 +127,7 @@ public actor SharedDaemon {
         closing = true
         await readiness.deactivate()
         maintenance?.cancel()
+        await coordinator.requestBackgroundStop()
         _ = await maintenance?.result
         try? await http?.close()
         try? await unix.close()

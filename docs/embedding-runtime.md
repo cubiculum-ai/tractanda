@@ -21,12 +21,29 @@ model. The model's 32,768-token limit is distinct from the server's initial
 384-byte passages with 64-byte overlap. Longer passage tuning, adaptive MRL
 retention and representative retrieval-quality benchmarks remain separate work.
 
+The checkpoint stores BF16 weights; the pinned host converts model parameters to
+FP32 before inference. The parameter values alone would occupy roughly 1.2 GiB
+in FP32, but that is not the complete or peak MLX/Metal memory footprint. We have
+no controlled low-RAM tests or measured Metal allocation peak; see [system
+requirements](system-requirements.md) for provisional end-user memory and disk
+guidance and the limits of the available process RSS snapshot.
+
+The application chunks stored text into 384-byte passages with 64-byte overlap.
+The embedding endpoint permits at most 16 nonempty inputs, limits each input to
+32,768 tokens, and caps the aggregate batch at 32,768 tokens. The HTTP body is
+limited to 2 MiB and at most two embedding requests are admitted concurrently.
+The host evaluates the batch rows separately to avoid padding every row to the
+longest input. These ceilings are not a default document-size target.
+
 ## Build and check
 
 The source requires Swift 6.4. On macOS use Apple's full command-line developer
-toolchain with Metal support. Linux checks use the official Swift 6.4.0 Debian 12
-image, pinned to manifest digest `sha256:4f4120422396f62788ef459c75fe1a47f8746471c224fdc2a7dd8dd2e07f7efd`,
-with amd64 and arm64 variants.
+toolchain with Metal support. Current Linux source/CI checks use the official
+Swift 6.4.0 Debian 13 (Trixie) multiarch image, pinned to index digest
+`sha256:c90a484cbd45ff768e05bfdb2a73c4cc8978de0d940d8eb2cf68fcede6bad8f8`,
+with amd64 and arm64/v8 variants. The Debian 12 inference results below are
+historical runtime validation; the Trixie source validation did not build or run
+the selected MLX embedding host.
 On Debian-family Linux, install the CPU build and
 check prerequisites (in addition to Swift):
 

@@ -1,6 +1,12 @@
 import CTractandaPlatform
 import Foundation
 
+#if canImport(Darwin)
+    import Darwin
+#else
+    import Glibc
+#endif
+
 /// Ephemeral selection details; profile aliases are client configuration, not database identities.
 public struct ResolvedConnection: Sendable {
     public enum Source: String, Sendable {
@@ -39,23 +45,33 @@ public struct ServerConnection: Codable, Equatable, Sendable {
         if let managedService { try ConnectionPreferences.validateName(managedService) }
     }
 
+    static func isPermissionDenied(_ error: TractandaError) -> Bool {
+        error.osError == EACCES || error.osError == EPERM
+    }
+    func connectionDiagnostic(_ error: TractandaError) -> TractandaError {
+        let advice =
+            Self.isPermissionDenied(error)
+            ? "Check socket permissions and command sandbox restrictions."
+            : "Start its server or configure a connection with tractanda connections add."
+        return TractandaError(error.code, error.message + " " + advice, osError: error.osError)
+    }
+
     /// Start only after connect failed before any request bytes were sent. Never replay an uncertain write.
     public func send(_ request: Data) throws -> Data {
         do {
             return try LocalTransport.call(socket: socketPath, request: request, serverUser: serverUser)
         } catch let error as TractandaError where error.code == "connectionFailed" {
-            guard let managedService else {
-                throw TractandaError(
-                    "connectionFailed",
-                    "Cannot connect to \(socketPath). Start its server or configure a connection with tractanda connections add."
-                )
-            }
+            // Permission failures do not establish that the server is absent.
+            guard !Self.isPermissionDenied(error) else { throw connectionDiagnostic(error) }
+            guard let managedService else { throw connectionDiagnostic(error) }
             let expected =
                 try serverUser.map { try SystemAccountDirectory().user(named: $0).uid }
                 ?? tractanda_uid()
             guard expected == tractanda_uid() else {
                 throw TractandaError(
-                    "connectionFailed", "The service must be started by its owning OS account.")
+                    "connectionFailed",
+                    error.message + " The service must be started by its owning OS account.",
+                    osError: error.osError)
             }
             try ManagedServer.start(name: managedService)
             let deadline = Date().addingTimeInterval(10)
@@ -64,6 +80,7 @@ public struct ServerConnection: Codable, Equatable, Sendable {
                     return try LocalTransport.call(
                         socket: socketPath, request: request, serverUser: serverUser)
                 } catch let retryError as TractandaError where retryError.code == "connectionFailed" {
+                    if Self.isPermissionDenied(retryError) { throw connectionDiagnostic(retryError) }
                     if Date() >= deadline { throw retryError }
                     Thread.sleep(forTimeInterval: 0.1)
                 }

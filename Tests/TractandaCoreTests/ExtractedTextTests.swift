@@ -127,16 +127,19 @@ final class ExtractedTextTests: XCTestCase {
             }
             XCTAssertEqual(try status(), "current")
             try index.execute(
-                "UPDATE text_index SET subject = ? WHERE id = ?", ["old index text", revision.itemID])
+                "UPDATE page_text_index SET text=? WHERE rowid IN (SELECT u.id FROM corpus_unit u JOIN corpus_link l ON l.generation_id=u.generation_id WHERE l.item_id=?)",
+                ["old index text", revision.itemID])
             XCTAssertEqual(try status(), "stale")
             XCTAssertFalse(
                 String(
                     decoding: try JSONSerialization.data(
                         withJSONObject: call(store, ["ids": [revision.itemID]])), as: UTF8.self
                 ).contains("old index text"))
-            try index.execute("DELETE FROM text_index WHERE id = ?", [revision.itemID])
+            try index.execute(
+                "DELETE FROM page_text_index WHERE rowid IN (SELECT u.id FROM corpus_unit u JOIN corpus_link l ON l.generation_id=u.generation_id WHERE l.item_id=?)",
+                [revision.itemID])
             XCTAssertEqual(try status(), "missing")
-            try index.execute("DROP TABLE text_index")
+            try index.execute("DROP TABLE page_text_index")
             XCTAssertThrowsError(try status()) {
                 XCTAssertTrue(
                     ["indexError", "recoveryRequired"].contains(($0 as? TractandaError)?.code ?? ""))

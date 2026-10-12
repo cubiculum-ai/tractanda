@@ -30,6 +30,15 @@ System PAM/UUID libraries are dynamically supplied by the platform and have thei
 
 Model weights must be obtained separately under the selected model's terms. Do not assume the runtime's license covers a model, tokenizer dataset or unrelated application material. Recheck the applicable notice set when updating a dependency or packaging a binary.
 
+
+## Native Docling converter and model
+
+The native converter uses `osaurus-ai/vmlx-swift` revision `61a4b20d4ad01b10466e8fc94c50402a9f994430`; its MIT license and collected MLX/runtime dependency notices are retained under [LICENSES/optional-embedding-host](LICENSES/optional-embedding-host/). The converter applies Tractanda's separately identified Idefics3 vision GELU precision patch (`idefics3-vision-gelu-f32-v1`) to that pinned runtime. The before/after source digests and patch digest are in [the runtime patch manifest](Packages/TractandaDocuments/RuntimePatches/manifest.json). This first-party patch remains subject to this repository's PolyForm Noncommercial License; that license does not replace the model or runtime notices.
+
+Model assets are IBM Granite Docling 258M MLX, `ibm-granite/granite-docling-258M-mlx` revision `a8b999991fe8c521a0cec749973414eaaf823731`. The pinned Hugging Face revision declares Apache 2.0; IBM's [model card](https://huggingface.co/ibm-granite/granite-docling-258M) identifies IBM Research as developer and also states Apache 2.0. The pinned model revision, attribution, later conversion-provenance note and license copy are described in [the model notice](Packages/TractandaDocuments/ThirdPartyNotices/Granite-Docling-MODEL-NOTICE.md) and [Granite-Docling-LICENSE](Packages/TractandaDocuments/ThirdPartyNotices/Granite-Docling-LICENSE). No upstream `NOTICE` file was present in the pinned model snapshot. Its 14-file size/SHA-256 manifest is `Packages/TractandaDocuments/Sources/TractandaDocumentConverter/Resources/ModelAssets.json`.
+
+The RGB resampler is Tractanda's Swift implementation derived from Pillow 12.3.0 resampling behavior, not copied Pillow C code. The Pillow MIT-CMU attribution and full license are in [the package notice](Packages/TractandaDocuments/ThirdPartyNotices/Pillow-LICENSE); this notice is separate from both the IBM model and vmlx runtime licenses.
+
 ## Bundled Granite embedding model
 
 The preview bundles IBM Granite Embedding 311M Multilingual R2 at revision

@@ -15,6 +15,8 @@ fi
 python3 scripts/test-release-pipeline.py
 python3 scripts/test-notarize-macos.py
 python3 scripts/test-release-status.py
+python3 scripts/test-docling-packaging.py
+python3 scripts/test-docling-model-validator.py
 run_tests() (
     log=$1; scratch=$2; shift 2
     result=0

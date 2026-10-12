@@ -143,13 +143,176 @@ public struct ItemClient: Sendable {
             state: page.queryState, nextCursor: page.nextCursor, previousCursor: page.previousCursor)
     }
 
+    public func beginStoreRebuild(operationID: String) async throws -> StoreRebuildStatus {
+        let status = try await call(
+            "TractandaStore/rebuild", arguments: ["operationID": operationID],
+            returning: StoreRebuildStatus.self)
+        try status.validate()
+        guard status.operationID == operationID else {
+            throw TractandaError("protocolError", "Rebuild intent changed.")
+        }
+        return status
+    }
+    public func storeRebuildStatus(jobID: String? = nil) async throws -> StoreRebuildStatus {
+        let status = try await call(
+            "TractandaStore/rebuildStatus", arguments: jobID.map { ["jobID": $0] } ?? [:],
+            returning: StoreRebuildStatus.self)
+        try status.validate()
+        guard jobID == nil || status.jobID == jobID else {
+            throw TractandaError("protocolError", "Rebuild identity changed.")
+        }
+        return status
+    }
+    public func cancelStoreRebuild(jobID: String) async throws -> StoreRebuildStatus {
+        let status = try await call(
+            "TractandaStore/rebuildCancel", arguments: ["jobID": jobID], returning: StoreRebuildStatus.self)
+        try status.validate()
+        guard status.jobID == jobID else {
+            throw TractandaError("protocolError", "Rebuild identity changed.")
+        }
+        return status
+    }
     public func commit(_ request: CommitRequest) async throws -> CommitResult {
-        let result = try await call("TractandaItem/commit", arguments: request, returning: CommitResult.self)
+        let result: CommitResult
+        while true {
+            try Task.checkCancellation()
+            do {
+                result = try await call(
+                    "TractandaItem/commit", arguments: request, returning: CommitResult.self)
+                break
+            } catch let error as TractandaError where error.code == "attachmentCopyPending" {
+                try await Task.sleep(for: .milliseconds(100))
+            }
+        }
         guard result.revision.fields["operationID"]?.string == request.operationID,
             request.action == .create || request.action == .copy || result.revision.itemID == request.itemID
         else { throw TractandaError("protocolError", "Commit receipt does not match the pending edit.") }
         return result
     }
+    public func extractAttachmentText(
+        itemID: String, expectedRevisionID: String,
+        attachmentID: String, operationID: String
+    ) async throws -> AttachmentCommitResult {
+        try await call(
+            "TractandaAttachment/extractText",
+            arguments: AttachmentDetachRequest(
+                itemID: itemID,
+                expectedRevisionID: expectedRevisionID, attachmentID: attachmentID, operationID: operationID),
+            returning: AttachmentCommitResult.self)
+    }
+    public func extractAttachmentDocument(
+        itemID: String, expectedRevisionID: String, attachmentID: String, operationID: String
+    ) async throws -> AttachmentCommitResult {
+        try await call(
+            "TractandaAttachment/extractDocument",
+            arguments: AttachmentDocumentExtractRequest(
+                itemID: itemID, expectedRevisionID: expectedRevisionID,
+                attachmentID: attachmentID, operationID: operationID),
+            returning: AttachmentCommitResult.self)
+    }
+    public func attachmentDocument(
+        itemID: String, attachmentID: String, revisionID: String? = nil,
+        pageNumber: Int? = nil, maxBytes: Int = 1_048_576
+    ) async throws -> AttachmentDocumentReadResult {
+        try await call(
+            "TractandaAttachment/document",
+            arguments: AttachmentDocumentReadRequest(
+                itemID: itemID, attachmentID: attachmentID, revisionID: revisionID,
+                pageNumber: pageNumber, maxBytes: maxBytes),
+            returning: AttachmentDocumentReadResult.self)
+    }
+    public func documentContentPart(
+        itemID: String, attachmentID: String, revisionID: String? = nil,
+        kind: String, level: Int = 0, index: Int64 = 0, offset: Int64 = 0, limit: Int = 262_144
+    ) async throws -> DocumentContentPart {
+        try await call(
+            "TractandaAttachment/documentContent",
+            arguments: DocumentContentPartRequest(
+                itemID: itemID,
+                attachmentID: attachmentID, revisionID: revisionID, kind: kind, level: level, index: index,
+                offset: offset, limit: limit),
+            returning: DocumentContentPart.self)
+    }
+    public func beginAttachment(_ request: AttachmentUploadRequest) async throws -> AttachmentUploadResult {
+        try await call(
+            "TractandaAttachment/begin", arguments: request, returning: AttachmentUploadResult.self)
+    }
+    public func appendAttachment(uploadID: String, offset: Int64, data: Data) async throws -> Int64 {
+        guard data.count <= 262_144 else {
+            throw TractandaError("invalidArguments", "Chunk exceeds 256 KiB.")
+        }
+        let result = try await call(
+            "TractandaAttachment/upload",
+            arguments: AttachmentChunkRequest(uploadID: uploadID, offset: offset, data: data),
+            returning: AttachmentChunkResult.self)
+        return result.offset
+    }
+    public func finishAttachment(uploadID: String) async throws -> AttachmentCommitResult {
+        while true {
+            try Task.checkCancellation()
+            do {
+                return try await call(
+                    "TractandaAttachment/finish", arguments: AttachmentUploadID(uploadID: uploadID),
+                    returning: AttachmentCommitResult.self)
+            } catch let error as TractandaError where error.code == "attachmentVerifying" {
+                try await Task.sleep(for: .milliseconds(100))
+            }
+        }
+    }
+    public func attachmentUploadStatus(uploadID: String) async throws -> AttachmentIntegrityStatus {
+        try await call(
+            "TractandaAttachment/uploadStatus", arguments: AttachmentUploadID(uploadID: uploadID),
+            returning: AttachmentIntegrityStatus.self)
+    }
+    public func attachmentIntegrityStatus(itemID: String, revisionID: String? = nil, attachmentID: String)
+        async throws -> AttachmentIntegrityStatus
+    {
+        try await call(
+            "TractandaAttachment/integrity",
+            arguments: AttachmentListRequestWithID(
+                itemID: itemID, revisionID: revisionID, attachmentID: attachmentID),
+            returning: AttachmentIntegrityStatus.self)
+    }
+    public func abortAttachment(uploadID: String) async throws {
+        _ = try await call(
+            "TractandaAttachment/abort", arguments: AttachmentUploadID(uploadID: uploadID),
+            returning: AttachmentAbortResult.self)
+    }
+    public func listAttachments(itemID: String, revisionID: String? = nil) async throws
+        -> AttachmentListResult
+    {
+        try await call(
+            "TractandaAttachment/list",
+            arguments: AttachmentListRequest(itemID: itemID, revisionID: revisionID),
+            returning: AttachmentListResult.self)
+    }
+    public func attachmentContent(
+        itemID: String, revisionID: String? = nil, attachmentID: String, offset: Int64 = 0,
+        limit: Int = 262_144
+    ) async throws -> AttachmentContentResult {
+        while true {
+            try Task.checkCancellation()
+            do {
+                return try await call(
+                    "TractandaAttachment/content",
+                    arguments: AttachmentContentRequest(
+                        itemID: itemID, revisionID: revisionID, attachmentID: attachmentID, offset: offset,
+                        limit: limit), returning: AttachmentContentResult.self)
+            } catch let error as TractandaError where error.code == "attachmentVerifying" {
+                try await Task.sleep(for: .milliseconds(100))
+            }
+        }
+    }
+    public func detachAttachment(
+        itemID: String, expectedRevisionID: String, attachmentID: String, operationID: String
+    ) async throws -> AttachmentCommitResult {
+        try await call(
+            "TractandaAttachment/detach",
+            arguments: AttachmentDetachRequest(
+                itemID: itemID, expectedRevisionID: expectedRevisionID, attachmentID: attachmentID,
+                operationID: operationID), returning: AttachmentCommitResult.self)
+    }
+
 }
 
 private struct GetRequest: Encodable, Sendable { let ids: [String] }
@@ -213,4 +376,60 @@ private struct MethodResponse<Result: Decodable>: Decodable {
         result = try call.decode(Result.self)
         callID = try call.decode(String.self)
     }
+}
+
+private struct AttachmentUploadID: Encodable, Sendable { let uploadID: String }
+private struct AttachmentChunkRequest: Encodable, Sendable {
+    let uploadID: String
+    let offset: Int64
+    let data: Data
+}
+private struct AttachmentChunkResult: Decodable, Sendable { let offset: Int64 }
+private struct AttachmentAbortResult: Decodable, Sendable { let aborted: Bool }
+private struct AttachmentListRequest: Encodable, Sendable {
+    let itemID: String
+    let revisionID: String?
+}
+private struct AttachmentContentRequest: Encodable, Sendable {
+    let itemID: String
+    let revisionID: String?
+    let attachmentID: String
+    let offset: Int64
+    let limit: Int
+}
+private struct AttachmentDetachRequest: Encodable, Sendable {
+    let itemID: String
+    let expectedRevisionID: String
+    let attachmentID: String
+    let operationID: String
+}
+private struct AttachmentDocumentExtractRequest: Encodable, Sendable {
+    let itemID: String
+    let expectedRevisionID: String
+    let attachmentID: String
+    let operationID: String
+}
+private struct AttachmentDocumentReadRequest: Encodable, Sendable {
+    let itemID: String
+    let attachmentID: String
+    let revisionID: String?
+    let pageNumber: Int?
+    let maxBytes: Int
+}
+
+private struct AttachmentListRequestWithID: Encodable {
+    let itemID: String
+    let revisionID: String?
+    let attachmentID: String
+}
+
+private struct DocumentContentPartRequest: Encodable {
+    let itemID: String
+    let attachmentID: String
+    let revisionID: String?
+    let kind: String
+    let level: Int
+    let index: Int64
+    let offset: Int64
+    let limit: Int
 }

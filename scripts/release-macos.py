@@ -103,7 +103,7 @@ def lock():
 def config(path):
     value = read(path)
     required = ('repository', 'branch', 'instance', 'softwareRoot', 'applicationIdentity',
-                'installerIdentity', 'modelDirectory',
+                'installerIdentity', 'modelDirectory', 'documentModelDirectory',
                 'developerTeamID')
     missing = [k for k in required if not isinstance(value.get(k), str) or not value[k]]
     if missing:
@@ -508,6 +508,19 @@ class Pipeline:
             self.state['steps'][name] = {'completedAt': now(), 'result': result}
             self.save()
 
+    def document_build_arguments(self):
+        # Separate paths keep the patched native runtime out of the embedding/root graphs.
+        base = self.directory / 'docling-build'
+        return [argument for name in ('scratch', 'cache', 'config', 'security')
+                for argument in ('--' + name, str(base / name))]
+
+    def verify_document_model(self, directory, evidence):
+        proof = json.loads(command([sys.executable, 'scripts/validate-docling-model.py', str(directory)],
+                                   cwd=self.source, env=self.environment))
+        if proof.get('status') != 'verified' or proof.get('fileCount') != 14:
+            raise RuntimeError('Pinned document model validation did not complete.')
+        write(self.directory / evidence, proof)
+
     def build(self):
         self.run_command('release-build', ['swift', 'build', '-c', 'release', '--disable-sandbox',
                                         '--disable-automatic-resolution'])
@@ -521,6 +534,10 @@ class Pipeline:
         self.run_command('release-build', ['sh', 'scripts/validate-granite-runtime.sh',
             str(Path(products) / 'TractandaEmbeddingsHost'), self.settings['modelDirectory']])
 
+        self.verify_document_model(self.settings['documentModelDirectory'], 'document-model-input.json')
+        self.run_command('release-build', [sys.executable, 'scripts/build-docling-native.py',
+                         *self.document_build_arguments()])
+
     def assemble(self):
         if self.bundle.exists():
             self.bundle.rename(self.bundle.with_name(self.bundle.name + '.incomplete-' + str(os.getpid())))
@@ -528,11 +545,19 @@ class Pipeline:
                            env=self.environment)
         embedding_products = command(['swift', 'build', '-c', 'release', '--show-bin-path',
             '--package-path', 'Packages/TractandaEmbeddings'], cwd=self.source, env=self.environment)
+        document_products = command(['swift', 'build', '-c', 'release', '--show-bin-path',
+            '--package-path', 'Packages/TractandaDocuments',
+            *[argument for name in ('scratch', 'cache', 'config', 'security')
+              for argument in ('--' + name + '-path', str(self.directory / 'docling-build' / name))]],
+            cwd=self.source, env=self.environment)
         s = self.settings
         self.run_command('bundle', [sys.executable, 'scripts/package-macos.py', '--build-products', products,
             '--output', self.bundle, '--version', self.state['version'], '--sign-identity', s['applicationIdentity'],
             '--embeddings-host', str(Path(embedding_products) / 'TractandaEmbeddingsHost'),
-            '--model-directory', s['modelDirectory']])
+            '--model-directory', s['modelDirectory'],
+            '--document-converter', str(Path(document_products) / 'tractanda-document-converter'),
+            '--document-model-directory', s['documentModelDirectory']])
+        self.verify_document_model(self.bundle / 'models/granite-docling-258m-mlx', 'document-model-copied.json')
         return {'manifestSHA256': sha(self.bundle / 'bundle-manifest.json')}
 
     def build_package(self):
@@ -621,7 +646,17 @@ class Pipeline:
                                           env=environment))
             if not semantic.get('enabled') or semantic.get('model') != manifest['embedding']['model']:
                 raise RuntimeError('The live semantic configuration does not match the bundled model.')
-        return {'server': info['server'], 'features': info.get('features'),
+        document = manifest.get('documentExtraction')
+        if document:
+            observed = info.get('documentExtraction', {})
+            expected_converter = next(f['sha256'] for f in manifest['files']
+                                      if f['path'] == document['converterPath'])
+            if (observed.get('state') != 'configured' or observed.get('identity') != document['identity']
+                    or observed.get('executableSHA256') != expected_converter
+                    or observed.get('requiresPreparedInput') is not True
+                    or info.get('documentJobs', {}).get('protocol') != document['workerProtocol']):
+                raise RuntimeError('Running document configuration differs from the signed payload.')
+        return {'documentExtraction': info.get('documentExtraction'), 'server': info['server'], 'features': info.get('features'),
                 'release': str(release.resolve()), 'semantic': semantic}
 
     def push(self):

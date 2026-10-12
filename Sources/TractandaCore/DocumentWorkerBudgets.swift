@@ -1,0 +1,82 @@
+import Foundation
+
+/// Operational resources are separate from semantic converter/model/source identity.
+struct DocumentWorkerBudgets: Sendable {
+    let inspect: Double
+    let modelLoad: Double
+    let page: Double
+    let noProgress: Double
+    let terminationGrace: Double
+    init(
+        inspect: Double = 30, modelLoad: Double = 180, page: Double = 180,
+        noProgress: Double = 60, terminationGrace: Double = 2
+    ) throws {
+        guard
+            [inspect, modelLoad, page, noProgress, terminationGrace].allSatisfy({
+                $0.isFinite && $0 > 0 && $0 < Double(Int64.max) / 1_000_000_000
+            }), terminationGrace <= 60
+        else {
+            throw TractandaError(
+                "invalidDocumentConfiguration", "Native phase budgets must be positive and addressable.")
+        }
+        self.inspect = inspect
+        self.modelLoad = modelLoad
+        self.page = page
+        self.noProgress = noProgress
+        self.terminationGrace = terminationGrace
+    }
+}
+
+/// One phase/page, never the whole document. Caller renews only after strict valid progress.
+struct DocumentWorkerDeadline {
+    enum Phase: String { case inspect, modelLoad, page, finish }
+    let budgets: DocumentWorkerBudgets
+    private(set) var phase: Phase
+    private var started: ContinuousClock.Instant
+    private var lastProgress: ContinuousClock.Instant
+    init(budgets: DocumentWorkerBudgets, phase: Phase, now: ContinuousClock.Instant = .now) {
+        self.budgets = budgets
+        self.phase = phase
+        started = now
+        lastProgress = now
+    }
+    mutating func begin(_ phase: Phase, now: ContinuousClock.Instant = .now) {
+        self.phase = phase
+        started = now
+        lastProgress = now
+    }
+    mutating func observe(meaningful: Bool, now: ContinuousClock.Instant = .now) {
+        if meaningful { lastProgress = now }
+    }
+    private var phaseSeconds: Double {
+        let seconds: Double
+        switch phase {
+        case .inspect: seconds = budgets.inspect
+        case .modelLoad: seconds = budgets.modelLoad
+        case .page: seconds = budgets.page
+        case .finish: seconds = budgets.noProgress
+        }
+        return seconds
+    }
+    var deadline: ContinuousClock.Instant {
+        min(
+            started.advanced(by: .seconds(phaseSeconds)),
+            lastProgress.advanced(by: .seconds(budgets.noProgress)))
+    }
+    /// Safe bounded context captured at failure, before termination can add cleanup time.
+    func timeoutFailure(lastPhase: String?, now: ContinuousClock.Instant = .now) -> TractandaError {
+        let noProgress =
+            lastProgress.advanced(by: .seconds(budgets.noProgress))
+            < started.advanced(by: .seconds(phaseSeconds))
+        let origin = noProgress ? lastProgress : started
+        let duration = origin.duration(to: now).components
+        let elapsed = max(0, Double(duration.seconds) + Double(duration.attoseconds) / 1e18)
+        let limit = noProgress ? budgets.noProgress : phaseSeconds
+        // The phase comes only from strictly validated worker progress, never inferred counters.
+        return TractandaError(
+            "documentTimeout",
+            "Native worker operational budget expired. phase=\(lastPhase ?? "unknown"); "
+                + "timeout=\(noProgress ? "noProgress" : phase.rawValue); "
+                + "budgetSeconds=\(limit); elapsedSeconds=\(elapsed).")
+    }
+}

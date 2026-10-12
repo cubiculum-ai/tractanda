@@ -47,6 +47,77 @@ final class SharedDaemonTests: XCTestCase {
         url.standardizedFileURL.resolvingSymlinksInPath().path
     }
 
+    func testCloseRequestsRebuildStopBeforeQueuedMaintenanceDrain() async throws {
+        let root = try directory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storeRoot = root.appendingPathComponent("store")
+        do {
+            let store = try ItemStore(root: storeRoot)
+            _ = try store.commit(CommitRequest(classID: "Item", operationID: "item"))
+        }
+        let daemon = try await SharedDaemon.start(
+            configuration: .init(
+                storePath: storeRoot.path,
+                socketPath: root.appendingPathComponent("socket").path, httpPort: nil))
+        let coordinator = await daemon.coordinatorForTesting()
+        let entered = expectation(description: "Store queue is held inside durability loop")
+        let released = DispatchSemaphore(value: 0)
+        let lock = NSLock()
+        nonisolated(unsafe) var once = false
+        try await coordinator.setCanonicalSyncHookForTesting {
+            lock.lock()
+            let first = !once
+            once = true
+            lock.unlock()
+            if first {
+                entered.fulfill()
+                _ = released.wait(timeout: .now() + 5)
+            }
+        }
+        func request(_ method: String, _ arguments: [String: String] = [:]) throws -> Data {
+            try JSONSerialization.data(withJSONObject: [
+                "using": [ItemService.capability],
+                "methodCalls": [[method, arguments, "r"]],
+            ])
+        }
+        _ = try await coordinator.handle(
+            request("TractandaStore/rebuild", ["operationID": "close"]), forUID: getuid())
+        await fulfillment(of: [entered], timeout: 3)
+        // Reproduce an already accepted maintenance continuation queued behind rebuild.
+        let maintenance = Task { try? await coordinator.queueMaintenanceForTesting() }
+        let joinedMaintenance = Task<Void, Never> { _ = await maintenance.value }
+        await daemon.setMaintenanceForTesting(joinedMaintenance)
+        try await Task.sleep(for: .milliseconds(10))
+        let closing = Task { await daemon.close() }
+        var stopping = false
+        for _ in 0..<100 {
+            let data = try await coordinator.handle(request("TractandaStore/rebuildStatus"), forUID: getuid())
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let status = ((object["methodResponses"] as? [[Any]])?.first?[1]) as? [String: Any]
+            stopping = status?["state"] as? String == "stopping"
+            if stopping { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(stopping, "Shutdown must request cancellation before awaiting queued maintenance")
+        released.signal()
+        await closing.value
+        let journal = RebuildJournal(root: storeRoot, ownerUID: getuid())
+        XCTAssertEqual(try journal.load()?.state, "cancelled")
+        let reopened = try ItemStore(root: storeRoot)
+        XCTAssertTrue(reopened.isCanonicalTrusted)
+    }
+    func testRebuildNoProgressConfigurationRejectsInvalidIntervals() throws {
+        for timeout in [0.0, -1, .infinity, .nan] {
+            let configuration = DaemonConfiguration(
+                storePath: "/private/tmp/test-store", socketPath: "/private/tmp/test-socket",
+                rebuildNoProgressTimeoutSeconds: timeout)
+            XCTAssertThrowsError(try configuration.validate())
+        }
+        try DaemonConfiguration(
+            storePath: "/private/tmp/test-store", socketPath: "/private/tmp/test-socket",
+            rebuildNoProgressTimeoutSeconds: 120
+        ).validate()
+    }
     func testStartEndpointsConcurrentCloseAndWriterRelease() async throws {
         let root = try directory()
         defer { try? FileManager.default.removeItem(at: root) }

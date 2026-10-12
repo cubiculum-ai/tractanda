@@ -4,7 +4,9 @@
 
 Tractanda keeps versioned items, overlapping categories and reusable views in one local store. The Swift service owns revisions, queries and authorization; the CLI, TUI, stdio MCP adapter, optional shared daemon and browser example all use that service.
 
-For the executable preview, see [macOS installation and service management](docs/install.md). Linux packaging remains in development.
+The terminal client offers temporary Text/Semantic item search with `F` / `Ctrl-F` from Views or Categories, across all readable items without saving a view. See the [terminal search guide](docs/terminal-search.md).
+
+The downloadable macOS preview requires Apple Silicon (M1 or later) and macOS 15 or later; 16 GiB unified memory is a provisional practical recommendation. See [macOS installation and service management](docs/install.md) and [system requirements](docs/system-requirements.md) for limitations and storage guidance. Linux packaging remains in development. The pending native document package adds 640,444,815 bytes (about 610.8 MiB) of pinned Docling model assets per retained release; final package size and combined peak memory remain unmeasured.
 
 ## Proof-of-concept status
 

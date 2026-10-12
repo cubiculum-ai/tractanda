@@ -20,25 +20,7 @@ public final class ItemClient {
             "using": [ItemService.capability], "methodCalls": [[method, arguments, "client"]],
         ]
         let response = try transport(JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys]))
-        guard let decoded = try JSONSerialization.jsonObject(with: response) as? [String: Any] else {
-            throw TractandaError("protocolError", "Invalid native response.")
-        }
-        if let code = decoded["code"] as? String {
-            throw TractandaError(code, decoded["message"] as? String ?? "")
-        }
-        guard let calls = decoded["methodResponses"] as? [[Any]], calls.count == 1,
-            calls[0].count == 3, calls[0][2] as? String == "client",
-            let result = calls[0][1] as? [String: Any]
-        else {
-            throw TractandaError("protocolError", "Missing native method response.")
-        }
-        if calls[0][0] as? String == "error" {
-            throw TractandaError(result["type"] as? String ?? "error", result["description"] as? String ?? "")
-        }
-        guard calls[0][0] as? String == method else {
-            throw TractandaError("protocolError", "Unexpected method result.")
-        }
-        return try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
+        return try NativeMethodResult.unwrap(response, method: method)
     }
 
     /// Runs a query and its matching get serially in one native request.
@@ -94,9 +76,152 @@ public final class ItemClient {
         return revision
     }
 
+    public func beginStoreRebuild(operationID: String) throws -> StoreRebuildStatus {
+        let status = try JSON.decode(
+            StoreRebuildStatus.self, call("TractandaStore/rebuild", arguments: ["operationID": operationID]))
+        try status.validate()
+        guard status.operationID == operationID else {
+            throw TractandaError("protocolError", "Rebuild intent changed.")
+        }
+        return status
+    }
+    public func storeRebuildStatus(jobID: String? = nil) throws -> StoreRebuildStatus {
+        let status = try JSON.decode(
+            StoreRebuildStatus.self,
+            call("TractandaStore/rebuildStatus", arguments: jobID.map { ["jobID": $0] } ?? [:]))
+        try status.validate()
+        guard jobID == nil || status.jobID == jobID else {
+            throw TractandaError("protocolError", "Rebuild identity changed.")
+        }
+        return status
+    }
+    public func cancelStoreRebuild(jobID: String) throws -> StoreRebuildStatus {
+        let status = try JSON.decode(
+            StoreRebuildStatus.self, call("TractandaStore/rebuildCancel", arguments: ["jobID": jobID]))
+        try status.validate()
+        guard status.jobID == jobID else {
+            throw TractandaError("protocolError", "Rebuild identity changed.")
+        }
+        return status
+    }
     public func commit(_ request: CommitRequest) throws -> CommitResult {
         let arguments = try JSONSerialization.jsonObject(with: JSON.encode(request)) as! [String: Any]
-        return try JSON.decode(CommitResult.self, call("TractandaItem/commit", arguments: arguments))
+        while true {
+            try Task.checkCancellation()
+            do {
+                return try JSON.decode(CommitResult.self, call("TractandaItem/commit", arguments: arguments))
+            } catch let error as TractandaError where error.code == "attachmentCopyPending" {
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+        }
+    }
+
+    public func extractAttachmentText(
+        itemID: String, expectedRevisionID: String,
+        attachmentID: String, operationID: String
+    ) throws -> AttachmentCommitResult {
+        try JSON.decode(
+            AttachmentCommitResult.self,
+            call(
+                "TractandaAttachment/extractText",
+                arguments: [
+                    "itemID": itemID, "expectedRevisionID": expectedRevisionID,
+                    "attachmentID": attachmentID, "operationID": operationID,
+                ]))
+    }
+    public func documentContentPart(
+        itemID: String, attachmentID: String, revisionID: String? = nil,
+        kind: String, level: Int = 0, index: Int64 = 0, offset: Int64 = 0, limit: Int = 262_144
+    ) throws -> DocumentContentPart {
+        var args: [String: Any] = [
+            "itemID": itemID, "attachmentID": attachmentID, "kind": kind, "level": level,
+            "index": index, "offset": offset, "limit": limit,
+        ]
+        if let revisionID { args["revisionID"] = revisionID }
+        return try JSON.decode(
+            DocumentContentPart.self, call("TractandaAttachment/documentContent", arguments: args))
+    }
+    public func beginAttachment(_ request: AttachmentUploadRequest) throws -> AttachmentUploadResult {
+        let args = try JSONSerialization.jsonObject(with: JSON.encode(request)) as! [String: Any]
+        return try JSON.decode(
+            AttachmentUploadResult.self, call("TractandaAttachment/begin", arguments: args))
+    }
+    public func appendAttachment(uploadID: String, offset: Int64, data: Data) throws -> Int64 {
+        guard data.count <= 262_144 else {
+            throw TractandaError("invalidArguments", "Chunk exceeds 256 KiB.")
+        }
+        struct Result: Decodable { let offset: Int64 }
+        return try JSON.decode(
+            Result.self,
+            call(
+                "TractandaAttachment/upload",
+                arguments: [
+                    "uploadID": uploadID, "offset": offset, "data": data.base64EncodedString(),
+                ])
+        ).offset
+    }
+    public func finishAttachment(uploadID: String) throws -> AttachmentCommitResult {
+        while true {
+            try Task.checkCancellation()
+            do {
+                return try JSON.decode(
+                    AttachmentCommitResult.self,
+                    call("TractandaAttachment/finish", arguments: ["uploadID": uploadID]))
+            } catch let error as TractandaError where error.code == "attachmentVerifying" {
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+        }
+    }
+    public func attachmentUploadStatus(uploadID: String) throws -> AttachmentIntegrityStatus {
+        try JSON.decode(
+            AttachmentIntegrityStatus.self,
+            call("TractandaAttachment/uploadStatus", arguments: ["uploadID": uploadID]))
+    }
+    public func attachmentIntegrityStatus(itemID: String, revisionID: String? = nil, attachmentID: String)
+        throws -> AttachmentIntegrityStatus
+    {
+        var args: [String: Any] = ["itemID": itemID, "attachmentID": attachmentID]
+        if let revisionID { args["revisionID"] = revisionID }
+        return try JSON.decode(
+            AttachmentIntegrityStatus.self, call("TractandaAttachment/integrity", arguments: args))
+    }
+    public func abortAttachment(uploadID: String) throws {
+        _ = try call("TractandaAttachment/abort", arguments: ["uploadID": uploadID])
+    }
+    public func listAttachments(itemID: String, revisionID: String? = nil) throws -> AttachmentListResult {
+        var args: [String: Any] = ["itemID": itemID]
+        if let revisionID { args["revisionID"] = revisionID }
+        return try JSON.decode(AttachmentListResult.self, call("TractandaAttachment/list", arguments: args))
+    }
+    public func attachmentContent(
+        itemID: String, revisionID: String? = nil, attachmentID: String, offset: Int64 = 0,
+        limit: Int = 262_144
+    ) throws -> AttachmentContentResult {
+        var args: [String: Any] = [
+            "itemID": itemID, "attachmentID": attachmentID, "offset": offset, "limit": limit,
+        ]
+        if let revisionID { args["revisionID"] = revisionID }
+        while true {
+            try Task.checkCancellation()
+            do {
+                return try JSON.decode(
+                    AttachmentContentResult.self, call("TractandaAttachment/content", arguments: args))
+            } catch let error as TractandaError where error.code == "attachmentVerifying" {
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+        }
+    }
+    public func detachAttachment(
+        itemID: String, expectedRevisionID: String, attachmentID: String, operationID: String
+    ) throws -> AttachmentCommitResult {
+        try JSON.decode(
+            AttachmentCommitResult.self,
+            call(
+                "TractandaAttachment/detach",
+                arguments: [
+                    "itemID": itemID, "expectedRevisionID": expectedRevisionID,
+                    "attachmentID": attachmentID, "operationID": operationID,
+                ]))
     }
 
     public func state() throws -> String {

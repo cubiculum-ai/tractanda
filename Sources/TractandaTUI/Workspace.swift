@@ -35,6 +35,7 @@ struct WorkspaceRow {
 /// Presentation state only. Membership, authorization, ordering and writes remain native operations.
 final class Workspace {
     let client: ItemClient
+    private(set) var isSemanticSearch = false
     var expression = ""
     var text = ""
     var categoryPath: [Revision] = []
@@ -169,12 +170,14 @@ final class Workspace {
     }
 
     func refresh(position: Int? = nil) throws {
+        guard !isSemanticSearch else { return }
         queryDate = Timestamp.now()
         try loadSections(positions: sections.map { position ?? $0.position })
     }
 
     /// A failed current read must never leave rows from an earlier authorized view on screen.
     func clearResults() {
+        isSemanticSearch = false
         expression = ""
         text = ""
         categoryPath = []
@@ -191,6 +194,16 @@ final class Workspace {
         categoryNavigation = nil
         categoryMemberships = [:]
         categoryMembershipLabels = [:]
+    }
+
+    func showSemanticSearch(_ items: [Revision]) {
+        clearResults()
+        isSemanticSearch = true
+        sections = [
+            WorkspaceSection(
+                category: nil, items: items, position: 0, total: items.count,
+                nextCursor: nil, previousCursor: nil)
+        ]
     }
 
     private func queryArguments(
@@ -225,6 +238,7 @@ final class Workspace {
     /// Mark the whole authorized section, never silently just its loaded page.
     func items(inSectionAt index: Int) throws -> [Revision] {
         guard sections.indices.contains(index) else { return [] }
+        if isSemanticSearch { return sections[index].items }
         let page = try JSON.decode(
             ItemPage.self,
             client.call(
@@ -540,6 +554,7 @@ final class Workspace {
     }
 
     func allItems() throws {
+        isSemanticSearch = false
         expression = ""
         text = ""
         categoryPath = []

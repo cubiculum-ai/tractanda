@@ -16,9 +16,9 @@ jobs:
   linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
-    # Official Swift 6.4.0 Debian 12 release image; supports amd64 and arm64.
+    # Official Swift 6.4.0 Debian 13 (Trixie) multiarch image; supports amd64 and arm64/v8.
     container:
-      image: docker.io/library/swift@sha256:4f4120422396f62788ef459c75fe1a47f8746471c224fdc2a7dd8dd2e07f7efd
+      image: docker.io/library/swift@sha256:c90a484cbd45ff768e05bfdb2a73c4cc8978de0d940d8eb2cf68fcede6bad8f8
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:

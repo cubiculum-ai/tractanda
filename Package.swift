@@ -97,6 +97,7 @@ let package = Package(
         .executableTarget(
             name: "TractandaCLI",
             dependencies: ["TractandaCore", "TractandaKanban", "TractandaWeb", "TractandaServer"]),
+        .testTarget(name: "TractandaCLITests", dependencies: ["TractandaCLI", "TractandaCore"]),
         .testTarget(name: "TractandaCoreTests", dependencies: ["TractandaCore"]),
         .testTarget(name: "TractandaSetupTests", dependencies: ["TractandaSetup"]),
         .testTarget(

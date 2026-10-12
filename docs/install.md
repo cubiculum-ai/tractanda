@@ -2,6 +2,8 @@
 
 The downloadable preview targets Apple Silicon Macs. It contains the server, terminal client, MCP adapter, native installer and their required runtime libraries. A bundle with semantic retrieval also contains the pinned Granite Embedding 311M multilingual R2 model and the vmlx-swift host. Running the downloaded bundle does not require Xcode, Swift, Python or a model download.
 
+See [system requirements](system-requirements.md) for the macOS version/architecture floor and provisional RAM and disk planning guidance.
+
 Linux installation remains in development. The portable CPU embedding host can be built from source; see [embedding runtime build and checks](embedding-runtime.md). A supported Linux installer is a later step.
 
 ## Install an empty or sample database
@@ -89,3 +91,42 @@ The builder verifies a temporary payload copy's hashes and code signatures, writ
 That lower-level builder produces the signed input to `scripts/notarize-macos.py`; its output alone is not the final distribution. A valid Developer ID signature without notarization can still be rejected by Gatekeeper. Use the release command to complete and verify all steps. Bare executable tickets cannot be stapled, so the archive requires an online notarization lookup; the native package carries its ticket for offline verification.
 
 A new release uses a new directory. Reinstalling the same release pauses registered services using those files and resumes them after setup. If Apple's Installer fails before its completion script runs, rerun the installer or use `tractanda-setup start --name NAME`; canonical data is separate from the package payload.
+
+## Bundled native document extraction
+
+A configured macOS arm64 release includes `tractanda-document-converter` and all 14 assets from
+`ibm-granite/granite-docling-258M-mlx` at revision `a8b999991fe8c521a0cec749973414eaaf823731`.
+The source `ModelAssets.json` defines the exact sizes and SHA-256 hashes. The 14 pinned assets total 640,444,815 bytes (about 610.8 MiB); allow additional space for the full signed release and document working data.
+The release controller requires `documentModelDirectory` in its local configuration, pointing to
+an operator-prepared snapshot. It validates that input and the package copy offline; build,
+installation and runtime never download model weights. Pinned SwiftPM source dependency
+resolution remains part of the normal explicitly requested release build.
+
+The data-only `documentExtraction` descriptor records converter identity, worker protocol,
+model revision/manifest hash, the `osaurus-ai/vmlx-swift` runtime revision and the reviewed GELU
+patch identity/hash. Every executable, resource, model file and notice also appears in the ordinary
+bundle inventory. Shared MLX resource bundle names must have identical contents and modes;
+assembly rejects collisions. The converter uses the same dependency, signing, installer,
+notarization and verification pipeline as the other executables. Model Apache 2.0 attribution,
+runtime notices and Pillow licensing accompany the payload.
+
+The installer owns the daemon's converter/model paths inside the immutable release. Each
+instance receives private `document-state/NAME/scratch` and `document-state/NAME/prepared`
+directories under the installation configuration root, owned by `daemon` with mode 0700.
+They are separate from canonical records, indexes and immutable software. These workspaces
+and durable job metadata survive uninstall; existing unused-release deletion rules still apply.
+Uninstall does not implicitly discard document jobs. Reinstall or changed release/model paths
+can leave retained jobs paused because their saved configuration identity differs. Inspect job
+status and make an explicit resume/rebase/discard or configuration-recovery decision; the
+installer does not silently adopt old jobs into a changed runtime.
+
+Upgrade uses the existing registration/receipt rollback transaction and preserves prior release
+references and user data. Readiness checks configured identity, converter hash, prepared-input
+requirement and worker protocol from native info. The verified release inventory and hashed
+LaunchDaemon definition bind model and filesystem paths. Configured readiness does not prove
+that weights have loaded or that inference succeeded; actual converted-content validation is a
+separate gate. Document jobs stream originals and process bounded pages without a whole-document
+page ceiling. The current 1024-token/page output budget, quotas and coverage failures remain
+visible; arbitrary original size does not imply unlimited generated text. Linux document runtime
+packaging and managed startup remain in development. Source edits do not install or activate a
+release; a release/deployment still requires an explicit request.

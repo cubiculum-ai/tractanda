@@ -47,9 +47,10 @@ public struct BundleManifest: Codable, Equatable, Sendable {
     public let arch: String
     public let files: [File]
     public let embedding: EmbeddingPayload?
+    public let documentExtraction: DocumentExtractionPayload?
     public init(
         profile: String = Self.profile, version: String, platform: String, arch: String, files: [File],
-        embedding: EmbeddingPayload? = nil
+        embedding: EmbeddingPayload? = nil, documentExtraction: DocumentExtractionPayload? = nil
     ) {
         self.profile = profile
         self.version = version
@@ -57,6 +58,7 @@ public struct BundleManifest: Codable, Equatable, Sendable {
         self.arch = arch
         self.files = files
         self.embedding = embedding
+        self.documentExtraction = documentExtraction
     }
 
     public func validate() throws {
@@ -98,6 +100,17 @@ public struct BundleManifest: Codable, Equatable, Sendable {
             throw SetupError("Bundle is missing the Tractanda web resource bundle.")
         }
         try embedding?.validate(files: files)
+        if let documentExtraction {
+            guard platform == "macos", arch == "arm64" else {
+                throw SetupError("Bundled document extraction requires macOS arm64.")
+            }
+            try documentExtraction.validate(files: files)
+        } else if files.contains(where: {
+            $0.path == "bin/tractanda-document-converter"
+                || $0.path.hasPrefix("models/granite-docling-258m-mlx/")
+        }) {
+            throw SetupError("Document payload requires its complete descriptor.")
+        }
     }
 
     static func validateRelativePath(_ path: String) throws {
@@ -234,4 +247,71 @@ public struct SetupPlan: Codable, Equatable, Sendable {
     public let definition: String
     public let executable: String
     public let actions: [String]
+}
+
+/// A pinned, data-only document payload. The ordinary file inventory remains authoritative.
+public struct DocumentExtractionPayload: Codable, Equatable, Sendable {
+    public let converterPath: String
+    public let identity: DocumentConverterIdentity
+    public let workerProtocol: String
+    public let modelDirectory: String
+    public let modelManifestPath: String
+    public let modelManifestSHA256: String
+    public let runtimeRepository: String
+    public let runtimePatchManifestPath: String
+    public let runtimePatchManifestSHA256: String
+    public let runtimePatchIdentifier: String
+    public let runtimePatchPath: String
+    public let runtimePatchSHA256: String
+    public let noticePaths: [String]
+
+    public static let pinned = Self(
+        converterPath: "bin/tractanda-document-converter", identity: DocumentConverterIdentity(),
+        workerProtocol: "tractanda.native-document-worker.v1",
+        modelDirectory: "models/granite-docling-258m-mlx",
+        modelManifestPath: "licenses/Docling/ModelAssets.json",
+        modelManifestSHA256: "64894c93726b0b76d2eb5c20f001c61d6fc2eea1ef848b23773ba60cae9e00ef",
+        runtimeRepository: "osaurus-ai/vmlx-swift",
+        runtimePatchManifestPath: "licenses/Docling/runtime-patches.json",
+        runtimePatchManifestSHA256: "732b8d020e258b8ab5de5875f53bc3756143b089d9a1d7619f311ccbe4674635",
+        runtimePatchIdentifier: "idefics3-vision-gelu-f32-v1",
+        runtimePatchPath: "licenses/Docling/vmlx-61a4b20-idefics3-gelu-f32.patch",
+        runtimePatchSHA256: "4b45ae94cd5a9a2545025cf5165cd9e617f3c30c5a7b02e236c036ee943b9321",
+        noticePaths: [
+            "licenses/Docling/Granite-Docling-LICENSE",
+            "licenses/Docling/Granite-Docling-MODEL-NOTICE.md", "licenses/Docling/Pillow-LICENSE",
+            "licenses/optional-embedding-host/vmlx-swift/LICENSE",
+            "licenses/optional-embedding-host/vmlx-swift/ACKNOWLEDGMENTS.md",
+        ])
+
+    static let assetNames: Set<String> = [
+        "README.md", "config.json", "preprocessor_config.json", "processor_config.json",
+        "chat_template.jinja", "generation_config.json", "tokenizer.json", "tokenizer_config.json",
+        "special_tokens_map.json", "added_tokens.json", "merges.txt", "vocab.json",
+        "model.safetensors.index.json", "model.safetensors",
+    ]
+
+    func validate(files: [BundleManifest.File]) throws {
+        guard self == Self.pinned else { throw SetupError("Unsupported document payload descriptor.") }
+        guard Set(files.map(\.path)).count == files.count else {
+            throw SetupError("Duplicate document inventory paths.")
+        }
+        let entries = Dictionary(uniqueKeysWithValues: files.map { ($0.path, $0) })
+        guard let converter = entries[converterPath], converter.mode & 0o111 != 0,
+            entries[modelManifestPath]?.sha256 == modelManifestSHA256,
+            entries[runtimePatchManifestPath]?.sha256 == runtimePatchManifestSHA256,
+            entries[runtimePatchPath]?.sha256 == runtimePatchSHA256,
+            noticePaths.allSatisfy({ entries[$0] != nil }),
+            files.contains(where: {
+                $0.path.hasPrefix("bin/TractandaDocuments_TractandaDocumentConverter.bundle/")
+                    && $0.path.hasSuffix("/ModelAssets.json") && $0.sha256 == modelManifestSHA256
+            })
+        else { throw SetupError("Document payload is missing its converter, resources, or pinned notices.") }
+        let prefix = modelDirectory + "/"
+        let names = Set(
+            files.filter { $0.path.hasPrefix(prefix) }.map { String($0.path.dropFirst(prefix.count)) })
+        guard names == Self.assetNames else {
+            throw SetupError("Document model must contain exactly 14 pinned assets.")
+        }
+    }
 }

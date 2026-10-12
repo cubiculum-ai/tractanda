@@ -838,9 +838,10 @@ final class ServiceCoordinatorTests: XCTestCase {
             }
             XCTAssertTrue(exclusive)
             let completedBeforeDrain = await finished.value()
-            XCTAssertFalse(completedBeforeDrain)
+            XCTAssertTrue(completedBeforeDrain, "Admission must return before a held reader drains")
             release.signal()
-            _ = try await reading.value
+            _ = try? await reading.value
+            try await waitForRebuild(coordinator, uid: accounts.administrator)
             let rebuilt = try await rebuilding.value
             let object = try XCTUnwrap(JSONSerialization.jsonObject(with: rebuilt) as? [String: Any])
             let call = try XCTUnwrap((object["methodResponses"] as? [[Any]])?.first)
@@ -881,6 +882,7 @@ final class ServiceCoordinatorTests: XCTestCase {
                 if finishedBeforeRelease { break }
                 try await Task.sleep(for: .milliseconds(20))
             }
+            try await waitForRebuild(coordinator, uid: accounts.service)
             await gate.release()
             XCTAssertTrue(finishedBeforeRelease, "Rebuild waited on a read with no active lease.")
             let rebuiltData = try await rebuilding.value
@@ -888,7 +890,12 @@ final class ServiceCoordinatorTests: XCTestCase {
             XCTAssertEqual(
                 (object["methodResponses"] as? [[Any]])?.first?[0] as? String,
                 "TractandaStore/rebuild")
-            let readData = try await reading.value
+            do {
+                _ = try await reading.value
+                XCTFail("The earlier read must be fenced after rebuild admission")
+            } catch { XCTAssertEqual((error as? TractandaError)?.code, "serviceBusy") }
+            await coordinator.setPooledReadBeforeFinishHookForTesting(nil)
+            let readData = try await coordinator.handle(query, forUID: accounts.service)
             XCTAssertEqual(try nativePage(readData).total, 1)
 
             let secondGate = PreparedReadGate()
@@ -1114,9 +1121,28 @@ final class ServiceCoordinatorTests: XCTestCase {
     private func nativeRequest(_ method: String, _ arguments: [String: Any], id: String = "read") throws
         -> Data
     {
-        try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability], "methodCalls": [[method, arguments, id]],
+        let args =
+            method == "TractandaStore/rebuild" && arguments.isEmpty
+            ? ["operationID": "test-rebuild-" + Identifier.make()] : arguments
+        return try JSONSerialization.data(withJSONObject: [
+            "using": [ItemService.capability], "methodCalls": [[method, args, id]],
         ])
+    }
+    private func waitForRebuild(_ coordinator: ServiceCoordinator, uid: UInt32) async throws {
+        let request = try nativeRequest("TractandaStore/rebuildStatus", [:])
+        for _ in 0..<200 {
+            let data = try await coordinator.handle(request, forUID: uid)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let body = try XCTUnwrap((object["methodResponses"] as? [[Any]])?.first?[1])
+            let status = try JSON.decode(
+                StoreRebuildStatus.self, JSONSerialization.data(withJSONObject: body))
+            if status.isTerminal {
+                XCTAssertEqual(status.state, "completed")
+                return
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("Rebuild did not complete")
     }
 
     private func nativePage(_ data: Data) throws -> (ids: [String], total: Int) {
@@ -1167,10 +1193,11 @@ final class ServiceCoordinatorTests: XCTestCase {
             }
             try await Task.sleep(for: .milliseconds(50))
             let completedBeforeDrain = await finished.value()
-            XCTAssertFalse(completedBeforeDrain, "Rebuild must await the accepted verifier lease.")
+            XCTAssertTrue(completedBeforeDrain, "Admission must return before the accepted verifier drains.")
             await coordinator.setVerificationScanHookForTesting(nil)
             await gate.release()
             let response = try await accepted.value
+            try await waitForRebuild(coordinator, uid: accounts.administrator)
             let object = try XCTUnwrap(JSONSerialization.jsonObject(with: response) as? [String: Any])
             let call = try XCTUnwrap((object["methodResponses"] as? [[Any]])?.first)
             XCTAssertEqual(call[0] as? String, "TractandaStore/rebuild")

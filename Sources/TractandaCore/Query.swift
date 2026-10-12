@@ -922,6 +922,64 @@ public enum Categories {
         return candidates.dropFirst().reduce(candidates[0]) { .or($0, $1) }
     }
 
+    /// Category-rank pages count every exact match while retaining only compact
+    /// comparator keys for the requested prefix. No full result/rank map is cached.
+    static func categorySortedPage(
+        store: ItemStore, expression: String?, text: String?, categoryPath: [String],
+        excludedCategoryIDs: [String], sort: [ItemSort], position: Int, limit: Int,
+        at date: Date, timeZone: String,
+        maximumRetainedBytes: Int = ItemStore.exactQueryByteLimit,
+        isCancelled: @escaping () -> Bool = { Task.isCancelled }
+    ) throws -> ItemIndex.Page {
+        guard categoryPath.count <= 32, excludedCategoryIDs.count <= 32 else {
+            throw TractandaError("limit", "Category path exceeds 32 levels.")
+        }
+        try ItemSort.validate(sort)
+        let sortIDs = sort.compactMap(\.categoryRootID)
+        for id in categoryPath + excludedCategoryIDs { _ = try rule(store.get(id)) }
+        for id in sortIDs { _ = try readableCategoryRoot(store, id) }
+        let evaluator = try CategoryEvaluator(
+            definitions: store.readableCategoryDefinitions(
+                requestedCategoryIDs: Set(categoryPath + excludedCategoryIDs + sortIDs)),
+            store: store, at: date)
+        for id in sortIDs where evaluator.hierarchy.items[id] == nil {
+            throw TractandaError("notCategory", "This item has no available selection criteria.")
+        }
+        let predicate = try expression.map(SpotlightQuery.init)
+        let calendar = try QueryCalendar.make(timeZone: timeZone)
+        var results = try BoundedQueryResults<(key: ItemSort.SortKey, bytes: Int)>(
+            strategy: .orderedWindow(position: position, limit: limit),
+            maximumRetainedBytes: maximumRetainedBytes, estimateBytes: { $0.bytes },
+            isOrderedBefore: { ItemSort.isOrderedBefore($0.key, $1.key, by: sort) },
+            isCancelled: isCancelled)
+        try store.forEachReadableCandidate(
+            text: text,
+            candidatePlan: predicate?.boundedIndexCandidatePlan(at: date, calendar: calendar) ?? .all,
+            isCancelled: isCancelled
+        ) { item in
+            // Even a stream with zero matches must observe cancellation.
+            if isCancelled() { throw CancellationError() }
+            guard predicate?.matches(item, at: date, calendar: calendar) ?? true else { return }
+            var cache: [String: Membership] = [:]
+            for id in categoryPath
+            where try evaluator.membership(item, categoryID: id, cache: &cache).isIncluded != true {
+                return
+            }
+            for id in excludedCategoryIDs
+            where try evaluator.membership(item, categoryID: id, cache: &cache).isIncluded == true {
+                return
+            }
+            var ranks: [String: Int?] = [:]
+            for id in sortIDs {
+                ranks[id] = try categorySortRank(item, rootID: id, evaluator: evaluator, cache: &cache)
+            }
+            let key = ItemSort.key(item, by: sort, categoryRanks: ranks)
+            try results.append((key, try JSON.encode(key).count))
+        }
+        let page = try results.finish()
+        return .init(ids: page.elements.map { $0.key.itemID }, total: page.totalCount)
+    }
+
     private static func categoryCacheDependencies(
         store: ItemStore, categoryPath: [String], excludedCategoryIDs: [String]
     ) throws -> Set<String>? {
@@ -996,6 +1054,12 @@ public enum Categories {
                     sort: sort, order: indexedOrder!, position: position, limit: limit,
                     at: date, timeZone: timeZone,
                     savedViewID: savedViewID)
+            }
+            if sort.contains(where: { $0.categoryRootID != nil }) {
+                return try categorySortedPage(
+                    store: store, expression: expression, text: text, categoryPath: categoryPath,
+                    excludedCategoryIDs: excludedCategoryIDs, sort: sort, position: position, limit: limit,
+                    at: date, timeZone: timeZone)
             }
             let manualCategoryDependencies: Set<String>?
             if savedViewID != nil {
@@ -1171,27 +1235,41 @@ public enum Categories {
                 definitions: try store.readableCategoryDefinitions(
                     requestedCategoryIDs: Set(categoryPath + excludedCategoryIDs + categorySortIDs)),
                 store: store, at: date)
-        // Avoid materializing a category decision or personal-target ID set as a prepass.
-        // Every fallback candidate is checked by the exact evaluator below; the restricted
-        // candidate sources remain an optimization only for separately bounded APIs.
-        let queryCandidates = try store.candidates(
-            text: text, restrictedTo: nil,
-            candidatePlan: query?.boundedIndexCandidatePlan(at: date, calendar: calendar) ?? .all)
-        let evaluated = try queryCandidates.compactMap {
-            item -> (Revision, [String: Membership])? in
-            if let query, !query.matches(item, at: date, calendar: calendar) { return nil }
+        // Stream the readable superset through exact selection before charging the
+        // retained sort working set. Unrelated heads must not consume a board's cap.
+        var evaluated: [(Revision, [String: Membership])] = []
+        var retainedBytes = 0
+        try store.forEachReadableCandidate(
+            text: text,
+            candidatePlan: query?.boundedIndexCandidatePlan(at: date, calendar: calendar) ?? .all
+        ) { item in
+            if let query, !query.matches(item, at: date, calendar: calendar) { return }
             var cache: [String: Membership] = [:]
             for id in categoryPath {
                 if try evaluator?.membership(item, categoryID: id, cache: &cache).isIncluded != true {
-                    return nil
+                    return
                 }
             }
             for id in excludedCategoryIDs {
                 if try evaluator?.membership(item, categoryID: id, cache: &cache).isIncluded == true {
-                    return nil
+                    return
                 }
             }
-            return (item, cache)
+            guard
+                evaluated.count
+                    < (store.exactQueryCandidateLimitForTesting
+                        ?? ItemStore.exactQueryCandidateLimit)
+            else {
+                throw TractandaError(
+                    "resourceLimit", "Exact query matches exceed the bounded working set.")
+            }
+            let size = try JSON.encode(item).count + JSON.encode(cache).count
+            guard size <= ItemStore.exactQueryByteLimit - retainedBytes else {
+                throw TractandaError(
+                    "resourceLimit", "Exact query matches exceed the bounded byte budget.")
+            }
+            retainedBytes += size
+            evaluated.append((item, cache))
         }
         let result = evaluated.map(\.0)
         var categoryRanks: [String: [String: Int]] = [:]

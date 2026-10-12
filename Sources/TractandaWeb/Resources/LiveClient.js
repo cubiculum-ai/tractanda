@@ -52,6 +52,7 @@
     revisionsByID.clear();dirty=!!pendingWrite;undoStack=[];changes=0;isConnected=false;
     learningCategoryID='';learningNotice='';learningItemPosition=0;learningSuggestionPosition=0;learningQueryState=null;
     if ($('learning-dialog').open) $('learning-dialog').close();
+    $('board-load-error').hidden=true;$('project-counts').hidden=false;
     $('search').value='';$('track-filter').value='all';render();
   }
 
@@ -498,13 +499,18 @@
       const refreshed=await readLiveBoard(viewID,snapshot);
       if (!selectionIsCurrent(viewID,generation)) return false;
       data=refreshed.data;revisionsByID=refreshed.revisions;isConnected=true;
+      $('board-load-error').hidden=true;$('project-counts').hidden=false;
       render();showWorkspace();
       if(resumeEditorAfterSignIn && !pendingWrite){resumeEditorAfterSignIn=false;$('task-dialog').showModal();}
       $('connection-message').textContent=pendingWrite?'An edit needs a retry. Its original request is retained.':'Connected · changes are saved as item revisions';
       return true;
     } catch(error) {
       if (!selectionIsCurrent(viewID,generation)) return false;
-      isConnected=false;clearViewData(viewID);$('connection-message').textContent=error.message;
+      isConnected=false;clearViewData(viewID);
+      const message='Could not load this board: '+(error.message||'The server read failed.');
+      $('board-load-error').textContent=message;$('board-load-error').hidden=false;
+      $('project-counts').hidden=true;$('filter-count').textContent='Board unavailable';
+      $('connection-message').textContent=message;
       return false;
     } finally {if(refreshID===refreshGeneration){isRefreshing=false;updateConnectionState();}}
   }

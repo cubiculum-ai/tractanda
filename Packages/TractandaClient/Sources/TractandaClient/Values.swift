@@ -3,9 +3,12 @@ import Foundation
 public struct TractandaError: Error, Codable, Equatable, Sendable, CustomStringConvertible {
     public let code: String
     public let message: String
-    public init(_ code: String, _ message: String) {
+    /// POSIX cause for native connection diagnostics; absent for ordinary protocol errors.
+    public let osError: Int32?
+    public init(_ code: String, _ message: String, osError: Int32? = nil) {
         self.code = code
         self.message = message
+        self.osError = osError
     }
     public var description: String { "\(code): \(message)" }
 }

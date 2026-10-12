@@ -1,6 +1,8 @@
+import CSQLite
 import CTractandaPlatform
 import Crypto
 import Foundation
+import TractandaVectors
 
 /// Immutable, caller-scoped input that can be handed to CPU-only query work. The byte
 /// count is the encoded Revision JSON size, excluding collection punctuation.
@@ -742,6 +744,11 @@ public final class ItemStore {
         }
     }
 
+    private var rebuildControl: RebuildControl?
+    func rebuildAdministratorPolicy() throws -> RebuildAdministratorPolicy {
+        try requireAdministrator()
+        return RebuildAdministratorPolicy(ownerUID: ownerUID, configuration: accessConfiguration)
+    }
     private var isCanonicalReady = false
     private struct VerificationAccumulation {
         let generation: String
@@ -763,6 +770,7 @@ public final class ItemStore {
     // Failure injection at the file/index boundary, available to core tests only.
     var beforeIndexUpdate: (() throws -> Void)?
     var beforeCheckpointClear: (() throws -> Void)?
+    var afterCanonicalSyncEntryForTesting: (() throws -> Void)?
     var beforeCanonicalDurabilitySync: (() throws -> Void)?
     var publishResultOverrideForTesting: Int32?
     var beforeCategoryGraphValidation: (() -> Void)?
@@ -771,6 +779,50 @@ public final class ItemStore {
     var beforeIndexQuarantineMarkerForTesting: (() throws -> Void)?
     // Deterministic collision injection in tests; production uses the UUIDv1 generator.
     var makePersistentUUID: () throws -> UUID = { try UUID.makeVersion1() }
+    private var stagingByteQuota: StagingByteQuota!
+    private var pendingCorpusReadReleases: Set<String> = []
+    var beforeCorpusReadReleaseForTesting: ((String) throws -> Void)?
+    var afterCorpusReadCaptureForTesting: (() throws -> Void)? {
+        get { index?.afterCorpusReadCommitForTesting }
+        set { index?.afterCorpusReadCommitForTesting = newValue }
+    }
+    private var attachmentPayloads: AttachmentPayloadStore!
+    private var documentContents: DocumentContentStore!
+    private var documentJobRecords: DocumentJobRecords!
+    private var documentJobs: [String: DocumentJobRecord] = [:]
+    private var documentJobWriters: [String: DocumentContentWriter] = [:]
+    var beforeDocumentJobCommitForTesting: (() throws -> Void)?
+    var afterDocumentJobHistoryForTesting: (() throws -> Void)? {
+        get { documentJobRecords.afterHistoryWriteForTesting }
+        set { documentJobRecords.afterHistoryWriteForTesting = newValue }
+    }
+    var afterDocumentJobLookupForTesting: (() throws -> Void)? {
+        get { documentJobRecords.afterLookupWriteForTesting }
+        set { documentJobRecords.afterLookupWriteForTesting = newValue }
+    }
+    private let attachmentCapacityProvider: (@Sendable () throws -> UInt64)?
+    func setAttachmentReserveForTesting(_ bytes: Int64) throws {
+        attachmentPayloads = try AttachmentPayloadStore(
+            root: root, ownerUID: ownerUID, reserveBytes: bytes, availableBytes: attachmentCapacityProvider,
+            stagingQuota: stagingByteQuota)
+        documentContents = DocumentContentStore(
+            root: root, ownerUID: ownerUID, minimumFreeBytes: bytes,
+            availableBytes: attachmentCapacityProvider, stagingQuota: stagingByteQuota)
+        documentJobRecords = DocumentJobRecords(
+            root: root,
+            files: DocumentContentFiles(
+                root: root, ownerUID: ownerUID, minimumFreeBytes: bytes,
+                availableBytes: attachmentCapacityProvider, stagingQuota: stagingByteQuota))
+    }
+    let attachmentUploadPolicy: AttachmentUploadPolicy
+    var attachmentClockForTesting: () -> Date = { Date() }
+    private var attachmentUploads: [String: AttachmentUploadState] = [:]
+    private(set) var attachmentRecoveryValidationsForTesting = 0
+    var beforeAttachmentCopyCommitForTesting: (() throws -> Void)?
+    var beforeAttachmentCommitForTesting: (() throws -> Void)?
+    var afterAttachmentItemCommitForTesting: (() throws -> Void)?
+    var afterAttachmentPayloadPublicationForTesting: (() throws -> Void)?
+    var afterAttachmentStageDiscardForTesting: (() throws -> Void)?
     private static let managed: Set<String> = [
         "itemID", "revisionID", "classID", "schemaVersion",
         "createdAt", "modifiedAt", "supersedes", "actor", "operationID", "requestIdentity",
@@ -778,8 +830,13 @@ public final class ItemStore {
 
     public init(
         root: URL, indexDirectory requestedIndexDirectory: URL? = nil,
-        accounts: any AccountDirectory = SystemAccountDirectory()
+        accounts: any AccountDirectory = SystemAccountDirectory(),
+        attachmentUploadPolicy: AttachmentUploadPolicy = AttachmentUploadPolicy(),
+        attachmentAvailableBytes: (@Sendable () throws -> UInt64)? = nil
     ) throws {
+        try attachmentUploadPolicy.validate()
+        self.attachmentUploadPolicy = attachmentUploadPolicy
+        self.attachmentCapacityProvider = attachmentAvailableBytes
         self.root = root.standardizedFileURL.resolvingSymlinksInPath()
         self.accounts = accounts
         ownerUID = tractanda_uid()
@@ -796,7 +853,10 @@ public final class ItemStore {
             // absent descendant at different times.
             let suppliedPath = requestedIndexDirectory.standardizedFileURL.path
             let itemPath = root.standardizedFileURL.appendingPathComponent("items").path
-            guard suppliedPath != itemPath && !suppliedPath.hasPrefix(itemPath + "/") else {
+            let attachmentPath = root.standardizedFileURL.appendingPathComponent("attachments").path
+            guard suppliedPath != itemPath && !suppliedPath.hasPrefix(itemPath + "/"),
+                suppliedPath != attachmentPath && !suppliedPath.hasPrefix(attachmentPath + "/")
+            else {
                 throw TractandaError(
                     "invalidIndexDirectory", "Index files cannot be stored inside canonical items.")
             }
@@ -812,7 +872,10 @@ public final class ItemStore {
             self.indexDirectory = defaultIndexDirectory
         }
         usesExternalIndexDirectory = self.indexDirectory.path != defaultIndexDirectory.path
-        guard !Self.isDescendant(self.indexDirectory, of: self.root.appendingPathComponent("items")) else {
+        guard !Self.isDescendant(self.indexDirectory, of: self.root.appendingPathComponent("items")),
+            !Self.isDescendant(self.indexDirectory, of: self.root.appendingPathComponent("attachments")),
+            !Self.isDescendant(self.indexDirectory, of: self.root.appendingPathComponent("documents"))
+        else {
             throw TractandaError(
                 "invalidIndexDirectory", "Index files cannot be stored inside canonical items.")
         }
@@ -823,8 +886,32 @@ public final class ItemStore {
         }
         do {
             try ensureDirectory(self.root.appendingPathComponent("items"))
-            try rejectIndexInsideCanonicalItems()
+            // Recover bounded upload intents/cleanup first, then rebuild shared accounting.
+            let recoveryPayloads = try AttachmentPayloadStore(
+                root: self.root, ownerUID: ownerUID,
+                reserveBytes: attachmentUploadPolicy.minimumFreeBytes,
+                availableBytes: attachmentAvailableBytes)
+            attachmentUploads = try recoveryPayloads.loadUploads()
+            stagingByteQuota = try StagingByteQuota(
+                root: self.root, ownerUID: ownerUID, maximumBytes: attachmentUploadPolicy.maximumStagedBytes,
+                pendingUploads: attachmentUploads)
+            attachmentPayloads = try AttachmentPayloadStore(
+                root: self.root, ownerUID: ownerUID, reserveBytes: attachmentUploadPolicy.minimumFreeBytes,
+                availableBytes: attachmentAvailableBytes, stagingQuota: stagingByteQuota)
+            documentContents = DocumentContentStore(
+                root: self.root, ownerUID: ownerUID,
+                minimumFreeBytes: attachmentUploadPolicy.minimumFreeBytes,
+                availableBytes: attachmentAvailableBytes, stagingQuota: stagingByteQuota)
+            documentJobRecords = DocumentJobRecords(
+                root: self.root,
+                files: DocumentContentFiles(
+                    root: self.root, ownerUID: ownerUID,
+                    minimumFreeBytes: attachmentUploadPolicy.minimumFreeBytes,
+                    availableBytes: attachmentAvailableBytes, stagingQuota: stagingByteQuota))
+            documentJobs = try documentJobRecords.load()
+            try rejectIndexInsideCanonicalSubtrees()
             try ensureDirectory(indexDirectory)
+            try rejectIndexInsideCanonicalSubtrees()
             if usesExternalIndexDirectory {
                 try bindExternalIndexDirectory()
             } else {
@@ -844,6 +931,8 @@ public final class ItemStore {
                 ]
                 try rebuildIndex()
             }
+            try restoreCorpusRecoveryCharges()
+            try reclaimStartupCorpusReaders()
         } catch {
             if indexWriter >= 0 { tractanda_unlock(indexWriter) }
             tractanda_unlock(writer)
@@ -900,16 +989,24 @@ public final class ItemStore {
     /// Compare directory identities while walking an existing external-path ancestor. String
     /// prefixes alone are unsafe here because macOS can render `/tmp` and `/private/tmp`
     /// differently when an index leaf has not been created yet.
-    private func rejectIndexInsideCanonicalItems() throws {
-        let canonicalItems = try FileMetadata.read(at: root.appendingPathComponent("items"))
-        var ancestor = indexDirectory
+    private func rejectIndexInsideCanonicalSubtrees() throws {
+        let canonicalDirectories = try ["items", "attachments", "documents"].compactMap {
+            name -> FileMetadata? in
+            do {
+                return try FileMetadata.read(at: root.appendingPathComponent(name))
+            } catch FileMetadataError.posix(let code) where code == ENOENT { return nil }
+        }
+        var ancestor = indexDirectory.resolvingSymlinksInPath()
         while ancestor.path != "/" {
             if let metadata = try? FileMetadata.read(at: ancestor),
-                metadata.type == .directory, metadata.device == canonicalItems.device,
-                metadata.inode == canonicalItems.inode
+                metadata.type == .directory,
+                canonicalDirectories.contains(where: {
+                    $0.device == metadata.device && $0.inode == metadata.inode
+                })
             {
                 throw TractandaError(
-                    "invalidIndexDirectory", "Index files cannot be stored inside canonical items.")
+                    "invalidIndexDirectory",
+                    "Index files cannot be stored inside canonical item or attachment subtrees.")
             }
             ancestor.deleteLastPathComponent()
         }
@@ -1578,6 +1675,13 @@ public final class ItemStore {
     private func recover(
         staging: ItemIndex, statements: ItemIndex.RebuildStatements, measurePhases: Bool = false
     ) throws -> RecoveryPhaseMetrics? {
+        attachmentRecoveryValidationsForTesting = 0
+        try staging.execute(
+            "CREATE TEMP TABLE attachment_owners (id TEXT PRIMARY KEY, item TEXT NOT NULL, descriptor TEXT NOT NULL)"
+        )
+        try staging.execute(
+            "CREATE TEMP TABLE document_owners (id TEXT PRIMARY KEY, item TEXT NOT NULL, descriptor TEXT NOT NULL)"
+        )
         let enumerationStart = ProcessInfo.processInfo.systemUptime
         var recordReadSeconds: TimeInterval = 0
         var recordDecodeSeconds: TimeInterval = 0
@@ -1588,6 +1692,7 @@ public final class ItemStore {
                 throw TractandaError("recoveryError", "Canonical directory depth exceeded.")
             }
             try POSIXDirectory.withEntries(at: directory) { name in
+                try self.rebuildControl?.check()
                 let url = directory.appendingPathComponent(name, isDirectory: false)
                 let metadata = try FileMetadata.read(at: url)
                 let archiveState = tractanda_path_read_only(url.path)
@@ -1640,6 +1745,33 @@ public final class ItemStore {
                 recordHashSeconds += ProcessInfo.processInfo.systemUptime - hashStart
                 let semanticsStart = ProcessInfo.processInfo.systemUptime
                 try ItemSemantics.validate(revision)
+                for attachment in try AttachmentDescriptor.descriptors(in: revision.fields) {
+                    if try staging.registerRecoveryAttachment(attachment, itemID: revision.itemID) {
+                        let control = rebuildControl
+                        let startingBytes = control?.status.originalBytesVerified ?? 0
+                        try attachmentPayloads.validate(
+                            descriptor: attachment,
+                            progress: { verified in
+                                let prior = control?.status.originalBytesVerified ?? startingBytes
+                                let total = startingBytes.addingReportingOverflow(verified)
+                                guard !total.overflow else {
+                                    throw TractandaError("resourceLimit", "Rebuild byte progress overflowed.")
+                                }
+                                try control?.pulse(originalBytes: total.partialValue - prior)
+                            })
+                        attachmentRecoveryValidationsForTesting += 1
+                    }
+                }
+                for document in try AttachmentDocumentRepresentation.representations(in: revision.fields) {
+                    if let content = document.content,
+                        try staging.registerRecoveryDocument(document, itemID: revision.itemID)
+                    {
+                        try documentContents.validate(
+                            content, source: document.source, identity: document.identity,
+                            extractedAt: document.extractedAt, boundary: { try self.rebuildControl?.check() },
+                            progress: { _ in try self.rebuildControl?.pulse(pages: 1) })
+                    }
+                }
                 try Identifier.validate(revision.itemID)
                 try Identifier.validate(revision.revisionID)
                 semanticValidationSeconds += ProcessInfo.processInfo.systemUptime - semanticsStart
@@ -1672,14 +1804,21 @@ public final class ItemStore {
                     throw TractandaError(
                         "recoveryError", "Duplicate canonical revision, path or receipt: \(error)")
                 }
+                try rebuildControl?.pulse(records: 1)
                 try afterRecoveryRecordForTesting?(url)
                 return true
             }
         }
         do { try scan(root.appendingPathComponent("items"), depth: 0) } catch {
+            if let failure = error as? TractandaError,
+                ["cancelled", "rebuildNoProgress"].contains(failure.code)
+            {
+                throw failure
+            }
             throw TractandaError("recoveryError", "Cannot enumerate or validate canonical records: \(error)")
         }
         let enumerationEnd = ProcessInfo.processInfo.systemUptime
+        try rebuildControl?.pulse(phase: "validatingRevisionGraph")
         do { try staging.validateRecoveryGraph() } catch {
             throw TractandaError("recoveryError", "Canonical revision graph is invalid: \(error)")
         }
@@ -1692,7 +1831,9 @@ public final class ItemStore {
         var recoveredConfiguration: AccessConfiguration?
         var clockDependent = false
         var cursor: String?
+        try rebuildControl?.pulse(phase: "projectingCurrentItems")
         while let head = try staging.recoveryHead(after: cursor) {
+            try rebuildControl?.pulse(items: 1)
             guard let row = try staging.revision(itemID: head.itemID, revisionID: head.revisionID) else {
                 throw TractandaError("recoveryError", "Current revision catalogue row is missing.")
             }
@@ -1721,7 +1862,17 @@ public final class ItemStore {
                 throw TractandaError(
                     "recoveryError", "Current revision body or indexed text is inconsistent.")
             }
-            try staging.putForRebuild(revision, using: statements)
+            let input = try PageCorpusInput(
+                storeID: canonicalStoreIdentity(creatingIfMissing: false), revision: revision)
+            let provider = StoredPageCorpusProvider(contents: documentContents, incoming: nil)
+            try staging.putForRebuild(
+                revision, using: statements, corpusInput: input,
+                pageProvider: provider,
+                corpusBoundary: {
+                    try self.rebuildControl?.check()
+                    try self.rebuildControl?.pulse(phase: "indexingAuthenticatedPages")
+                    try self.requireIndexFilesystemCapacity(additionalBytes: 0)
+                })
             guard try staging.textMatches(revision) else {
                 throw TractandaError("recoveryError", "Current revision indexing failed during rebuild.")
             }
@@ -1901,7 +2052,12 @@ public final class ItemStore {
         }
         let corpusChanged =
             hasCorpusDependency
-            && base.map { ItemTextContent.corpus(for: $0) != ItemTextContent.corpus(for: revision) } == true
+            && (base.map { previous in
+                guard let old = try? IndexCorpusPlan.current(previous).map(\.sourceKey),
+                    let new = try? IndexCorpusPlan.current(revision).map(\.sourceKey)
+                else { return true }
+                return old != new
+            } ?? true)
         let invalid = savedViewPageDependencies.compactMap { key, dependencies in
             let isCachedMember = savedViewPages[key]?.contains(itemID) == true
             let changed = dependencies.contains { dependency in
@@ -2146,6 +2302,7 @@ public final class ItemStore {
         order: ItemIndex.IndexedOrder? = nil,
         savedViewID: String? = nil,
         maximumCandidates: Int? = nil, maximumSerializedBytes: Int? = nil,
+        isCancelled: (() -> Bool)? = nil,
         _ body: (Revision) throws -> Void
     ) throws {
         guard let index else {
@@ -2159,6 +2316,7 @@ public final class ItemStore {
             lexicalText: text, restrictingTo: ids, candidatePlan: candidatePlan, order: order,
             savedViewID: savedViewID
         ) { id in
+            if isCancelled?() == true { throw CancellationError() }
             lastIndexCandidateCountForTesting += 1
             guard let head = try currentHead(id), !head.isDeleted, canRead(head) else { return }
             count += 1
@@ -2503,9 +2661,839 @@ public final class ItemStore {
         return try index.savedViewIsReady(id: id)
     }
 
-    public func commit(_ request: CommitRequest, actorUID: UInt32? = nil) throws -> CommitResult {
+    private func attachmentStagedOffset(_ upload: AttachmentUploadState) throws -> Int64 {
+        if upload.location == "published" { return upload.descriptor.byteCount }
+        if try attachmentPayloads.publishedMetadataMatches(upload.descriptor) {
+            return upload.descriptor.byteCount
+        }
+        return try attachmentPayloads.stagedSize(id: upload.descriptor.attachmentID)
+    }
+    @discardableResult
+    private func renewAttachmentUpload(_ id: String, upload: AttachmentUploadState, phase: String? = nil)
+        throws -> AttachmentUploadState
+    {
+        var renewed = upload
+        renewed.expiresAt = attachmentClockForTesting().addingTimeInterval(
+            attachmentUploadPolicy.idleRetentionSeconds)
+        if let phase {
+            renewed.phase = phase
+            renewed.failureCode = nil
+            if phase == "published" { renewed.location = "published" }
+        }
+        try attachmentPayloads.saveUpload(renewed)
+        attachmentUploads[id] = renewed
+        return renewed
+    }
+    private func requireAttachmentStagingCapacity(additionalBytes: Int64) throws {
+        try stagingByteQuota.require(additionalBytes: additionalBytes)
+    }
+    func prepareAttachmentIntegrity(uploadID: String) throws -> AttachmentIntegrityWork? {
+        let upload = try attachmentUpload(uploadID)
+        if let code = upload.failureCode {
+            throw TractandaError(code, "Upload integrity verification failed; abort and begin again.")
+        }
+        if try attachmentPayloads.isStagedVerified(upload.descriptor) { return nil }
+        guard try attachmentStagedOffset(upload) == upload.descriptor.byteCount else {
+            throw TractandaError(
+                "uploadMismatch", "Upload is incomplete; resume sending the remaining bytes.")
+        }
+        if upload.phase != "verifying" {
+            _ = try renewAttachmentUpload(uploadID, upload: upload, phase: "verifying")
+        }
+        return AttachmentIntegrityWork(
+            payloads: attachmentPayloads, descriptor: upload.descriptor, uploadID: uploadID)
+    }
+    func attachmentIntegrityFinished(uploadID: String, failureCode: String?) throws {
+        guard let upload = attachmentUploads[uploadID] else { return }
+        var next = upload
+        next.phase = failureCode == nil ? "verified" : (failureCode == "cancelled" ? "paused" : "failed")
+        next.failureCode = failureCode == "cancelled" ? nil : failureCode
+        _ = try renewAttachmentUpload(uploadID, upload: next)
+    }
+    func attachmentUploadStatus(uploadID: String, verifiedBytes: Int64 = 0) throws
+        -> AttachmentIntegrityStatus
+    {
+        let upload = try attachmentUpload(uploadID)
+        let verified =
+            try (upload.phase == "verified" || upload.phase == "published")
+            && attachmentPayloads.isStagedVerified(upload.descriptor)
+        return AttachmentIntegrityStatus(
+            attachmentID: upload.descriptor.attachmentID, uploadID: uploadID,
+            phase: upload.phase,
+            verifiedBytes: verified
+                ? upload.descriptor.byteCount : min(verifiedBytes, upload.descriptor.byteCount),
+            totalBytes: upload.descriptor.byteCount, staging: stagingByteQuota.uploadUsage(id: uploadID))
+    }
+    func prepareAttachmentReadIntegrity(itemID: String, revisionID: String?, attachmentID: String) throws
+        -> AttachmentIntegrityWork?
+    {
+        let descriptor = try attachmentReadDescriptor(
+            itemID: itemID, revisionID: revisionID, attachmentID: attachmentID)
+        if try attachmentPayloads.isVerified(descriptor) { return nil }
+        return AttachmentIntegrityWork(payloads: attachmentPayloads, descriptor: descriptor, uploadID: nil)
+    }
+    private func attachmentReadDescriptor(itemID: String, revisionID: String?, attachmentID: String) throws
+        -> AttachmentDescriptor
+    {
+        let revision = try get(itemID, revisionID: revisionID)
+        guard
+            let descriptor = try AttachmentDescriptor.descriptors(in: revision.fields).first(where: {
+                $0.attachmentID == attachmentID
+            })
+        else {
+            throw TractandaError("notFound", "Attachment is unavailable on this item revision.")
+        }
+        return descriptor
+    }
+    func attachmentReadIntegrityStatus(
+        itemID: String, revisionID: String?, attachmentID: String, verifiedBytes: Int64 = 0
+    ) throws -> AttachmentIntegrityStatus {
+        let descriptor = try attachmentReadDescriptor(
+            itemID: itemID, revisionID: revisionID, attachmentID: attachmentID)
+        let verified = try attachmentPayloads.isVerified(descriptor)
+        return AttachmentIntegrityStatus(
+            attachmentID: attachmentID, uploadID: nil, phase: verified ? "verified" : "verifying",
+            verifiedBytes: verified ? descriptor.byteCount : min(verifiedBytes, descriptor.byteCount),
+            totalBytes: descriptor.byteCount)
+    }
+
+    private func expireAttachmentUploads() throws {
+        let now = attachmentClockForTesting()
+        for (id, upload) in attachmentUploads where upload.expiresAt <= now && upload.phase != "verifying" {
+            _ = try renewAttachmentUpload(id, upload: upload, phase: "discarding")
+            try attachmentPayloads.discardStaging(id: id)
+            try afterAttachmentStageDiscardForTesting?()
+            try attachmentPayloads.removeUpload(id: id)
+            attachmentUploads.removeValue(forKey: id)
+        }
+    }
+    private func attachmentUpload(_ id: String) throws -> AttachmentUploadState {
+        try expireAttachmentUploads()
+        guard let upload = attachmentUploads[id], upload.uid == accessContext!.uid else {
+            throw TractandaError("uploadExpired", "Upload is unavailable; begin again with the same intent.")
+        }
+        let current = try get(upload.request.itemID)
+        try requireEdit(current, changesPermissions: false)
+        return upload
+    }
+    private func attachmentCommitRequest(
+        _ request: AttachmentUploadRequest, descriptor: AttachmentDescriptor
+    ) throws -> CommitRequest {
+        let base = try get(request.itemID, revisionID: request.expectedRevisionID)
+        var descriptors = try AttachmentDescriptor.descriptors(in: base.fields)
+        guard descriptors.count < 128 else {
+            throw TractandaError("resourceLimit", "An item permits at most 128 attachments.")
+        }
+        descriptors.append(descriptor)
+        return CommitRequest(
+            action: .revise, itemID: request.itemID, expectedRevisionID: request.expectedRevisionID,
+            changes: ["attachments": .list(descriptors.map(\.itemValue))], operationID: request.operationID)
+    }
+    public func beginAttachment(_ request: AttachmentUploadRequest) throws -> AttachmentUploadResult {
+        if accessContext == nil { return try withAccess(forUID: ownerUID) { try beginAttachment(request) } }
+        try Identifier.validate(request.itemID)
+        try Identifier.validate(request.expectedRevisionID)
+        guard !request.operationID.isEmpty, request.operationID.utf8.count <= 200,
+            !request.operationID.contains("\0")
+        else {
+            throw TractandaError("invalidArguments", "Supply a nonempty operationID of at most 200 bytes.")
+        }
+        let current = try get(request.itemID)
+        // Replay survives a lost reply and restart; intent includes exact source bytes and base revision.
+        if let prior = try priorOperation(request.operationID, uid: accessContext!.uid) {
+            guard let encoded = prior.fields["requestIdentity"]?.string,
+                let bytes = Data(base64Encoded: encoded),
+                let original = try? JSON.decode(CommitRequest.self, bytes),
+                original.itemID == request.itemID,
+                original.expectedRevisionID == request.expectedRevisionID,
+                original.action == .revise, original.unset.isEmpty,
+                Set(original.changes.keys) == ["attachments"],
+                let descriptor = try AttachmentDescriptor.descriptors(in: original.changes).last,
+                descriptor.filename == request.filename, descriptor.mediaType == request.mediaType,
+                descriptor.byteCount == request.byteCount, descriptor.sha256 == request.sha256
+            else {
+                throw TractandaError("operationMismatch", "Operation already committed a different intent.")
+            }
+            let replay = try commitInternal(attachmentCommitRequest(request, descriptor: descriptor))
+            try attachmentPayloads.removeUpload(id: descriptor.attachmentID)
+            attachmentUploads.removeValue(forKey: descriptor.attachmentID)
+            return AttachmentUploadResult(
+                uploadID: nil, attachment: descriptor, offset: descriptor.byteCount,
+                chunkBytes: 262_144, expiresAt: nil, committed: AttachmentCommitResult(replay))
+        }
+        try requireEdit(current, changesPermissions: false)
+        guard current.revisionID == request.expectedRevisionID else {
+            throw TractandaError("revisionConflict", "The item changed; reconcile before beginning upload.")
+        }
+        try expireAttachmentUploads()
+        if let (id, upload) = attachmentUploads.first(where: {
+            $0.value.uid == accessContext!.uid && $0.value.request.operationID == request.operationID
+        }) {
+            guard upload.request == request else {
+                throw TractandaError("operationMismatch", "Upload operation already has a different intent.")
+            }
+            let renewed = try renewAttachmentUpload(id, upload: upload)
+            return AttachmentUploadResult(
+                uploadID: id, attachment: renewed.descriptor,
+                offset: try attachmentStagedOffset(renewed),
+                chunkBytes: 262_144, expiresAt: Timestamp.format(renewed.expiresAt), committed: nil)
+        }
+        let id = try makePersistentUUID().uuidString.lowercased()
+        let descriptor = try AttachmentDescriptor(
+            attachmentID: id, filename: request.filename, mediaType: request.mediaType,
+            byteCount: request.byteCount, sha256: request.sha256)
+        guard attachmentUploads.count < 64,
+            attachmentUploads.values.filter({ $0.uid == accessContext!.uid }).count < 8
+        else {
+            throw TractandaError(
+                "resourceLimit",
+                "Staging permits eight uploads per caller and 64 total.")
+        }
+        _ = try attachmentCommitRequest(request, descriptor: descriptor)
+        let expiration = attachmentClockForTesting().addingTimeInterval(
+            attachmentUploadPolicy.idleRetentionSeconds)
+        let upload = AttachmentUploadState(
+            uid: accessContext!.uid, request: request, descriptor: descriptor, expiresAt: expiration)
+        try stagingByteQuota.retainUpload(
+            id: id, initialCheckpointBytes: Int64(try JSON.encode(upload).count))
+        var stageOwned = false
+        do {
+            try attachmentPayloads.createStaging(id: id, onCreated: { stageOwned = true })
+        } catch {
+            let admissionError = error
+            if stageOwned {
+                do { try attachmentPayloads.discardStaging(id: id) } catch {
+                    // Uncertain cleanup retains the intent and reservation for retry/disposal.
+                    attachmentUploads[id] = upload
+                    try? attachmentPayloads.saveUpload(upload)
+                    throw admissionError
+                }
+            }
+            stagingByteQuota.completeUpload(id: id)
+            throw admissionError
+        }
+        // Keep an admitted intent discoverable in memory even after an uncertain checkpoint reply.
+        attachmentUploads[id] = upload
+        try attachmentPayloads.saveUpload(upload)
+        return AttachmentUploadResult(
+            uploadID: id, attachment: descriptor, offset: 0, chunkBytes: 262_144,
+            expiresAt: Timestamp.format(expiration), committed: nil)
+    }
+    public func appendAttachment(uploadID: String, offset: Int64, data: Data) throws -> Int64 {
         if accessContext == nil {
-            return try withAccess(forUID: actorUID ?? ownerUID) { try commit(request, actorUID: actorUID) }
+            return try withAccess(forUID: ownerUID) {
+                try appendAttachment(uploadID: uploadID, offset: offset, data: data)
+            }
+        }
+        let upload = try attachmentUpload(uploadID)
+        guard offset >= 0, offset <= upload.descriptor.byteCount,
+            data.count <= 262_144, Int64(data.count) <= upload.descriptor.byteCount - offset
+        else {
+            throw TractandaError(
+                "invalidArguments", "Chunk exceeds the declared original or 256 KiB ceiling.")
+        }
+        guard upload.phase == "uploading" || upload.phase == "paused" else {
+            throw TractandaError("uploadBusy", "Upload is being finalized or has already been published.")
+        }
+        let currentSize = try attachmentPayloads.stagedSize(id: uploadID)
+        if offset == currentSize { try requireAttachmentStagingCapacity(additionalBytes: Int64(data.count)) }
+        let next = try attachmentPayloads.append(id: uploadID, offset: offset, data: data)
+        _ = try renewAttachmentUpload(uploadID, upload: upload, phase: "uploading")
+        return next
+    }
+    public func finishAttachment(uploadID: String, requireVerified: Bool = false) throws -> CommitResult {
+        if accessContext == nil {
+            return try withAccess(forUID: ownerUID) {
+                try finishAttachment(uploadID: uploadID, requireVerified: requireVerified)
+            }
+        }
+        let upload = try attachmentUpload(uploadID)
+        if let code = upload.failureCode {
+            throw TractandaError(code, "Upload integrity verification failed; abort and begin again.")
+        }
+        let request = try attachmentCommitRequest(upload.request, descriptor: upload.descriptor)
+        // Once publication is durable, failure may leave unreachable bytes but never a dangling revision.
+        try attachmentPayloads.publish(descriptor: upload.descriptor, requireVerifiedStage: requireVerified)
+        try afterAttachmentPayloadPublicationForTesting?()
+        _ = try renewAttachmentUpload(uploadID, upload: upload, phase: "published")
+        try beforeAttachmentCommitForTesting?()
+        let result = try commitInternal(request)
+        try afterAttachmentItemCommitForTesting?()
+        try attachmentPayloads.removeUpload(id: uploadID)
+        attachmentUploads.removeValue(forKey: uploadID)
+        return result
+    }
+    public func abortAttachment(uploadID: String) throws {
+        if accessContext == nil {
+            return try withAccess(forUID: ownerUID) { try abortAttachment(uploadID: uploadID) }
+        }
+        let upload = try attachmentUpload(uploadID)
+        _ = try renewAttachmentUpload(uploadID, upload: upload, phase: "discarding")
+        try attachmentPayloads.discardStaging(id: uploadID)
+        try afterAttachmentStageDiscardForTesting?()
+        try attachmentPayloads.removeUpload(id: uploadID)
+        attachmentUploads.removeValue(forKey: uploadID)
+    }
+    public func listAttachments(itemID: String, revisionID: String? = nil) throws -> AttachmentListResult {
+        let revision = try get(itemID, revisionID: revisionID)
+        return AttachmentListResult(
+            itemID: itemID, revisionID: revision.revisionID,
+            attachments: try AttachmentDescriptor.descriptors(in: revision.fields))
+    }
+    public func attachmentContent(
+        itemID: String, revisionID: String? = nil, attachmentID: String, offset: Int64 = 0,
+        limit: Int = 262_144, requireVerified: Bool = false
+    ) throws -> AttachmentContentResult {
+        // Resolve current permissions before any payload path/metadata/read, including history.
+        let revision = try get(itemID, revisionID: revisionID)
+        guard
+            let descriptor = try AttachmentDescriptor.descriptors(in: revision.fields).first(where: {
+                $0.attachmentID == attachmentID
+            })
+        else { throw TractandaError("notFound", "Attachment is unavailable on this item revision.") }
+        let bytes = try attachmentPayloads.read(
+            descriptor: descriptor, offset: offset, limit: limit, requireVerified: requireVerified)
+        let next = offset + Int64(bytes.count)
+        return AttachmentContentResult(
+            attachment: descriptor, offset: offset, nextOffset: next,
+            isComplete: next == descriptor.byteCount, data: bytes)
+    }
+    public func detachAttachment(
+        itemID: String, expectedRevisionID: String, attachmentID: String, operationID: String
+    ) throws -> CommitResult {
+        if accessContext == nil {
+            return try withAccess(forUID: ownerUID) {
+                try detachAttachment(
+                    itemID: itemID, expectedRevisionID: expectedRevisionID,
+                    attachmentID: attachmentID, operationID: operationID)
+            }
+        }
+        let base = try get(itemID, revisionID: expectedRevisionID)
+        let descriptors = try AttachmentDescriptor.descriptors(in: base.fields)
+        guard descriptors.contains(where: { $0.attachmentID == attachmentID }) else {
+            throw TractandaError("notFound", "Attachment is unavailable on the expected item revision.")
+        }
+        return try commitInternal(
+            CommitRequest(
+                action: .revise, itemID: itemID, expectedRevisionID: expectedRevisionID,
+                changes: [
+                    "attachments": .list(
+                        descriptors.filter { $0.attachmentID != attachmentID }.map(\.itemValue))
+                ],
+                operationID: operationID))
+    }
+
+    private func documentExtractionReplay(
+        itemID: String, expectedRevisionID: String, attachmentID: String, operationID: String,
+        identity: DocumentConverterIdentity
+    ) throws -> AttachmentCommitResult? {
+        guard let prior = try priorOperation(operationID, uid: accessContext!.uid) else { return nil }
+        guard let encoded = prior.fields["requestIdentity"]?.string,
+            let data = Data(base64Encoded: encoded),
+            let original = try? JSON.decode(CommitRequest.self, data),
+            original.action == .revise, original.itemID == itemID,
+            original.expectedRevisionID == expectedRevisionID, original.unset.isEmpty,
+            Set(original.changes.keys) == [AttachmentDocumentRepresentation.fieldName],
+            let representation = try AttachmentDocumentRepresentation.representations(in: original.changes)
+                .first(where: { $0.attachmentID == attachmentID }),
+            representation.source.itemID == itemID,
+            representation.source.revisionID == expectedRevisionID,
+            representation.source.attachmentID == attachmentID, representation.identity == identity
+        else {
+            throw TractandaError(
+                "operationMismatch", "This operation committed a different document extraction.")
+        }
+        return AttachmentCommitResult(try commitInternal(original))
+    }
+
+    /// Current authority is scoped to this synchronous admission only. The snapshot
+    /// contains immutable original bytes and no Store, access context or file handles.
+    func prepareAttachmentDocument(
+        itemID: String, expectedRevisionID: String, attachmentID: String, operationID: String,
+        identity: DocumentConverterIdentity, unavailableCode: String? = nil
+    ) throws -> DocumentExtractionAdmission {
+        if accessContext == nil {
+            return try withAccess(forUID: ownerUID) {
+                try prepareAttachmentDocument(
+                    itemID: itemID, expectedRevisionID: expectedRevisionID,
+                    attachmentID: attachmentID, operationID: operationID, identity: identity,
+                    unavailableCode: unavailableCode)
+            }
+        }
+        for id in [itemID, expectedRevisionID, attachmentID] { try Identifier.validate(id) }
+        try identity.validateCurrent()
+        guard !operationID.isEmpty, operationID.utf8.count <= 200, !operationID.contains("\0") else {
+            throw TractandaError(
+                "invalidArguments", "Supply a document extraction operationID of at most 200 bytes.")
+        }
+        let current = try get(itemID)
+        if let replay = try documentExtractionReplay(
+            itemID: itemID, expectedRevisionID: expectedRevisionID, attachmentID: attachmentID,
+            operationID: operationID, identity: identity)
+        {
+            return .replay(replay)
+        }
+        try requireEdit(current, changesPermissions: false)
+        if let unavailableCode {
+            throw TractandaError(unavailableCode, "Document conversion is unavailable or busy.")
+        }
+        guard current.revisionID == expectedRevisionID else {
+            throw TractandaError("revisionConflict", "The item changed; reconcile before extracting.")
+        }
+        guard
+            let descriptor = try AttachmentDescriptor.descriptors(in: current.fields)
+                .first(where: { $0.attachmentID == attachmentID })
+        else { throw TractandaError("notFound", "Attachment is unavailable on this item revision.") }
+        guard descriptor.byteCount <= AttachmentDocumentRepresentation.maximumInputBytes else {
+            throw TractandaError(
+                "resourceLimit",
+                "The current converter bridge still requires a bounded original; the paged bridge is pending."
+            )
+        }
+        let source = try AttachmentDocumentSource(
+            itemID: itemID, revisionID: expectedRevisionID, attachmentID: attachmentID,
+            sha256: descriptor.sha256, byteCount: descriptor.byteCount, mediaType: descriptor.mediaType)
+        var input = Data()
+        input.reserveCapacity(Int(source.byteCount))
+        var offset: Int64 = 0
+        while offset < source.byteCount {
+            try Task.checkCancellation()
+            let chunk = try attachmentPayloads.read(descriptor: descriptor, offset: offset, limit: 262_144)
+            guard !chunk.isEmpty, Int64(chunk.count) <= source.byteCount - offset else {
+                throw TractandaError(
+                    "attachmentIntegrity", "Original content changed during document admission.")
+            }
+            input.append(chunk)
+            offset += Int64(chunk.count)
+        }
+        return .prepared(
+            DocumentExtractionSnapshot(
+                source: source, operationID: operationID, actorUID: accessContext!.uid,
+                identity: identity, input: input))
+    }
+
+    /// Must be called in a newly resolved authority scope after off-queue conversion.
+    func finishAttachmentDocument(
+        _ snapshot: DocumentExtractionSnapshot, pages: [AttachmentDocumentPage],
+        cancellation: DocumentConversionCancellation? = nil
+    ) throws -> AttachmentCommitResult {
+        if accessContext == nil {
+            return try withAccess(forUID: ownerUID) {
+                try finishAttachmentDocument(snapshot, pages: pages, cancellation: cancellation)
+            }
+        }
+        guard accessContext!.uid == snapshot.actorUID else {
+            throw TractandaError("forbidden", "Document extraction caller changed.")
+        }
+        let source = snapshot.source
+        try cancellation?.check()
+        let current = try get(source.itemID)
+        if let replay = try documentExtractionReplay(
+            itemID: source.itemID, expectedRevisionID: source.revisionID,
+            attachmentID: source.attachmentID, operationID: snapshot.operationID, identity: snapshot.identity)
+        {
+            return replay
+        }
+        try requireEdit(current, changesPermissions: false)
+        guard current.revisionID == source.revisionID else {
+            throw TractandaError("revisionConflict", "The item changed during document conversion.")
+        }
+        guard
+            let descriptor = try AttachmentDescriptor.descriptors(in: current.fields)
+                .first(where: { $0.attachmentID == source.attachmentID }),
+            descriptor.sha256 == source.sha256, descriptor.byteCount == source.byteCount,
+            descriptor.mediaType == source.mediaType
+        else { throw TractandaError("attachmentIntegrity", "Document original changed during conversion.") }
+        let writer = try documentContents.begin(source: source, identity: snapshot.identity)
+        for page in pages {
+            try writer.append(
+                DocumentStoredPage(
+                    pageNumber: Int64(page.pageNumber), sourceSHA256: source.sha256, page: page))
+        }
+        let prepared = try writer.preparePublication()
+        let corpus = try prepareAttachmentDocumentCorpus(
+            snapshot, prepared: prepared, cancellation: cancellation)
+        return try finishAttachmentDocument(
+            snapshot, prepared: prepared, corpus: corpus, cancellation: cancellation)
+    }
+
+    func finishAttachmentDocument(
+        _ snapshot: DocumentExtractionSnapshot, prepared: PreparedDocumentContent,
+        corpus: IndexedCorpusStage? = nil, cancellation: DocumentConversionCancellation? = nil
+    ) throws -> AttachmentCommitResult {
+        if accessContext == nil {
+            return try withAccess(forUID: ownerUID) {
+                try finishAttachmentDocument(
+                    snapshot, prepared: prepared, corpus: corpus, cancellation: cancellation)
+            }
+        }
+        guard accessContext!.uid == snapshot.actorUID else {
+            throw TractandaError("forbidden", "Document actor changed.")
+        }
+        let source = snapshot.source
+        if let replay = try documentExtractionReplay(
+            itemID: source.itemID, expectedRevisionID: source.revisionID,
+            attachmentID: source.attachmentID, operationID: snapshot.operationID, identity: snapshot.identity)
+        {
+            return replay
+        }
+        let current = try get(source.itemID)
+        try requireEdit(current, changesPermissions: false)
+        guard current.revisionID == source.revisionID, prepared.source == source,
+            prepared.identity == snapshot.identity
+        else {
+            throw TractandaError(
+                "revisionConflict", "Document source changed; preserve prepared pages and reconcile.")
+        }
+        guard
+            try AttachmentDescriptor.descriptors(in: current.fields).contains(where: {
+                $0.attachmentID == source.attachmentID && $0.sha256 == source.sha256
+                    && $0.byteCount == source.byteCount && $0.mediaType == source.mediaType
+            })
+        else {
+            throw TractandaError("attachmentIntegrity", "Document original binding changed.")
+        }
+        try cancellation?.check()
+        guard let corpus else {
+            throw TractandaError(
+                "indexProjectionPending", "Prepare the authenticated offline corpus before finalization.")
+        }
+        let content = try documentContents.publishPrepared(prepared)
+        let representation = try AttachmentDocumentRepresentation(
+            representationID: makePersistentUUID().uuidString.lowercased(), attachmentID: source.attachmentID,
+            source: source, extractedAt: prepared.extractedAt, identity: snapshot.identity, content: content)
+        try AttachmentDocumentValidator.validate(representation)
+        var documents = try activeDocuments(
+            in: current.fields, originals: AttachmentDescriptor.descriptors(in: current.fields))
+        documents.removeAll { $0.attachmentID == source.attachmentID }
+        documents.append(representation)
+        let changes = [
+            AttachmentDocumentRepresentation.fieldName: ItemValue.list(try documents.map { try $0.itemValue })
+        ]
+        _ = try AttachmentDocumentRepresentation.representations(in: changes)
+        try Task.checkCancellation()
+        try cancellation?.check()
+        let result = try commitInternal(
+            CommitRequest(
+                action: .revise, itemID: source.itemID,
+                expectedRevisionID: source.revisionID, changes: changes, operationID: snapshot.operationID),
+            indexedCorpus: corpus)
+        if result.isIndexReady {
+            try stagingByteQuota.observeDerived(
+                workID: corpus.workID,
+                retainedEncodedBytes: index?.corpusRetainedBytes(corpus.workID) ?? 0, recovering: true)
+        }
+        return AttachmentCommitResult(result)
+    }
+
+    public func readAttachmentDocument(
+        itemID: String, revisionID: String? = nil, attachmentID: String, pageNumber: Int? = nil
+    ) throws -> AttachmentDocumentReadResult {
+        let revision = try get(itemID, revisionID: revisionID)
+        let descriptor = try attachmentReadDescriptor(
+            itemID: itemID, revisionID: revisionID, attachmentID: attachmentID)
+        guard
+            let document = try AttachmentDocumentRepresentation.representations(in: revision.fields).first(
+                where: { $0.attachmentID == attachmentID }),
+            document.source.sha256 == descriptor.sha256, document.source.byteCount == descriptor.byteCount,
+            document.source.mediaType == descriptor.mediaType
+        else { throw TractandaError("notFound", "Saved document is unavailable on this revision.") }
+        if let content = document.content {
+            let manifest = try documentContents.manifest(content)
+            guard manifest.source == document.source, manifest.identity == document.identity,
+                manifest.extractedAt == document.extractedAt
+            else {
+                throw TractandaError("documentIntegrity", "Saved document provenance changed.")
+            }
+            let page = try pageNumber.map { try documentContents.readPage(content, pageNumber: Int64($0)) }
+            return try AttachmentDocumentReadResult(
+                revision: revision, document: document, pageNumber: pageNumber, savedPage: page)
+        }
+        return try AttachmentDocumentReadResult(
+            revision: revision, document: document, pageNumber: pageNumber)
+    }
+
+    public func documentContentPart(
+        itemID: String, revisionID: String? = nil, attachmentID: String,
+        kind: String, level: Int = 0, index: Int64 = 0, offset: Int64 = 0, limit: Int = 262_144
+    ) throws -> DocumentContentPart {
+        let revision = try get(itemID, revisionID: revisionID)
+        let descriptor = try attachmentReadDescriptor(
+            itemID: itemID, revisionID: revisionID, attachmentID: attachmentID)
+        guard
+            let document = try AttachmentDocumentRepresentation.representations(in: revision.fields).first(
+                where: { $0.attachmentID == attachmentID }),
+            let content = document.content, document.source.sha256 == descriptor.sha256,
+            document.source.byteCount == descriptor.byteCount,
+            document.source.mediaType == descriptor.mediaType
+        else { throw TractandaError("notFound", "Current saved document content is unavailable.") }
+        return try documentContents.part(
+            content, kind: kind, level: level, index: index, offset: offset, limit: limit)
+    }
+
+    var beforeAttachmentTextCommitForTesting: (() throws -> Void)?
+    public func extractAttachmentText(
+        itemID: String, expectedRevisionID: String, attachmentID: String, operationID: String
+    ) throws -> AttachmentCommitResult {
+        if accessContext == nil {
+            return try withAccess(forUID: ownerUID) {
+                try extractAttachmentText(
+                    itemID: itemID, expectedRevisionID: expectedRevisionID,
+                    attachmentID: attachmentID, operationID: operationID)
+            }
+        }
+        try Identifier.validate(itemID)
+        try Identifier.validate(expectedRevisionID)
+        try Identifier.validate(attachmentID)
+        guard !operationID.isEmpty, operationID.utf8.count <= 200, !operationID.contains("\0") else {
+            throw TractandaError("invalidArguments", "Supply a nonempty operationID of at most 200 bytes.")
+        }
+        let current = try get(itemID)
+        if let prior = try priorOperation(operationID, uid: accessContext!.uid) {
+            guard let identity = prior.fields["requestIdentity"]?.string,
+                let data = Data(base64Encoded: identity),
+                let original = try? JSON.decode(CommitRequest.self, data),
+                original.action == .revise, original.itemID == itemID,
+                original.expectedRevisionID == expectedRevisionID, original.unset.isEmpty,
+                Set(original.changes.keys) == ["attachmentText"],
+                let representation = try AttachmentTextRepresentation.representations(in: original.changes)
+                    .first(where: { $0.attachmentID == attachmentID }),
+                representation.source.itemID == itemID,
+                representation.source.revisionID == expectedRevisionID,
+                representation.source.attachmentID == attachmentID
+            else {
+                throw TractandaError(
+                    "operationMismatch", "This operation already committed a different extraction intent.")
+            }
+            return AttachmentCommitResult(try commitInternal(original))
+        }
+        try requireEdit(current, changesPermissions: false)
+        guard current.revisionID == expectedRevisionID else {
+            throw TractandaError("revisionConflict", "The item changed; reconcile before extracting.")
+        }
+        guard
+            let descriptor = try AttachmentDescriptor.descriptors(in: current.fields)
+                .first(where: { $0.attachmentID == attachmentID })
+        else {
+            throw TractandaError("notFound", "Attachment is unavailable on this item revision.")
+        }
+        guard descriptor.byteCount <= 524_288 else {
+            throw TractandaError(
+                "resourceLimit", "Deterministic UTF8 extraction is limited to 512 KiB originals.")
+        }
+        let source = try AttachmentTextSource(
+            itemID: itemID, revisionID: expectedRevisionID,
+            attachmentID: attachmentID, sha256: descriptor.sha256, byteCount: descriptor.byteCount,
+            mediaType: descriptor.mediaType)
+        var input = Data()
+        var offset: Int64 = 0
+        repeat {
+            let bytes = try attachmentPayloads.read(descriptor: descriptor, offset: offset, limit: 262_144)
+            input.append(bytes)
+            offset += Int64(bytes.count)
+            guard input.count <= 524_288, !bytes.isEmpty || offset == descriptor.byteCount else {
+                throw TractandaError("attachmentIntegrity", "Original content changed during extraction.")
+            }
+        } while offset < descriptor.byteCount
+        let representation = try AttachmentTextDecoder.decode(
+            input, source: source,
+            representationID: makePersistentUUID().uuidString.lowercased(), attachmentID: attachmentID,
+            extractedAt: Timestamp.now())
+        var representations = try AttachmentTextRepresentation.representations(in: current.fields)
+        representations.removeAll { $0.attachmentID == attachmentID }
+        representations.append(representation)
+        let values: [String: ItemValue] = ["attachmentText": .list(representations.map(\.itemValue))]
+        _ = try AttachmentTextRepresentation.representations(in: values)
+        let request = CommitRequest(
+            action: .revise, itemID: itemID,
+            expectedRevisionID: expectedRevisionID, changes: values, operationID: operationID)
+        try beforeAttachmentTextCommitForTesting?()
+        return AttachmentCommitResult(try commitInternal(request))
+    }
+
+    private func activeDocuments(in fields: [String: ItemValue], originals: [AttachmentDescriptor]) throws
+        -> [AttachmentDocumentRepresentation]
+    {
+        try AttachmentDocumentRepresentation.representations(in: fields).filter { document in
+            originals.contains {
+                $0.attachmentID == document.attachmentID && $0.sha256 == document.source.sha256
+                    && $0.byteCount == document.source.byteCount && $0.mediaType == document.source.mediaType
+            }
+        }
+    }
+
+    private func completeAttachmentCopyQuota(key: String) throws {
+        let files = DocumentContentFiles(
+            root: root, ownerUID: ownerUID,
+            minimumFreeBytes: attachmentUploadPolicy.minimumFreeBytes,
+            availableBytes: attachmentCapacityProvider)
+        let path = ["copies", key, "completed.json"]
+        if let existing = try files.readIfPresent(path: path, maximumBytes: 256) {
+            guard existing == Data(key.utf8) else {
+                throw TractandaError("attachmentIntegrity", "Copy completion changed.")
+            }
+        } else {
+            try files.writeImmutable(Data(key.utf8), path: path)
+        }
+        try files.synchronizeDirectory(Array(path.dropLast()))
+        stagingByteQuota.complete(copyKey: key)
+    }
+    func prepareAttachmentCopy(_ request: CommitRequest) throws -> AttachmentCopyAdmission {
+        guard request.action == .copy, let itemID = request.itemID,
+            let revisionID = request.expectedRevisionID
+        else { throw TractandaError("invalidArguments", "Copy requires an item and expected revision.") }
+        guard request.changes["attachments"] == nil, request.changes["attachmentText"] == nil,
+            request.changes["attachmentDocument"] == nil,
+            Set(request.unset).isDisjoint(with: ["attachments", "attachmentText", "attachmentDocument"])
+        else {
+            throw TractandaError("invalidArguments", "Reserved attachment fields cannot be forged.")
+        }
+        guard !request.operationID.isEmpty, request.operationID.utf8.count <= 200,
+            !request.operationID.contains("\0"),
+            Set(request.unset).count == request.unset.count,
+            Set(request.changes.keys).isDisjoint(with: request.unset),
+            Self.managed.isDisjoint(with: request.changes.keys), Self.managed.isDisjoint(with: request.unset)
+        else { throw TractandaError("invalidArguments", "Invalid copy intent.") }
+        let uid = accessContext!.uid
+        if try priorOperation(request.operationID, uid: uid) != nil {
+            let result = try commit(request, allowBlockingAttachmentCopy: false)
+            let key = AttachmentCopyPlan(
+                actorUID: uid, request: request, originals: [], documents: [],
+                targetIDs: [], representationIDs: [], byteQuota: 1
+            ).key
+            // Replay still authorizes the current target before operational cleanup.
+            if (try? FileMetadata.read(at: root.appendingPathComponent("copies/" + key + "/intent.json")))
+                != nil
+            {
+                try completeAttachmentCopyQuota(key: key)
+            }
+            return .replay(result)
+        }
+        let source = try get(itemID)
+        guard source.revisionID == revisionID else {
+            throw TractandaError("revisionConflict", "Copy source changed; reconcile before copying.")
+        }
+        let originals = try AttachmentDescriptor.descriptors(in: source.fields)
+        let documents = try activeDocuments(in: source.fields, originals: originals)
+        if originals.isEmpty { return .replay(try commit(request, allowBlockingAttachmentCopy: false)) }
+        var estimate: Int64 = 0
+        for amount in originals.map(\.byteCount)
+            + documents.map({ $0.content?.totalEncodedBytes ?? Int64((try? JSON.encode($0).count) ?? 0) })
+        {
+            let next = estimate.addingReportingOverflow(amount)
+            guard !next.overflow else { throw TractandaError("resourceLimit", "Copy byte count overflowed.") }
+            estimate = next.partialValue
+        }
+        let files = DocumentContentFiles(
+            root: root, ownerUID: ownerUID, minimumFreeBytes: attachmentUploadPolicy.minimumFreeBytes,
+            availableBytes: attachmentCapacityProvider, stagingQuota: stagingByteQuota)
+        var plan = AttachmentCopyPlan(
+            actorUID: uid, request: request, originals: originals, documents: documents,
+            targetIDs: try originals.map { _ in try makePersistentUUID().uuidString.lowercased() },
+            representationIDs: try documents.map { _ in try makePersistentUUID().uuidString.lowercased() },
+            byteQuota: attachmentUploadPolicy.maximumStagedBytes)
+        var isResuming = false
+        if let bytes = try files.readIfPresent(
+            path: ["copies", plan.key, "intent.json"], maximumBytes: 16 * 1024 * 1024)
+        {
+            let prior = try JSON.decode(AttachmentCopyPlan.self, bytes)
+            guard prior.actorUID == uid, try JSON.encode(prior.request) == JSON.encode(request),
+                prior.originals == originals, prior.documents == documents
+            else { throw TractandaError("operationMismatch", "Copy intent changed.") }
+            plan = prior
+            isResuming = true
+        }
+        try requireAttachmentStagingCapacity(additionalBytes: isResuming ? 0 : estimate)
+        try plan.validate()
+        return .prepared(
+            AttachmentCopyWork(
+                plan: plan, payloads: attachmentPayloads, documents: documentContents, files: files,
+                stagingQuota: stagingByteQuota))
+    }
+    func finishAttachmentCopy(_ prepared: PreparedAttachmentCopy) throws -> CommitResult {
+        let plan = prepared.plan
+        guard plan.actorUID == accessContext!.uid else {
+            throw TractandaError("forbidden", "Copy actor changed.")
+        }
+        if try priorOperation(plan.request.operationID, uid: plan.actorUID) != nil {
+            return try commit(plan.request, allowBlockingAttachmentCopy: false)
+        }
+        let source = try get(plan.request.itemID!)
+        guard source.revisionID == plan.request.expectedRevisionID else {
+            throw TractandaError("revisionConflict", "Copy source changed; prepared bytes are retained.")
+        }
+        guard try AttachmentDescriptor.descriptors(in: source.fields) == plan.originals,
+            try activeDocuments(in: source.fields, originals: plan.originals) == plan.documents,
+            prepared.originals.count == plan.originals.count, prepared.documents.count == plan.documents.count
+        else { throw TractandaError("attachmentIntegrity", "Prepared copy bindings changed.") }
+        guard prepared.signatures.count == prepared.originals.count else {
+            throw TractandaError("attachmentIntegrity", "Prepared copy proof count changed.")
+        }
+        for (index, original) in prepared.originals.enumerated() {
+            try Task.checkCancellation()
+            _ = try withAccess(forUID: plan.actorUID) { try get(plan.request.itemID!) }
+            try attachmentPayloads.restoreVerifiedSignature(original, expected: prepared.signatures[index])
+            try attachmentPayloads.publish(descriptor: original, requireVerifiedStage: true)
+        }
+        var copiedDocuments: [AttachmentDocumentRepresentation] = []
+        for (index, document) in plan.documents.enumerated() {
+            guard
+                let original = plan.originals.firstIndex(where: { $0.attachmentID == document.attachmentID })
+            else { throw TractandaError("documentIntegrity", "Document original disappeared from its copy.") }
+            let content = try documentContents.publishPrepared(prepared.documents[index])
+            copiedDocuments.append(
+                try AttachmentDocumentRepresentation(
+                    representationID: plan.representationIDs[index],
+                    attachmentID: prepared.originals[original].attachmentID,
+                    source: document.source, extractedAt: document.extractedAt, identity: document.identity,
+                    content: content))
+        }
+        try beforeAttachmentCopyCommitForTesting?()
+        let result = try withAccess(forUID: plan.actorUID) {
+            _ = try get(plan.request.itemID!)
+            return try commitInternal(
+                plan.request, preparedCopyOriginals: prepared.originals,
+                preparedCopyDocuments: copiedDocuments)
+        }
+        try completeAttachmentCopyQuota(key: plan.key)
+        return result
+    }
+
+    public func commit(
+        _ request: CommitRequest, actorUID: UInt32? = nil, allowBlockingAttachmentCopy: Bool = true
+    ) throws -> CommitResult {
+        guard request.changes["attachments"] == nil, !request.unset.contains("attachments") else {
+            throw TractandaError(
+                "invalidAttachment", "Use attachment lifecycle operations to change originals.")
+        }
+        guard request.changes["attachmentText"] == nil, !request.unset.contains("attachmentText") else {
+            throw TractandaError(
+                "invalidAttachmentText", "Use guarded extraction to change saved attachment representations.")
+        }
+        guard request.changes["attachmentDocument"] == nil, !request.unset.contains("attachmentDocument")
+        else {
+            throw TractandaError(
+                "invalidDocumentOutput", "Use guarded extraction to change saved document representations.")
+        }
+        return try commitInternal(
+            request, actorUID: actorUID, allowBlockingAttachmentCopy: allowBlockingAttachmentCopy)
+    }
+
+    private func commitInternal(
+        _ request: CommitRequest, actorUID: UInt32? = nil, allowBlockingAttachmentCopy: Bool = true,
+        preparedCopyOriginals: [AttachmentDescriptor]? = nil,
+        preparedCopyDocuments: [AttachmentDocumentRepresentation]? = nil,
+        indexedCorpus: IndexedCorpusStage? = nil
+    ) throws -> CommitResult {
+        if accessContext == nil {
+            return try withAccess(forUID: actorUID ?? ownerUID) {
+                try commitInternal(
+                    request, actorUID: actorUID, allowBlockingAttachmentCopy: allowBlockingAttachmentCopy,
+                    preparedCopyOriginals: preparedCopyOriginals,
+                    preparedCopyDocuments: preparedCopyDocuments,
+                    indexedCorpus: indexedCorpus
+                )
+            }
         }
         guard isCanonicalReady else {
             throw TractandaError(
@@ -2586,6 +3574,58 @@ public final class ItemStore {
             fields.removeValue(forKey: "learningFeedback")
             fields.removeValue(forKey: "permissions")
             fields.removeValue(forKey: "templateKey")
+            fields.removeValue(forKey: "attachmentText")
+            fields.removeValue(forKey: "attachmentDocument")
+            // Copy owns independent originals; never share private source attachment identities.
+            let originals = try AttachmentDescriptor.descriptors(in: base!.fields)
+            guard allowBlockingAttachmentCopy || originals.isEmpty else {
+                throw TractandaError(
+                    "attachmentCopyRequiresJob",
+                    "Attached-item copies require the forthcoming bounded copy job path.")
+            }
+            let copies =
+                try preparedCopyOriginals
+                ?? originals.map {
+                    try attachmentPayloads.clone(
+                        source: $0, newID: makePersistentUUID().uuidString.lowercased())
+                }
+            if !copies.isEmpty { fields["attachments"] = .list(copies.map(\.itemValue)) }
+            let clonedByID = Dictionary(
+                uniqueKeysWithValues: zip(originals, copies).map { ($0.attachmentID, $1) })
+            let representations = try AttachmentTextRepresentation.representations(in: base!.fields)
+            let remapped = try representations.filter { representation in
+                originals.contains {
+                    $0.attachmentID == representation.attachmentID
+                        && $0.sha256 == representation.source.sha256
+                        && $0.byteCount == representation.source.byteCount
+                        && $0.mediaType == representation.source.mediaType
+                }
+            }.map { representation in
+                guard let clone = clonedByID[representation.attachmentID],
+                    clone.sha256 == representation.source.sha256,
+                    clone.byteCount == representation.source.byteCount,
+                    clone.mediaType == representation.source.mediaType
+                else { return representation }
+                return try representation.remapping(
+                    attachmentID: clone.attachmentID,
+                    representationID: makePersistentUUID().uuidString.lowercased())
+            }
+            if !remapped.isEmpty { fields["attachmentText"] = .list(remapped.map(\.itemValue)) }
+            let documents = try activeDocuments(in: base!.fields, originals: originals)
+            let remappedDocuments =
+                try preparedCopyDocuments
+                ?? documents.map { document in
+                    guard let clone = clonedByID[document.attachmentID],
+                        clone.sha256 == document.source.sha256, clone.byteCount == document.source.byteCount,
+                        clone.mediaType == document.source.mediaType
+                    else { return document }
+                    return try documentContents.clone(
+                        document, attachmentID: clone.attachmentID,
+                        representationID: makePersistentUUID().uuidString.lowercased())
+                }
+            if !remappedDocuments.isEmpty {
+                fields["attachmentDocument"] = .list(try remappedDocuments.map { try $0.itemValue })
+            }
         }
         let now = Timestamp.now()
         let itemID = isNew ? try makePersistentUUID().uuidString.lowercased() : base!.itemID
@@ -2818,7 +3858,7 @@ public final class ItemStore {
             guard let index else { throw TractandaError("indexUnavailable", "Index requires rebuilding.") }
             try index.execute("BEGIN IMMEDIATE")
             do {
-                try index.put(revision)
+                try index.put(revision, corpus: indexedCorpus)
                 try index.upsertCatalogue(newLocation.catalogueRow(revisionID: revision.revisionID))
                 try index.execute("COMMIT")
                 if Self.categoryUsesClock(revision) || base.map(Self.categoryUsesClock) == true {
@@ -2856,8 +3896,12 @@ public final class ItemStore {
             warnings: warnings)
     }
 
-    public func rebuildIndex() throws {
+    public func rebuildIndex() throws { try rebuildIndex(control: nil) }
+    func rebuildIndex(control: RebuildControl?) throws {
         try requireAdministrator()
+        rebuildControl = control
+        defer { rebuildControl = nil }
+        try control?.check()
         indexRebuildInProgress = true
         defer { indexRebuildInProgress = false }
         var rebuildPublished = false
@@ -2880,6 +3924,7 @@ public final class ItemStore {
         // replacement catalogue is durable, the previous clean catalogue must not be reused.
         try StoreCheckpoint.markDirty(root: root)
         isCanonicalReady = false
+        try control?.pulse(phase: "verifyingCanonicalClosure")
         if let index { try index.closeChecked() }
         index = nil
         hasLivePersonalStateMemo = nil
@@ -2898,6 +3943,7 @@ public final class ItemStore {
         defer { statements.close() }
         let recoveryPhases = try recover(
             staging: fresh, statements: statements, measurePhases: measureStartup)
+        try control?.pulse(phase: "finalizingIndex")
         try fresh.finalizeSavedViewMaterializations()
         let recoveryEnded = ProcessInfo.processInfo.systemUptime
         isCanonicalReady = false
@@ -2917,6 +3963,8 @@ public final class ItemStore {
         temporaryIsClosed = true
         try index?.closeChecked()
         index = nil
+        try control?.authorizePublication()
+        try control?.pulse(phase: "publishingIndex")
         let publicationStarted = ProcessInfo.processInfo.systemUptime
         // Old rollback/WAL state belongs to the discarded database. SQLite
         // must not recover it against the newly rebuilt file at the same path.
@@ -2933,6 +3981,7 @@ public final class ItemStore {
         if let index { installIndexFailureHandler(index) }
         try StoreCheckpoint.syncDirectory(indexDirectory)
         if StoreCheckpoint.isDirty(root: root) {
+            try control?.authorizePublication()
             try beforeCheckpointClear?()
             try StoreCheckpoint.clear(root: root)
         }
@@ -2994,13 +4043,19 @@ public final class ItemStore {
     /// and synchronize writable canonical bytes and ancestor entries before sealing a clean
     /// checkpoint. Read-only archive paths retain their existing recovery exemption.
     private func syncCanonicalForCheckpoint(index: ItemIndex) throws {
+        try rebuildControl?.pulse(phase: "synchronizingCanonicalDurability")
         try beforeCanonicalDurabilitySync?()
+        func confirmedEntry() throws {
+            try rebuildControl?.pulse(durabilityEntries: 1)
+            try afterCanonicalSyncEntryForTesting?()
+        }
         let itemsRoot = root.appendingPathComponent("items")
         var cursor: String?
         while true {
             let rows = try index.recoveryRowPage(after: cursor, limit: 128)
             if rows.isEmpty { break }
             for row in rows {
+                try rebuildControl?.check()
                 let locationURL = root.appendingPathComponent(row.path)
                 let archiveState = tractanda_path_read_only(locationURL.path)
                 guard archiveState >= 0 else {
@@ -3012,23 +4067,1197 @@ public final class ItemStore {
                         throw TractandaError(
                             "recoveryError", "Cannot open canonical record for synchronization.")
                     }
+                    defer { _ = close(descriptor) }
+                    try rebuildControl?.check()
                     let result = fsync(descriptor)
-                    _ = close(descriptor)
                     guard result == 0 else {
                         throw TractandaError("recoveryError", "Cannot synchronize canonical record.")
                     }
                 }
+                try confirmedEntry()
                 var directory = locationURL.deletingLastPathComponent()
                 while directory.path.hasPrefix(itemsRoot.path + "/") {
+                    try rebuildControl?.check()
                     if tractanda_path_read_only(directory.path) != 1 {
                         try StoreCheckpoint.syncDirectory(directory)
                     }
+                    try confirmedEntry()
                     directory.deleteLastPathComponent()
                 }
                 cursor = row.revisionID
             }
         }
+        try rebuildControl?.check()
         if tractanda_path_read_only(itemsRoot.path) != 1 { try StoreCheckpoint.syncDirectory(itemsRoot) }
+        try confirmedEntry()
+        try rebuildControl?.check()
         if tractanda_path_read_only(root.path) != 1 { try StoreCheckpoint.syncDirectory(root) }
+        try confirmedEntry()
+    }
+}
+
+// Durable document lifecycle is internal until the sequential producer/coordinator is wired.
+extension ItemStore {
+    private func saveDocumentJob(_ record: DocumentJobRecord) throws {
+        documentJobs[record.intent.jobID] = record  // Fence uncertain checkpoint replies in this process.
+        try documentJobRecords.save(record)
+    }
+    private func archiveDocumentJob(_ record: DocumentJobRecord) throws {
+        try documentJobRecords.archive(record)
+        stagingByteQuota.releaseJobAdmission(id: record.intent.jobID)
+        documentJobs.removeValue(forKey: record.intent.jobID)
+        documentJobWriters.removeValue(forKey: record.intent.jobID)
+    }
+    private func documentJobAuthority(_ id: String) throws -> DocumentJobRecord {
+        try Identifier.validate(id)
+        guard let record = try documentJobs[id] ?? documentJobRecords.archived(id),
+            record.intent.actorUID == (accessContext?.uid ?? ownerUID) || isAdministrator
+        else {
+            throw TractandaError("notFound", "Document job is unavailable.")
+        }
+        _ = try get(record.intent.source.itemID)  // Fresh current source ACL even for staged reads.
+        return record
+    }
+    private func validateDocumentJobActor(_ record: DocumentJobRecord, configurationSHA256: String) throws {
+        guard configurationSHA256 == record.intent.configurationSHA256 else {
+            throw TractandaError(
+                "documentConfigurationChanged", "Resume requires the original configured producer identity.")
+        }
+        try record.intent.identity.validateCurrent()
+        try withAccess(forUID: record.intent.actorUID) {
+            let principal =
+                accessContext!.account.map { "user:\($0.name)" } ?? "uid:\(record.intent.actorUID)"
+            guard principal == record.intent.actorPrincipal else {
+                throw TractandaError("documentActorChanged", "The original document actor identity changed.")
+            }
+            let current = try get(record.intent.source.itemID)
+            try requireEdit(current)
+            guard try AttachmentDescriptor.descriptors(in: current.fields).contains(record.intent.descriptor)
+            else {
+                throw TractandaError("documentOriginalChanged", "The job original descriptor changed.")
+            }
+        }
+    }
+    private func documentJobReplay(_ record: DocumentJobRecord) throws -> AttachmentCommitResult? {
+        do {
+            let intent = record.intent
+            _ = try get(intent.source.itemID)
+            guard let index, let receipts = try index.receipts(named: intent.request.operationID) else {
+                throw TractandaError(
+                    "indexUnavailable", "Cannot reconcile bounded document operation receipts.")
+            }
+            let matches = receipts.filter { $0.actor == intent.actorPrincipal }
+            guard matches.count <= 1 else {
+                throw TractandaError("operationMismatch", "Document intent has conflicting actor receipts.")
+            }
+            guard let match = matches.first else { return nil }
+            guard let prior = try loadRevision(match.revisionID) else {
+                throw TractandaError(
+                    "recoveryError", "Document commit receipt points to an unavailable revision.")
+            }
+            guard let encoded = prior.fields["requestIdentity"]?.string,
+                let data = Data(base64Encoded: encoded),
+                let original = try? JSON.decode(CommitRequest.self, data),
+                original.action == .revise, original.itemID == intent.source.itemID,
+                original.expectedRevisionID == record.checkpoint.expectedRevisionID,
+                original.unset.isEmpty,
+                Set(original.changes.keys) == [AttachmentDocumentRepresentation.fieldName],
+                let representation = try AttachmentDocumentRepresentation.representations(
+                    in: original.changes
+                ).first(where: { $0.attachmentID == intent.source.attachmentID }),
+                representation.source == intent.source, representation.identity == intent.identity,
+                representation.extractedAt == intent.extractedAt, let content = representation.content,
+                record.checkpoint.pageCount == content.pageCount,
+                record.checkpoint.coverage == content.coverage,
+                let prepared = record.checkpoint.prepared,
+                prepared.rootEntry.sha256 == content.rootSHA256,
+                prepared.byteCount == content.totalEncodedBytes
+            else {
+                throw TractandaError(
+                    "operationMismatch", "Document operation committed a different immutable intent.")
+            }
+            return AttachmentCommitResult(
+                CommitResult(revision: prior, wasReplayed: true, isIndexReady: isCanonicalReady, warnings: [])
+            )
+        }
+    }
+    private func reconciledDocumentJob(_ record: DocumentJobRecord) throws -> DocumentJobRecord {
+        guard record.checkpoint.committed == nil, let receipt = try documentJobReplay(record),
+            receipt.isIndexReady
+        else {
+            return record
+        }
+        var reconciled = record
+        reconciled.checkpoint.state = "completed"
+        reconciled.checkpoint.reasonCode = nil
+        reconciled.checkpoint.committed = receipt
+        return reconciled
+    }
+    func startDocumentJob(
+        _ request: DocumentJobStart, identity: DocumentConverterIdentity, configurationSHA256: String
+    ) throws -> DocumentJobStatus {
+        if accessContext == nil {
+            return try withAccess(forUID: ownerUID) {
+                try startDocumentJob(request, identity: identity, configurationSHA256: configurationSHA256)
+            }
+        }
+        let current = try get(request.itemID)
+        let actor = accessContext!.uid
+        if let existing = try documentJobs.values.first(where: {
+            $0.intent.actorUID == actor && $0.intent.request.operationID == request.operationID
+        })
+            ?? documentJobRecords.archived(actorUID: actor, operationID: request.operationID)
+        {
+            guard existing.intent.request == request, existing.intent.identity == identity,
+                existing.intent.configurationSHA256 == configurationSHA256
+            else {
+                throw TractandaError(
+                    "operationMismatch", "Document operation already names a different job intent.")
+            }
+            return try documentJobStatus(existing.intent.jobID)
+        }
+        try requireEdit(current)
+        try identity.validateCurrent()
+        guard current.revisionID == request.expectedRevisionID else {
+            throw TractandaError(
+                "revisionConflict", "Reconcile the current item before starting a document job.")
+        }
+        guard
+            let descriptor = try AttachmentDescriptor.descriptors(in: current.fields).first(where: {
+                $0.attachmentID == request.attachmentID
+            })
+        else {
+            throw TractandaError("notFound", "Document original is unavailable.")
+        }
+        guard documentJobs.count < 64,
+            documentJobs.values.filter({
+                $0.intent.actorUID == actor && $0.checkpoint.state != "completed" && !$0.checkpoint.discarded
+            }).count < 8
+        else {
+            throw TractandaError("resourceLimit", "Durable document job slots are full.")
+        }
+        let source = try AttachmentDocumentSource(
+            itemID: current.itemID, revisionID: current.revisionID,
+            attachmentID: descriptor.attachmentID, sha256: descriptor.sha256, byteCount: descriptor.byteCount,
+            mediaType: descriptor.mediaType)
+        let intent = DocumentJobIntent(
+            jobID: try UUID.makeVersion1().uuidString.lowercased(), actorUID: actor,
+            actorPrincipal: accessContext!.account.map { "user:\($0.name)" } ?? "uid:\(actor)",
+            request: request, descriptor: descriptor, source: source, identity: identity,
+            configurationSHA256: configurationSHA256, extractedAt: Timestamp.now())
+        var record = DocumentJobRecord(intent: intent)
+        try record.validate()
+        // Reject operation reuse before acquiring a durable new admission.
+        if try priorOperation(request.operationID, uid: actor) != nil {
+            throw TractandaError("operationMismatch", "Operation already committed outside this job.")
+        }
+        try stagingByteQuota.retainJob(id: intent.jobID, initialBytes: Int64(try JSON.encode(record).count))
+        try saveDocumentJob(record)
+        do {
+            _ = try documentContents.beginJob(
+                id: intent.jobID, source: source, identity: identity, extractedAt: intent.extractedAt)
+        } catch {
+            record.checkpoint.state = "paused"
+            record.checkpoint.reasonCode = (error as? TractandaError)?.code ?? "documentStageUnavailable"
+            try saveDocumentJob(record)
+        }
+        return record.status
+    }
+    func documentJobStatus(_ id: String) throws -> DocumentJobStatus {
+        if accessContext == nil { return try withAccess(forUID: ownerUID) { try documentJobStatus(id) } }
+        let record = try documentJobAuthority(id)
+        if record.checkpoint.committed != nil { return record.status }
+        // A read never rewrites another actor's checkpoint or acquires its producer.
+        return try reconciledDocumentJob(record).status
+    }
+    func listDocumentJobs(afterJobID: String? = nil, limit: Int = 32) throws -> DocumentJobList {
+        if accessContext == nil {
+            return try withAccess(forUID: ownerUID) {
+                try listDocumentJobs(afterJobID: afterJobID, limit: limit)
+            }
+        }
+        guard (1...64).contains(limit) else {
+            throw TractandaError("invalidArguments", "Job discovery limit must be1...64.")
+        }
+        if let afterJobID { try Identifier.validate(afterJobID) }
+        var results: [DocumentJobStatus] = []
+        var next: String?
+        for id in documentJobs.keys.sorted() where afterJobID.map({ id > $0 }) ?? true {
+            guard let record = try? documentJobAuthority(id), record.checkpoint.state != "completed",
+                !record.checkpoint.discarded
+            else { continue }
+            if results.count == limit {
+                next = results.last?.jobID
+                break
+            }
+            let status = try documentJobStatus(id)
+            if status.state != "completed" { results.append(status) }
+        }
+        return DocumentJobList(jobs: results, nextJobID: next)
+    }
+    func documentJobPage(_ id: String, pageNumber: Int64) throws -> DocumentJobPage {
+        if accessContext == nil {
+            return try withAccess(forUID: ownerUID) { try documentJobPage(id, pageNumber: pageNumber) }
+        }
+        let record = try reconciledDocumentJob(documentJobAuthority(id))
+        guard !record.checkpoint.discarded, pageNumber > 0, pageNumber <= record.checkpoint.acceptedPages
+        else {
+            throw TractandaError("notFound", "Accepted provisional page is unavailable.")
+        }
+        guard record.checkpoint.committed == nil else {
+            throw TractandaError(
+                "documentJobCompleted", "Read committed document pages through their canonical revision.")
+        }
+        let page =
+            try record.checkpoint.prepared.map {
+                try documentContents.readPreparedJobPage($0, number: pageNumber)
+            }
+            ?? documentContents.readStagedPage(
+                stage: record.intent.stage, source: record.intent.source,
+                identity: record.intent.identity, number: pageNumber)
+        return DocumentJobPage(jobID: id, outcome: page)
+    }
+    func controlDocumentJob(
+        _ id: String, action: String, expectedRevisionID: String? = nil, configurationSHA256: String,
+        deferMaterialWork: Bool = false
+    ) throws -> DocumentJobStatus {
+        if accessContext == nil {
+            return try withAccess(forUID: ownerUID) {
+                try controlDocumentJob(
+                    id, action: action, expectedRevisionID: expectedRevisionID,
+                    configurationSHA256: configurationSHA256, deferMaterialWork: deferMaterialWork)
+            }
+        }
+        guard ["cancel", "resume", "rebase", "discard"].contains(action) else {
+            throw TractandaError("invalidArguments", "Unknown document job control.")
+        }
+        var record = try documentJobAuthority(id)
+        record = try reconciledDocumentJob(record)  // Lost commit reply wins over all intent mutation.
+        if record.checkpoint.state == "completed" {
+            if documentJobs[id] != nil {
+                try saveDocumentJob(record)
+                try archiveDocumentJob(record)
+            }
+            return record.status
+        }
+        if record.checkpoint.discarded {
+            if action == "discard", !deferMaterialWork {
+                if try hasRetainedDocumentIndexWork(record) {
+                    record.checkpoint.reasonCode = "indexProjectionPending"
+                    try saveDocumentJob(record)
+                    return record.status
+                }
+                try documentContents.discardJob(
+                    stage: record.intent.stage, prepared: record.checkpoint.prepared)
+                if documentJobs[id] != nil { try archiveDocumentJob(record) }
+            }
+            return record.status
+        }
+        try record.checkpoint.fence()
+        documentJobWriters.removeValue(forKey: id)
+        if action == "cancel" || action == "discard" {
+            record.checkpoint.state = "cancelled"
+            record.checkpoint.reasonCode = action == "discard" ? "discarded" : "userCancelled"
+            // Tombstone precedes disposal and makes interrupted discard recoverable.
+            record.checkpoint.discarded = action == "discard"
+            try saveDocumentJob(record)
+            if action == "discard", !deferMaterialWork {
+                if try hasRetainedDocumentIndexWork(record) {
+                    record.checkpoint.reasonCode = "indexProjectionPending"
+                    try saveDocumentJob(record)
+                    return record.status
+                }
+                try documentContents.discardJob(
+                    stage: record.intent.stage, prepared: record.checkpoint.prepared)
+                if documentJobs[id] != nil { try archiveDocumentJob(record) }
+            }
+            return record.status
+        }
+        do {
+            try validateDocumentJobActor(record, configurationSHA256: configurationSHA256)
+            if action == "rebase" {
+                guard let expectedRevisionID else {
+                    throw TractandaError("invalidArguments", "Rebase requires an explicit current revision.")
+                }
+                try Identifier.validate(expectedRevisionID)
+                guard try get(record.intent.source.itemID).revisionID == expectedRevisionID else {
+                    throw TractandaError(
+                        "revisionConflict", "Rebase expectation is not the current revision.")
+                }
+                record.checkpoint.expectedRevisionID = expectedRevisionID
+                record.checkpoint.corpusArtifactName = nil
+            }
+            if deferMaterialWork {
+                record.checkpoint.state = "queued"
+                record.checkpoint.reasonCode = nil
+                try saveDocumentJob(record)
+                return record.status
+            }
+            guard try !hasRetainedDocumentIndexWork(record) else {
+                throw TractandaError(
+                    "indexProjectionPending",
+                    "Resume retained Index work through the sequential document producer.")
+            }
+            _ = try documentContents.beginJob(
+                id: id, source: record.intent.source, identity: record.intent.identity,
+                extractedAt: record.intent.extractedAt)
+            if record.checkpoint.prepared == nil {
+                let writer = try documentContents.reopenJob(
+                    stage: record.intent.stage, source: record.intent.source,
+                    identity: record.intent.identity, extractedAt: record.intent.extractedAt,
+                    acceptedPages: record.checkpoint.acceptedPages, pageCount: record.checkpoint.pageCount)
+                record.checkpoint.acceptedPages = writer.acceptedPages
+                record.checkpoint.coverage = try writer.coverage
+                documentJobWriters[id] = writer
+            } else {
+                try documentContents.revalidatePrepared(record.checkpoint.prepared!)
+            }
+            record.checkpoint.state = record.checkpoint.prepared == nil ? "queued" : "readyToPublish"
+            record.checkpoint.reasonCode = nil
+        } catch {
+            record.checkpoint.state = "paused"
+            record.checkpoint.reasonCode = (error as? TractandaError)?.code ?? "documentRecoveryFailed"
+        }
+        try saveDocumentJob(record)
+        return record.status
+    }
+    /// A producer receives one generation token; all later accepts/CAS must present it.
+    func claimDocumentJob(_ id: String, configurationSHA256: String, expectedGeneration: Int64? = nil) throws
+        -> DocumentJobRecord
+    {
+        var record = try documentJobAuthority(id)
+        guard record.intent.actorUID == (accessContext?.uid ?? ownerUID), record.checkpoint.state == "queued",
+            !record.checkpoint.discarded
+        else {
+            throw TractandaError("documentJobNotRunnable", "Job cannot admit a producer in this state.")
+        }
+        guard expectedGeneration.map({ $0 == record.checkpoint.generation }) ?? true else {
+            throw TractandaError("documentJobFenced", "Queued admission was superseded.")
+        }
+        try validateDocumentJobActor(record, configurationSHA256: configurationSHA256)
+        try record.checkpoint.fence()
+        record.checkpoint.state = "verifyingOriginal"
+        try saveDocumentJob(record)
+        return record
+    }
+    func inspectDocumentJob(_ id: String, generation: Int64, pageCount: Int64) throws {
+        var record = try runningDocumentJob(id, generation: generation)
+        guard pageCount > 0, record.checkpoint.pageCount == nil || record.checkpoint.pageCount == pageCount
+        else {
+            throw TractandaError("documentIntegrity", "Inspected page count changed or is invalid.")
+        }
+        record.checkpoint.pageCount = pageCount
+        record.checkpoint.state = "running"
+        try saveDocumentJob(record)
+    }
+    private func runningDocumentJob(_ id: String, generation: Int64) throws -> DocumentJobRecord {
+        let record = try documentJobAuthority(id)
+        guard record.intent.actorUID == (accessContext?.uid ?? ownerUID),
+            record.checkpoint.generation == generation,
+            ["verifyingOriginal", "inspecting", "running", "readyToPublish"].contains(
+                record.checkpoint.state), !record.checkpoint.discarded
+        else {
+            throw TractandaError("documentJobFenced", "Document producer was cancelled or superseded.")
+        }
+        try validateDocumentJobActor(record, configurationSHA256: record.intent.configurationSHA256)
+        return record
+    }
+    func appendDocumentJobPage(_ id: String, generation: Int64, page: DocumentStoredPage) throws
+        -> DocumentJobStatus
+    {
+        var record = try runningDocumentJob(id, generation: generation)
+        guard record.checkpoint.state == "running", let pageCount = record.checkpoint.pageCount,
+            page.pageNumber <= pageCount, record.checkpoint.prepared == nil
+        else {
+            throw TractandaError("documentIntegrity", "Page lies outside inspected terminal coverage.")
+        }
+        let writer: DocumentContentWriter
+        if let retained = documentJobWriters[id] {
+            writer = retained
+        } else {
+            writer = try documentContents.reopenJob(
+                stage: record.intent.stage, source: record.intent.source,
+                identity: record.intent.identity, extractedAt: record.intent.extractedAt,
+                acceptedPages: record.checkpoint.acceptedPages, pageCount: pageCount)
+            documentJobWriters[id] = writer
+        }
+        if page.pageNumber <= writer.acceptedPages {
+            guard
+                try documentContents.readStagedPage(
+                    stage: record.intent.stage, source: record.intent.source,
+                    identity: record.intent.identity, number: page.pageNumber) == page
+            else {
+                throw TractandaError("documentIntegrity", "Accepted page replay changed.")
+            }
+        } else {
+            try writer.append(page)
+        }
+        record.checkpoint.acceptedPages = writer.acceptedPages
+        record.checkpoint.coverage = try writer.coverage
+        try saveDocumentJob(record)  // Acknowledge each sealed page before requesting the next.
+        return record.status
+    }
+    func prepareDocumentJobPublication(_ id: String, generation: Int64) throws -> DocumentJobStatus {
+        var record = try runningDocumentJob(id, generation: generation)
+        guard record.checkpoint.pageCount == record.checkpoint.acceptedPages,
+            record.checkpoint.acceptedPages > 0
+        else {
+            throw TractandaError(
+                "documentIncomplete",
+                "Publication requires an explicit terminal outcome for every inspected page.")
+        }
+        if record.checkpoint.prepared == nil {
+            let writer =
+                try documentJobWriters[id]
+                ?? documentContents.reopenJob(
+                    stage: record.intent.stage,
+                    source: record.intent.source, identity: record.intent.identity,
+                    extractedAt: record.intent.extractedAt,
+                    acceptedPages: record.checkpoint.acceptedPages, pageCount: record.checkpoint.pageCount)
+            record.checkpoint.prepared = try writer.preparePublication()
+            documentJobWriters.removeValue(forKey: id)
+        }
+        record.checkpoint.state = "readyToPublish"
+        try saveDocumentJob(record)
+        return record.status
+    }
+    /// Called on startup only after producers are absent; cancelled work remains cancelled.
+    func recoverDocumentJobs(configurationSHA256: String) throws {
+        for id in documentJobs.keys.sorted() {
+            guard let record = documentJobs[id] else { continue }
+            if record.checkpoint.state == "completed" {
+                try archiveDocumentJob(record)
+            } else if record.checkpoint.discarded {
+                _ = try controlDocumentJob(id, action: "discard", configurationSHA256: configurationSHA256)
+            } else if record.checkpoint.state != "cancelled" {
+                _ = try controlDocumentJob(id, action: "resume", configurationSHA256: configurationSHA256)
+            }
+        }
+    }
+    /// Coordinator must quiesce its child before invoking this Store-side generation fence.
+    func pauseDocumentJobs(reasonCode: String) throws {
+        guard ["serverShutdown", "storeMaintenance", "producerInterrupted"].contains(reasonCode) else {
+            throw TractandaError("invalidArguments", "Unknown producer lifecycle pause reason.")
+        }
+        for id in documentJobs.keys.sorted() {
+            guard var record = documentJobs[id],
+                ["queued", "verifyingOriginal", "inspecting", "running", "readyToPublish"].contains(
+                    record.checkpoint.state)
+            else { continue }
+            try record.checkpoint.fence()
+            record.checkpoint.state = "paused"
+            record.checkpoint.reasonCode = reasonCode
+            documentJobWriters.removeValue(forKey: id)
+            try saveDocumentJob(record)
+        }
+    }
+    var afterDocumentJobCommitForTesting: (() throws -> Void)? {
+        get { afterAttachmentItemCommitForTesting }
+        set { afterAttachmentItemCommitForTesting = newValue }
+    }
+    func publishDocumentJob(_ id: String, generation: Int64) throws -> DocumentJobStatus {
+        var record = try reconciledDocumentJob(documentJobAuthority(id))
+        if record.checkpoint.state == "completed" {
+            if documentJobs[id] != nil {
+                try saveDocumentJob(record)
+                try archiveDocumentJob(record)
+            }
+            return record.status
+        }
+        record = try runningDocumentJob(id, generation: generation)
+        guard let prepared = record.checkpoint.prepared, record.checkpoint.state == "readyToPublish" else {
+            throw TractandaError("documentIncomplete", "Prepare terminal page coverage first.")
+        }
+        guard try get(record.intent.source.itemID).revisionID == record.checkpoint.expectedRevisionID else {
+            try pauseDocumentJob(id, generation: generation, reasonCode: "revisionConflict")
+            throw TractandaError("revisionConflict", "Rebase explicitly before offline publication.")
+        }
+        // Explicit offline preparation, outside every head/writer transaction. Managed routing
+        // uses the detached producer instead of this synchronous fixture/offline adapter.
+        let corpus = try prepareOfflineDocumentCorpus(itemID: record.intent.source.itemID, prepared: prepared)
+        let content = try documentContents.publishPrepared(prepared)
+        return try publishIndexedDocumentJob(id, generation: generation, content: content, corpus: corpus)
+    }
+}
+
+extension ItemStore {
+    func documentJobMaterialWork(_ id: String, generation: Int64, configurationSHA256: String) throws
+        -> DocumentJobMaterialWork
+    {
+        let record = try runningDocumentJob(id, generation: generation)
+        try validateDocumentJobActor(record, configurationSHA256: configurationSHA256)
+        return DocumentJobMaterialWork(
+            intent: record.intent, checkpoint: record.checkpoint,
+            payloads: attachmentPayloads, contents: documentContents)
+    }
+    /// Compact acceptance only; producer already sealed/validated its bounded material off queue.
+    func acknowledgeDocumentStage(_ seal: DocumentStageSeal) throws -> DocumentJobStatus {
+        var record = try runningDocumentJob(seal.jobID, generation: seal.generation)
+        let next = record.checkpoint.acceptedPages.addingReportingOverflow(1)
+        let sameCount = seal.acceptedPages == record.checkpoint.acceptedPages
+        guard sameCount || (!next.overflow && seal.acceptedPages == next.partialValue) else {
+            throw TractandaError(
+                "documentIntegrity", "One sealed outcome must be acknowledged before another.")
+        }
+        let oldCounts = [
+            record.checkpoint.coverage.converted, record.checkpoint.coverage.unsupported,
+            record.checkpoint.coverage.truncated, record.checkpoint.coverage.timedOut,
+            record.checkpoint.coverage.failed,
+        ]
+        let newCounts = [
+            seal.coverage.converted, seal.coverage.unsupported, seal.coverage.truncated,
+            seal.coverage.timedOut, seal.coverage.failed,
+        ]
+        guard zip(oldCounts, newCounts).allSatisfy({ $1 >= $0 }),
+            !sameCount || seal.coverage == record.checkpoint.coverage
+        else {
+            throw TractandaError(
+                "documentIntegrity", "Acknowledged outcome coverage cannot change retroactively.")
+        }
+        guard seal.source == record.intent.source, seal.identity == record.intent.identity,
+            seal.extractedAt == record.intent.extractedAt,
+            seal.acceptedPages >= record.checkpoint.acceptedPages,
+            try seal.coverage.processedPageCount() == seal.acceptedPages,
+            record.checkpoint.pageCount.map({ seal.acceptedPages <= $0 }) ?? (seal.acceptedPages == 0)
+        else {
+            throw TractandaError("documentIntegrity", "Detached stage acknowledgement binding changed.")
+        }
+        if let prepared = seal.prepared {
+            guard prepared.stage == record.intent.stage, prepared.source == seal.source,
+                prepared.identity == seal.identity, prepared.extractedAt == seal.extractedAt,
+                prepared.rootEntry.lastPage == seal.acceptedPages, prepared.coverage == seal.coverage,
+                seal.acceptedPages == record.checkpoint.pageCount
+            else {
+                throw TractandaError("documentIncomplete", "Prepared stage lacks full inspected coverage.")
+            }
+            record.checkpoint.prepared = prepared
+            record.checkpoint.state = "readyToPublish"
+        }
+        record.checkpoint.acceptedPages = seal.acceptedPages
+        record.checkpoint.coverage = seal.coverage
+        try saveDocumentJob(record)
+        return record.status
+    }
+}
+
+extension ItemStore {
+    /// Startup enumerates compact records only; the detached producer rebuilds/authenticates frontiers.
+    func recoverDocumentJobAdmissions(configurationSHA256: String?) throws -> [DocumentJobAdmission] {
+        var admissions: [DocumentJobAdmission] = []
+        for id in documentJobs.keys.sorted() {
+            guard let record = documentJobs[id] else { continue }
+            if record.checkpoint.state == "completed" {
+                try archiveDocumentJob(record)
+            } else if record.checkpoint.discarded {
+                admissions.append(
+                    DocumentJobAdmission(
+                        jobID: id, actorUID: ownerUID, generation: record.checkpoint.generation, discard: true
+                    ))
+            } else if let configurationSHA256,
+                ["queued", "verifyingOriginal", "inspecting", "running", "readyToPublish"].contains(
+                    record.checkpoint.state)
+                    || [
+                        "serverShutdown", "storeMaintenance", "producerInterrupted", "indexProjectionPending",
+                    ].contains(record.checkpoint.reasonCode ?? "")
+            {
+                do {
+                    _ = try withAccess(forUID: record.intent.actorUID) {
+                        try controlDocumentJob(
+                            id, action: "resume", configurationSHA256: configurationSHA256,
+                            deferMaterialWork: true)
+                    }
+                } catch {
+                    var paused = record
+                    try paused.checkpoint.fence()
+                    paused.checkpoint.state = "paused"
+                    paused.checkpoint.reasonCode =
+                        (error as? TractandaError)?.code ?? "documentRecoveryFailed"
+                    try saveDocumentJob(paused)
+                }
+                if let runnable = documentJobs[id], runnable.checkpoint.state == "queued" {
+                    admissions.append(
+                        DocumentJobAdmission(
+                            jobID: id, actorUID: runnable.intent.actorUID,
+                            generation: runnable.checkpoint.generation, discard: false))
+                }
+            }
+        }
+        return admissions
+    }
+    func documentJobAdmission(_ id: String, discard: Bool = false) throws -> DocumentJobAdmission {
+        let record = try documentJobAuthority(id)
+        return DocumentJobAdmission(
+            jobID: id, actorUID: discard ? (accessContext?.uid ?? ownerUID) : record.intent.actorUID,
+            generation: record.checkpoint.generation, discard: discard)
+    }
+    func documentJobDisposalWork(_ id: String, generation: Int64) throws -> DocumentJobMaterialWork {
+        // The durable authorized tombstone is the disposal capability, even if its actor was removed.
+        guard let record = documentJobs[id], record.checkpoint.generation == generation,
+            record.checkpoint.discarded, record.checkpoint.committed == nil
+        else {
+            throw TractandaError("documentJobFenced", "Job no longer owns uncommitted disposal.")
+        }
+        return DocumentJobMaterialWork(
+            intent: record.intent, checkpoint: record.checkpoint,
+            payloads: attachmentPayloads, contents: documentContents)
+    }
+    func acknowledgeDocumentJobDisposal(_ id: String, generation: Int64) throws {
+        guard let record = documentJobs[id], record.checkpoint.generation == generation,
+            record.checkpoint.discarded, record.checkpoint.committed == nil
+        else {
+            throw TractandaError("documentJobFenced", "Disposal acknowledgement was superseded.")
+        }
+        try archiveDocumentJob(record)
+    }
+    func pauseDocumentJob(
+        _ id: String, generation: Int64, reasonCode: String, reasonMessage: String? = nil
+    ) throws {
+        // Failure fencing grants no content or publication rights, including after actor revocation.
+        guard var record = documentJobs[id], record.checkpoint.generation == generation,
+            !record.checkpoint.discarded, record.checkpoint.committed == nil,
+            ["verifyingOriginal", "inspecting", "running", "readyToPublish"].contains(record.checkpoint.state)
+        else {
+            throw TractandaError("documentJobFenced", "Failure checkpoint was superseded.")
+        }
+        try record.checkpoint.fence()
+        record.checkpoint.state = "paused"
+        record.checkpoint.reasonCode = reasonCode
+        record.checkpoint.reasonMessage = reasonMessage
+        try saveDocumentJob(record)
+    }
+    func retainDocumentJobForIndex(_ id: String, generation: Int64) throws {
+        var record = try runningDocumentJob(id, generation: generation)
+        guard record.checkpoint.prepared != nil else {
+            throw TractandaError("documentIncomplete", "Index publication requires a sealed document.")
+        }
+        record.checkpoint.state = "readyToPublish"
+        record.checkpoint.reasonCode = "indexProjectionPending"
+        try saveDocumentJob(record)
+    }
+}
+
+extension ItemStore {
+    /// Safe failure metadata only: a stale admission cannot stop a later explicit resume/rebase.
+    func pauseQueuedDocumentJob(_ admission: DocumentJobAdmission, reasonCode: String) throws {
+        guard var record = documentJobs[admission.jobID], !admission.discard,
+            record.intent.actorUID == admission.actorUID,
+            record.checkpoint.generation == admission.generation,
+            record.checkpoint.state == "queued", !record.checkpoint.discarded
+        else { return }
+        try record.checkpoint.fence()
+        record.checkpoint.state = "paused"
+        record.checkpoint.reasonCode = reasonCode
+        try saveDocumentJob(record)
+    }
+}
+
+extension ItemStore {
+    func capturePageCorpus(itemID: String, incoming: PreparedDocumentContent? = nil) throws
+        -> StoredPageCorpusSnapshot
+    {
+        let current = try get(itemID)
+        let plan = try incoming.map { prepared in
+            try PageCorpusDocumentPlan(
+                attachmentID: prepared.source.attachmentID,
+                source: prepared.source, identity: prepared.identity, extractedAt: prepared.extractedAt,
+                rootSHA256: prepared.rootEntry.sha256, pageCount: prepared.rootEntry.lastPage,
+                totalEncodedBytes: prepared.byteCount, coverage: prepared.coverage)
+        }
+        return StoredPageCorpusSnapshot(
+            input: try PageCorpusInput(
+                storeID: canonicalStoreIdentity(creatingIfMissing: false), revision: current, incoming: plan),
+            provider: StoredPageCorpusProvider(contents: documentContents, incoming: incoming))
+    }
+    func captureIndexedCorpus(itemID: String, expectedRevisionID: String? = nil) throws
+        -> IndexedCorpusSnapshot?
+    {
+        let current = try get(itemID)
+        guard expectedRevisionID == nil || expectedRevisionID == current.revisionID else {
+            throw TractandaError("revisionConflict", "Current corpus head changed.")
+        }
+        guard isCanonicalReady, let index else {
+            throw TractandaError("indexUnavailable", "Current lexical index is unavailable.")
+        }
+        guard !current.isDeleted else { return nil }
+        guard try index.corpusMatches(current),
+            let preflight = try index.captureCorpusSnapshot(
+                itemID: itemID, expectedRevisionID: current.revisionID)
+        else {
+            throw TractandaError(
+                "indexProjectionPending", "Current authenticated corpus components are incomplete.")
+        }
+        guard preflight.identity.unitCount > 0 else { return nil }
+        let id = try UUID.makeVersion1().uuidString.lowercased()
+        guard try index.corpusRetainedBytes(id) == 0 else {
+            throw TractandaError("identifierCollision", "Reader retention identity is already owned.")
+        }
+        let charge = try ItemIndex.corpusReadLeaseCharge(id, identity: preflight.identity)
+        try requireIndexFilesystemCapacity(additionalBytes: 65_536 + Int64(preflight.links.count) * 4096)
+        try stagingByteQuota.reserveDerived(workID: id, estimatedAdditionalBytes: charge)
+        do {
+            guard
+                let snapshot = try index.captureCorpusSnapshot(
+                    itemID: itemID, expectedRevisionID: current.revisionID, retentionID: id)
+            else {
+                throw TractandaError(
+                    "indexProjectionPending", "Current corpus disappeared before reader capture.")
+            }
+            // Accounting follows COMMIT before capacity, permissions or any other later failure.
+            try stagingByteQuota.observeDerived(
+                workID: id, retainedEncodedBytes: index.corpusRetainedBytes(id))
+            try requireIndexFilesystemCapacity(additionalBytes: 0)
+            try revalidateIndexedCorpus(snapshot)
+            return snapshot
+        } catch {
+            let failure = error
+            // Even an uncertain capture reply can have committed a durable header. No reader
+            // escaped, so this ID is fenced for retirement; failures retain debt and retry proof.
+            do {
+                let retained = try index.corpusRetainedBytes(id)
+                try stagingByteQuota.observeDerived(
+                    workID: id, retainedEncodedBytes: retained, recovering: true)
+                if retained > 0 {
+                    pendingCorpusReadReleases.insert(id)
+                    try? retireCorpusReadLease(id)
+                }
+            } catch {
+                // An unreadable ledger cannot prove rollback/disposal; preserve the fenced ID.
+                pendingCorpusReadReleases.insert(id)
+            }
+            throw failure
+        }
+    }
+    func revalidateIndexedCorpus(_ snapshot: IndexedCorpusSnapshot) throws {
+        let current = try get(snapshot.identity.itemID)  // Fresh current ACL before delivery.
+        guard isCanonicalReady, let index else {
+            throw TractandaError("indexUnavailable", "Current lexical index is unavailable.")
+        }
+        guard current.revisionID == snapshot.identity.revisionID, try index.corpusMatches(current) else {
+            throw TractandaError("revisionConflict", "Current authenticated corpus binding changed.")
+        }
+        try index.validateCorpusReadLease(snapshot)
+    }
+    func releaseIndexedCorpus(_ snapshot: IndexedCorpusSnapshot) throws {
+        // Owning caller has finished every detached reader before presenting this disposal proof.
+        if let id = snapshot.retentionID {
+            pendingCorpusReadReleases.insert(id)
+            try retireCorpusReadLease(id)
+        }
+    }
+    private func retireCorpusReadLease(_ id: String) throws {
+        guard let index else {
+            throw TractandaError("indexUnavailable", "Reader debt cannot be reconciled without its index.")
+        }
+        let before = try index.corpusRetainedBytes(id)
+        if before == 0 {
+            // A normal read-work header has positive charge. An absent header needs no writer
+            // transaction or failed-disposal proof; this also makes repeated release idempotent.
+            try stagingByteQuota.observeDerived(workID: id, retainedEncodedBytes: 0, recovering: true)
+            pendingCorpusReadReleases.remove(id)
+            return
+        }
+        var failure: Error?
+        do {
+            try beforeCorpusReadReleaseForTesting?(id)
+            try index.releaseCorpusWork(id)
+        } catch { failure = error }
+        // Reconcile actual committed bytes even if the release reply/budget check failed.
+        try stagingByteQuota.observeDerived(
+            workID: id, retainedEncodedBytes: index.corpusRetainedBytes(id), recovering: true)
+        if let failure { throw failure }
+        pendingCorpusReadReleases.remove(id)
+    }
+    @discardableResult
+    func retireOnePendingCorpusRead() throws -> Bool {
+        guard let id = pendingCorpusReadReleases.sorted().first else { return false }
+        try retireCorpusReadLease(id)
+        return true
+    }
+    private func reclaimStartupCorpusReaders() throws {
+        // Constructor owns exclusive store/index writer locks; no reader in this process exists.
+        // Old process leases are fenced, while stage/discard ownership and canonical links survive.
+        guard let index else { return }
+        var cursor: String?
+        while true {
+            let page = try index.corpusReadWorkPage(after: cursor, limit: 64)
+            guard !page.isEmpty else { break }
+            for id in page {
+                pendingCorpusReadReleases.insert(id)
+                try retireCorpusReadLease(id)
+                cursor = id
+            }
+        }
+        try restoreCorpusRecoveryCharges()  // Observe any shared ownership transfers after retirement.
+    }
+    func corpusReadStateForTesting() throws -> (count: Int, charge: Int64, pending: Int) {
+        guard let index else { throw TractandaError("indexUnavailable", "Reader state is unavailable.") }
+        let ids = try index.corpusReadWorkPage(limit: 64)
+        var charge: Int64 = 0
+        for id in ids { charge += stagingByteQuota.corpusCharge(id) }
+        return (ids.count, charge, pendingCorpusReadReleases.count)
+    }
+    func requireIndexFilesystemCapacity(additionalBytes: Int64) throws {
+        guard additionalBytes >= 0 else {
+            throw TractandaError("resourceLimit", "Negative index growth estimate.")
+        }
+        var capacity = statvfs()
+        guard statvfs(indexDirectory.path, &capacity) == 0, capacity.f_frsize > 0 else {
+            throw TractandaError("resourceLimit", "Cannot determine genuine index-filesystem capacity.")
+        }
+        let available = UInt64(capacity.f_bavail).multipliedReportingOverflow(by: UInt64(capacity.f_frsize))
+        let required = UInt64(attachmentUploadPolicy.minimumFreeBytes).addingReportingOverflow(
+            UInt64(additionalBytes))
+        guard !available.overflow, !required.overflow, available.partialValue >= required.partialValue else {
+            throw TractandaError("resourceLimit", "Index write would cross the genuine-free reserve.")
+        }
+    }
+}
+
+extension ItemStore {
+    func documentJobProjectionWork(_ id: String, generation: Int64) throws -> DocumentJobProjectionWork {
+        let record = try runningDocumentJob(id, generation: generation)
+        guard let prepared = record.checkpoint.prepared,
+            record.checkpoint.state == "readyToPublish"
+        else {
+            throw TractandaError("documentIncomplete", "Index projection requires a sealed document.")
+        }
+        let current = try get(record.intent.source.itemID)
+        try requireEdit(current)
+        guard current.revisionID == record.checkpoint.expectedRevisionID else {
+            throw TractandaError("revisionConflict", "Rebase explicitly before projecting retained pages.")
+        }
+        return DocumentJobProjectionWork(
+            jobID: id, generation: generation,
+            snapshot: try capturePageCorpus(itemID: current.itemID, incoming: prepared),
+            contents: documentContents, quota: stagingByteQuota,
+            indexPath: indexDirectory.appendingPathComponent("items.sqlite").path,
+            maximumBytes: attachmentUploadPolicy.maximumStagedBytes,
+            minimumFreeBytes: attachmentUploadPolicy.minimumFreeBytes,
+            retainedArtifact: record.checkpoint.corpusArtifactName)
+    }
+    func acknowledgeDocumentCorpus(_ id: String, generation: Int64, prepared: PreparedPageCorpus) throws {
+        var record = try runningDocumentJob(id, generation: generation)
+        let actual = try documentJobProjectionWork(id, generation: generation)
+        guard prepared.receipt.source == actual.snapshot.input.binding,
+            prepared.directory.deletingLastPathComponent().lastPathComponent == "corpus",
+            prepared.directory.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent == id
+        else {
+            throw TractandaError("documentIntegrity", "Corpus seal belongs to another current job/base.")
+        }
+        record.checkpoint.corpusArtifactName = prepared.directory.lastPathComponent
+        try saveDocumentJob(record)
+    }
+    func publishIndexedDocumentJob(
+        _ id: String, generation: Int64,
+        content: DocumentContentReference, corpus: IndexedCorpusStage
+    ) throws -> DocumentJobStatus {
+        var record = try reconciledDocumentJob(documentJobAuthority(id))
+        if record.checkpoint.state == "completed" {
+            if documentJobs[id] != nil {
+                try saveDocumentJob(record)
+                try archiveDocumentJob(record)
+            }
+            return record.status
+        }
+        record = try runningDocumentJob(id, generation: generation)
+        guard let prepared = record.checkpoint.prepared, record.checkpoint.state == "readyToPublish",
+            content.rootSHA256 == prepared.rootEntry.sha256,
+            content.pageCount == prepared.rootEntry.lastPage,
+            content.totalEncodedBytes == prepared.byteCount, content.coverage == prepared.coverage,
+            corpus.workID == id
+        else {
+            throw TractandaError("documentIntegrity", "Publication capability binding changed.")
+        }
+        let current = try get(record.intent.source.itemID)
+        try requireEdit(current)
+        guard current.revisionID == record.checkpoint.expectedRevisionID,
+            corpus.source
+                == (try documentJobProjectionWork(id, generation: generation)).snapshot.input.binding
+        else {
+            throw TractandaError("revisionConflict", "Current projection/publication expectation changed.")
+        }
+        let representation = try AttachmentDocumentRepresentation(
+            representationID: makePersistentUUID().uuidString.lowercased(),
+            attachmentID: record.intent.source.attachmentID, source: record.intent.source,
+            extractedAt: record.intent.extractedAt, identity: record.intent.identity, content: content)
+        var documents = try activeDocuments(
+            in: current.fields, originals: AttachmentDescriptor.descriptors(in: current.fields))
+        documents.removeAll { $0.attachmentID == record.intent.source.attachmentID }
+        documents.append(representation)
+        try beforeDocumentJobCommitForTesting?()
+        let result = try commitInternal(
+            CommitRequest(
+                action: .revise, itemID: current.itemID,
+                expectedRevisionID: record.checkpoint.expectedRevisionID,
+                changes: [
+                    AttachmentDocumentRepresentation.fieldName: .list(try documents.map { try $0.itemValue })
+                ],
+                operationID: record.intent.request.operationID), indexedCorpus: corpus)
+        try afterDocumentJobCommitForTesting?()
+        guard result.isIndexReady else {
+            try pauseDocumentJob(id, generation: generation, reasonCode: "indexUnavailable")
+            throw TractandaError(
+                "indexUnavailable",
+                "Canonical content committed; rebuild before claiming completed search readiness.")
+        }
+        try stagingByteQuota.observeDerived(
+            workID: id,
+            retainedEncodedBytes: index?.corpusRetainedBytes(id) ?? 0, recovering: true)
+        record.checkpoint.committed = AttachmentCommitResult(result)
+        record.checkpoint.state = "completed"
+        record.checkpoint.reasonCode = nil
+        try saveDocumentJob(record)
+        try archiveDocumentJob(record)
+        return record.status
+    }
+}
+
+extension ItemStore {
+    func checkDocumentIndexBoundary(
+        _ id: String, generation: Int64,
+        binding: PageCorpusBinding, reserveBytes: Int64
+    ) throws {
+        let actual = try documentJobProjectionWork(id, generation: generation)
+        guard actual.snapshot.input.binding == binding else {
+            throw TractandaError("revisionConflict", "Current source/ordinary projection changed.")
+        }
+        try requireIndexFilesystemCapacity(additionalBytes: reserveBytes)
+        if reserveBytes > 0 {
+            try stagingByteQuota.reserveDerived(workID: id, estimatedAdditionalBytes: reserveBytes)
+        }
+    }
+    func observeDocumentIndexWork(_ id: String, retainedEncodedBytes: Int64) throws {
+        // Safe ledger reconciliation must still happen when the actor disappears after COMMIT.
+        try stagingByteQuota.observeDerived(workID: id, retainedEncodedBytes: retainedEncodedBytes)
+        try requireIndexFilesystemCapacity(additionalBytes: 0)
+    }
+}
+
+extension ItemStore {
+    /// One canonical current revision per call; no array of complete 8 MiB records is assembled.
+    func semanticCurrentRevision(after itemID: String? = nil) throws -> Revision? {
+        guard isCanonicalReady, let index else {
+            throw TractandaError("indexUnavailable", "Current semantic cursor requires a trusted index.")
+        }
+        if let itemID { try Identifier.validate(itemID) }
+        guard let head = try index.checkpointHead(after: itemID) else { return nil }
+        let revision = try get(head.itemID)
+        guard revision.revisionID == head.revisionID else {
+            throw TractandaError("revisionConflict", "Semantic maintenance head changed.")
+        }
+        return revision
+    }
+}
+
+extension ItemStore {
+    func semanticVectorWriteBoundary(_ batch: Vec1WriteBatch) throws {
+        let work = "vector:" + batch.generationID
+        switch batch.phase {
+        case .beforeAppend:
+            try requireIndexFilesystemCapacity(additionalBytes: batch.estimatedAdditionalBytes)
+            try stagingByteQuota.reserveDerived(
+                workID: work, estimatedAdditionalBytes: batch.estimatedAdditionalBytes)
+        case .afterAppend:
+            // Held Vector writer transaction: no Store/SQLite re-entry or invented physical observation.
+            break
+        case .afterCommit:
+            try stagingByteQuota.observeDerived(
+                workID: work, retainedEncodedBytes: batch.retainedEncodedBytes)
+            try requireIndexFilesystemCapacity(additionalBytes: 0)
+        case .rollback:
+            stagingByteQuota.releaseDerivedReservation(workID: work)
+        case .promotion, .disposal:
+            try stagingByteQuota.observeDerived(workID: work, retainedEncodedBytes: 0, recovering: true)
+            try requireIndexFilesystemCapacity(additionalBytes: 0)
+        }
+    }
+}
+
+extension ItemStore {
+    /// Explicit synchronous offline preparation. Managed routes perform these stages off queue.
+    func prepareAttachmentDocumentCorpus(
+        _ snapshot: DocumentExtractionSnapshot,
+        prepared: PreparedDocumentContent, cancellation: DocumentConversionCancellation? = nil
+    ) throws -> IndexedCorpusStage {
+        let current = try get(snapshot.source.itemID)
+        try requireEdit(current)
+        guard current.revisionID == snapshot.source.revisionID,
+            prepared.source == snapshot.source, prepared.identity == snapshot.identity
+        else {
+            throw TractandaError("revisionConflict", "Offline projection source/base changed.")
+        }
+        return try prepareOfflineDocumentCorpus(
+            itemID: current.itemID, prepared: prepared,
+            cancellation: cancellation)
+    }
+    private func prepareOfflineDocumentCorpus(
+        itemID: String, prepared: PreparedDocumentContent,
+        cancellation: DocumentConversionCancellation? = nil
+    ) throws -> IndexedCorpusStage {
+        let snapshot = try capturePageCorpus(itemID: itemID, incoming: prepared)
+        let workID = prepared.stage.last!
+        let root = try documentContents.offlineCorpusRoot(workID)
+        let reservation = "offline-spool:" + workID
+        let path = ["documents", ".staging", "corpus-" + workID]
+        let policy = try PageCorpusSpoolPolicy(
+            maximumBytes: attachmentUploadPolicy.maximumStagedBytes,
+            minimumFreeBytes: attachmentUploadPolicy.minimumFreeBytes,
+            stagingBoundary: { [stagingByteQuota] directory, growth in
+                try cancellation?.check()
+                if directory == root {
+                    try stagingByteQuota!.reserveDerived(
+                        workID: reservation, estimatedAdditionalBytes: growth)
+                } else {
+                    try stagingByteQuota!.observePrivateCorpus(
+                        path: path, reservationID: reservation,
+                        encodedBytes: PageCorpusAllocation.usage(at: directory).logicalBytes)
+                    try stagingByteQuota!.reserveDerived(
+                        workID: reservation, estimatedAdditionalBytes: growth)
+                }
+            })
+        let spool = try PageCorpusProjection.prepare(
+            input: snapshot.input, provider: snapshot.provider,
+            root: root, policy: policy, boundary: { try cancellation?.check() })
+        let stage = try ItemIndex.stageCorpus(
+            indexPath: indexDirectory.appendingPathComponent("items.sqlite").path,
+            input: snapshot.input, prepared: spool, workID: workID,
+            writeBoundary: { batch in
+                try cancellation?.check()
+                if batch.phase == .before {
+                    try self.requireIndexFilesystemCapacity(additionalBytes: batch.estimatedAdditionalBytes)
+                    try self.stagingByteQuota.reserveDerived(
+                        workID: workID, estimatedAdditionalBytes: batch.estimatedAdditionalBytes)
+                } else if batch.phase == .afterCommit {
+                    try self.observeDocumentIndexWork(
+                        workID, retainedEncodedBytes: batch.retainedEncodedBytes)
+                }
+            }, boundary: { try cancellation?.check() })
+        try documentContents.discardOfflineCorpus(workID)
+        stagingByteQuota.release(path: path)
+        stagingByteQuota.releaseDerivedReservation(workID: reservation)
+        return stage
+    }
+}
+
+extension ItemStore {
+    func restoreCorpusRecoveryCharges() throws {
+        guard let index else { return }
+        var cursor: String?
+        while true {
+            let page = try index.retainedCorpusWorkPage(after: cursor, limit: 64)
+            guard !page.isEmpty else { break }
+            for work in page {
+                try stagingByteQuota.observeDerived(
+                    workID: work.workID,
+                    retainedEncodedBytes: work.retainedEncodedBytes, recovering: true)
+                cursor = work.workID
+            }
+        }
+    }
+    func semanticVectorIndexDisposed() {
+        // Called only after storage is drained/closed and all owned Vector files are gone.
+        stagingByteQuota.releaseDerivedNamespace(prefix: "vector:")
+    }
+}
+
+extension ItemStore {
+    /// Compare the actual common lexical FTS rows for bounded ordinary canonical values.
+    /// Referenced documents retain their authenticated source bindings and use bounded unit reads.
+    func ownedFTSTextState(for revision: Revision) throws -> String {
+        _ = try get(revision.itemID)
+        guard let index else {
+            throw TractandaError("indexUnavailable", "Current lexical index is unavailable.")
+        }
+        let statement = try index.corpusPrepare(
+            "SELECT u.origin,p.text FROM corpus_link l JOIN corpus_generation g ON g.id=l.generation_id AND g.state='ready' JOIN corpus_unit u ON u.generation_id=g.id JOIN page_text_index p ON p.rowid=u.id WHERE l.item_id=? AND g.kind='field' ORDER BY u.ordinal",
+            [revision.itemID])
+        defer { sqlite3_finalize(statement) }
+        var state = "current"
+        func text(_ column: Int32) throws -> String {
+            let count = Int(sqlite3_column_bytes(statement, column))
+            guard count >= 0, count <= 16 * 1024 * 1024,
+                let pointer = sqlite3_column_text(statement, column)
+            else {
+                throw TractandaError("indexError", "Malformed lexical source row.")
+            }
+            let data = Data(bytes: pointer, count: count)
+            guard String(data: data, encoding: .utf8) != nil else {
+                throw TractandaError("indexError", "Malformed lexical UTF8 row.")
+            }
+            return String(decoding: data, as: UTF8.self)
+        }
+        try IndexCorpusPlan.forEachField(revision) { path, value in
+            guard state == "current" else { return }
+            let step = sqlite3_step(statement)
+            if step == SQLITE_DONE {
+                state = "missing"
+                return
+            }
+            guard step == SQLITE_ROW else {
+                throw TractandaError("indexError", "Lexical source query failed.")
+            }
+            let origin = try JSON.decode(PageCorpusOrigin.self, Data(text(0).utf8))
+            let indexedText = try text(1)
+            if origin.kind != "field" || origin.fieldPath != path || indexedText != value {
+                state = "stale"
+            }
+        }
+        if state == "current", sqlite3_step(statement) != SQLITE_DONE { state = "stale" }
+        return state
+    }
+}
+
+extension ItemStore {
+    func documentJobIndexRecoveryWork(_ id: String, generation: Int64, discard: Bool)
+        throws -> DocumentJobIndexRecoveryWork
+    {
+        if discard {
+            _ = try documentJobDisposalWork(id, generation: generation)
+        } else {
+            guard let record = documentJobs[id] else {
+                throw TractandaError("documentJobFenced", "Recovery admission disappeared.")
+            }
+            _ = try withAccess(forUID: record.intent.actorUID) {
+                try documentJobProjectionWork(id, generation: generation)
+            }
+        }
+        guard index != nil else {
+            throw TractandaError("indexUnavailable", "Document recovery requires the current index.")
+        }
+        return DocumentJobIndexRecoveryWork(
+            indexPath: indexDirectory.appendingPathComponent("items.sqlite").path, workID: id)
+    }
+    /// Fresh ledger reads and observations are serialized with all new quota reservations.
+    /// Reconcile both vanished charged IDs and newly transferred ledger owners, one page per call.
+    func reconcileCorpusChargePage(after: String? = nil, charged: Bool) throws -> String? {
+        guard let index else {
+            throw TractandaError("indexUnavailable", "Cannot reconcile unavailable corpus debt.")
+        }
+        let ids =
+            try charged
+            ? stagingByteQuota.chargedCorpusWorkPage(after: after, limit: 64)
+            : index.retainedCorpusWorkPage(after: after, limit: 64).map(\.workID)
+        for id in ids {
+            try stagingByteQuota.observeDerived(
+                workID: id, retainedEncodedBytes: index.corpusRetainedBytes(id), recovering: true)
+        }
+        return ids.last
+    }
+}
+
+extension ItemStore {
+    func pauseDocumentJobDisposal(_ id: String, generation: Int64, reasonCode: String) throws {
+        guard var record = documentJobs[id], record.checkpoint.generation == generation,
+            record.checkpoint.discarded, record.checkpoint.committed == nil
+        else { throw TractandaError("documentJobFenced", "Disposal checkpoint was superseded.") }
+        record.checkpoint.reasonCode = reasonCode
+        try saveDocumentJob(record)
+    }
+}
+
+extension ItemStore {
+    private func hasRetainedDocumentIndexWork(_ record: DocumentJobRecord) throws -> Bool {
+        guard let index else { return record.checkpoint.corpusArtifactName != nil }
+        return try index.corpusRetainedBytes(record.intent.jobID) > 0
     }
 }

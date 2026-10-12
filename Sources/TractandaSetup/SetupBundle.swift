@@ -55,6 +55,31 @@ extension SetupEngine {
                 throw SetupError("Bundle verification failed: \(file.path)")
             }
         }
+        if let document = manifest.documentExtraction {
+            struct Assets: Decodable {
+                struct Asset: Decodable {
+                    let file: String
+                    let bytes: UInt64
+                    let sha256: String
+                }
+                let revision: String
+                let files: [Asset]
+            }
+            let assets = try JSONDecoder().decode(
+                Assets.self, from: Data(contentsOf: bundle.appendingPathComponent(document.modelManifestPath))
+            )
+            guard assets.revision == document.identity.modelRevision, assets.files.count == 14,
+                Set(assets.files.map(\.file)) == DocumentExtractionPayload.assetNames
+            else { throw SetupError("Pinned document asset manifest differs.") }
+            for asset in assets.files {
+                guard
+                    manifest.files.contains(where: {
+                        $0.path == document.modelDirectory + "/" + asset.file
+                            && $0.size == asset.bytes && $0.sha256 == asset.sha256
+                    })
+                else { throw SetupError("Document inventory differs from pinned model assets.") }
+            }
+        }
         return manifest
     }
 

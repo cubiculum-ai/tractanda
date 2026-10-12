@@ -577,4 +577,94 @@ final class CategoryEvaluationContextTests: XCTestCase {
                 [target.itemID])
         }
     }
+    func testCategorySortedPagesUseCallerOverlaysAndFreshRevocation() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(Identifier.make())
+        defer { try? FileManager.default.removeItem(at: root) }
+        let accounts = Accounts()
+        let store = try ItemStore(root: root, accounts: accounts)
+        _ = try store.configureAccess(
+            .object([
+                "profile": .text(AccessConfiguration.profile),
+                "users": .list([.text("alice"), .text("bob")]),
+            ]), operationID: Identifier.make())
+        func category(_ name: String, parent: Revision? = nil) throws -> Revision {
+            try create(
+                store, uid: accounts.alice,
+                fields: [
+                    "subject": .text(name),
+                    "selection": .object([
+                        "language": .text(SpotlightQuery.profile), "expression": .text("itemID == \"\""),
+                    ]),
+                    "categoryParents": .list(parent.map { [.reference(ItemReference($0.itemID))] } ?? []),
+                    "permissions": permissions(owner: "alice", mode: 0o644),
+                ])
+        }
+        let priority = try category("Priority")
+        let high = try category("High", parent: priority)
+        let low = try category("Low", parent: priority)
+        let shared = try create(
+            store, uid: accounts.alice,
+            fields: [
+                "subject": .text("Shared"), "work": .boolean(true),
+                "categoryOverrides": .object([low.itemID: .text("include")]),
+                "permissions": permissions(owner: "alice", mode: 0o640),
+            ])
+        let privateItem = try create(
+            store, uid: accounts.alice,
+            fields: [
+                "subject": .text("Private"), "work": .boolean(true),
+                "categoryOverrides": .object([high.itemID: .text("include")]),
+                "permissions": permissions(owner: "alice", mode: 0o600),
+            ])
+        _ = try create(
+            store, uid: accounts.alice, classID: "PersonalStateItem",
+            fields: [
+                "target": .reference(ItemReference(shared.itemID)),
+                "personalOverrides": .object([high.itemID: .text("include"), low.itemID: .text("exclude")]),
+                "permissions": permissions(owner: "alice", mode: 0o600),
+            ])
+        let sort = [try ItemSort(categoryRootID: priority.itemID), try ItemSort(property: "subject")]
+        store.exactQueryCandidateLimitForTesting = 1
+        for uid in [accounts.alice, accounts.bob] {
+            try store.withAccess(forUID: uid) {
+                let page = try Categories.page(
+                    store: store, expression: "work == true", text: nil,
+                    categoryPath: [], excludedCategoryIDs: [], sort: sort, position: 0, limit: 10,
+                    at: Date(), timeZone: "UTC")
+                XCTAssertEqual(
+                    page.ids, uid == accounts.alice ? [privateItem.itemID, shared.itemID] : [shared.itemID])
+                XCTAssertEqual(page.total, uid == accounts.alice ? 2 : 1)
+            }
+        }
+        try store.withAccess(forUID: accounts.alice) {
+            _ = try store.commit(
+                CommitRequest(
+                    action: .revise, itemID: shared.itemID,
+                    expectedRevisionID: shared.revisionID,
+                    changes: ["permissions": permissions(owner: "alice", mode: 0o600)],
+                    operationID: Identifier.make()))
+        }
+        try store.withAccess(forUID: accounts.bob) {
+            let page = try Categories.page(
+                store: store, expression: "work == true", text: nil,
+                categoryPath: [], excludedCategoryIDs: [], sort: sort, position: 0, limit: 10,
+                at: Date(), timeZone: "UTC")
+            XCTAssertEqual(page.total, 0)
+            XCTAssertTrue(page.ids.isEmpty)
+            var visits = 0
+            XCTAssertThrowsError(
+                try Categories.categorySortedPage(
+                    store: store, expression: "work == true", text: nil,
+                    categoryPath: [], excludedCategoryIDs: [], sort: sort, position: 0, limit: 1,
+                    at: Date(), timeZone: "UTC",
+                    isCancelled: {
+                        visits += 1
+                        return visits >= 2
+                    })
+            ) { XCTAssertTrue($0 is CancellationError) }
+            XCTAssertGreaterThanOrEqual(visits, 2)
+
+        }
+    }
+
 }

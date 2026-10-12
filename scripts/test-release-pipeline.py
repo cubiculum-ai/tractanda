@@ -243,17 +243,17 @@ class ReleaseTests(unittest.TestCase):
             path = Path(temporary) / 'config.json'
             settings = {key: 'configured' for key in (
                 'branch', 'softwareRoot', 'applicationIdentity', 'installerIdentity',
-                'modelDirectory')}
+                'modelDirectory', 'documentModelDirectory')}
             settings.update(repository='owner/repo', instance='production', developerTeamID='ABCDE12345')
             release.write(path, settings)
             self.assertEqual(release.config(path), settings)
 
     def test_release_builds_the_embedding_host_from_the_sealed_source(self):
-        pipeline = release.Pipeline({'directory': '/unused', 'configuration': {'modelDirectory': '/model'},
+        pipeline = release.Pipeline({'directory': '/unused', 'configuration': {'modelDirectory': '/model', 'documentModelDirectory': '/documents'},
                                     'version': 'test', 'steps': {}})
-        with patch.object(pipeline, 'run_command') as run, patch.object(release, 'command', return_value='/built'):
+        with patch.object(pipeline, 'run_command') as run, patch.object(release, 'command', return_value='/built'), patch.object(pipeline, 'verify_document_model'):
             pipeline.build()
-        self.assertEqual(run.call_count, 3)
+        self.assertEqual(run.call_count, 4)
         provider = run.call_args_list[1].args[1]
         self.assertEqual(provider[provider.index('--package-path') + 1], 'Packages/TractandaEmbeddings')
         self.assertIn('--disable-automatic-resolution', provider)

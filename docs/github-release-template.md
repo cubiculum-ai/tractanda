@@ -12,7 +12,7 @@ Use the downloads attached to **this release**. These notes consolidate the stil
 
 **Apple Silicon Mac, macOS 15 or later:** download `Tractanda-{{VERSION}}-arm64.pkg` and open it in macOS Installer. A fresh installation creates a sample database for the logged-in user. An existing installation upgrades its system-default database, preserving its data and settings; read the compatibility guidance below before upgrading an early prototype store.
 
-The package is Developer ID-signed, notarized, stapled and checked by Gatekeeper. `SHA256SUMS` contains the download checksums. The bundle includes the pinned Granite Embedding 311M multilingual R2 model, vmlx-swift host, required runtime libraries and third-party/model notices. No Xcode, Swift, Python or separate model download is needed to use it.
+The package is Developer ID-signed, notarized, stapled and checked by Gatekeeper. `SHA256SUMS` contains the download checksums. The bundle includes the pinned Granite Embedding 311M multilingual R2 model, vmlx-swift embedding host, native document converter, Granite Docling 258M model assets, required runtime libraries and third-party/model notices. No Xcode, Swift, Python or separate model download is needed to use it.
 
 For a fresh evaluation installation with explicit choices, unpack `tractanda-{{VERSION}}-macos-arm64.tar.gz` and run from that directory:
 
@@ -77,7 +77,9 @@ Back up the **complete canonical store**, including durable settings and ownersh
 - HTTP is loopback-oriented, not an Internet-facing gateway. The preview's shared `daemon` identity does not isolate its files from another service running under that same account.
 - Granite CPU inference and native server/Vec1 retrieval passed in an isolated Debian aarch64 container. A supported Linux installer/runtime bundle and physical NAS/x86_64 measurements remain pending; see [source build instructions]({{TAG_URL}}/docs/embedding-runtime.md).
 - The bundled embedding model is Granite Embedding 311M multilingual R2: 768 dimensions, CLS pooling and normalization. Upgrading an installer-managed Qwen or earlier Granite runtime profile creates a new Granite profile and rebuilds derived vectors; canonical item files are preserved. Custom semantic configurations are not overwritten.
-- Attachments, synchronization/offline replicas, a native SwiftUI GUI, scheduled automations and broader feed integrations remain planned. Category learning provides suggestions; automatic classification is not implemented.
+- Attachments preserve immutable originals and support bounded transfer, durable page-by-page document jobs, saved page reads, full-text and semantic retrieval, citations and complete export. See [attachment commands]({{TAG_URL}}/docs/attachment-cli.md), [document content]({{TAG_URL}}/docs/document-content.md) and [document jobs]({{TAG_URL}}/docs/document-jobs.md).
+- Small real PNG and two-page PDF checks plus real embeddings are not a 100-page inference benchmark. Dense pages, complex tables and recognition accuracy have recorded limitations; structural DocTags validation does not guarantee OCR accuracy. Changed runtime/model configurations require explicit retained-job recovery. Linux document runtime and installer packaging remain in development.
+- Synchronization/offline replicas, clustering, a native SwiftUI GUI, scheduled automations and broader feed integrations remain planned. Category learning provides suggestions; automatic classification is not implemented.
 
 The release workflow validates sealed source, code/package signatures, notarization and Gatekeeper acceptance, managed upgrade and canonical-file preservation, live executable identity, and GitHub source CI before publishing. Earlier disposable-store lifecycle checks cover restart, failed-startup rollback and data-preserving uninstall; they do not amount to a production-readiness guarantee or a Linux boot certification.
 

@@ -16,7 +16,7 @@ final class ItemTextContentTests: XCTestCase {
         let corpus = ItemTextContent.corpus(for: revision)
         XCTAssertTrue(corpus.metadata.isEmpty)
         XCTAssertTrue(corpus.sourceText.isEmpty)
-        XCTAssertEqual(ItemTextContent.profile, "tractanda.item-text.v3")
+        XCTAssertEqual(ItemTextContent.profile, "tractanda.item-text.v6")
     }
 
     func testOperationalExclusionDoesNotHideOrdinaryNestedText() throws {

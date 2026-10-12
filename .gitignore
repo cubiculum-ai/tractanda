@@ -63,3 +63,8 @@ node_modules/
 
 # Local static-site output.
 /_site/
+
+# Private local test artifacts and development receipts.
+/Tests/work/
+/guard-repair-receipt.json
+/progress.md

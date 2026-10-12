@@ -16,6 +16,9 @@
 #include <signal.h>
 #include <stdatomic.h>
 #include <poll.h>
+#include <spawn.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
 #include <pwd.h>
 #include <grp.h>
 #include <sys/statvfs.h>
@@ -27,6 +30,8 @@
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <linux/ethtool.h>
+#include <linux/fs.h>
+#include <sys/syscall.h>
 #include <linux/sockios.h>
 #include <sys/ioctl.h>
 #endif
@@ -532,6 +537,11 @@ static void socket_options(int fd) {
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof(yes));
 #endif
 }
+int tractanda_socket_receive_timeout(int fd, uint32_t milliseconds) {
+    if (milliseconds < 1 || milliseconds > 390000) { errno = EINVAL; return -1; }
+    struct timeval timeout = { milliseconds / 1000, (milliseconds % 1000) * 1000 };
+    return setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+}
 static int socket_address(const char *path, struct sockaddr_un *address) {
     if (strlen(path) >= sizeof(address->sun_path)) { errno = ENAMETOOLONG; return -1; }
     memset(address, 0, sizeof(*address));
@@ -626,4 +636,141 @@ int tractanda_receive_frame(int fd, void **bytes, uint32_t *count) {
     if (!buffer) return -1;
     if (read_bytes(fd, buffer, length) != 0) { free(buffer); return -1; }
     *bytes = buffer; *count = length; return 0;
+}
+
+int tractanda_publish_directory_at(int source_parent, const char *source, int target_parent, const char *target) {
+    if (!source || !target || !*source || !*target || strchr(source, '/') || strchr(target, '/') ||
+        !strcmp(source, ".") || !strcmp(source, "..") || !strcmp(target, ".") || !strcmp(target, "..")) {
+        errno = EINVAL;
+        return -1;
+    }
+#ifdef __APPLE__
+    return renameatx_np(source_parent, source, target_parent, target, RENAME_EXCL);
+#elif defined(__linux__) && defined(SYS_renameat2)
+    return (int)syscall(SYS_renameat2, source_parent, source, target_parent, target, RENAME_NOREPLACE);
+#else
+    errno = ENOTSUP;
+    return -1;
+#endif
+}
+
+
+// Child stdio must use a real dup2, even when the parent's 0/1/2 were closed.
+static int document_pipe(int fds[2]) {
+    if (pipe(fds) != 0) return -1;
+    for (int i = 0; i < 2; ++i) {
+        if (fds[i] < 3) {
+            int replacement = fcntl(fds[i], F_DUPFD_CLOEXEC, 3);
+            if (replacement < 0) goto failure;
+            close(fds[i]); fds[i] = replacement;
+        }
+        if (fcntl(fds[i], F_SETFD, FD_CLOEXEC) != 0) goto failure;
+    }
+    return 0;
+failure: {
+    int saved = errno;
+    close(fds[0]); close(fds[1]); fds[0] = fds[1] = -1;
+    errno = saved; return -1;
+    }
+}
+
+extern char **environ;
+int tractanda_document_spawn(
+    const char *executable, const char *const argv[], int32_t *pid,
+    int32_t *input, int32_t *output, int32_t *error) {
+    if (!executable || !*executable || !argv || !argv[0] || !pid || !input || !output || !error) {
+        errno = EINVAL; return -1;
+    }
+    *pid = *input = *output = *error = -1;
+    int fds[6] = {-1, -1, -1, -1, -1, -1};
+    posix_spawnattr_t attributes;
+    posix_spawn_file_actions_t actions;
+    int has_attributes = 0, has_actions = 0, result, saved;
+    pid_t child;
+#define DOCUMENT_APPLY(expression) do { result = (expression); if (result) { errno = result; goto failure; } } while (0)
+    for (int i = 0; i < 6; i += 2) if (document_pipe(&fds[i]) != 0) goto failure;
+    int parent_ends[] = {1, 2, 4};
+    for (int i = 0; i < 3; ++i) {
+        int fd = fds[parent_ends[i]], flags = fcntl(fd, F_GETFL);
+        if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) goto failure;
+    }
+    DOCUMENT_APPLY(posix_spawnattr_init(&attributes)); has_attributes = 1;
+    DOCUMENT_APPLY(posix_spawn_file_actions_init(&actions)); has_actions = 1;
+    short flags = POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF;
+#ifdef __APPLE__
+    flags |= POSIX_SPAWN_CLOEXEC_DEFAULT;
+#endif
+    DOCUMENT_APPLY(posix_spawnattr_setflags(&attributes, flags));
+    DOCUMENT_APPLY(posix_spawnattr_setpgroup(&attributes, 0));
+    sigset_t empty, defaults;
+    sigemptyset(&empty); sigemptyset(&defaults);
+    sigaddset(&defaults, SIGINT); sigaddset(&defaults, SIGTERM); sigaddset(&defaults, SIGHUP);
+    sigaddset(&defaults, SIGPIPE); sigaddset(&defaults, SIGCHLD);
+    DOCUMENT_APPLY(posix_spawnattr_setsigmask(&attributes, &empty));
+    DOCUMENT_APPLY(posix_spawnattr_setsigdefault(&attributes, &defaults));
+    DOCUMENT_APPLY(posix_spawn_file_actions_adddup2(&actions, fds[0], STDIN_FILENO));
+    DOCUMENT_APPLY(posix_spawn_file_actions_adddup2(&actions, fds[3], STDOUT_FILENO));
+    DOCUMENT_APPLY(posix_spawn_file_actions_adddup2(&actions, fds[5], STDERR_FILENO));
+    for (int i = 0; i < 6; ++i) DOCUMENT_APPLY(posix_spawn_file_actions_addclose(&actions, fds[i]));
+#ifndef __APPLE__
+#if defined(__GLIBC__) && defined(__GLIBC_PREREQ)
+#if __GLIBC_PREREQ(2, 34)
+#define TRACTANDA_SPAWN_CLOSEFROM 1
+#endif
+#endif
+#ifdef TRACTANDA_SPAWN_CLOSEFROM
+    DOCUMENT_APPLY(posix_spawn_file_actions_addclosefrom_np(&actions, 3));
+#else
+    // A bounded fallback covers the hard limit, including descriptors opened before a soft-limit drop.
+    struct rlimit descriptor_limit;
+    if (getrlimit(RLIMIT_NOFILE, &descriptor_limit) != 0) goto failure;
+    if (descriptor_limit.rlim_max == RLIM_INFINITY || descriptor_limit.rlim_max > 4096) {
+        errno = ENOTSUP; goto failure;
+    }
+    for (int fd = 3; (rlim_t)fd < descriptor_limit.rlim_max; ++fd) {
+        int is_pipe = 0;
+        for (int i = 0; i < 6; ++i) if (fd == fds[i]) is_pipe = 1;
+        if (!is_pipe) DOCUMENT_APPLY(posix_spawn_file_actions_addclose(&actions, fd));
+    }
+#endif
+#endif
+    DOCUMENT_APPLY(posix_spawn(&child, executable, &actions, &attributes, (char *const *)argv, environ));
+    posix_spawn_file_actions_destroy(&actions); posix_spawnattr_destroy(&attributes);
+    close(fds[0]); close(fds[3]); close(fds[5]);
+    *pid = (int32_t)child; *input = fds[1]; *output = fds[2]; *error = fds[4];
+    return 0;
+failure:
+    saved = errno;
+    if (has_actions) posix_spawn_file_actions_destroy(&actions);
+    if (has_attributes) posix_spawnattr_destroy(&attributes);
+    for (int i = 0; i < 6; ++i) if (fds[i] >= 0) close(fds[i]);
+    errno = saved; return -1;
+#undef DOCUMENT_APPLY
+}
+
+
+int tractanda_document_exited(int32_t pid) {
+    if (pid <= 0) { errno = EINVAL; return -1; }
+    siginfo_t info;
+    memset(&info, 0, sizeof(info));
+    if (waitid(P_PID, (id_t)pid, &info, WEXITED | WNOHANG | WNOWAIT) != 0) return -1;
+    return info.si_pid == pid ? 1 : 0;
+}
+
+int64_t tractanda_document_write(int32_t fd, const void *bytes, size_t count) {
+    sigset_t blocked, original, pending;
+    sigemptyset(&blocked); sigaddset(&blocked, SIGPIPE);
+    int result = pthread_sigmask(SIG_BLOCK, &blocked, &original);
+    if (result) { errno = result; return -1; }
+    int already_pending = sigpending(&pending) == 0 && sigismember(&pending, SIGPIPE);
+    ssize_t written = write(fd, bytes, count);
+    int saved = errno;
+    if (written < 0 && saved == EPIPE && !already_pending
+        && sigpending(&pending) == 0 && sigismember(&pending, SIGPIPE)) {
+        int signal_number;
+        (void)sigwait(&blocked, &signal_number);
+    }
+    result = pthread_sigmask(SIG_SETMASK, &original, NULL);
+    if (result && written >= 0) { errno = result; return -1; }
+    errno = saved; return (int64_t)written;
 }

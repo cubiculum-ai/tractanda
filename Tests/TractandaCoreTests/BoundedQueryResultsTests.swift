@@ -29,6 +29,25 @@ final class BoundedQueryResultsTests: XCTestCase {
         XCTAssertEqual(page.totalCount, input.count)
     }
 
+    func testCompactWindowPagesBeyond512AndChargesReplacementBytes() throws {
+        var results = try BoundedQueryResults<Int>(
+            strategy: .orderedWindow(position: 513, limit: 3), maximumRetainedBytes: 516 * 8,
+            estimateBytes: { _ in 8 }, isOrderedBefore: { $0 < $1 })
+        for value in (0..<600).reversed() { try results.append(value) }
+        XCTAssertEqual(results.retainedCount, 516)
+        XCTAssertEqual(results.retainedByteCount, 516 * 8)
+        let page = try results.finish()
+        XCTAssertEqual(page.totalCount, 600)
+        XCTAssertEqual(page.elements, [513, 514, 515])
+        var replacement = try BoundedQueryResults<Int>(
+            strategy: .orderedWindow(position: 0, limit: 1), maximumRetainedBytes: 8,
+            estimateBytes: { $0 == 0 ? 9 : 8 }, isOrderedBefore: { $0 < $1 })
+        try replacement.append(2)
+        XCTAssertThrowsError(try replacement.append(0))
+        XCTAssertThrowsError(try replacement.finish())
+        XCTAssertEqual(replacement.retainedCount, 0)
+    }
+
     func testReverseOrderAndTiesAreDeterministic() throws {
         let input = [Row(key: 2, id: 5), Row(key: 1, id: 3), Row(key: 2, id: 1), Row(key: 3, id: 4)]
         var accumulator = try BoundedQueryResults(

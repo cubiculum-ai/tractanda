@@ -163,5 +163,30 @@ const f=fixture(),snapshot={};
  assert.equal(savedBoard.data.tasks.length,1);
  assert.deepEqual(Array.from(savedBoard.data.tasks[0].categoryIDs),['ready']);
  assert.deepEqual(saved.batches,[2,3],'Saved view query/get and section/filter membership calls are batched.');
+ const failed=fixture(),controls=new Map(['board-load-error','project-counts','filter-count','connection-message','learning-dialog','search','track-filter'].map(id=>[id,{hidden:true,value:'',open:false,textContent:''}]));
+ const validRead=failed.context.readLiveBoard;
+ Object.assign(failed.context,{isRefreshing:false,refreshGeneration:0,viewGeneration:0,pendingWrite:null,
+  isSaving:false,isConnected:true,data:{tasks:[{id:'stale'}],columns:[{id:'stale-column'}]},
+  revisionsByID:new Map([['stale',{}]]),undoStack:[],changes:0,
+  $:id=>controls.get(id),updateConnectionState:()=>{},render:()=>{},renderProjectViews:()=>{},
+  showWorkspace:()=>{},resumeEditorAfterSignIn:false,
+  readLiveBoard:async()=>{throw Object.assign(new Error('Exact query candidates exceed the bounded working set.'),{code:'resourceLimit'});}
+ });
+ vm.runInContext(live.slice(live.indexOf('  function clearViewData('),live.indexOf('  function restorePendingWrite(')),failed.context);
+ vm.runInContext(live.slice(live.indexOf('  async function refreshLiveBoard('),live.indexOf('  async function selectProjectView(')),failed.context);
+ assert.equal(await failed.context.refreshLiveBoard(),false);
+ assert.equal(failed.context.data.tasks.length,0,'A failed authorized read clears stale cards.');
+ assert.equal(failed.context.revisionsByID.size,0);
+ assert.equal(controls.get('board-load-error').hidden,false,'Failure is explicit inside the board.');
+ assert.match(controls.get('board-load-error').textContent,/Could not load this board: Exact query candidates/);
+ assert.equal(controls.get('project-counts').hidden,true,'A failed read must not claim zero items or columns.');
+ assert.equal(controls.get('filter-count').textContent,'Board unavailable');
+ assert.equal(failed.context.isConnected,false);
+ failed.context.readLiveBoard=validRead;
+ assert.equal(await failed.context.refreshLiveBoard(),true);
+ assert.equal(failed.context.data.tasks.length,1);
+ assert.equal(controls.get('board-load-error').hidden,true);
+ assert.equal(controls.get('project-counts').hidden,false);
+ console.log('Board failure: resourceLimit clears stale content, hides unconfirmed counts, and successful retry restores the board.');
  console.log('Board loading: content preserved, ID-only memberships, one scoped graph, and generation invalidation passed.');
 })().catch(error=>{console.error(error);process.exitCode=1;});

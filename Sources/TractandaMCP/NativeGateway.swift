@@ -103,23 +103,7 @@ actor NativeGateway {
     }
 
     private static func unwrap(_ response: Data, method: String) throws -> Data {
-        guard let decoded = try JSONSerialization.jsonObject(with: response) as? [String: Any] else {
-            throw TractandaError("protocolError", "Invalid native response.")
-        }
-        if let code = decoded["code"] as? String {
-            throw TractandaError(code, decoded["message"] as? String ?? "")
-        }
-        guard let calls = decoded["methodResponses"] as? [[Any]], calls.count == 1,
-            calls[0].count == 3, calls[0][2] as? String == "client",
-            let result = calls[0][1] as? [String: Any]
-        else { throw TractandaError("protocolError", "Missing native method response.") }
-        if calls[0][0] as? String == "error" {
-            throw TractandaError(result["type"] as? String ?? "error", result["description"] as? String ?? "")
-        }
-        guard calls[0][0] as? String == method else {
-            throw TractandaError("protocolError", "Unexpected method result.")
-        }
-        return try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
+        return try NativeMethodResult.unwrap(response, method: method)
     }
 
     /// MCP's ordinary write reply follows content projection and omits only the server-owned

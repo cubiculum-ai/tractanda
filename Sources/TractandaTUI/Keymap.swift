@@ -143,7 +143,7 @@ enum TUICommand: String, CaseIterable, Codable, Sendable {
         case .properties: "Properties"
         case .categories: "Category manager"
         case .views: "Open saved view"
-        case .filter: "Find / filter items"
+        case .filter: "Search items (Text / Semantic)"
         case .sections: "Configure sections"
         case .columns: "Configure columns"
         case .sort: "Sort items"
@@ -493,6 +493,7 @@ struct Keymap: Sendable {
         ] {
             bind(command, [.browser], primary(key))
         }
+        bind(.filter, [.viewWorkspace, .categories], [letter("f")] + primary("f"))
         bind(.saveAs, [.browser], [letter("S", .option)])
         bind(.editItem, [.browser], primary("e"))
         bind(.parent, [.browser], [KeyChord(.backspace), KeyChord(.up, .command)])

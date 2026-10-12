@@ -12,30 +12,44 @@ extension ItemSort {
             throw TractandaError("invalidArguments", "Category sort ranks must be evaluated before ordering.")
         }
         let decorated = items.map { item in
-            (
-                item,
-                order.map { sort -> SortValue? in
-                    if let property = sort.property { return SortValue(item.fields[metadataKey(property)]) }
-                    guard let rootID = sort.categoryRootID else { return nil }
-                    return categoryRanks[rootID]?[item.itemID].map(SortValue.category)
-                }
-            )
+            (item, key(item, by: order, categoryRanks: categoryRanks.mapValues { $0[item.itemID] }))
         }
-        return decorated.sorted { lhs, rhs in
-            for index in order.indices {
-                let a = lhs.1[index]
-                let b = rhs.1[index]
-                // Absent values stay at the bottom, including descending order.
-                if a == nil || b == nil {
-                    if a == nil && b == nil { continue }
-                    return a != nil
-                }
-                let comparison = a!.compare(to: b!)
-                if comparison != 0 { return order[index].isAscending ? comparison < 0 : comparison > 0 }
-            }
-            return lhs.0.itemID < rhs.0.itemID
-        }.map(\.0)
+        return decorated.sorted { isOrderedBefore($0.1, $1.1, by: order) }.map(\.0)
     }
+
+    /// Only selected scalar comparator values and identity survive the candidate scan.
+    struct SortKey: Encodable {
+        let itemID: String
+        fileprivate let values: [SortValue?]
+    }
+
+    static func key(
+        _ item: Revision, by order: [ItemSort], categoryRanks: [String: Int?]
+    ) -> SortKey {
+        SortKey(
+            itemID: item.itemID,
+            values: order.map { sort in
+                if let property = sort.property { return SortValue(item.fields[metadataKey(property)]) }
+                guard let rootID = sort.categoryRootID else { return nil }
+                return categoryRanks[rootID].flatMap { $0 }.map(SortValue.category)
+            })
+    }
+
+    static func isOrderedBefore(_ lhs: SortKey, _ rhs: SortKey, by order: [ItemSort]) -> Bool {
+        for index in order.indices {
+            let a = lhs.values[index]
+            let b = rhs.values[index]
+            // Absent values stay at the bottom, including descending order.
+            if a == nil || b == nil {
+                if a == nil && b == nil { continue }
+                return a != nil
+            }
+            let comparison = a!.compare(to: b!)
+            if comparison != 0 { return order[index].isAscending ? comparison < 0 : comparison > 0 }
+        }
+        return lhs.itemID < rhs.itemID
+    }
+
 }
 
 /// Query aliases also apply to sorting. Dots in any other key are literal, not reference traversal.
@@ -47,7 +61,7 @@ func metadataKey(_ property: String) -> String {
     ][property] ?? property
 }
 
-private enum SortValue {
+private enum SortValue: Encodable {
     case category(Int)
     case number(ItemValue)
     case date(Date)

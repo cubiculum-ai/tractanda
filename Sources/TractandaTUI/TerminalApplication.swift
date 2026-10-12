@@ -88,6 +88,7 @@ private struct Picker {
 private enum FormPurpose {
     case item(ItemDraft)
     case filter
+    case search
     case saveView(replacing: Bool)
     case viewDefinition
     case sort([ItemSort])
@@ -334,7 +335,35 @@ private struct AppliedCursor: Equatable {
 /// Synchronous terminal controller. A resize changes only rendering, never navigation or draft state.
 public final class TerminalApplication {
     private enum PrimaryWorkspace { case views, categories }
-    private let workspace: Workspace
+    private var workspace: Workspace
+    private let itemSearchLoader: ItemSearchLoader?
+    private var searchGeneration: Int?
+    private var searchMode = ItemSearchMode.text
+    private var searchQuery = ""
+    private var searchExpression = ""
+    private var searchPage: ItemSearchPage?
+    private var searchChecking = false
+    private var searchPending = false
+    private var searchValidatedSelectionID: String?
+    private var searchOpenAfterCheck: String?
+    private var searchHits: [String: ItemSearchHit] = [:]
+    private struct SearchReturn {
+        let workspace: Workspace
+        let location: WorkspaceLocation
+        let itemIndex: Int
+        let firstVisibleItem: Int
+        let columnOffset: Int
+        let activeWorkspace: PrimaryWorkspace
+        let selectorVisible: Bool
+        let selectorFocused: Bool
+        let previewFocused: Bool
+        let previewOffset: Int
+        let previewItemID: String?
+        let firstVisibleColumn: Int
+        let picker: Picker?
+        let categoryWorkspace: CategoryWorkspace?
+    }
+    private var searchReturn: SearchReturn?
     private let journal: RecoveryJournal
     private let keymap: Keymap
     private let clipboard = TextClipboard()
@@ -484,12 +513,13 @@ public final class TerminalApplication {
     init(
         client: ItemClient, journal: RecoveryJournal, viewID: String? = nil, itemsOnly: Bool = false,
         viewPreferencesURL: URL? = nil, appearanceURL: URL? = nil, keymap: Keymap = .standard,
-        previewConnection: ServerConnection? = nil,
+        previewConnection: ServerConnection? = nil, itemSearchLoader: ItemSearchLoader? = nil,
         functionKeys: FunctionKeyDisplay = .automatic, mouseEnabled: Bool = true
     )
         throws
     {
         workspace = Workspace(client: client)
+        self.itemSearchLoader = itemSearchLoader ?? previewConnection.map(ItemSearchLoader.init(connection:))
         self.journal = journal
         self.keymap = keymap
         self.viewPreferencesURL =
@@ -574,22 +604,10 @@ public final class TerminalApplication {
             needsRender = needsRender || columns != newColumns || rows != newRows
             columns = newColumns
             rows = newRows
-            if categoryPreviewLoader?.hasDelivery() == true { needsRender = true }
-            if Date().timeIntervalSince(lastClockRefresh) >= 30,
-                form == nil, picker == nil, pending == nil, pendingBatch == nil, pendingLearning == nil,
-                panel == nil,
-                learning == nil,
-                columnEditor == nil, !isMenuOpen, !isBatchMenuOpen
-            {
-                lastClockRefresh = Date()
-                let selectedID = current?.itemID
-                execute {
-                    try workspace.refresh()
-                    itemIndex =
-                        selectedID.flatMap { id in workspace.rows.firstIndex { $0.item?.itemID == id } } ?? 0
-                }
+            if categoryPreviewLoader?.hasDelivery() == true || itemSearchLoader?.hasDelivery() == true {
                 needsRender = true
             }
+            if refreshClock() { needsRender = true }
             if needsRender {
                 let rendered = render(columns: columns, rows: rows)
                 let cursor = rendered.enumerated().compactMap { row, line in
@@ -639,6 +657,28 @@ public final class TerminalApplication {
             for key in keys { handle(key) }
             needsRender = !keys.isEmpty || receivedTerminalReply
         }
+    }
+
+    /// Relative-date lexical refresh and semantic authorization checks never re-embed on a clock.
+    @discardableResult
+    func refreshClock(at now: Date = Date()) -> Bool {
+        guard now.timeIntervalSince(lastClockRefresh) >= 30,
+            form == nil, picker == nil, pending == nil, pendingBatch == nil, pendingLearning == nil,
+            panel == nil, learning == nil, columnEditor == nil, !isMenuOpen, !isBatchMenuOpen
+        else { return false }
+        lastClockRefresh = now
+        if searchReturn != nil, searchMode == .semantic {
+            guard searchPage != nil, !searchPending, !searchChecking else { return false }
+            beginSearchValidation()
+        } else {
+            let selectedID = current?.itemID
+            execute {
+                try workspace.refresh()
+                itemIndex =
+                    selectedID.flatMap { id in workspace.rows.firstIndex { $0.item?.itemID == id } } ?? 0
+            }
+        }
+        return true
     }
 
     private func write(_ text: String) -> Bool {
@@ -839,6 +879,7 @@ public final class TerminalApplication {
     ]
 
     private var activePreviewItem: Revision? {
+        if searchReturn != nil, searchMode == .semantic, searchChecking { return nil }
         if activeWorkspace == .categories, let manager = categoryWorkspace {
             return selectedCategoryItem(manager)
         }
@@ -1413,14 +1454,33 @@ public final class TerminalApplication {
     func handle(_ key: TerminalKey) {
         if case .mouse(let event) = key {
             handleMouse(event)
+            validateSearchSelection()
             return
         }
         mouse.cancel()
         form?.scrollOffset = nil
+        let searchCommand = keymap.command(for: key, in: keyContext)
+        if searchCommand == .filter, viewDefinitionDraft == nil,
+            [.browser, .viewWorkspace, .categories].contains(keyContext)
+        {
+            beginItemSearch()
+            return
+        }
+        if searchReturn != nil, form == nil, panel == nil, !isMenuOpen {
+            if key == .escape || searchCommand == .goBack || searchCommand == .parent {
+                execute { try finishItemSearch() }
+                return
+            }
+            if searchCommand == .allItems {
+                execute { try finishItemSearch(allItems: true) }
+                return
+            }
+        }
         if handlePreviewInput(key) { return }
         if handleViewWorkspace(key) { return }
         let context = keyContext
         dispatch(keymap.command(for: key, in: context), key: key, context: context)
+        validateSearchSelection()
     }
 
     private var mouseScene: String {
@@ -2027,6 +2087,26 @@ public final class TerminalApplication {
             panelOffset = 0
             return
         }
+        if command == .filter, viewDefinitionDraft == nil,
+            [.browser, .viewWorkspace, .categories, .categoryEditor].contains(context)
+        {
+            beginItemSearch()
+            return
+        }
+        if searchReturn != nil, form == nil, panel == nil {
+            if command == .goBack || command == .cancel || command == .parent {
+                execute { try finishItemSearch() }
+                return
+            }
+            if command == .allItems {
+                execute { try finishItemSearch(allItems: true) }
+                return
+            }
+            if command == .refresh, searchMode == .semantic {
+                startSemanticSearch()
+                return
+            }
+        }
         // These actions are global. In particular Appearance suspends a draft instead of replacing
         // it, so opening Preferences from a menu cannot discard an item or category edit.
         if command == .appearance || command == .categoryPreferences {
@@ -2036,6 +2116,11 @@ public final class TerminalApplication {
             } else {
                 beginCategoryPreferences()
             }
+            return
+        }
+        if searchReturn != nil,
+            [.switchWorkspace, .workspaceViews, .workspaceCategories, .toggleSelector].contains(command)
+        {
             return
         }
         switch command {
@@ -2118,6 +2203,11 @@ public final class TerminalApplication {
         case .categories, .categoryEditor, .picker, .sections, .history: handlePicker(key, command: command)
         case .columns: handleColumns(command)
         case .browser:
+            if let command, command.isMenuAction, searchReturn != nil,
+                !isCommandEnabled(command, in: .browser)
+            {
+                return
+            }
             switch command {
             case .moveUp: itemIndex = max(0, itemIndex - 1)
             case .moveDown: itemIndex = min(max(0, workspace.rows.count - 1), itemIndex + 1)
@@ -2168,6 +2258,19 @@ public final class TerminalApplication {
         {
             return false
         }
+        if searchChecking, context == .browser,
+            Self.previewEditingCommands.contains(command)
+        {
+            return false
+        }
+        if searchReturn != nil, context == .browser,
+            [
+                .save, .saveAs, .sections, .sort, .columns, .views, .categories, .childCategories,
+                .goForward, .switchWorkspace, .workspaceViews, .workspaceCategories,
+            ].contains(command)
+        {
+            return false
+        }
         switch command {
         case .about: return true
         case .appearance, .categoryPreferences:
@@ -2181,7 +2284,7 @@ public final class TerminalApplication {
         }
         if context == .browser {
             switch command {
-            case .goBack: return !navigationHistory.back.isEmpty
+            case .goBack: return searchReturn != nil || !navigationHistory.back.isEmpty
             case .goForward: return !navigationHistory.forward.isEmpty
             case .childCategories:
                 return workspace.categoryPath.isEmpty
@@ -2285,7 +2388,7 @@ public final class TerminalApplication {
         case .viewWorkspace:
             allowed = [
                 .newView, .editView, .editNote, .properties, .pinView, .focusReport, .toggleSelector,
-                .refresh,
+                .refresh, .filter,
             ]
         case .categories, .categoryEditor:
             allowed = [
@@ -2293,7 +2396,7 @@ public final class TerminalApplication {
                 .explain, .history, .done, .mark, .newChild, .newRoot, .moveCategory,
                 .detachCategory, .deleteCategory, .refineCategory, .learning,
                 .categoryModeItems, .categoryModeInspector, .categoryToggleTree,
-                .categoryToggleMaximize, .refresh, .save, .cancel, .toggleSelector,
+                .categoryToggleMaximize, .refresh, .save, .cancel, .toggleSelector, .filter,
             ]
         case .editor, .form:
             allowed = [.save, .cancel, .copy, .cut, .paste, .undo, .redo, .selectText, .setMark]
@@ -2480,6 +2583,10 @@ public final class TerminalApplication {
 
     private func activateRow() throws {
         guard let row = currentRow else { return }
+        if searchReturn != nil, searchMode == .semantic, let item = row.item {
+            beginSearchValidation(opening: item.itemID)
+            return
+        }
         switch row.content {
         case .item(let item): show(item)
         case .heading: try collapseSection()
@@ -2655,6 +2762,209 @@ public final class TerminalApplication {
         columnEditor = editor
     }
 
+    private func beginItemSearch() {
+        form = Form(
+            purpose: .search, title: "Search items · All readable items · temporary",
+            fields: [TextBuffer(searchQuery), TextBuffer(searchMode.rawValue), TextBuffer(searchExpression)],
+            labels: ["Search query", "Mode (←/→ Text or Semantic)", "Optional Spotlight expression"])
+        status = "Enter / Ctrl-S searches · Tab selects mode · Esc cancels"
+    }
+
+    private func submitItemSearch(_ editing: Form) throws {
+        let query = editing.fields[0].text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let expression = editing.fields[2].text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let mode = ItemSearchMode(rawValue: editing.fields[1].text) ?? .text
+        if query.isEmpty && expression.isEmpty {
+            form = nil
+            if searchReturn != nil {
+                try finishItemSearch(allItems: true)
+            } else {
+                if activeWorkspace == .categories {
+                    retainedCategoryPicker = picker
+                    retainedCategoryWorkspace = categoryWorkspace
+                    picker = nil
+                    categoryWorkspace = nil
+                    activeWorkspace = .views
+                    viewSelectorVisible = true
+                }
+                try workspace.allItems()
+                viewWorkspaceFocused = false
+            }
+            status = "All readable items"
+            return
+        }
+        guard mode != .semantic || !query.isEmpty else {
+            throw TractandaError("semanticQuery", "Enter a query for Semantic search.")
+        }
+        if searchReturn == nil {
+            searchReturn = SearchReturn(
+                workspace: workspace, location: workspace.navigationLocation,
+                itemIndex: itemIndex, firstVisibleItem: firstVisibleItem, columnOffset: columnOffset,
+                activeWorkspace: activeWorkspace, selectorVisible: viewSelectorVisible,
+                selectorFocused: viewWorkspaceFocused, previewFocused: viewPreviewFocused,
+                previewOffset: viewPreviewOffset, previewItemID: viewPreviewItemID,
+                firstVisibleColumn: firstVisibleColumn, picker: picker, categoryWorkspace: categoryWorkspace)
+        }
+        workspace = Workspace(client: workspace.client)
+        picker = nil
+        categoryWorkspace = nil
+        activeWorkspace = .views
+        viewSelectorVisible = false
+        viewWorkspaceFocused = false
+        viewPreviewFocused = false
+        form = nil
+        itemIndex = 0
+        firstVisibleItem = 0
+        columnOffset = 0
+        searchMode = mode
+        searchQuery = query
+        searchExpression = expression
+        searchHits = [:]
+        searchPage = nil
+        searchChecking = false
+        searchPending = false
+        searchOpenAfterCheck = nil
+        if mode == .text {
+            itemSearchLoader?.cancel()
+            searchGeneration = nil
+            workspace.text = query
+            workspace.expression = expression
+            try workspace.refresh(position: 0)
+            status = "Text search ready · All readable items · Esc returns; A clears"
+        } else {
+            startSemanticSearch()
+        }
+    }
+
+    private func startSemanticSearch() {
+        workspace.showSemanticSearch([])
+        searchHits = [:]
+        searchPage = nil
+        searchChecking = false
+        searchPending = false
+        searchOpenAfterCheck = nil
+        guard let itemSearchLoader else {
+            status = "Semantic unavailable · F retains query; choose Text to search"
+            return
+        }
+        searchGeneration = itemSearchLoader.start(text: searchQuery, expression: searchExpression)
+        searchPending = true
+        status = "Semantic pending · All readable items · Esc returns; F changes query"
+    }
+
+    private func collectItemSearch() {
+        guard let delivery = itemSearchLoader?.take(), delivery.generation == searchGeneration,
+            searchReturn != nil, searchMode == .semantic
+        else { return }
+        switch delivery.outcome {
+        case .pending: status = "Semantic pending · Esc returns; F changes query"
+        case .checking: status = "Semantic checking current access · refreshing snapshot"
+        case .ready(let page):
+            let selectedID = current?.itemID
+            workspace.showSemanticSearch(page.items)
+            searchHits = page.hits
+            searchPage = page
+            searchPending = false
+            searchChecking = false
+            itemIndex =
+                selectedID.flatMap { id in workspace.rows.firstIndex { $0.item?.itemID == id } }
+                ?? min(itemIndex, max(0, workspace.rows.count - 1))
+            searchValidatedSelectionID = current?.itemID
+            if let openID = searchOpenAfterCheck, let item = current, item.itemID == openID {
+                show(item)
+            }
+            searchOpenAfterCheck = nil
+            status =
+                "Semantic ready · top matches · \(page.items.count) items"
+                + (page.partialCoverage ? " · partial coverage" : "")
+                + (page.omitted > 0 ? " · \(page.omitted) stale/unavailable passages omitted" : "")
+                + " · Esc returns; A clears"
+        case .failed(let message):
+            clearSearchDelivery()
+            status = "Semantic error: " + message + " · F retains query; choose Text"
+        case .unavailable(let message):
+            clearSearchDelivery()
+            status = "Semantic unavailable: " + message + " · F retains query; choose Text"
+        case .expired:
+            clearSearchDelivery()
+            status = "Semantic expired/invalidated · F retains query; submit again"
+        }
+    }
+
+    private func clearSearchDelivery() {
+        workspace.showSemanticSearch([])
+        searchHits = [:]
+        searchPage = nil
+        searchChecking = false
+        searchPending = false
+        searchOpenAfterCheck = nil
+        panel = nil
+    }
+
+    private func beginSearchValidation(opening itemID: String? = nil) {
+        if let itemID { searchOpenAfterCheck = itemID }
+        guard !searchChecking, let page = searchPage, let itemSearchLoader else { return }
+        searchChecking = true
+        searchGeneration = itemSearchLoader.validate(page)
+        status = "Semantic checking current access · refreshing snapshot"
+    }
+
+    private func validateSearchSelection() {
+        guard searchReturn != nil, searchMode == .semantic, !searchPending,
+            current?.itemID != searchValidatedSelectionID
+        else { return }
+        if let opening = searchOpenAfterCheck, opening != current?.itemID { searchOpenAfterCheck = nil }
+        beginSearchValidation()
+    }
+
+    private func finishItemSearch(allItems: Bool = false) throws {
+        guard let origin = searchReturn else { return }
+        itemSearchLoader?.cancel()
+        searchGeneration = nil
+        searchReturn = nil
+        searchHits = [:]
+        searchPage = nil
+        searchChecking = false
+        searchPending = false
+        searchOpenAfterCheck = nil
+        searchQuery = ""
+        searchExpression = ""
+        workspace = origin.workspace
+        itemIndex = origin.itemIndex
+        firstVisibleItem = origin.firstVisibleItem
+        columnOffset = origin.columnOffset
+        activeWorkspace = .views
+        viewSelectorVisible = origin.selectorVisible
+        viewWorkspaceFocused = origin.selectorFocused
+        viewPreviewFocused = origin.previewFocused
+        viewPreviewOffset = origin.previewOffset
+        viewPreviewItemID = origin.previewItemID
+        firstVisibleColumn = origin.firstVisibleColumn
+        picker = origin.picker
+        categoryWorkspace = origin.categoryWorkspace
+        if origin.activeWorkspace == .categories {
+            retainedCategoryPicker = origin.picker
+            retainedCategoryWorkspace = origin.categoryWorkspace
+        }
+        if allItems {
+            picker = nil
+            categoryWorkspace = nil
+            viewWorkspaceFocused = false
+            try workspace.allItems()
+            itemIndex = 0
+            firstVisibleItem = 0
+            status = "All readable items · search cleared"
+        } else {
+            try workspace.restore(origin.location)
+            if origin.activeWorkspace == .categories {
+                picker = nil
+                categoryWorkspace = nil
+                try enterCategoriesWorkspace()
+            }
+            status = "Returned from temporary search"
+        }
+    }
+
     private func perform(_ command: TUICommand) {
         execute {
             switch command {
@@ -2710,6 +3020,10 @@ public final class TerminalApplication {
             case .explain: try beginPicker(.explain)
             case .history: try beginPicker(.history)
             case .filter:
+                if viewDefinitionDraft == nil {
+                    beginItemSearch()
+                    return
+                }
                 form = Form(
                     purpose: .filter, title: "Filter items",
                     fields: [TextBuffer(workspace.expression), TextBuffer(workspace.text)],
@@ -3920,6 +4234,45 @@ public final class TerminalApplication {
 
     private func handleForm(_ key: TerminalKey, command: TUICommand?) {
         guard var editing = form else { return }
+        if case .search = editing.purpose {
+            switch command {
+            case .cancel:
+                form = nil
+                status =
+                    searchReturn == nil
+                    ? "Search canceled."
+                    : searchPending
+                        ? "Semantic pending · Esc returns; F changes query"
+                        : searchChecking
+                            ? "Semantic checking current access · refreshing snapshot"
+                            : "Search results · Esc returns; F changes search."
+            case .save, .activate:
+                execute { try submitItemSearch(editing) }
+            case .nextField:
+                editing.focus = (editing.focus + 1) % editing.fields.count
+                form = editing
+            case .previousField:
+                editing.focus = (editing.focus + editing.fields.count - 1) % editing.fields.count
+                form = editing
+            default:
+                if editing.focus == 1 {
+                    if [.left, .right, .up, .down, .text(" ")].contains(key) {
+                        editing.fields[1] = TextBuffer(editing.fields[1].text == "Text" ? "Semantic" : "Text")
+                        form = editing
+                    }
+                } else {
+                    if let command,
+                        [.copy, .cut, .paste, .undo, .redo, .selectText, .setMark].contains(command)
+                    {
+                        editing.fields[editing.focus].handle(command: command, clipboard: clipboard)
+                    } else {
+                        editing.fields[editing.focus].handle(key, clipboard: clipboard, keymap: keymap)
+                    }
+                    form = editing
+                }
+            }
+            return
+        }
         if case .categoryDirty = editing.purpose {
             switch key {
             case .left, .up, .backTab:
@@ -4164,7 +4517,7 @@ public final class TerminalApplication {
                         form = nil
                         status = "No changes."
                     }
-                case .viewDefinition:
+                case .viewDefinition, .search:
                     return
                 case .filter:
                     if viewDefinitionDraft != nil {
@@ -4941,6 +5294,14 @@ public final class TerminalApplication {
                     Suggestion pages are checked before feedback; stale pages need R refresh and fresh review.
                     Relative-date views refresh every 30 seconds while browsing; drafts are never interrupted.
                     Resize freely. Below 48 columns × 12 rows, enlarge to resume with the draft intact.
+                    F / Ctrl-F / forwarded Cmd-F opens Search items in Views or Categories.
+                    Search Text or Semantic across all readable items, independent of the selected view.
+                    Tab chooses mode; arrows switch Text/Semantic; Enter or Ctrl-S submits explicitly.
+                    Optional Spotlight expression narrows the search. No saved view is created.
+                    Semantic results are top matches from at most 64 passages, in native ranking.
+                    Partial coverage means some current items have no indexed embedding yet.
+                    F changes query/mode, R refreshes, A clears search, Esc or Back returns to your context.
+                    Semantic failures retain your query; choose Text explicitly if unavailable.
                     Further terminal workflows and a keybinding editor remain planned.
                     """
         )
@@ -5945,8 +6306,68 @@ public final class TerminalApplication {
         return OverlayRect(x: x, y: y, width: boxWidth, height: boxHeight)
     }
 
+    private func overlayItemSearch(on lines: inout [ScreenLine], width: Int, height: Int) -> OverlayRect? {
+        guard let form, case .search = form.purpose else { return nil }
+        for index in lines.indices {
+            lines[index].hits = []
+            lines[index].cursorColumn = nil
+            lines[index].selectionColumns = []
+        }
+        let boxWidth = min(width, 90)
+        let inner = boxWidth - 2
+        let boxHeight = 10
+        let x = max(0, (width - boxWidth) / 2)
+        let y = max(0, (height - 2 - boxHeight) / 2)
+        func put(
+            _ text: String, at row: Int, style: ScreenStyle = .menu,
+            hits: [MouseHit] = [], cursor: Int? = nil, selections: [Range<Int>] = []
+        ) {
+            guard lines.indices.contains(row) else { return }
+            let popup = ScreenLine.popup(
+                text, over: lines[row].text,
+                column: x, boxWidth: boxWidth, width: width, style: style)
+            lines[row] = ScreenLine(
+                text: popup.text, segments: popup.segments, hits: hits,
+                selectionColumns: selections,
+                borderColumns: popup.borderColumns, borderStyle: popup.borderStyle, cursorColumn: cursor)
+        }
+        put("╭" + String(repeating: "─", count: inner) + "╮", at: y)
+        put(
+            "│" + TerminalText.fit(" Search items · All readable items · temporary", columns: inner) + "│",
+            at: y + 1, style: .header)
+        for index in form.fields.indices {
+            let labelRow = y + 2 + index * 2
+            let style: ScreenStyle = index == form.focus ? .menuSelection : .menu
+            put(
+                "│" + TerminalText.fit(" " + form.labels[index], columns: inner) + "│", at: labelRow,
+                style: style, hits: [MouseHit(columns: (x + 1)..<(x + boxWidth - 1), target: .field(index))])
+            let display = form.fields[index].displayLines(
+                columns: max(1, inner - 2), flatten: true,
+                cursorLayout: appearance.cursor.layout
+            ).first!
+            let offset = x + 2
+            put(
+                "│ " + TerminalText.fit(display.text, columns: inner - 2) + " │", at: labelRow + 1,
+                style: style,
+                hits: [
+                    MouseHit(columns: offset..<(x + boxWidth - 2), target: .fieldText(index, display.offsets))
+                ],
+                cursor: index == form.focus ? display.cursorColumn.map { offset + $0 } : nil,
+                selections: index == form.focus
+                    ? display.selectionColumns.map { (offset + $0.lowerBound)..<(offset + $0.upperBound) }
+                    : [])
+        }
+        put(
+            "│" + TerminalText.fit(" Enter search · Tab field · ←/→ mode · Esc cancel", columns: inner) + "│",
+            at: y + 8,
+            hits: [MouseHit(columns: (x + 1)..<min(x + 15, x + boxWidth - 1), target: .command(.save))])
+        put("╰" + String(repeating: "─", count: inner) + "╯", at: y + 9)
+        return OverlayRect(x: x, y: y, width: boxWidth, height: boxHeight)
+    }
+
     func render(columns: Int, rows: Int) -> [ScreenLine] {
         collectCategoryPreview()
+        collectItemSearch()
         if mouseFrameSize.columns != columns || mouseFrameSize.rows != rows {
             mouse.cancel()
             // A smaller item panel must reveal its caret, rather than keep the old body's
@@ -5973,6 +6394,10 @@ public final class TerminalApplication {
         editorViewport = nil
         let width = max(1, columns - 1)
         let height = max(1, rows)
+        let isSearchForm: Bool = {
+            if let form, case .search = form.purpose { return true }
+            return false
+        }()
         let isViewDefinitionForm: Bool = {
             guard let form else { return false }
             if case .viewDefinition = form.purpose { return true }
@@ -6058,10 +6483,15 @@ public final class TerminalApplication {
                     cursorColumn: display.cursorColumn.map { 3 + $0 }))
             lines.append(.controls([("Ctrl-S confirm", .save), ("Esc cancel", .cancel)]))
         } else if let form, !isViewDefinitionForm, !isItemForm, !isAppearanceForm,
-            !isCategoryPreferencesForm, !isCategoryDirtyForm
+            !isCategoryPreferencesForm, !isCategoryDirtyForm, !isSearchForm
         {
             lines.append(ScreenLine(text: " \(form.title) · \(form.labels[form.focus])", style: .header))
-            let submitLabel = viewDefinitionDraft == nil ? "Ctrl-S save" : "Ctrl-S apply"
+            let submitLabel: String
+            if case .search = form.purpose {
+                submitLabel = "Enter search"
+            } else {
+                submitLabel = viewDefinitionDraft == nil ? "Ctrl-S save" : "Ctrl-S apply"
+            }
             lines.append(
                 .controls([(submitLabel, .save), ("Esc cancel", .cancel), ("Tab next field", .nextField)]))
             // Focused content uses the space left after one summary line for every other field.
@@ -6348,7 +6778,9 @@ public final class TerminalApplication {
             lines.append(
                 ScreenLine(
                     text:
-                        " \(workspace.total) \(workspace.sectionCategories.isEmpty ? "items" : "section entries") · \(workspace.expression.isEmpty ? "No expression filter" : workspace.expression)\(workspace.text.isEmpty ? "" : " · text: " + workspace.text)",
+                        searchReturn == nil
+                        ? " \(workspace.total) \(workspace.sectionCategories.isEmpty ? "items" : "section entries") · \(workspace.expression.isEmpty ? "No expression filter" : workspace.expression)\(workspace.text.isEmpty ? "" : " · text: " + workspace.text)"
+                        : " Search results\(searchChecking ? " · refreshing snapshot" : "") · \(searchMode.rawValue): \(searchQuery) · All readable items\(searchExpression.isEmpty ? "" : " · " + searchExpression) · \(searchMode == .semantic ? "top matches (up to 64 passages)" : "\(workspace.total) items")",
                     style: reportStyle
                 ))
             // Both primary workspaces reserve a full-width bottom preview. Compact terminals hide
@@ -6389,11 +6821,19 @@ public final class TerminalApplication {
                     case .item(let item):
                         hits.append(MouseHit(columns: 2..<4, target: .browserMark(index, key)))
                         text += marks.contains(item.itemID) ? "◆ " : "  "
-                        text += TableLayout.line(
-                            item: item, columns: workspace.columns, offset: columnOffset, width: left - 4,
-                            preferredScopes: workspace.categoryPath.map(\.itemID),
-                            categoryMemberships: workspace.categoryMemberships,
-                            categoryLabels: workspace.categoryMembershipLabels)
+                        if !searchChecking, let hit = searchHits[item.itemID] {
+                            let snippet = hit.passage.components(separatedBy: .whitespacesAndNewlines)
+                                .filter { !$0.isEmpty }.joined(separator: " ")
+                            text +=
+                                String(format: "%.3f ", hit.similarity)
+                                + (item.fields["subject"]?.string ?? item.itemID) + " · " + snippet
+                        } else {
+                            text += TableLayout.line(
+                                item: item, columns: workspace.columns, offset: columnOffset, width: left - 4,
+                                preferredScopes: workspace.categoryPath.map(\.itemID),
+                                categoryMemberships: workspace.categoryMemberships,
+                                categoryLabels: workspace.categoryMembershipLabels)
+                        }
                     case .heading:
                         hits.append(MouseHit(columns: 2..<5, target: .browserDisclosure(index, key)))
                         let category = section.category!
@@ -6405,7 +6845,10 @@ public final class TerminalApplication {
                             "Next page · Enter (\(section.position + section.items.count) of \(section.total))"
                     }
                 } else if browserRows.isEmpty, row == 0 {
-                    text = " No items. N creates one; C opens categories; A clears filters."
+                    text =
+                        searchReturn == nil
+                        ? " No items. N creates one; C opens categories; A clears filters."
+                        : " No search results. F changes query/mode; A clears; Esc returns."
                 }
                 let isSelected = index == itemIndex && browserRows.indices.contains(index)
                 let rowStyle: ScreenStyle =
@@ -6415,7 +6858,8 @@ public final class TerminalApplication {
             }
             if previewVisible && !isCompactViewWorkspace {
                 lines += ItemPreviewPresentation.lines(
-                    item: current, width: width, offset: viewPreviewOffset, focused: viewPreviewFocused,
+                    item: activePreviewItem, width: width, offset: viewPreviewOffset,
+                    focused: viewPreviewFocused,
                     contentRows: effectivePreviewContentRows)
             }
         }
@@ -6487,6 +6931,11 @@ public final class TerminalApplication {
             }
         }
         var overlayRects: [OverlayRect] = []
+        if isSearchForm, panel == nil, columns >= 48, rows >= 12,
+            let rect = overlayItemSearch(on: &lines, width: width, height: height)
+        {
+            overlayRects.append(rect)
+        }
         if showsViewDefinitionOverlay {
             if let rect = overlayViewDefinitionForm(on: &lines, width: width, height: height) {
                 overlayRects.append(rect)

@@ -13,6 +13,15 @@ open class Item: SavedView {
     public let revision: Revision
     public required init(_ revision: Revision) { self.revision = revision }
     public subscript(key: String) -> ItemValue? { revision.fields[key] }
+    public var attachments: [AttachmentDescriptor] {
+        get throws { try AttachmentDescriptor.descriptors(in: revision.fields) }
+    }
+    public var attachmentText: [AttachmentTextRepresentation] {
+        get throws { try AttachmentTextRepresentation.representations(in: revision.fields) }
+    }
+    public var attachmentDocument: [AttachmentDocumentRepresentation] {
+        get throws { try AttachmentDocumentRepresentation.representations(in: revision.fields) }
+    }
     public var subject: String { self["subject"]?.string ?? "" }
     public var body: String { self["body"]?.string ?? "" }
     public var viewDefinition: SavedViewDefinition? {

@@ -1,0 +1,75 @@
+{
+  "revision": "a8b999991fe8c521a0cec749973414eaaf823731",
+  "files": [
+    {
+      "file": "README.md",
+      "bytes": 31,
+      "sha256": "4bcf87ecfbbb8e07a01b21415a970c8b53a5283bf6872b657040d3f45c9241f7"
+    },
+    {
+      "file": "config.json",
+      "bytes": 6873,
+      "sha256": "e5bfa734fb892953ee7eb69a378ad7cb52a66e046d46efc8987c450cfa122009"
+    },
+    {
+      "file": "preprocessor_config.json",
+      "bytes": 486,
+      "sha256": "6cb6e36d6fcb88ca1502c4a26750715dc3e7dedddc9a8f17b27d8d167d1457e7"
+    },
+    {
+      "file": "processor_config.json",
+      "bytes": 68,
+      "sha256": "e7bff42da73ae9eec9042ef20e066e11f1ee20f025358ff79131e3c0fb549b46"
+    },
+    {
+      "file": "chat_template.jinja",
+      "bytes": 588,
+      "sha256": "a4b0bf4348b014acca131da664d05b61e39d5dc8af980f1913846a57ccc6d289"
+    },
+    {
+      "file": "generation_config.json",
+      "bytes": 169,
+      "sha256": "e90fc149327adfa563401b852408345a7f8415e576878e016de778b38818cac0"
+    },
+    {
+      "file": "tokenizer.json",
+      "bytes": 7153329,
+      "sha256": "43de7f0b77e8ac9d1d39f21780281e209f6d4c3b2b18ab4c5c8eba66827ce8cd"
+    },
+    {
+      "file": "tokenizer_config.json",
+      "bytes": 17985,
+      "sha256": "ef21bfa4e14b96b54e9358a4a8e48a0aa1e07256304c9f51a088ce13dfd3105b"
+    },
+    {
+      "file": "special_tokens_map.json",
+      "bytes": 1078,
+      "sha256": "3e1c6950fd5624d1e6d60eea7110882c9743e37fa643364e17094466331e1cb5"
+    },
+    {
+      "file": "added_tokens.json",
+      "bytes": 35,
+      "sha256": "882e49757a3bea90e00df1d2dc8c18b2b526ff77380db20439feeb1f053a63cd"
+    },
+    {
+      "file": "merges.txt",
+      "bytes": 916646,
+      "sha256": "b6fe424e334903f7fb84d3a106d9730455f4744b9fe3c21ee136d97a00e72502"
+    },
+    {
+      "file": "vocab.json",
+      "bytes": 1612698,
+      "sha256": "e2bad0ce74e6ddfece426ef99e18067f4a6c3d4e65bb6dd9cfd638450cca0142"
+    },
+    {
+      "file": "model.safetensors.index.json",
+      "bytes": 38105,
+      "sha256": "576c0aaed5b79fc9d6dda76a5388c42026c4e9176f196c6df68f512a84a42f7c"
+    },
+    {
+      "file": "model.safetensors",
+      "bytes": 630696724,
+      "sha256": "b0891fbbf7a634d3e778e2dadb9c972fa1a516eff88cb1b09452ed7f32c962ae"
+    }
+  ]
+}

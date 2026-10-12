@@ -1,13 +1,19 @@
 import Foundation
+import TractandaVectors
 
 protocol SemanticVectorStorage: AnyObject {
     func identity(itemID: String, profileID: String) throws -> SemanticIndexedIdentity?
     func hasCurrent(itemID: String, profileID: String, contentHash: String) throws -> Bool
     func rebind(_ snapshot: SemanticSnapshot) throws
-    func replace(_ snapshot: SemanticSnapshot, chunks: [SemanticChunk], vectors: [[Double]]) throws
-    func prune(profileID: String, keeping itemIDs: Set<String>) throws
+    func begin(_ snapshot: SemanticSnapshot) throws -> Vec1Generation
+    func append(_ generation: Vec1Generation, chunks: [SemanticChunk], vectors: [[Double]]) throws
+    func publish(_ generation: Vec1Generation, count: Int64) throws
+    func discard(_ generation: Vec1Generation) throws
+    func prune(profileID: String, current: (String) throws -> Bool) throws
+    func cleanup() throws
     func search(
-        vector: [Double], profileID: String, current: [SemanticSnapshot], limit: Int
+        vector: [Double], profileID: String, limit: Int,
+        current: (_ visit: (SemanticSnapshot) throws -> Void) throws -> Void
     ) throws -> [SemanticIndexedPassage]
     func reset() throws
 }
@@ -17,143 +23,164 @@ struct SemanticIndexedIdentity {
     let contentHash: String
     let count: Int
 }
-
 struct SemanticIndexedPassage: Sendable, Equatable {
     let itemID: String
     let revisionID: String
     let profileID: String
     let contentHash: String
     let ordinal: Int
+    let unitOrdinal: Int64
     let byteRange: Range<Int>
-    let vector: [Double]
-    let score: Double?
+    let unitByteRange: Range<Int>
+    let text: String
+    let score: Double
 }
 
+/// Injectable test backend uses the same SQLite generation/filter contracts, including bounded cursors.
 final class SemanticMemoryStorage: SemanticVectorStorage {
-    private var values: [String: [SemanticIndexedPassage]] = [:]
+    private var backing: SemanticVec1Storage?
     func identity(itemID: String, profileID: String) throws -> SemanticIndexedIdentity? {
-        guard let values = values[itemID]?.filter({ $0.profileID == profileID }), let first = values.first
-        else { return nil }
-        return .init(
-            revisionID: first.revisionID, profileID: first.profileID, contentHash: first.contentHash,
-            count: values.count)
+        try backing?.identity(itemID: itemID, profileID: profileID)
     }
-
     func hasCurrent(itemID: String, profileID: String, contentHash: String) throws -> Bool {
-        values[itemID]?.first.map {
-            $0.profileID == profileID && $0.contentHash == contentHash
-        } ?? false
+        try backing?.hasCurrent(itemID: itemID, profileID: profileID, contentHash: contentHash) ?? false
     }
-
-    func rebind(_ snapshot: SemanticSnapshot) throws {
-        guard let prior = values[snapshot.itemID],
-            prior.first?.profileID == snapshot.profileID,
-            prior.first?.contentHash == snapshot.contentHash
-        else { return }
-        values[snapshot.itemID] = prior.map {
-            SemanticIndexedPassage(
-                itemID: $0.itemID,
-                revisionID: snapshot.revisionID,
-                profileID: $0.profileID,
-                contentHash: $0.contentHash,
-                ordinal: $0.ordinal,
-                byteRange: $0.byteRange,
-                vector: $0.vector,
-                score: nil)
+    func rebind(_ snapshot: SemanticSnapshot) throws { try backing?.rebind(snapshot) }
+    func begin(_ snapshot: SemanticSnapshot) throws -> Vec1Generation {
+        if backing == nil {
+            backing = try SemanticVec1Storage(
+                path: ":memory:", dimensions: snapshot.dimensions, profileID: snapshot.profileID)
         }
+        return try backing!.begin(snapshot)
     }
-
-    func replace(_ snapshot: SemanticSnapshot, chunks: [SemanticChunk], vectors: [[Double]]) throws {
-        guard chunks.count == vectors.count else {
-            throw TractandaError("semanticIndex", "Chunk/vector count mismatch.")
-        }
-        values[snapshot.itemID] = zip(chunks, vectors).map { chunk, vector in
-            SemanticIndexedPassage(
-                itemID: snapshot.itemID,
-                revisionID: snapshot.revisionID,
-                profileID: snapshot.profileID,
-                contentHash: snapshot.contentHash,
-                ordinal: chunk.ordinal,
-                byteRange: chunk.byteRange,
-                vector: vector,
-                score: nil)
-        }
+    func append(_ generation: Vec1Generation, chunks: [SemanticChunk], vectors: [[Double]]) throws {
+        try backing?.append(generation, chunks: chunks, vectors: vectors)
     }
-
-    func prune(profileID: String, keeping itemIDs: Set<String>) throws {
-        values = values.filter { itemID, passages in
-            passages.first?.profileID != profileID || itemIDs.contains(itemID)
-        }
+    func publish(_ generation: Vec1Generation, count: Int64) throws {
+        try backing?.publish(generation, count: count)
     }
-
+    func discard(_ generation: Vec1Generation) throws { try backing?.discard(generation) }
+    func prune(profileID: String, current: (String) throws -> Bool) throws {
+        try backing?.prune(profileID: profileID, current: current)
+    }
+    func cleanup() throws { try backing?.cleanup() }
     func search(
-        vector: [Double], profileID: String, current: [SemanticSnapshot], limit: Int
+        vector: [Double], profileID: String, limit: Int,
+        current: (_ visit: (SemanticSnapshot) throws -> Void) throws -> Void
     ) throws -> [SemanticIndexedPassage] {
-        let allowed = Dictionary(uniqueKeysWithValues: current.map { ($0.itemID, $0) })
-        var best: [String: SemanticIndexedPassage] = [:]
-        for passage in values.values.flatMap({ $0 }) {
-            guard passage.profileID == profileID,
-                let snapshot = allowed[passage.itemID],
-                passage.revisionID == snapshot.revisionID,
-                passage.contentHash == snapshot.contentHash
-            else { continue }
-            let score = cosine(vector, passage.vector)
-            let candidate = SemanticIndexedPassage(
-                itemID: passage.itemID,
-                revisionID: passage.revisionID,
-                profileID: passage.profileID,
-                contentHash: passage.contentHash,
-                ordinal: passage.ordinal,
-                byteRange: passage.byteRange,
-                vector: passage.vector,
-                score: score)
-            if best[passage.itemID].map({ ($0.score ?? -.infinity) < score }) ?? true {
-                best[passage.itemID] = candidate
+        try backing?.search(vector: vector, profileID: profileID, limit: limit, current: current) ?? []
+    }
+    func reset() throws { backing = nil }
+}
+
+private final class SemanticAcknowledgement: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Bool?
+    private var waiter: CheckedContinuation<Bool, Never>?
+    func wait() async -> Bool {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if let value {
+                lock.unlock()
+                continuation.resume(returning: value)
+            } else {
+                waiter = continuation
+                lock.unlock()
             }
         }
-        return best.values.sorted { lhs, rhs in
-            let left = lhs.score ?? -.infinity
-            let right = rhs.score ?? -.infinity
-            return left == right ? lhs.itemID < rhs.itemID : left > right
-        }.prefix(limit).map { $0 }
     }
-
-    func reset() throws {
-        values.removeAll()
+    func resolve(_ result: Bool) {
+        lock.lock()
+        guard value == nil else {
+            lock.unlock()
+            return
+        }
+        value = result
+        let continuation = waiter
+        waiter = nil
+        lock.unlock()
+        continuation?.resume(returning: result)
     }
 }
-
+private struct SemanticBatch: Sendable {
+    let epoch: Int
+    let jobID: String
+    let chunks: [SemanticChunk]  // <=16
+    let vectors: [[Double]]  // <=16
+    let acknowledgement: SemanticAcknowledgement
+}
 private struct CompletedSemanticWork: Sendable {
     let epoch: Int
     let jobID: String
-    let snapshot: SemanticSnapshot?
     let queryID: String?
-    let vectors: [[Double]]?
+    let vector: [Double]?
+    let count: Int64
     let failed: Bool
 }
-
 private final class SemanticMailbox: @unchecked Sendable {
     private let lock = NSLock()
-    private var values: [CompletedSemanticWork] = []
-
-    func append(_ value: CompletedSemanticWork) {
+    private var batch: SemanticBatch?
+    private var document: CompletedSemanticWork?
+    private var query: CompletedSemanticWork?
+    private var cancelledJobID: String?
+    func append(_ value: SemanticBatch) {
         lock.lock()
-        values.append(value)
+        if cancelledJobID == value.jobID {
+            lock.unlock()
+            value.acknowledgement.resolve(false)
+            return
+        }
+        precondition(batch == nil)
+        batch = value
         lock.unlock()
     }
-
-    func take() -> [CompletedSemanticWork] {
+    func append(_ value: CompletedSemanticWork) {
+        lock.lock()
+        if value.queryID == nil {
+            precondition(document == nil)
+            document = value
+        } else {
+            precondition(query == nil)
+            query = value
+        }
+        lock.unlock()
+    }
+    func takeBatch() -> SemanticBatch? {
         lock.lock()
         defer { lock.unlock() }
-        let result = values
-        values.removeAll(keepingCapacity: true)
+        let result = batch
+        batch = nil
         return result
     }
+    func takeCompleted() -> [CompletedSemanticWork] {
+        lock.lock()
+        defer { lock.unlock() }
+        let result = [document, query].compactMap { $0 }
+        document = nil
+        query = nil
+        return result
+    }
+    func cancelDocument(jobID: String?) {
+        lock.lock()
+        cancelledJobID = jobID
+        let current = batch
+        batch = nil
+        lock.unlock()
+        current?.acknowledgement.resolve(false)
+    }
+}
+private struct SemanticDocumentWork {
+    let epoch: Int
+    let jobID: String
+    let snapshot: SemanticSnapshot
+    let generation: Vec1Generation
+    let storage: SemanticVectorStorage
+    let task: Task<Void, Never>
+    var acceptedCount: Int64 = 0
+    var failed = false
 }
 
-/// The ItemStore serial executor owns this service. `maintain()` is called
-/// outside caller access scopes; asynchronous tasks receive only value
-/// snapshots and report through the mailbox.
+/// Store executor owns state; detached work sees only a leased corpus and one acknowledged batch.
 final class SemanticService {
     private let store: ItemStore
     private let configurations: SemanticConfigurationStore
@@ -164,9 +191,9 @@ final class SemanticService {
     private var queries: [String: SemanticQuery] = [:]
     private var queryVectors: [String: [Double]] = [:]
     private var queryFailures: Set<String> = []
-    private var documentJobs: [String: String] = [:]
     private var queryJobs: [String: String] = [:]
-    private var documentTasks: [String: Task<Void, Never>] = [:]
+    private var documentWork: SemanticDocumentWork?
+    private var documentWorkSuspended = false
     private var queryTasks: [String: Task<Void, Never>] = [:]
     private var retryAfter: [String: Date] = [:]
     private var storageProfile: String?
@@ -228,6 +255,10 @@ final class SemanticService {
                 return
             }
             let profile = try SemanticSource.profileID(configuration)
+            guard documentWork == nil || storageProfile == profile else {
+                expireQueries()
+                return
+            }
             try ensureStorage(configuration, profileID: profile)
             try reconcile(configuration, profileID: profile)
             scheduleOneQuery(configuration, profileID: profile)
@@ -257,22 +288,24 @@ final class SemanticService {
             ]
         }
         let profile = try SemanticSource.profileID(configuration)
-        let snapshots = try readableSnapshots(configuration: configuration, profileID: profile)
-        let indexed: Int
-        if storageProfile == profile, storageProblem == nil {
-            do {
-                indexed = try snapshots.filter {
-                    try storage.hasCurrent(itemID: $0.itemID, profileID: profile, contentHash: $0.contentHash)
-                }.count
-            } catch let error as TractandaError {
-                storageProblem = error
-                indexed = 0
-            } catch {
-                storageProblem = TractandaError("semanticIndex", "Semantic index is unavailable.")
-                indexed = 0
+        var indexable = 0
+        var indexed = 0
+        try store.forEachReadableCandidate(text: nil) { revision in
+            guard let snapshot = try snapshot(revision, configuration: configuration, profileID: profile)
+            else { return }
+            defer { try? store.releaseIndexedCorpus(snapshot.corpus) }
+            indexable += 1
+            if storageProfile == profile, storageProblem == nil {
+                do {
+                    if try storage.hasCurrent(
+                        itemID: snapshot.itemID, profileID: profile, contentHash: snapshot.contentHash)
+                    {
+                        indexed += 1
+                    }
+                } catch {
+                    storageProblem = TractandaError("semanticIndex", "Semantic index is unavailable.")
+                }
             }
-        } else {
-            indexed = 0
         }
         return [
             "enabled": true,
@@ -281,9 +314,9 @@ final class SemanticService {
             "profileID": profile,
             "inputEncoding": configuration.inputEncoding.rawValue,
             "itemTextProfile": ItemTextContent.profile,
-            "indexableItems": snapshots.count,
+            "indexableItems": indexable,
             "indexedItems": indexed,
-            "coverage": indexed == snapshots.count && storageProblem == nil ? "complete" : "partial",
+            "coverage": indexed == indexable && storageProblem == nil ? "complete" : "partial",
         ]
     }
 
@@ -303,15 +336,18 @@ final class SemanticService {
                 "chunkBytes": configuration.chunkBytes, "overlapBytes": configuration.overlapBytes,
                 "documentPrefixApplied": !configuration.documentPrefix.isEmpty,
             ]
-            guard !revision.isDeleted, !corpus.sourceText.isEmpty else {
+            guard !revision.isDeleted,
+                let snapshot = try snapshot(revision, configuration: configuration, profileID: profileID)
+            else {
                 result["status"] = "notIndexable"
                 return result
             }
+            defer { try? store.releaseIndexedCorpus(snapshot.corpus) }
             if storageProblem != nil {
                 result["status"] = "unavailable"
                 return result
             }
-            let hash = try SemanticSource.contentHash(sourceText: corpus.sourceText)
+            let hash = snapshot.contentHash
             guard storageProfile == profileID else {
                 result["status"] = "pending"
                 return result
@@ -374,6 +410,10 @@ final class SemanticService {
             throw TractandaError(
                 "configurationConflict", "Semantic configuration changed; read status and retry.")
         }
+        guard documentWork == nil else {
+            throw TractandaError(
+                "semanticBusy", "Drain active semantic document work before resetting its index.")
+        }
         if try configurations.performMaintenance(
             configurationID: configuration.configurationID,
             operationID: operationID,
@@ -419,7 +459,7 @@ final class SemanticService {
             expiresAt: createdAt.addingTimeInterval(queryLifetime),
             evaluatedAt: evaluatedAt,
             timeZone: timeZone)
-        _ = try eligibleSnapshots(query, configuration: configuration)
+        try forEachEligibleSnapshot(query, configuration: configuration) { _ in }
         queries[query.queryID] = query
         return queryResponse(query, state: "pending")
     }
@@ -443,55 +483,62 @@ final class SemanticService {
         guard let vector = queryVectors[queryID] else {
             return queryResponse(query, state: "pending", results: [])
         }
-        let current = try eligibleSnapshots(query, configuration: configuration)
-        let missingCurrent: Bool
-        do {
-            missingCurrent = try current.contains {
-                try !storage.hasCurrent(
-                    itemID: $0.itemID, profileID: query.profileID, contentHash: $0.contentHash)
-            }
-        } catch let error as TractandaError {
-            storageProblem = error
-            missingCurrent = true
-        } catch {
-            storageProblem = TractandaError("semanticIndex", "Semantic index is unavailable.")
-            missingCurrent = true
-        }
-        let partial = storageProblem != nil || missingCurrent
+        var partial = storageProblem != nil
         guard storageProfile == query.profileID, storageProblem == nil else {
             return queryResponse(query, state: "ready", results: [], partialCoverage: true)
         }
         let hits: [SemanticIndexedPassage]
         do {
-            hits = try storage.search(
-                vector: vector, profileID: query.profileID, current: current, limit: query.limit)
-        } catch let error as TractandaError {
-            storageProblem = error
-            return queryResponse(query, state: "ready", results: [], partialCoverage: true)
+            hits = try storage.search(vector: vector, profileID: query.profileID, limit: query.limit) {
+                visit in
+                try withoutActuallyEscaping(visit) { emit in
+                    try forEachEligibleSnapshot(query, configuration: configuration) { snapshot in
+                        let indexed = try storage.identity(
+                            itemID: snapshot.itemID, profileID: query.profileID)
+                        if indexed?.revisionID != snapshot.revisionID
+                            || indexed?.contentHash != snapshot.contentHash
+                        {
+                            partial = true
+                        }
+                        try emit(snapshot)
+                    }
+                }
+            }
         } catch {
             storageProblem = TractandaError("semanticIndex", "Semantic index is unavailable.")
             return queryResponse(query, state: "ready", results: [], partialCoverage: true)
         }
-        let currentByID = Dictionary(uniqueKeysWithValues: current.map { ($0.itemID, $0) })
         let result = try hits.compactMap { hit -> [String: Any]? in
-            guard let snapshot = currentByID[hit.itemID], snapshot.revisionID == hit.revisionID,
-                snapshot.contentHash == hit.contentHash
+            guard
+                let snapshot = try self.snapshot(
+                    id: hit.itemID, configuration: configuration, profileID: query.profileID)
             else { return nil }
-            let chunks = try SemanticChunker.chunks(
-                snapshot.sourceText, chunkBytes: configuration.chunkBytes,
-                overlapBytes: configuration.overlapBytes)
-            guard let chunk = chunks.first(where: { $0.ordinal == hit.ordinal }) else { return nil }
-            let bytes = Array(snapshot.sourceText.utf8)
-            guard chunk.byteRange.lowerBound >= 0, chunk.byteRange.upperBound <= bytes.count else {
+            defer { try? store.releaseIndexedCorpus(snapshot.corpus) }
+            guard snapshot.revisionID == hit.revisionID, snapshot.contentHash == hit.contentHash else {
                 return nil
             }
+            let length = hit.byteRange.count
+            guard (1...configuration.chunkBytes).contains(length), hit.unitByteRange.count == length else {
+                return nil
+            }
+            let window = try SemanticSource.readUnitWindow(
+                snapshot.corpus, ordinal: hit.unitOrdinal,
+                offset: Int64(hit.unitByteRange.lowerBound), limit: length)
+            guard window.data.count == length, String(decoding: window.data, as: UTF8.self) == hit.text else {
+                return nil
+            }
+            let unitStart = Int64(hit.byteRange.lowerBound) - Int64(hit.unitByteRange.lowerBound)
+            guard unitStart >= 0 else { return nil }
+            try store.revalidateIndexedCorpus(snapshot.corpus)
             return [
-                "itemID": snapshot.itemID,
-                "revisionID": snapshot.revisionID,
-                "byteStart": chunk.byteRange.lowerBound,
-                "byteEnd": chunk.byteRange.upperBound,
-                "passage": String(data: Data(bytes[chunk.byteRange]), encoding: .utf8) ?? "",
-                "similarity": hit.score ?? cosine(vector, hit.vector),
+                "itemID": snapshot.itemID, "revisionID": snapshot.revisionID,
+                "unitOrdinal": hit.unitOrdinal, "unitByteStart": hit.unitByteRange.lowerBound,
+                "unitByteEnd": hit.unitByteRange.upperBound, "byteStart": hit.byteRange.lowerBound,
+                "byteEnd": hit.byteRange.upperBound, "passage": hit.text, "similarity": hit.score,
+                "sources": try JSONSerialization.jsonObject(
+                    with: JSON.encode(
+                        try SemanticSource.passageSources(
+                            snapshot, window: window.raw, range: hit.byteRange, unitStart: unitStart))),
             ]
         }
         return queryResponse(query, state: "ready", results: result, partialCoverage: partial)
@@ -516,126 +563,180 @@ final class SemanticService {
     }
 
     private func drain(_ configuration: SemanticConfiguration?) throws {
-        for work in mailbox.take() {
-            if let itemID = work.snapshot?.itemID, documentJobs[itemID] == work.jobID {
-                documentJobs.removeValue(forKey: itemID)
-                documentTasks.removeValue(forKey: itemID)
-                // The canonical heads may have changed while this document
-                // occupied the sole embedding slot. Reconcile even if the
-                // completion is now stale and cannot be written.
-                reconciledStoreState = nil
+        if let batch = mailbox.takeBatch() {
+            var accepted = false
+            defer { batch.acknowledgement.resolve(accepted) }
+            if var work = documentWork, work.jobID == batch.jobID, work.epoch == batch.epoch,
+                batch.epoch == epoch, !work.failed, let configuration,
+                try SemanticSource.profileID(configuration) == work.snapshot.profileID
+            {
+                do {
+                    guard
+                        let current = try snapshot(
+                            id: work.snapshot.itemID, configuration: configuration,
+                            profileID: work.snapshot.profileID)
+                    else { throw CancellationError() }
+                    defer { try? store.releaseIndexedCorpus(current.corpus) }
+                    guard current.contentHash == work.snapshot.contentHash else { throw CancellationError() }
+                    try store.revalidateIndexedCorpus(current.corpus)
+                    try work.storage.append(work.generation, chunks: batch.chunks, vectors: batch.vectors)
+                    work.acceptedCount = try PageCorpusEmitter.add(
+                        work.acceptedCount, Int64(batch.chunks.count))
+                    accepted = true
+                } catch { work.failed = true }
+                documentWork = work
             }
-            if let queryID = work.queryID, queryJobs[queryID] == work.jobID {
-                queryJobs.removeValue(forKey: queryID)
-                queryTasks.removeValue(forKey: queryID)
-            }
-            guard work.epoch == epoch else { continue }
-            if work.failed {
-                if let itemID = work.snapshot?.itemID {
-                    retryAfter[itemID] = Date().addingTimeInterval(retryDelay)
+        }
+        for completed in mailbox.takeCompleted() {
+            if let queryID = completed.queryID {
+                if queryJobs[queryID] == completed.jobID {
+                    queryJobs.removeValue(forKey: queryID)
+                    queryTasks.removeValue(forKey: queryID)
                 }
-                if let queryID = work.queryID { queryFailures.insert(queryID) }
+                guard completed.epoch == epoch else { continue }
+                if completed.failed {
+                    queryFailures.insert(queryID)
+                    continue
+                }
+                if let vector = completed.vector, let configuration,
+                    queries[queryID]?.profileID == (try SemanticSource.profileID(configuration))
+                {
+                    try SemanticVectorValidation.validate(vector, dimensions: configuration.dimensions)
+                    queryVectors[queryID] = vector
+                }
                 continue
             }
-            if let queryID = work.queryID, let vector = work.vectors?.first, let configuration {
-                let activeProfile = try SemanticSource.profileID(configuration)
-                guard queries[queryID]?.profileID == activeProfile else { continue }
-                try SemanticVectorValidation.validate(vector, dimensions: configuration.dimensions)
-                queryVectors[queryID] = vector
+            guard let work = documentWork, work.jobID == completed.jobID else { continue }
+            documentWork = nil
+            reconciledStoreState = nil
+            defer { try? store.releaseIndexedCorpus(work.snapshot.corpus) }
+            var published = false
+            defer {
+                if !published { try? work.storage.discard(work.generation) }
+                try? work.storage.cleanup()
+            }
+            guard completed.epoch == epoch else { continue }
+            guard !completed.failed, !work.failed,
+                completed.count == work.acceptedCount, completed.count > 0,
+                let configuration, try SemanticSource.profileID(configuration) == work.snapshot.profileID,
+                let current = try snapshot(
+                    id: work.snapshot.itemID, configuration: configuration, profileID: work.snapshot.profileID
+                )
+            else {
+                retryAfter[work.snapshot.itemID] = Date().addingTimeInterval(retryDelay)
                 continue
             }
-            guard let snapshot = work.snapshot, let vectors = work.vectors, let configuration else {
-                continue
-            }
-            let activeProfile = try SemanticSource.profileID(configuration)
-            guard snapshot.profileID == activeProfile,
-                let current = try self.snapshot(
-                    id: snapshot.itemID, configuration: configuration, profileID: snapshot.profileID),
-                current.contentHash == snapshot.contentHash
-            else { continue }
-            let chunks = try SemanticChunker.chunks(
-                current.sourceText, chunkBytes: configuration.chunkBytes,
-                overlapBytes: configuration.overlapBytes)
-            guard vectors.count == chunks.count else {
-                retryAfter[current.itemID] = Date().addingTimeInterval(retryDelay)
-                continue
-            }
-            for vector in vectors {
-                try SemanticVectorValidation.validate(vector, dimensions: configuration.dimensions)
-            }
-            // A metadata-only revision keeps the source content hash. Rebind
-            // the completed vectors to the latest head instead of discarding
-            // useful work and embedding the same passage again.
-            try storage.replace(current, chunks: chunks, vectors: vectors)
+            defer { try? store.releaseIndexedCorpus(current.corpus) }
+            guard current.contentHash == work.snapshot.contentHash else { continue }
+            try store.revalidateIndexedCorpus(current.corpus)
+            try work.storage.publish(work.generation, count: completed.count)
+            published = true
+            if current.revisionID != work.snapshot.revisionID { try work.storage.rebind(current) }
             retryAfter.removeValue(forKey: current.itemID)
         }
     }
 
     private func reconcile(_ configuration: SemanticConfiguration, profileID: String) throws {
+        try storage.cleanup()
+        guard !documentWorkSuspended else { return }
         let storeState = store.state
-        let canRetry = documentJobs.isEmpty && documentTasks.isEmpty && hasDueDocumentRetry
+        let canRetry = documentWork == nil && hasDueDocumentRetry
         guard reconciledStoreState != storeState || canRetry else { return }
-        let snapshots = try allSnapshots(configuration: configuration, profileID: profileID)
-        let indexableIDs = Set(snapshots.map(\.itemID))
-        retryAfter = retryAfter.filter { indexableIDs.contains($0.key) }
-        try storage.prune(profileID: profileID, keeping: indexableIDs)
+        try storage.prune(profileID: profileID) { itemID in
+            guard let current = try snapshot(id: itemID, configuration: configuration, profileID: profileID)
+            else { return false }
+            defer { try? store.releaseIndexedCorpus(current.corpus) }
+            return true
+        }
         reconciledStoreState = storeState
-        guard documentJobs.isEmpty, documentTasks.isEmpty else { return }
-        for snapshot in snapshots {
-            if let indexed = try storage.identity(itemID: snapshot.itemID, profileID: profileID),
-                indexed.contentHash == snapshot.contentHash
+        guard documentWork == nil else { return }
+        var cursor: String?
+        while let revision = try store.semanticCurrentRevision(after: cursor) {
+            cursor = revision.itemID
+            guard let current = try snapshot(revision, configuration: configuration, profileID: profileID)
+            else { continue }
+            var transferred = false
+            defer { if !transferred { try? store.releaseIndexedCorpus(current.corpus) } }
+            if let indexed = try storage.identity(itemID: current.itemID, profileID: profileID),
+                indexed.contentHash == current.contentHash
             {
-                guard indexed.revisionID != snapshot.revisionID else { continue }
-                try storage.rebind(snapshot)
-            } else if retryAfter[snapshot.itemID, default: .distantPast] <= Date() {
-                scheduleDocument(snapshot, configuration)
+                if indexed.revisionID != current.revisionID { try storage.rebind(current) }
+            } else if retryAfter[current.itemID, default: .distantPast] <= Date() {
+                try scheduleDocument(current, configuration)
+                transferred = true
                 break
             }
         }
     }
+    private var hasDueDocumentRetry: Bool { retryAfter.values.contains { $0 <= Date() } }
 
-    private var hasDueDocumentRetry: Bool {
-        retryAfter.values.contains { $0 <= Date() }
-    }
-
-    private func scheduleDocument(_ snapshot: SemanticSnapshot, _ configuration: SemanticConfiguration) {
-        guard documentJobs[snapshot.itemID] == nil,
-            let chunks = try? SemanticChunker.chunks(
-                snapshot.sourceText, chunkBytes: configuration.chunkBytes,
-                overlapBytes: configuration.overlapBytes)
-        else { return }
+    private func scheduleDocument(_ snapshot: SemanticSnapshot, _ configuration: SemanticConfiguration) throws
+    {
+        guard documentWork == nil else { return }
+        let generation = try storage.begin(snapshot)
         let jobID = Identifier.make()
-        documentJobs[snapshot.itemID] = jobID
         let currentEpoch = epoch
         let provider = embed
         let mailbox = mailbox
         let task = Task.detached {
+            var count: Int64 = 0
+            var failed = false
             do {
-                try Task.checkCancellation()
-                let inputs = chunks.map(\.text)
-                var vectors: [[Double]] = []
-                var position = 0
-                while position < inputs.count {
+                var cursor = try SemanticChunkCursor(
+                    snapshot: snapshot.corpus, chunkBytes: configuration.chunkBytes,
+                    overlapBytes: configuration.overlapBytes)
+                var done = false
+                while !done {
                     try Task.checkCancellation()
-                    let end = min(position + 16, inputs.count)
-                    vectors += try await provider(configuration, Array(inputs[position..<end]), false)
-                    position = end
+                    var chunks: [SemanticChunk] = []
+                    while chunks.count < 16 {
+                        guard let chunk = try cursor.next(boundary: { try Task.checkCancellation() }) else {
+                            done = true
+                            break
+                        }
+                        chunks.append(chunk)
+                    }
+                    guard !chunks.isEmpty else { break }
+                    let vectors = try await provider(configuration, chunks.map(\.text), false)
+                    try Task.checkCancellation()
+                    guard vectors.count == chunks.count else {
+                        throw TractandaError("semanticProvider", "Embedding response count mismatch.")
+                    }
+                    for vector in vectors {
+                        try SemanticVectorValidation.validate(vector, dimensions: configuration.dimensions)
+                    }
+                    let acknowledgement = SemanticAcknowledgement()
+                    mailbox.append(
+                        .init(
+                            epoch: currentEpoch, jobID: jobID, chunks: chunks, vectors: vectors,
+                            acknowledgement: acknowledgement))
+                    guard await acknowledgement.wait() else { throw CancellationError() }
+                    count = try PageCorpusEmitter.add(count, Int64(chunks.count))
                 }
                 try Task.checkCancellation()
-                mailbox.append(
-                    CompletedSemanticWork(
-                        epoch: currentEpoch, jobID: jobID, snapshot: snapshot, queryID: nil,
-                        vectors: vectors, failed: false))
-            } catch is CancellationError {
-                return
-            } catch {
-                mailbox.append(
-                    CompletedSemanticWork(
-                        epoch: currentEpoch, jobID: jobID, snapshot: snapshot, queryID: nil,
-                        vectors: nil, failed: true))
-            }
+            } catch { failed = true }
+            // This is the last operation: all reader work is finished before lease disposal can be acknowledged.
+            mailbox.append(
+                CompletedSemanticWork(
+                    epoch: currentEpoch, jobID: jobID, queryID: nil, vector: nil, count: count, failed: failed
+                ))
         }
-        documentTasks[snapshot.itemID] = task
+        documentWork = .init(
+            epoch: currentEpoch, jobID: jobID, snapshot: snapshot, generation: generation, storage: storage,
+            task: task)
+    }
+
+    @discardableResult
+    func cancelDocumentWork() -> Task<Void, Never>? {
+        documentWorkSuspended = true
+        documentWork?.task.cancel()
+        mailbox.cancelDocument(jobID: documentWork?.jobID)
+        return documentWork?.task
+    }
+    var hasPendingDocumentWork: Bool { documentWork != nil }
+    func resumeDocumentWork() {
+        documentWorkSuspended = false
+        reconciledStoreState = nil
     }
 
     private func scheduleOneQuery(_ configuration: SemanticConfiguration, profileID: String) {
@@ -659,86 +760,94 @@ final class SemanticService {
                 try Task.checkCancellation()
                 mailbox.append(
                     CompletedSemanticWork(
-                        epoch: currentEpoch, jobID: jobID, snapshot: nil, queryID: query.queryID,
-                        vectors: vectors, failed: false))
-            } catch is CancellationError {
-                return
+                        epoch: currentEpoch, jobID: jobID, queryID: query.queryID,
+                        vector: vectors.count == 1 ? vectors.first : nil, count: 0, failed: vectors.count != 1
+                    ))
             } catch {
                 mailbox.append(
                     CompletedSemanticWork(
-                        epoch: currentEpoch, jobID: jobID, snapshot: nil, queryID: query.queryID,
-                        vectors: nil, failed: true))
+                        epoch: currentEpoch, jobID: jobID, queryID: query.queryID,
+                        vector: nil, count: 0, failed: true))
             }
         }
         queryTasks[query.queryID] = task
     }
 
-    private func readableSnapshots(configuration: SemanticConfiguration, profileID: String) throws
-        -> [SemanticSnapshot]
-    {
-        try store.candidates().compactMap {
-            try snapshot($0, configuration: configuration, profileID: profileID)
-        }
-    }
-
-    private func allSnapshots(configuration: SemanticConfiguration, profileID: String) throws
-        -> [SemanticSnapshot]
-    {
-        try store.candidates().compactMap {
-            try snapshot($0, configuration: configuration, profileID: profileID)
-        }
-    }
-
     private func snapshot(id: String, configuration: SemanticConfiguration, profileID: String) throws
         -> SemanticSnapshot?
     {
-        try snapshot(store.get(id), configuration: configuration, profileID: profileID)
+        do {
+            return try snapshot(store.get(id), configuration: configuration, profileID: profileID)
+        } catch let error as TractandaError where error.code == "notFound" || error.code == "forbidden" {
+            return nil
+        }
     }
-
     private func snapshot(_ revision: Revision, configuration: SemanticConfiguration, profileID: String)
-        throws
-        -> SemanticSnapshot?
+        throws -> SemanticSnapshot?
     {
-        guard !revision.isDeleted else { return nil }
-        let corpus = ItemTextContent.corpus(for: revision)
-        let sourceText = corpus.sourceText
-        guard !sourceText.isEmpty else { return nil }
-        let contentHash = try SemanticSource.contentHash(sourceText: sourceText)
-        return SemanticSnapshot(
-            itemID: revision.itemID,
-            revisionID: revision.revisionID,
-            subject: corpus.subject,
-            body: corpus.body,
-            sourceText: sourceText,
-            profileID: profileID,
-            contentHash: contentHash)
+        guard !revision.isDeleted,
+            let corpus = try store.captureIndexedCorpus(
+                itemID: revision.itemID, expectedRevisionID: revision.revisionID)
+        else { return nil }
+        return .init(corpus: corpus, profileID: profileID, dimensions: configuration.dimensions)
     }
-
-    private func eligibleSnapshots(_ query: SemanticQuery, configuration: SemanticConfiguration) throws
-        -> [SemanticSnapshot]
-    {
-        let revisions: [Revision]
-        if let viewID = query.viewID {
-            guard query.expression == nil, query.categoryPath.isEmpty, query.excludedCategoryIDs.isEmpty
-            else {
+    private func forEachEligibleSnapshot(
+        _ query: SemanticQuery, configuration: SemanticConfiguration,
+        visit: (SemanticSnapshot) throws -> Void
+    ) throws {
+        var expression = query.expression
+        var text: String?
+        var categoryPath = query.categoryPath
+        var excluded = query.excludedCategoryIDs
+        if let id = query.viewID {
+            guard expression == nil, categoryPath.isEmpty, excluded.isEmpty else {
                 throw TractandaError(
                     "invalidArguments", "Use either a saved view or inline semantic criteria.")
             }
-            revisions = try Categories.savedView(
-                store: store, id: viewID, sectionID: nil, at: query.evaluatedAt, timeZone: query.timeZone)
-        } else {
-            revisions = try Categories.query(
-                store: store,
-                expression: query.expression,
-                text: nil,
-                categoryPath: query.categoryPath,
-                excludedCategoryIDs: query.excludedCategoryIDs,
-                sort: [],
-                at: query.evaluatedAt,
-                timeZone: query.timeZone)
+            let view = try store.get(id)
+            guard !view.isDeleted, let value = view.fields["viewDefinition"] else {
+                throw TractandaError("notView", "Item has no available saved view definition.")
+            }
+            let definition = try SavedViewDefinition(value)
+            expression = definition.expression
+            text = definition.text
+            categoryPath = definition.categoryPath
+            excluded = definition.excludedCategoryIDs
         }
-        return try revisions.compactMap {
-            try snapshot($0, configuration: configuration, profileID: query.profileID)
+        guard categoryPath.count <= 32, excluded.count <= 32 else {
+            throw TractandaError("limit", "Category path exceeds32levels.")
+        }
+        let predicate = try expression.map(SpotlightQuery.init)
+        let calendar = try QueryCalendar.make(timeZone: query.timeZone)
+        for id in categoryPath + excluded { _ = try Categories.rule(store.get(id)) }
+        let evaluator =
+            try categoryPath.isEmpty && excluded.isEmpty
+            ? nil
+            : CategoryEvaluator(
+                definitions: store.readableCategoryDefinitions(
+                    requestedCategoryIDs: Set(categoryPath + excluded)), store: store, at: query.evaluatedAt)
+        try store.forEachReadableCandidate(
+            text: text,
+            candidatePlan: predicate?.boundedIndexCandidatePlan(at: query.evaluatedAt, calendar: calendar)
+                ?? .all
+        ) { revision in
+            guard predicate?.matches(revision, at: query.evaluatedAt, calendar: calendar) ?? true else {
+                return
+            }
+            var cache: [String: Membership] = [:]
+            for id in categoryPath
+            where try evaluator?.membership(revision, categoryID: id, cache: &cache).isIncluded != true {
+                return
+            }
+            for id in excluded
+            where try evaluator?.membership(revision, categoryID: id, cache: &cache).isIncluded == true {
+                return
+            }
+            guard
+                let current = try snapshot(revision, configuration: configuration, profileID: query.profileID)
+            else { return }
+            defer { try? store.releaseIndexedCorpus(current.corpus) }
+            try visit(current)
         }
     }
 
@@ -757,15 +866,22 @@ final class SemanticService {
         storage = SemanticMemoryStorage()
         storageProfile = nil
         reconciledStoreState = nil
+        try store.requireIndexFilesystemCapacity(additionalBytes: 131_072)
         do {
             storage = try SemanticVec1Storage(
-                path: semanticIndexURL.path, dimensions: configuration.dimensions, profileID: profileID)
+                path: semanticIndexURL.path, dimensions: configuration.dimensions, profileID: profileID,
+                writeBoundary: { [unowned store] batch in try store.semanticVectorWriteBoundary(batch) })
             storageProfile = profileID
             storageProblem = nil
+        } catch let error as TractandaError
+            where error.code == "resourceLimit" || error.code == "forbidden" || error.code == "notFound"
+        {
+            throw error
         } catch {
             try quarantineDerivedIndex()
             storage = try SemanticVec1Storage(
-                path: semanticIndexURL.path, dimensions: configuration.dimensions, profileID: profileID)
+                path: semanticIndexURL.path, dimensions: configuration.dimensions, profileID: profileID,
+                writeBoundary: { [unowned store] batch in try store.semanticVectorWriteBoundary(batch) })
             storageProfile = profileID
             storageProblem = nil
         }
@@ -785,6 +901,7 @@ final class SemanticService {
             let path = URL(fileURLWithPath: semanticIndexURL.path + suffix)
             if fileManager.fileExists(atPath: path.path) { try fileManager.removeItem(at: path) }
         }
+        try store.semanticVectorIndexDisposed()
     }
 
     private func quarantineDerivedIndex() throws {
@@ -802,16 +919,13 @@ final class SemanticService {
     }
 
     private func invalidate() {
-        for task in documentTasks.values { task.cancel() }
+        documentWork?.task.cancel()
+        mailbox.cancelDocument(jobID: documentWork?.jobID)
         for task in queryTasks.values { task.cancel() }
         epoch += 1
         queries.removeAll()
         queryVectors.removeAll()
         queryFailures.removeAll()
-        documentJobs.removeAll()
-        queryJobs.removeAll()
-        documentTasks.removeAll()
-        queryTasks.removeAll()
         retryAfter.removeAll()
         reconciledStoreState = nil
     }
@@ -824,23 +938,5 @@ final class SemanticService {
         queries = queries.filter { $0.value.expiresAt > now }
         queryVectors = queryVectors.filter { queries[$0.key] != nil }
         queryFailures = queryFailures.filter { queries[$0] != nil }
-        queryJobs = queryJobs.filter { queries[$0.key] != nil }
-        queryTasks = queryTasks.filter { queries[$0.key] != nil }
     }
-}
-
-private func cosine(_ left: [Double], _ right: [Double]) -> Double {
-    guard left.count == right.count, !left.isEmpty else { return -.infinity }
-    var dot = 0.0
-    var leftMagnitude = 0.0
-    var rightMagnitude = 0.0
-    for (a, b) in zip(left, right) {
-        dot += a * b
-        leftMagnitude += a * a
-        rightMagnitude += b * b
-    }
-    guard leftMagnitude.isFinite, rightMagnitude.isFinite, leftMagnitude > 0, rightMagnitude > 0 else {
-        return -.infinity
-    }
-    return dot / (sqrt(leftMagnitude) * sqrt(rightMagnitude))
 }

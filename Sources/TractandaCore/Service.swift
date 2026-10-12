@@ -2,10 +2,23 @@ import CTractandaPlatform
 import Foundation
 import TractandaClient
 
+#if canImport(Darwin)
+    import Darwin
+#else
+    import Glibc
+#endif
+
 struct PreparedNativeRead: Sendable {
     let query: PreparedReadQuery
     let snapshot: ImmutableReadSnapshot
     let callID: String
+}
+
+struct PreparedDocumentNativeCall: Sendable {
+    let callID: String
+    let admission: DocumentExtractionAdmission
+    let configuration: DocumentConverterConfiguration?
+    let executableSHA256: String?
 }
 
 struct PreparedPooledQuery: Sendable {
@@ -356,6 +369,12 @@ public final class ItemService {
     public let store: ItemStore
     private var learners: [String: CategoryLearning] = [:]
     private let semantic: SemanticService
+    var requiresAsyncAttachmentIntegrity = false
+    var rejectsBlockingNetworkAttachments = false
+    var requiresAsyncDocumentJobs = false
+    private let hasExtractedTextUnitRoute: Bool
+    private var documentConverter: DocumentConverterConfiguration?
+    private var documentExecutableSHA256: String?
     public var learning: CategoryLearning {
         let scope = store.accessScope
         if let existing = learners[scope] { return existing }
@@ -364,9 +383,438 @@ public final class ItemService {
         learners[scope] = learner
         return learner
     }
-    public init(store: ItemStore) {
+    public convenience init(store: ItemStore) {
+        self.init(store: store, extractedTextUnitRouting: false)
+    }
+    init(
+        store: ItemStore, extractedTextUnitRouting: Bool,
+        embeddingProviderForTesting: (
+            @Sendable (SemanticConfiguration, [String], Bool) async throws -> [[Double]]
+        )? = nil
+    ) {
         self.store = store
-        semantic = SemanticService(store: store)
+        hasExtractedTextUnitRoute = extractedTextUnitRouting
+        if let embeddingProviderForTesting {
+            semantic = SemanticService(store: store, embed: embeddingProviderForTesting)
+        } else {
+            semantic = SemanticService(store: store)
+        }
+    }
+    convenience init(
+        store: ItemStore,
+        embeddingProviderForTesting:
+            @escaping @Sendable (SemanticConfiguration, [String], Bool) async throws -> [[Double]]
+    ) {
+        self.init(
+            store: store, extractedTextUnitRouting: false,
+            embeddingProviderForTesting: embeddingProviderForTesting)
+    }
+    public convenience init(store: ItemStore, documentConverter: DocumentConverterConfiguration) throws {
+        try self.init(store: store, documentConverter: documentConverter, extractedTextUnitRouting: false)
+    }
+    convenience init(
+        store: ItemStore, documentConverter: DocumentConverterConfiguration, extractedTextUnitRouting: Bool
+    ) throws {
+        try documentConverter.validate(storeRoot: store.root, indexDirectory: store.indexDirectory)
+        self.init(store: store, extractedTextUnitRouting: extractedTextUnitRouting)
+        self.documentConverter = documentConverter
+        documentExecutableSHA256 = try DocumentProcess.executableSHA256(documentConverter.executablePath)
+    }
+
+    static func semanticLifecycleMethod(_ data: Data) -> String? {
+        guard data.count <= 8 * 1024 * 1024,
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let calls = object["methodCalls"] as? [[Any]], calls.count == 1,
+            let call = calls.first, call.count == 3, let method = call[0] as? String,
+            ["TractandaSemantic/reset", "TractandaSemantic/rebuild", "TractandaSemantic/configure"].contains(
+                method)
+        else { return nil }
+        return method
+    }
+    func cancelSemanticDocumentWork() -> Task<Void, Never>? { semantic.cancelDocumentWork() }
+    func drainSemanticDocumentTerminal() { semantic.maintain() }
+    func resumeSemanticDocumentWork() { semantic.resumeDocumentWork() }
+    var hasPendingSemanticDocumentWork: Bool { semantic.hasPendingDocumentWork }
+
+    static func documentJobNativeCall(_ data: Data) -> DocumentJobNativeCall? {
+        guard data.count <= 8 * 1024 * 1024,
+            let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            Set(request.keys) == ["using", "methodCalls"],
+            let using = request["using"] as? [String], using.contains(Self.capability),
+            Set(using).isSubset(of: [Self.capability, "urn:ietf:params:jmap:core"]),
+            let calls = request["methodCalls"] as? [[Any]], calls.count == 1,
+            let call = calls.first, call.count == 3, let method = call[0] as? String,
+            ["start", "status", "list", "cancel", "resume", "rebase", "page", "discard"].contains(
+                String(method.dropFirst("TractandaDocumentJob/".count))),
+            method.hasPrefix("TractandaDocumentJob/"), let args = call[1] as? [String: Any],
+            let callID = call[2] as? String, !callID.isEmpty, callID.utf8.count <= 200,
+            let data = try? JSONSerialization.data(withJSONObject: args)
+        else { return nil }
+        return DocumentJobNativeCall(method: method, callID: callID, arguments: data)
+    }
+    func documentJobRuntime() throws -> DocumentJobRuntime? {
+        guard let configuration = documentConverter, let executableSHA256 = documentExecutableSHA256 else {
+            return nil
+        }
+        let identity: [String: Any] = [
+            "executableSHA256": executableSHA256,
+            "modelDirectory": configuration.modelDirectory,
+            "identity": try object(DocumentConverterIdentity()),
+        ]
+        let bytes = try JSONSerialization.data(withJSONObject: identity, options: [.sortedKeys])
+        return DocumentJobRuntime(
+            configuration: configuration, executableSHA256: executableSHA256,
+            configurationSHA256: PageCorpusInput.digest(bytes))
+    }
+    func dispatchDocumentJob(_ call: DocumentJobNativeCall, peerUID: UInt32) throws -> DocumentJobDispatch {
+        try store.withAccess(forUID: peerUID) {
+            guard requiresAsyncDocumentJobs else {
+                throw TractandaError("documentJobsRequireCoordinator", "Use the asynchronous shared service.")
+            }
+            let args = try JSONSerialization.jsonObject(with: call.arguments) as! [String: Any]
+            let action = String(call.method.dropFirst("TractandaDocumentJob/".count))
+            var result: Any
+            var admission: DocumentJobAdmission?
+            switch action {
+            case "start":
+                try check(args, allowed: ["itemID", "expectedRevisionID", "attachmentID", "operationID"])
+                guard let runtime = try documentJobRuntime() else {
+                    throw TractandaError(
+                        "documentConverterUnavailable", "Configure the native document producer.")
+                }
+                let request = try decode(DocumentJobStart.self, args)
+                let status = try store.startDocumentJob(
+                    request, identity: .init(), configurationSHA256: runtime.configurationSHA256)
+                result = try object(status)
+                if status.state == "queued" { admission = try store.documentJobAdmission(status.jobID) }
+            case "list":
+                try check(args, allowed: ["afterJobID", "limit"])
+                let limit = try integer(args, "limit", default: 32, range: 1...64)
+                let after = args["afterJobID"] == nil ? nil : try string(args, "afterJobID")
+                result = try object(store.listDocumentJobs(afterJobID: after, limit: limit))
+            case "page":
+                try check(args, allowed: ["jobID", "pageNumber"])
+                let number = try NativeWorkerProtocol.integer(args["pageNumber"] as Any)
+                result = try object(store.documentJobPage(try string(args, "jobID"), pageNumber: number))
+            case "status":
+                try check(args, allowed: ["jobID"])
+                result = try object(store.documentJobStatus(try string(args, "jobID")))
+            default:
+                try check(args, allowed: action == "rebase" ? ["jobID", "expectedRevisionID"] : ["jobID"])
+                let id = try string(args, "jobID")
+                let runtime = try documentJobRuntime()
+                if ["resume", "rebase"].contains(action), runtime == nil {
+                    throw TractandaError(
+                        "documentConverterUnavailable",
+                        "Configure the native document producer before resuming.")
+                }
+                let expected = action == "rebase" ? try string(args, "expectedRevisionID") : nil
+                let status = try store.controlDocumentJob(
+                    id, action: action, expectedRevisionID: expected,
+                    configurationSHA256: runtime?.configurationSHA256 ?? "", deferMaterialWork: true)
+                result = try object(status)
+                if status.discarded {
+                    admission = try store.documentJobAdmission(id, discard: true)
+                } else if status.state == "queued" {
+                    admission = try store.documentJobAdmission(id)
+                }
+            }
+            let response = try JSONSerialization.data(withJSONObject: [
+                "methodResponses": [[call.method, result, call.callID]], "sessionState": store.state,
+            ])
+            return DocumentJobDispatch(response: response, admission: admission)
+        }
+    }
+
+    static func attachmentIntegrityMethod(_ data: Data) -> String? {
+        guard data.count <= 8 * 1024 * 1024,
+            let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let calls = request["methodCalls"] as? [[Any]], calls.count == 1,
+            let call = calls.first, call.count == 3, let method = call[0] as? String,
+            [
+                "TractandaAttachment/finish", "TractandaAttachment/content",
+                "TractandaAttachment/uploadStatus", "TractandaAttachment/integrity",
+                "TractandaAttachment/abort",
+            ].contains(method)
+        else { return nil }
+        return method
+    }
+    func prepareAttachmentIntegrityNativeCall(_ data: Data, peerUID: UInt32) throws
+        -> PreparedAttachmentIntegrityCall
+    {
+        try store.withAccess(forUID: peerUID) {
+            guard store.isCanonicalTrusted else {
+                throw TractandaError("recoveryRequired", "Rebuild before attachment access.")
+            }
+            guard let method = Self.attachmentIntegrityMethod(data),
+                let request = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let using = request["using"] as? [String], using.contains(Self.capability),
+                Set(using).isSubset(of: [Self.capability, "urn:ietf:params:jmap:core"]),
+                let calls = request["methodCalls"] as? [[Any]], let args = calls[0][1] as? [String: Any],
+                let callID = calls[0][2] as? String, !callID.isEmpty
+            else {
+                throw TractandaError("invalidArguments", "Use a valid singleton attachment envelope.")
+            }
+            try check(request, allowed: ["using", "methodCalls"])
+            if [
+                "TractandaAttachment/finish", "TractandaAttachment/uploadStatus", "TractandaAttachment/abort",
+            ].contains(method) {
+                try check(args, allowed: ["uploadID"])
+                let id = try string(args, "uploadID")
+                _ = try store.attachmentUploadStatus(uploadID: id)
+                let work =
+                    method == "TractandaAttachment/finish"
+                    ? try store.prepareAttachmentIntegrity(uploadID: id) : nil
+                return PreparedAttachmentIntegrityCall(
+                    key: "upload:" + id, callID: callID, method: method, work: work)
+            }
+            try check(
+                args,
+                allowed: method == "TractandaAttachment/content"
+                    ? ["itemID", "revisionID", "attachmentID", "offset", "limit"]
+                    : ["itemID", "revisionID", "attachmentID"])
+            if args["revisionID"] != nil { _ = try string(args, "revisionID") }
+            let itemID = try string(args, "itemID")
+            let attachmentID = try string(args, "attachmentID")
+            let status = try store.attachmentReadIntegrityStatus(
+                itemID: itemID, revisionID: args["revisionID"] as? String, attachmentID: attachmentID)
+            if method == "TractandaAttachment/content" {
+                let offset = try integer(args, "offset", default: 0, range: 0...Int.max)
+                _ = try integer(args, "limit", default: 262_144, range: 1...262_144)
+                guard Int64(offset) <= status.totalBytes else {
+                    throw TractandaError("invalidArguments", "Content offset exceeds its original.")
+                }
+            }
+            let work =
+                method == "TractandaAttachment/content"
+                ? try store.prepareAttachmentReadIntegrity(
+                    itemID: itemID, revisionID: args["revisionID"] as? String, attachmentID: attachmentID)
+                : nil
+            return PreparedAttachmentIntegrityCall(
+                key: "read:" + attachmentID, callID: callID, method: method, work: work)
+        }
+    }
+    func attachmentIntegrityNativeResponse(
+        _ data: Data, peerUID: UInt32, verifiedBytes: Int64, pending: Bool, failure: String? = nil
+    ) throws -> Data {
+        try store.withAccess(forUID: peerUID) {
+            let admission = try prepareAttachmentStatusNativeCall(data, verifiedBytes: verifiedBytes)
+            let payload: Any
+            let isStatus =
+                admission.method == "TractandaAttachment/uploadStatus"
+                || admission.method == "TractandaAttachment/integrity"
+            if let failure, isStatus {
+                var map = try object(admission.status) as! [String: Any]
+                map["phase"] = "failed"
+                map["failureCode"] = failure
+                payload = map
+            } else if pending || failure != nil {
+                var map = try object(admission.status) as! [String: Any]
+                map["type"] = failure ?? "attachmentVerifying"
+                map["description"] =
+                    failure == nil
+                    ? "Original integrity verification is pending. Retry the same request or inspect its status."
+                    : "Original integrity verification failed."
+                map["retryable"] = failure == nil
+                payload = map
+            } else {
+                payload = try object(admission.status)
+            }
+            return try JSONSerialization.data(
+                withJSONObject: [
+                    "methodResponses": [
+                        [
+                            pending || (failure != nil && !isStatus) ? "error" : admission.method, payload,
+                            admission.callID,
+                        ]
+                    ], "sessionState": store.state,
+                ], options: [.sortedKeys])
+        }
+    }
+    private func prepareAttachmentStatusNativeCall(_ data: Data, verifiedBytes: Int64) throws -> (
+        status: AttachmentIntegrityStatus, method: String, callID: String
+    ) {
+        guard let method = Self.attachmentIntegrityMethod(data),
+            let request = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let calls = request["methodCalls"] as? [[Any]], let args = calls[0][1] as? [String: Any],
+            let callID = calls[0][2] as? String
+        else {
+            throw TractandaError("invalidArguments", "Invalid attachment status request.")
+        }
+        let status: AttachmentIntegrityStatus
+        if method == "TractandaAttachment/finish" || method == "TractandaAttachment/uploadStatus" {
+            status = try store.attachmentUploadStatus(
+                uploadID: string(args, "uploadID"), verifiedBytes: verifiedBytes)
+        } else {
+            status = try store.attachmentReadIntegrityStatus(
+                itemID: string(args, "itemID"), revisionID: args["revisionID"] as? String,
+                attachmentID: string(args, "attachmentID"), verifiedBytes: verifiedBytes)
+        }
+        return (status, method, callID)
+    }
+
+    static func attachmentCopyCallID(_ data: Data) -> String? {
+        guard data.count <= 8 * 1024 * 1024,
+            let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let calls = request["methodCalls"] as? [[Any]], calls.count == 1, let call = calls.first,
+            call.count == 3, call[0] as? String == "TractandaItem/commit",
+            let args = call[1] as? [String: Any], args["action"] as? String == "copy",
+            let id = call[2] as? String
+        else { return nil }
+        return id
+    }
+    func prepareAttachmentCopyNativeCall(_ data: Data, peerUID: UInt32) throws -> PreparedCopyCall {
+        try store.withAccess(forUID: peerUID) {
+            guard let callID = Self.attachmentCopyCallID(data), !callID.isEmpty,
+                let envelope = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let using = envelope["using"] as? [String], using.contains(Self.capability),
+                Set(using).isSubset(of: [Self.capability, "urn:ietf:params:jmap:core"]),
+                let calls = envelope["methodCalls"] as? [[Any]], let args = calls[0][1] as? [String: Any]
+            else {
+                throw TractandaError("invalidArguments", "Use a valid singleton copy call.")
+            }
+            try check(envelope, allowed: ["using", "methodCalls"])
+            try check(
+                args,
+                allowed: [
+                    "action", "itemID", "expectedRevisionID", "classID", "changes", "unset", "operationID",
+                ])
+            let request = try decode(CommitRequest.self, args)
+            return PreparedCopyCall(callID: callID, admission: try store.prepareAttachmentCopy(request))
+        }
+    }
+    func attachmentCopyNativeResponse(callID: String, result: CommitResult, peerUID: UInt32) throws -> Data {
+        try store.withAccess(forUID: peerUID) {
+            _ = try store.get(result.revision.itemID)
+            return try JSONSerialization.data(
+                withJSONObject: [
+                    "methodResponses": [["TractandaItem/commit", try object(result), callID]],
+                    "sessionState": store.state,
+                ], options: [.sortedKeys])
+        }
+    }
+    func finishAttachmentCopyNativeCall(callID: String, prepared: PreparedAttachmentCopy, peerUID: UInt32)
+        throws -> Data
+    {
+        try store.withAccess(forUID: peerUID) {
+            let result = try store.finishAttachmentCopy(prepared)
+            return try attachmentCopyNativeResponse(callID: callID, result: result, peerUID: peerUID)
+        }
+    }
+    func attachmentCopyPending(
+        callID: String, plan: AttachmentCopyPlan, bytes: Int64, peerUID: UInt32,
+        failure: TractandaError? = nil
+    ) throws -> Data {
+        try store.withAccess(forUID: peerUID) {
+            _ = try store.get(plan.request.itemID!)
+            guard peerUID == plan.actorUID else { throw TractandaError("forbidden", "Copy actor changed.") }
+            return try JSONSerialization.data(
+                withJSONObject: [
+                    "methodResponses": [
+                        [
+                            "error",
+                            [
+                                "type": failure?.code ?? "attachmentCopyPending",
+                                "description": failure?.message
+                                    ?? "Copy is preparing independent bytes. Retry the identical guarded request.",
+                                "retryable": failure == nil, "phase": failure == nil ? "copying" : "failed",
+                                "copiedBytes": bytes, "retryAfterMilliseconds": 100,
+                            ], callID,
+                        ]
+                    ], "sessionState": store.state,
+                ], options: [.sortedKeys])
+        }
+    }
+
+    static func documentExtractionCallID(_ data: Data) -> String? {
+        guard data.count <= 8 * 1024 * 1024,
+            let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let calls = request["methodCalls"] as? [[Any]], calls.count == 1,
+            let call = calls.first, call.count == 3,
+            call[0] as? String == "TractandaAttachment/extractDocument", let id = call[2] as? String
+        else { return nil }
+        return id
+    }
+
+    func prepareDocumentNativeCall(_ data: Data, peerUID: UInt32, busy: Bool) throws
+        -> PreparedDocumentNativeCall
+    {
+        try store.withAccess(forUID: peerUID) {
+            guard store.isCanonicalTrusted else {
+                throw TractandaError("recoveryRequired", "Rebuild the disposable index before extracting.")
+            }
+            guard let id = Self.documentExtractionCallID(data),
+                let request = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let using = request["using"] as? [String], using.contains(Self.capability),
+                Set(using).isSubset(of: [Self.capability, "urn:ietf:params:jmap:core"]),
+                let calls = request["methodCalls"] as? [[Any]], let args = calls[0][1] as? [String: Any]
+            else {
+                throw TractandaError("invalidArguments", "Use one valid document extraction method call.")
+            }
+            try check(request, allowed: ["using", "methodCalls"])
+            try check(args, allowed: ["itemID", "expectedRevisionID", "attachmentID", "operationID"])
+            let admission = try store.prepareAttachmentDocument(
+                itemID: string(args, "itemID"), expectedRevisionID: string(args, "expectedRevisionID"),
+                attachmentID: string(args, "attachmentID"), operationID: string(args, "operationID"),
+                identity: .init(),
+                unavailableCode: busy
+                    ? "serviceBusy" : (documentConverter == nil ? "documentConverterUnavailable" : nil))
+            return PreparedDocumentNativeCall(
+                callID: id, admission: admission, configuration: documentConverter,
+                executableSHA256: documentExecutableSHA256)
+        }
+    }
+
+    func documentNativeResponse(
+        callID: String, receipt: AttachmentCommitResult, peerUID: UInt32
+    ) throws -> Data {
+        try store.withAccess(forUID: peerUID) {
+            // Re-resolve current admission and item readability even for a completed replay.
+            _ = try store.get(receipt.itemID)
+            return try JSONSerialization.data(
+                withJSONObject: [
+                    "methodResponses": [
+                        ["TractandaAttachment/extractDocument", try object(receipt), callID]
+                    ],
+                    "sessionState": store.state,
+                ], options: [.sortedKeys])
+        }
+    }
+
+    func finishDocumentNativeCall(
+        _ prepared: PreparedDocumentNativeCall, pages: [AttachmentDocumentPage],
+        cancellation: DocumentConversionCancellation, peerUID: UInt32
+    ) throws -> Data {
+        try store.withAccess(forUID: peerUID) {
+            guard store.isCanonicalTrusted else {
+                throw TractandaError(
+                    "recoveryRequired", "Rebuild the disposable index before saving extraction.")
+            }
+            guard case .prepared(let snapshot) = prepared.admission else {
+                throw TractandaError("invalidDocumentOutput", "Document admission changed.")
+            }
+            let receipt = try store.finishAttachmentDocument(
+                snapshot, pages: pages, cancellation: cancellation)
+            return try documentNativeResponse(callID: prepared.callID, receipt: receipt, peerUID: peerUID)
+        }
+    }
+
+    func documentNativeFailure(callID: String, failure: TractandaError, peerUID: UInt32) -> Data {
+        do {
+            return try store.withAccess(forUID: peerUID) {
+                try JSONSerialization.data(
+                    withJSONObject: [
+                        "methodResponses": [
+                            ["error", ["type": failure.code, "description": failure.message], callID]
+                        ],
+                        "sessionState": store.state,
+                    ], options: [.sortedKeys])
+            }
+        } catch {
+            let denied =
+                error as? TractandaError ?? TractandaError("forbidden", "Current admission is unavailable.")
+            return (try? JSON.encode(denied)) ?? Data("{\"code\":\"forbidden\"}".utf8)
+        }
     }
     private func object<T: Encodable>(_ value: T) throws -> Any {
         try JSONSerialization.jsonObject(with: JSON.encode(value), options: [.fragmentsAllowed])
@@ -545,19 +993,96 @@ public final class ItemService {
         }
         return result
     }
+    static func extractedTextUnitCall(_ data: Data) -> ExtractedTextUnitCall? {
+        guard data.count <= 8 * 1024 * 1024,
+            let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            Set(request.keys) == ["using", "methodCalls"],
+            let using = request["using"] as? [String], using.contains(Self.capability),
+            Set(using).isSubset(of: [Self.capability, "urn:ietf:params:jmap:core"]),
+            let calls = request["methodCalls"] as? [[Any]], calls.count == 1,
+            let call = calls.first, call.count == 3, call[0] as? String == ExtractedTextUnitCall.method,
+            let arguments = call[1] as? [String: Any], let callID = call[2] as? String,
+            !callID.isEmpty, callID.utf8.count <= 200,
+            let bytes = try? JSONSerialization.data(withJSONObject: arguments)
+        else { return nil }
+        return .init(callID: callID, arguments: bytes)
+    }
+    func prepareExtractedTextUnit(_ call: ExtractedTextUnitCall, peerUID: UInt32) throws
+        -> PreparedExtractedTextUnit
+    {
+        try store.withAccess(forUID: peerUID) {
+            guard let args = try JSONSerialization.jsonObject(with: call.arguments) as? [String: Any]
+            else { throw TractandaError("invalidArguments", "Expected source window arguments.") }
+            try check(args, allowed: ["itemID", "expectedRevisionID", "unit", "offset", "limit", "maxBytes"])
+            let id = try string(args, "itemID")
+            let expected = try string(args, "expectedRevisionID")
+            try Identifier.validate(id)
+            try Identifier.validate(expected)
+            guard args["unit"] != nil else { throw TractandaError("invalidArguments", "unit is required.") }
+            let ordinal = try integer(args, "unit", default: 0, range: 0...Int.max - 1)
+            let offset = try integer(args, "offset", default: 0, range: 0...Int.max - 1)
+            let limit = try integer(args, "limit", default: 65_536, range: 1...262_144)
+            let maximum = try integer(args, "maxBytes", default: 524_288, range: 8_192...524_288)
+            let canonical = try store.capturePageCorpus(itemID: id)
+            guard let corpus = try store.captureIndexedCorpus(itemID: id, expectedRevisionID: expected)
+            else { throw TractandaError("notIndexable", "Current item has no indexed source units.") }
+            do {
+                guard Int64(ordinal) < corpus.identity.unitCount else {
+                    throw TractandaError("invalidArguments", "unit is outside the current corpus.")
+                }
+                return .init(
+                    callID: call.callID, corpus: corpus, canonical: canonical, ordinal: Int64(ordinal),
+                    offset: Int64(offset), limit: limit, maxBytes: maximum)
+            } catch {
+                try? store.releaseIndexedCorpus(corpus)
+                throw error
+            }
+        }
+    }
+    func finishExtractedTextUnit(_ prepared: PreparedExtractedTextUnit, result: Data, peerUID: UInt32) throws
+        -> Data
+    {
+        try store.withAccess(forUID: peerUID) {
+            try store.revalidateIndexedCorpus(prepared.corpus)
+            // Codable preserves a BOM-only string; Foundation JSONSerialization drops it.
+            let decoded = try JSON.decode(PreparedExtractedTextUnit.Result.self, result)
+            guard result.count <= prepared.maxBytes else {
+                throw TractandaError("responseTooLarge", "Reduce limit for serialized source metadata.")
+            }
+            return try JSON.encode(
+                ExtractedTextUnitResponse(result: decoded, callID: prepared.callID, sessionState: store.state)
+            )
+        }
+    }
+    func extractedTextUnitFailure(_ call: ExtractedTextUnitCall, error: Error) throws -> Data {
+        let failure: TractandaError
+        if let known = error as? TractandaError {
+            failure = known
+        } else if error is CancellationError {
+            failure = TractandaError("cancelled", "Source window was cancelled.")
+        } else {
+            failure = TractandaError("serverError", "Source window read failed.")
+        }
+        // No unscoped Store state in rejected/unauthorized source replies.
+        return try JSONSerialization.data(
+            withJSONObject: [
+                "methodResponses": [
+                    ["error", ["type": failure.code, "description": failure.message], call.callID]
+                ]
+            ], options: [.prettyPrinted, .sortedKeys])
+    }
     private func extractionEntry(_ revision: Revision, projection: String) throws -> [String: Any] {
         let corpus = ItemTextContent.corpus(for: revision)
         let source = corpus.sourceText
-        var fts: [String: Any] = ["searchEligible": !revision.isDeleted && !source.isEmpty]
+        var fts: [String: Any] = [
+            "searchEligible": !revision.isDeleted && !source.isEmpty,
+            "searchEligibleScope": "inlineFieldsAndRepresentations",
+        ]
         do {
-            if let row = try store.ftsTextRow(for: revision.itemID) {
-                fts["indexedRevisionID"] = row.revisionID
-                fts["status"] =
-                    row.revisionID == revision.revisionID && row.subject == corpus.subject
-                        && row.body == corpus.body && row.metadata == corpus.metadata ? "current" : "stale"
-            } else {
-                fts["status"] = "missing"
-            }
+            fts["indexedRevisionID"] = revision.revisionID
+            fts["status"] = try store.ownedFTSTextState(for: revision)
+            fts["scope"] = "ordinary owned values"
+
         } catch {
             // A transient cache failure may leave canonical extraction usable. A persistent
             // index fault has already gated the store; do not deliver part of that request.
@@ -576,6 +1101,50 @@ public final class ItemService {
                 "metadata": corpus.metadata.utf8.count,
             ],
             "index": ["fts": fts, "semantic": semantic.textDiagnostics(for: revision, corpus: corpus)],
+        ]
+        result["sourceScope"] = "inlineFieldsAndRepresentations"
+        let current = try store.capturePageCorpus(itemID: revision.itemID).input
+        let omitted = current.documents.filter { $0.savedContent != nil }
+        result["sourceComplete"] = omitted.isEmpty
+        result["omittedDocumentRepresentationIDs"] = omitted.compactMap(\.representationID)
+        result["documentCoverage"] = try object(
+            current.documents.map { document in
+                ExtractedDocumentCoverage(
+                    attachmentID: document.attachmentID, representationID: document.representationID,
+                    pageCount: document.pageCount, coverage: document.coverage)
+            })
+        do {
+            let captured = try store.captureIndexedCorpus(
+                itemID: revision.itemID, expectedRevisionID: revision.revisionID)
+            defer { if let captured { try? store.releaseIndexedCorpus(captured) } }
+            result["indexedCorpus"] = [
+                "status": captured == nil ? "notIndexable" : "currentBinding",
+                "scope": "captured component metadata", "canonicalSourceVerification": "notPerformed",
+                "searchEligible": captured != nil,
+                "identity": try captured.map { try object($0.identity) } ?? NSNull(),
+            ]
+        } catch let failure as TractandaError {
+            guard store.isCanonicalTrusted else { throw failure }
+            result["indexedCorpus"] = ["status": failure.code, "canonicalSourceVerification": "notPerformed"]
+        }
+        result["sources"] = try object(corpus.sourceSegments)
+        let attachments = try AttachmentDescriptor.descriptors(in: revision.fields)
+        let representations = try AttachmentTextRepresentation.representations(in: revision.fields)
+        let represented = Set(
+            representations.filter { representation in
+                attachments.contains {
+                    $0.attachmentID == representation.attachmentID
+                        && $0.sha256 == representation.source.sha256
+                        && $0.byteCount == representation.source.byteCount
+                        && $0.mediaType == representation.source.mediaType
+                }
+            }.map(\.attachmentID))
+        result["attachmentText"] = [
+            "scope": "saved UTF8 text representations",
+            "attachments": attachments.count,
+            "currentRepresentations": represented.count, "retainedRepresentations": representations.count,
+            "unrepresentedAttachmentIDs": attachments.filter { !represented.contains($0.attachmentID) }.map(
+                \.attachmentID),
         ]
         if projection == "source" { result["sourceText"] = source }
         if projection == "fts" {
@@ -653,6 +1222,26 @@ public final class ItemService {
                 "topic": topic,
                 "binding": "local experimental; not JMAP conformant",
                 "capability": Self.capability,
+                "attachments": [
+                    "maximumFileBytes": Int64.max, "formatSizeCeiling": false, "maximumChunkBytes": 262_144,
+                    "maximumPerItem": 128,
+                    "uploadIdleRetentionSeconds": store.attachmentUploadPolicy.idleRetentionSeconds,
+                    "maximumActualStagedBytes": store.attachmentUploadPolicy.maximumStagedBytes,
+                    "minimumFreeBytes": store.attachmentUploadPolicy.minimumFreeBytes,
+                    "integrityStatusMethods": [
+                        "TractandaAttachment/uploadStatus", "TractandaAttachment/integrity",
+                    ],
+                    "integrityPendingError": "attachmentVerifying",
+                    "heavyCallsRequireSingleton": requiresAsyncAttachmentIntegrity,
+                    "maximumUploadsPerCaller": 8, "maximumUploads": 64,
+                    "metadataOnlyGet": true,
+                    "searchableOriginalContent": "saved UTF8 representation after explicit extraction",
+                    "maximumTextInputBytes": 524_288, "maximumSavedRepresentationBytes": 2_097_152,
+                    "copy": requiresAsyncAttachmentIntegrity
+                        ? "attachmentCopyRequiresJob pending bounded copy integration"
+                        : "independent streamed originals",
+                    "restart": "unfinished uploads resume acknowledged bytes",
+                ],
                 "currentUID": currentUID,
                 "ownerUID": store.ownerUID,
                 "accessScope": store.accessScope,
@@ -697,6 +1286,10 @@ public final class ItemService {
                 "topic": topic,
                 "nonExhaustive": true,
                 "properties": [
+                    [
+                        "name": "attachments", "kind": "list of immutable original descriptors",
+                        "editing": "TractandaAttachment lifecycle only",
+                    ],
                     ["name": "subject", "kind": "text", "editing": "ordinary"],
                     ["name": "body", "kind": "text", "editing": "ordinary"],
                     ["name": "workingNotes", "kind": "text", "editing": "ordinary"],
@@ -941,6 +1534,11 @@ public final class ItemService {
                 "list": list,
                 "notFound": notFound, "state": store.state,
             ]
+        case "TractandaItem/extractedTextUnit":
+            throw TractandaError(
+                "extractedTextUnitsRequireCoordinator",
+                "This synchronous service backend does not provide source-unit reads. Use the shared asynchronous service."
+            )
         case "TractandaItem/extractedText":
             try check(args, allowed: ["ids", "projection", "maxBytes"])
             let ids = try strings(args, "ids")
@@ -1109,6 +1707,126 @@ public final class ItemService {
                     timeZone: timeZone, digest: queryDigest),
                 "previousCursor": NSNull(),
             ]
+        case "TractandaDocumentJob/start", "TractandaDocumentJob/status", "TractandaDocumentJob/list",
+            "TractandaDocumentJob/cancel", "TractandaDocumentJob/resume", "TractandaDocumentJob/rebase",
+            "TractandaDocumentJob/page", "TractandaDocumentJob/discard":
+            throw TractandaError(
+                "documentJobsRequireCoordinator",
+                "Use one document job call through the shared asynchronous service.")
+        case "TractandaAttachment/extractDocument":
+            throw TractandaError(
+                "documentConverterUnavailable",
+                "Use TractandaDocumentJob/start through the shared asynchronous service.")
+        case "TractandaAttachment/document":
+            try check(args, allowed: ["itemID", "revisionID", "attachmentID", "pageNumber", "maxBytes"])
+            let maximum = try integer(args, "maxBytes", default: 1_048_576, range: 4096...4_194_304)
+            let selected = try args["pageNumber"].map { _ in
+                try integer(args, "pageNumber", default: 1, range: 1...Int.max)
+            }
+            let document = try store.readAttachmentDocument(
+                itemID: string(args, "itemID"),
+                revisionID: args["revisionID"].map { _ in try string(args, "revisionID") },
+                attachmentID: string(args, "attachmentID"), pageNumber: selected)
+            let result = try object(document) as! [String: Any]
+            guard try JSONSerialization.data(withJSONObject: result).count <= maximum else {
+                throw TractandaError(
+                    "responseTooLarge",
+                    "Use a bounded saved page or increase maxBytes within the page response window.")
+            }
+            return result
+        case "TractandaAttachment/documentContent":
+            try check(
+                args,
+                allowed: [
+                    "itemID", "revisionID", "attachmentID", "kind", "level", "index", "offset", "limit",
+                ])
+            return try object(
+                store.documentContentPart(
+                    itemID: string(args, "itemID"),
+                    revisionID: args["revisionID"].map { _ in try string(args, "revisionID") },
+                    attachmentID: string(args, "attachmentID"), kind: string(args, "kind"),
+                    level: integer(args, "level", default: 0, range: 0...8),
+                    index: Int64(integer(args, "index", default: 0, range: 0...Int.max)),
+                    offset: Int64(integer(args, "offset", default: 0, range: 0...Int.max)),
+                    limit: integer(args, "limit", default: 262_144, range: 1...262_144))) as! [String: Any]
+        case "TractandaAttachment/extractText":
+            try check(args, allowed: ["itemID", "expectedRevisionID", "attachmentID", "operationID"])
+            return try object(
+                store.extractAttachmentText(
+                    itemID: string(args, "itemID"),
+                    expectedRevisionID: string(args, "expectedRevisionID"),
+                    attachmentID: string(args, "attachmentID"),
+                    operationID: string(args, "operationID"))) as! [String: Any]
+        case "TractandaAttachment/begin":
+            try check(
+                args,
+                allowed: [
+                    "itemID", "expectedRevisionID", "operationID", "filename", "mediaType", "byteCount",
+                    "sha256",
+                ])
+            return try object(store.beginAttachment(decode(AttachmentUploadRequest.self, args)))
+                as! [String: Any]
+        case "TractandaAttachment/upload":
+            try check(args, allowed: ["uploadID", "offset", "data"])
+            let offset = try integer(args, "offset", default: 0, range: 0...Int.max)
+            guard let encoded = args["data"] as? String, encoded.utf8.count <= 349_528,
+                let bytes = Data(base64Encoded: encoded), bytes.count <= 262_144
+            else {
+                throw TractandaError("invalidArguments", "data must be base64 encoding at most 256 KiB.")
+            }
+            return [
+                "offset": try store.appendAttachment(
+                    uploadID: string(args, "uploadID"), offset: Int64(offset), data: bytes)
+            ]
+        case "TractandaAttachment/finish":
+            try check(args, allowed: ["uploadID"])
+            return try object(
+                AttachmentCommitResult(
+                    store.finishAttachment(
+                        uploadID: string(args, "uploadID"), requireVerified: requiresAsyncAttachmentIntegrity)
+                ))
+                as! [String: Any]
+        case "TractandaAttachment/uploadStatus":
+            try check(args, allowed: ["uploadID"])
+            return try object(store.attachmentUploadStatus(uploadID: string(args, "uploadID")))
+                as! [String: Any]
+        case "TractandaAttachment/integrity":
+            try check(args, allowed: ["itemID", "revisionID", "attachmentID"])
+            return try object(
+                store.attachmentReadIntegrityStatus(
+                    itemID: string(args, "itemID"), revisionID: args["revisionID"] as? String,
+                    attachmentID: string(args, "attachmentID"))) as! [String: Any]
+        case "TractandaAttachment/abort":
+            try check(args, allowed: ["uploadID"])
+            try store.abortAttachment(uploadID: string(args, "uploadID"))
+            return ["aborted": true]
+        case "TractandaAttachment/list":
+            try check(args, allowed: ["itemID", "revisionID"])
+            if args["revisionID"] != nil { _ = try string(args, "revisionID") }
+            return try object(
+                store.listAttachments(
+                    itemID: string(args, "itemID"), revisionID: args["revisionID"] as? String))
+                as! [String: Any]
+        case "TractandaAttachment/content":
+            try check(args, allowed: ["itemID", "revisionID", "attachmentID", "offset", "limit"])
+            if args["revisionID"] != nil { _ = try string(args, "revisionID") }
+            return try object(
+                store.attachmentContent(
+                    itemID: string(args, "itemID"), revisionID: args["revisionID"] as? String,
+                    attachmentID: string(args, "attachmentID"),
+                    offset: Int64(integer(args, "offset", default: 0, range: 0...Int.max)),
+                    limit: integer(args, "limit", default: 262_144, range: 1...262_144),
+                    requireVerified: requiresAsyncAttachmentIntegrity)) as! [String: Any]
+        case "TractandaAttachment/detach":
+            try check(args, allowed: ["itemID", "expectedRevisionID", "attachmentID", "operationID"])
+            return try object(
+                AttachmentCommitResult(
+                    store.detachAttachment(
+                        itemID: string(args, "itemID"),
+                        expectedRevisionID: string(args, "expectedRevisionID"),
+                        attachmentID: string(args, "attachmentID"), operationID: string(args, "operationID")))
+            )
+                as! [String: Any]
         case "TractandaItem/commit":
             try check(
                 args,
@@ -1116,7 +1834,12 @@ public final class ItemService {
                     "action", "itemID", "expectedRevisionID", "classID", "changes", "unset", "operationID",
                 ])
             let request = try decode(CommitRequest.self, args)
-            return try object(store.commit(request, actorUID: uid)) as! [String: Any]
+            return try object(
+                store.commit(
+                    request, actorUID: uid,
+                    allowBlockingAttachmentCopy:
+                        !(requiresAsyncAttachmentIntegrity || rejectsBlockingNetworkAttachments)))
+                as! [String: Any]
         case "TractandaItem/history":
             try check(args, allowed: ["itemID", "position", "limit", "projection", "properties"])
             let position = try integer(args, "position", default: 0, range: 0...Int.max)
@@ -1168,6 +1891,16 @@ public final class ItemService {
                     store: store))
                 as! [String: Any]
         case "TractandaStore/rebuild":
+            if requiresAsyncAttachmentIntegrity {
+                throw TractandaError(
+                    "rebuildSingletonRequired",
+                    "Rebuild requires a singleton daemon envelope with an operationID.")
+            }
+            if rejectsBlockingNetworkAttachments {
+                throw TractandaError(
+                    "rebuildRequiresCoordinator",
+                    "Use the daemon singleton asynchronous rebuild API with an operationID.")
+            }
             try check(args, allowed: [])
             try store.rebuildIndex()
             return ["state": store.state, "warnings": store.recoveryWarnings]
@@ -1175,12 +1908,27 @@ public final class ItemService {
             try check(args, allowed: [])
             return [
                 "features": [
-                    ServerFeature.runtimeIdentity.rawValue, ServerFeature.semanticJobTiming.rawValue,
+                    ServerFeature.runtimeIdentity.rawValue, ServerFeature.asynchronousStoreRebuild.rawValue,
+                    ServerFeature.semanticJobTiming.rawValue,
                     ServerFeature.categoryMembershipSort.rawValue,
                     ServerFeature.categoryMembershipProjection.rawValue,
                     ServerFeature.extractedTextDiagnostics.rawValue,
-                    ServerFeature.liveSeekCursor.rawValue,
-                ],
+                    ServerFeature.extractedTextUnits.rawValue,
+                    ServerFeature.liveSeekCursor.rawValue, ServerFeature.attachmentLifecycle.rawValue,
+                    ServerFeature.resumableAttachmentTransfer.rawValue,
+                    ServerFeature.attachmentText.rawValue,
+                    ServerFeature.attachmentDocument.rawValue,
+                    ServerFeature.attachmentDocumentContent.rawValue,
+                    ServerFeature.documentJobs.rawValue,
+                ].filter {
+                    if $0 == ServerFeature.documentJobs.rawValue { return requiresAsyncDocumentJobs }
+                    if $0 == ServerFeature.extractedTextUnits.rawValue { return hasExtractedTextUnitRoute }
+                    return requiresAsyncAttachmentIntegrity
+                        || ![
+                            ServerFeature.resumableAttachmentTransfer.rawValue,
+                            ServerFeature.asynchronousStoreRebuild.rawValue,
+                        ].contains($0)
+                },
                 "server": try JSONSerialization.jsonObject(with: JSON.encode(RuntimeIdentity.current)),
                 "state": store.state, "ownerUID": store.ownerUID, "queryProfile": SpotlightQuery.profile,
                 "binding": "local experimental; not JMAP conformant", "capability": Self.capability,
@@ -1192,9 +1940,28 @@ public final class ItemService {
                 "callerIsAdministrator": store.isAdministrator,
                 "learningProfile": CategoryLearningSettings.profile,
                 "itemTextProfile": ItemTextContent.profile,
+                "documentJobs": [
+                    "state": documentConverter == nil ? "unavailable" : "configured",
+                    "protocol": NativeWorkerProtocol.name, "maximumPendingJobs": 64,
+                    "maximumPendingJobsPerActor": 8,
+                    "pageCounts": "checked Int64; no whole-document page ceiling",
+                ],
+                "documentExtraction": [
+                    "state": documentConverter == nil ? "unavailable" : "configured",
+                    "identity": documentConverter == nil ? NSNull() : try object(DocumentConverterIdentity()),
+                    "executableSHA256": documentExecutableSHA256 as Any? ?? NSNull(),
+                    "requiresPreparedInput": documentConverter?.preparationDirectory != nil,
+                    "mediaTypes": ["image/png", "image/jpeg", "application/pdf"],
+                    "inputBytes": "checked Int64 originals through resumable uploads",
+                    "pageCounts": "checked Int64 durable jobs; no whole-document page ceiling",
+                    "maximumTokensPerPage": 1024, "maximumGeneratedPageBytes": 262_144,
+                    "unsupported": [
+                        "nonidentity image orientation", "OTSL spans", "unknown or nested DocTags",
+                    ],
+                ],
                 "itemTextExcludedRootFields": ItemTextContent.excludedRootFields.sorted(),
                 "itemTextAttachmentLimit":
-                    "Attachments, bytes, references, and remote content are not extracted.",
+                    "Only explicitly saved supported UTF8/document output is searchable; originals and remote content are not implicitly converted.",
             ]
         case "TractandaStore/describe":
             try check(args, allowed: ["topic"])
@@ -1236,6 +2003,8 @@ public final class ItemService {
 
     func maintainSemanticIndex() {
         semantic.maintain()
+        // Existing maintenance retries one fenced terminal lease, never active reader I/O.
+        _ = try? store.retireOnePendingCorpusRead()
     }
 
     /// One ordinary indexed query may run its SQL count/page on an isolated read lease.
@@ -1755,6 +2524,28 @@ public final class ItemService {
                         "recoveryRequired",
                         "Canonical verification found an inconsistency; rebuild the store before access.")
                 }
+                if rejectsBlockingNetworkAttachments,
+                    ["TractandaAttachment/finish", "TractandaAttachment/content"].contains(method)
+                {
+                    throw TractandaError(
+                        "attachmentRequiresDaemon",
+                        "Original finish and content require the asynchronous daemon. Use tractanda daemon STORE SOCKET --no-http instead of the synchronous serve transport."
+                    )
+                }
+                if requiresAsyncAttachmentIntegrity, calls.count != 1,
+                    [
+                        "TractandaAttachment/finish", "TractandaAttachment/content",
+                        "TractandaAttachment/abort",
+                    ].contains(method)
+                {
+                    throw TractandaError(
+                        "attachmentSingletonRequired",
+                        "Original finish, content and abort calls require their own singleton envelope.")
+                }
+                if method == ExtractedTextUnitCall.method, calls.count != 1 {
+                    throw TractandaError(
+                        "singleCallRequired", "Source-unit reads require their own single-call envelope.")
+                }
                 var args = call[1] as! [String: Any]
                 for key in args.keys.filter({ $0.hasPrefix("#") }).sorted() {
                     let name = String(key.dropFirst())
@@ -1808,41 +2599,43 @@ public final class ItemService {
         return result
     }
 
-    /// Read-only admission for the coordinator's asynchronous verifier drain. Invalid or
-    /// unauthorized envelopes use the ordinary handler and never stop background work.
-    func admittedRebuildRequest(_ data: Data, peerUID: UInt32) -> Bool {
+    static func rebuildNativeCall(_ data: Data) -> RebuildNativeCall? {
         guard data.count <= 8 * 1024 * 1024,
             let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
             Set(request.keys) == ["using", "methodCalls"],
             let using = request["using"] as? [String], using.contains(Self.capability),
             Set(using).isSubset(of: [Self.capability, "urn:ietf:params:jmap:core"]),
-            let calls = request["methodCalls"] as? [[Any]], calls.count <= 32
-        else { return false }
-        var callIDs: Set<String> = []
-        var hasRebuild = false
-        for call in calls {
-            guard call.count == 3, let method = call[0] as? String,
-                let arguments = call[1] as? [String: Any],
-                let callID = call[2] as? String, !callID.isEmpty,
-                callIDs.insert(callID).inserted
-            else { return false }
-            if method == "TractandaStore/rebuild" {
-                guard arguments.isEmpty else { return false }
-                hasRebuild = true
-            }
-        }
-        guard hasRebuild else { return false }
-        return (try? store.withAccess(forUID: peerUID) { store.isAdministrator }) == true
+            let calls = request["methodCalls"] as? [[Any]], calls.count == 1,
+            let call = calls.first, call.count == 3, let method = call[0] as? String,
+            ["TractandaStore/rebuild", "TractandaStore/rebuildStatus", "TractandaStore/rebuildCancel"]
+                .contains(method),
+            let args = call[1] as? [String: Any], let callID = call[2] as? String, !callID.isEmpty
+        else { return nil }
+        return RebuildNativeCall(method: method, callID: callID, arguments: args)
     }
+
 }
 
 public enum LocalTransport {
+    static func connectionFailure(socket: String, errorCode: Int32) -> TractandaError {
+        TractandaError(
+            "connectionFailed",
+            "Cannot connect to \(socket): \(String(cString: strerror(errorCode))) (errno \(errorCode)).",
+            osError: errorCode)
+    }
+    static func responseTimeoutMilliseconds(for request: Data) -> UInt32 {
+        ItemService.documentExtractionCallID(request) == nil ? 15_000 : 390_000
+    }
     public static func call(socket: String, request: Data, serverUser: String? = nil) throws -> Data {
         guard !request.isEmpty, request.count <= 8 * 1024 * 1024 else {
             throw TractandaError("limit", "Request must contain 1 byte to 8 MiB.")
         }
         let fd = tractanda_connect(socket)
-        guard fd >= 0 else { throw TractandaError("connectionFailed", "Cannot connect to the local socket.") }
+        guard fd >= 0 else {
+            // The C bridge restores connect errno after closing its failed socket.
+            let errorCode = errno
+            throw connectionFailure(socket: socket, errorCode: errorCode)
+        }
         defer { tractanda_close(fd) }
         var peer: UInt32 = 0
         let expectedUID: UInt32
@@ -1857,6 +2650,12 @@ public enum LocalTransport {
         guard request.withUnsafeBytes({ tractanda_send_frame(fd, $0.baseAddress, UInt32($0.count)) }) == 0
         else {
             throw TractandaError("transportError", "Send failed; retry mutations with the same operationID.")
+        }
+        // Only a single document extraction gets the server360s+cleanup response
+        // wait. Connect and send retain their ordinary15-second defaults.
+        let timeout = responseTimeoutMilliseconds(for: request)
+        if timeout != 15_000, tractanda_socket_receive_timeout(fd, timeout) != 0 {
+            throw TractandaError("transportError", "Cannot configure document response wait.")
         }
         return try receive(fd)
     }
@@ -1874,6 +2673,9 @@ public enum LocalTransport {
     public static func serve(
         _ service: ItemService, socket: String, maxRequests: Int? = nil, isManaged: Bool = false
     ) throws {
+        service.rejectsBlockingNetworkAttachments = true
+        defer { service.rejectsBlockingNetworkAttachments = false }
+
         // ItemStore already holds its exclusive writer lock before any stale endpoint is considered.
         if isManaged, tractanda_remove_stale_socket(socket) != 0 {
             throw TractandaError(

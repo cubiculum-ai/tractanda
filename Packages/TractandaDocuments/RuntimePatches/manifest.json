@@ -1,0 +1,16 @@
+{
+  "schema": "tractanda.docling-runtime-patches.v1",
+  "runtimeBaseRevision": "61a4b20d4ad01b10466e8fc94c50402a9f994430",
+  "converterIdentity": "tractanda.docling-native.v2-idefics3-gelu-f32",
+  "patches": [
+    {
+      "identifier": "idefics3-vision-gelu-f32-v1",
+      "sourcePath": "Libraries/MLXVLM/Models/Idefics3.swift",
+      "beforeSHA256": "f0055d256d0b6faeac55d805efcff0e40e3ac18fbd786866d1c173402b363491",
+      "afterSHA256": "2f775ea1f6362b7b8f94b83a8e20515f288e05f20ba9a5697e17ed387ed9bf2c",
+      "file": "vmlx-61a4b20-idefics3-gelu-f32.patch",
+      "sha256": "4b45ae94cd5a9a2545025cf5165cd9e617f3c30c5a7b02e236c036ee943b9321",
+      "patchMarker": "Idefics3.tractandaVisionGELUPatchIdentifier"
+    }
+  ]
+}

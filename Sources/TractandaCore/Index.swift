@@ -81,6 +81,7 @@ final class ItemIndex {
         let ids: [String]
         let total: Int
     }
+    let corpusIndexPath: String
     private var database: OpaquePointer?
     var onPersistentFailure: (() -> Void)?
     static func shouldQuarantineSQLiteFailure(_ code: Int32) -> Bool {
@@ -88,6 +89,8 @@ final class ItemIndex {
             .contains(code)
     }
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+    var corpusGCStatsForTesting = IndexCorpusGCStats()
+    var afterCorpusReadCommitForTesting: (() throws -> Void)?
     private(set) var seekVMInstructionsForTesting = 0
     private(set) var principalLookupVMInstructionsForTesting = 0
     private(set) var savedViewCategoryPlanLookupsForTesting = 0
@@ -104,7 +107,7 @@ final class ItemIndex {
         fileprivate init(prepare: (String) throws -> OpaquePointer) throws {
             let sql = [
                 "INSERT OR REPLACE INTO items VALUES (?, ?, ?, ?, ?, ?, ?)",
-                "INSERT INTO text_index (id, subject, body, metadata) VALUES (?, ?, ?, ?)",
+                "INSERT INTO text_snapshot (id, subject, body, metadata) VALUES (?, ?, ?, ?)",
                 "INSERT INTO saved_view_targets VALUES (?, ?, ?, ?, ?) "
                     + "ON CONFLICT(id) DO UPDATE SET selection=excluded.selection, "
                     + "class_filter=excluded.class_filter, dependencies=excluded.dependencies, "
@@ -157,6 +160,7 @@ final class ItemIndex {
         }
     }
     init(path: String, create: Bool) throws {
+        corpusIndexPath = path
         guard sqlite3_open_v2(path, &database, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil) == SQLITE_OK
         else {
             if let database { sqlite3_close(database) }
@@ -299,8 +303,9 @@ final class ItemIndex {
             )
             try execute("CREATE INDEX personal_overlay_owner_lookup ON personal_overlay_targets(owner_name)")
             try execute(
-                "CREATE VIRTUAL TABLE text_index USING fts5(id UNINDEXED, subject, body, metadata, tokenize='unicode61')"
+                "CREATE TABLE text_snapshot (id TEXT PRIMARY KEY,subject TEXT NOT NULL,body TEXT NOT NULL,metadata TEXT NOT NULL)"
             )
+            try createCorpusTables()
             try execute("CREATE TABLE checkpoint_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             try execute(
                 "CREATE TABLE revision_catalog (revision TEXT PRIMARY KEY, item TEXT NOT NULL, path TEXT NOT NULL, parent TEXT, actor TEXT NOT NULL, operation TEXT NOT NULL, size INTEGER NOT NULL, inode INTEGER NOT NULL, uid INTEGER NOT NULL, mode INTEGER NOT NULL, mtime_seconds INTEGER NOT NULL, mtime_nanoseconds INTEGER NOT NULL, digest TEXT NOT NULL, created_at TEXT NOT NULL)"
@@ -325,6 +330,11 @@ final class ItemIndex {
                 "CREATE TABLE recovery_ordinals (item TEXT NOT NULL, revision TEXT PRIMARY KEY, ordinal INTEGER NOT NULL, UNIQUE(item, ordinal))"
             )
             try execute("CREATE TABLE recovery_heads (item TEXT PRIMARY KEY, revision TEXT NOT NULL UNIQUE)")
+        }
+        if !create {
+            // No old-schema shim: rebuilding preserves canonical items and constructs this disposable projection.
+            try execute("SELECT encoded_bytes,owner_work_id FROM corpus_generation LIMIT 0")
+            try execute("SELECT generation_id FROM corpus_gc_candidate LIMIT 0")
         }
         // Request-local authorization state belongs to each connection, including
         // reopened read-only connections; TEMP writes do not mutate the main catalogue.
@@ -384,6 +394,10 @@ final class ItemIndex {
     func holdStatementForTesting() throws -> OpaquePointer {
         try prepare("SELECT 1")
     }
+    /// Internal same-executor bridge for the corpus projection; never exported in a capability.
+    func corpusPrepare(_ sql: String, _ values: [String] = []) throws -> OpaquePointer {
+        try prepare(sql, values)
+    }
     private func prepare(_ sql: String, _ bindings: [String] = []) throws -> OpaquePointer {
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
@@ -440,7 +454,19 @@ final class ItemIndex {
 
     /// Inserts a head into the known-empty temporary rebuild database. Its FTS row
     /// cannot exist yet, so this intentionally omits only the ordinary put's delete.
-    func putForRebuild(_ revision: Revision, using statements: RebuildStatements) throws {
+    func putForRebuild(
+        _ revision: Revision, using statements: RebuildStatements,
+        corpusInput: PageCorpusInput? = nil, pageProvider: (any PageCorpusPageProvider)? = nil,
+        corpusBoundary: () throws -> Void = {}
+    ) throws {
+        if let corpusInput {
+            guard corpusInput.revision == revision, let pageProvider else {
+                throw TractandaError(
+                    "indexError", "Rebuild corpus input must bind its actual current head/provider.")
+            }
+            try installCorpusForRebuild(input: corpusInput, provider: pageProvider, boundary: corpusBoundary)
+        }
+        try putCorpus(revision)
         let fields = String(decoding: try JSON.encode(revision.fields), as: UTF8.self)
         let corpus = ItemTextContent.corpus(for: revision)
         guard case .date(let timestamp) = revision.fields["modifiedAt"],
@@ -550,6 +576,54 @@ final class ItemIndex {
         guard status == SQLITE_DONE || status == SQLITE_ROW else { throw error() }
     }
 
+    func registerRecoveryDocument(_ document: AttachmentDocumentRepresentation, itemID: String) throws -> Bool
+    {
+        guard let reference = document.content else { return false }
+        let encoded = String(decoding: try JSON.encode(document), as: UTF8.self)
+        let statement = try prepare(
+            "SELECT item, descriptor FROM document_owners WHERE id = ?", [reference.contentID])
+        defer { sqlite3_finalize(statement) }
+        let status = sqlite3_step(statement)
+        if status == SQLITE_ROW {
+            guard let item = sqlite3_column_text(statement, 0),
+                let descriptor = sqlite3_column_text(statement, 1),
+                String(cString: item) == itemID, String(cString: descriptor) == encoded
+            else {
+                throw TractandaError(
+                    "recoveryError", "Document content identity was rebound across canonical revisions.")
+            }
+            return false
+        }
+        guard status == SQLITE_DONE else { throw error() }
+        try execute("INSERT INTO document_owners VALUES (?, ?, ?)", [reference.contentID, itemID, encoded])
+        return true
+    }
+
+    /// Disk-backed recovery ownership prevents an immutable identity from changing owner or bytes.
+    func registerRecoveryAttachment(_ descriptor: AttachmentDescriptor, itemID: String) throws -> Bool {
+        let encoded = String(decoding: try JSON.encode(descriptor), as: UTF8.self)
+        let statement = try prepare(
+            "SELECT item, descriptor FROM attachment_owners WHERE id = ?", [descriptor.attachmentID])
+        defer { sqlite3_finalize(statement) }
+        let status = sqlite3_step(statement)
+        if status == SQLITE_ROW {
+            guard let storedItem = sqlite3_column_text(statement, 0),
+                let storedDescriptor = sqlite3_column_text(statement, 1),
+                String(cString: storedItem) == itemID,
+                String(cString: storedDescriptor) == encoded
+            else {
+                throw TractandaError(
+                    "recoveryError", "Attachment identity was rebound across canonical revisions.")
+            }
+            return false
+        } else {
+            guard status == SQLITE_DONE else { throw error() }
+            try execute(
+                "INSERT INTO attachment_owners VALUES (?, ?, ?)", [descriptor.attachmentID, itemID, encoded])
+            return true
+        }
+    }
+
     func replaceCatalogue<Rows: Sequence>(identity: String, rows: Rows) throws
     where Rows.Element == CatalogueRow {
         try execute("DELETE FROM revision_catalog")
@@ -561,6 +635,7 @@ final class ItemIndex {
         try execute("INSERT INTO checkpoint_meta VALUES ('identity', ?)", [identity])
         try execute("INSERT INTO checkpoint_meta VALUES ('schema', '11')")
         try execute("INSERT INTO checkpoint_meta VALUES ('engine', 'tractanda-sqlite-catalogue-v11')")
+        try execute("INSERT INTO checkpoint_meta VALUES ('itemTextProfile', ?)", [ItemTextContent.profile])
         for row in rows {
             let values = [
                 row.revisionID, row.itemID, row.path, row.parentID ?? "", row.actor,
@@ -615,6 +690,11 @@ final class ItemIndex {
         defer { sqlite3_finalize(schema) }
         guard sqlite3_step(schema) == SQLITE_ROW,
             exactString(schema, 0) == "11", sqlite3_step(schema) == SQLITE_DONE
+        else { return nil }
+        let extraction = try prepare("SELECT value FROM checkpoint_meta WHERE key = 'itemTextProfile'")
+        defer { sqlite3_finalize(extraction) }
+        guard sqlite3_step(extraction) == SQLITE_ROW,
+            exactString(extraction, 0) == ItemTextContent.profile, sqlite3_step(extraction) == SQLITE_DONE
         else { return nil }
         let engine = try prepare("SELECT value FROM checkpoint_meta WHERE key = 'engine'")
         defer { sqlite3_finalize(engine) }
@@ -751,6 +831,8 @@ final class ItemIndex {
         try execute("INSERT OR REPLACE INTO checkpoint_meta VALUES ('schema', '11')")
         try execute(
             "INSERT OR REPLACE INTO checkpoint_meta VALUES ('engine', 'tractanda-sqlite-catalogue-v11')")
+        try execute(
+            "INSERT OR REPLACE INTO checkpoint_meta VALUES ('itemTextProfile', ?)", [ItemTextContent.profile])
     }
 
     func recoveryRowPage(after revision: String? = nil, limit: Int = 128) throws -> [CatalogueRow] {
@@ -1003,6 +1085,7 @@ final class ItemIndex {
         // catalogue-sized data and belongs to explicit audit/rebuild work, not startup.
         for (key, expected) in [
             ("identity", identity), ("schema", "11"), ("engine", "tractanda-sqlite-catalogue-v11"),
+            ("itemTextProfile", ItemTextContent.profile),
         ] {
             let statement = try prepare("SELECT value FROM checkpoint_meta WHERE key=?", [key])
             let valid =
@@ -1240,7 +1323,8 @@ final class ItemIndex {
     func textMatches(_ revision: Revision) throws -> Bool {
         guard let row = try textRow(id: revision.itemID) else { return false }
         let corpus = ItemTextContent.corpus(for: revision)
-        return row.revisionID == revision.revisionID && row.subject == corpus.subject
+        return try corpusMatches(revision) && row.revisionID == revision.revisionID
+            && row.subject == corpus.subject
             && row.body == corpus.body && row.metadata == corpus.metadata
     }
 
@@ -1269,7 +1353,8 @@ final class ItemIndex {
             throw TractandaError("indexError", "Cannot synchronize checkpoint database.")
         }
     }
-    func put(_ revision: Revision) throws {
+    func put(_ revision: Revision, corpus: IndexedCorpusStage? = nil) throws {
+        try putCorpus(revision, stage: corpus)
         let changedSavedViewFields = try changedFields(for: revision)
         let fields = String(decoding: try JSON.encode(revision.fields), as: UTF8.self)
         let corpus = ItemTextContent.corpus(for: revision)
@@ -1291,9 +1376,9 @@ final class ItemIndex {
         try execute("DELETE FROM scalar_value WHERE item_id = ?", [revision.itemID])
         try putScalars(for: revision)
         try putACL(for: revision)
-        try execute("DELETE FROM text_index WHERE id = ?", [revision.itemID])
+        try execute("DELETE FROM text_snapshot WHERE id = ?", [revision.itemID])
         try execute(
-            "INSERT INTO text_index (id, subject, body, metadata) VALUES (?, ?, ?, ?)",
+            "INSERT INTO text_snapshot (id, subject, body, metadata) VALUES (?, ?, ?, ?)",
             [
                 revision.itemID, corpus.subject, corpus.body, corpus.metadata,
             ])
@@ -2538,8 +2623,7 @@ final class ItemIndex {
         var predicates = includeDeleted ? ["1"] : ["items.deleted = 0"]
         var arguments: [String] = []
         if let lexicalText {
-            joins += " JOIN text_index ON text_index.id = items.id"
-            predicates.append("text_index MATCH ?")
+            predicates.append(Self.corpusLiteralMembershipSQL)
             arguments.append("\"" + lexicalText.replacingOccurrences(of: "\"", with: "\"\"") + "\"")
         }
         if let classEquals {
@@ -2875,8 +2959,8 @@ final class ItemIndex {
                 let batch = Array(orderedIDs[offset..<min(offset + 400, orderedIDs.count)])
                 let placeholders = Array(repeating: "?", count: batch.count).joined(separator: ",")
                 let statement = try prepare(
-                    "SELECT id FROM text_index WHERE text_index MATCH ? AND id IN (\(placeholders)) "
-                        + "ORDER BY rank, id",
+                    "SELECT items.id FROM items WHERE " + Self.corpusLiteralMembershipSQL
+                        + " AND items.id IN (\(placeholders)) ORDER BY items.id",
                     [phrase] + batch)
                 defer { sqlite3_finalize(statement) }
                 while true {
@@ -2895,7 +2979,7 @@ final class ItemIndex {
         if let lexicalText {
             // A literal phrase, not arbitrary executable SQL or an accidental FTS expression.
             let phrase = "\"" + lexicalText.replacingOccurrences(of: "\"", with: "\"\"") + "\""
-            sql = "SELECT id FROM text_index WHERE text_index MATCH ? ORDER BY rank, id"
+            sql = "SELECT items.id FROM items WHERE " + Self.corpusLiteralMembershipSQL + " ORDER BY items.id"
             args = [phrase]
         } else {
             sql = "SELECT id FROM items ORDER BY id"
@@ -2942,7 +3026,7 @@ final class ItemIndex {
     }
     func textRow(id: String) throws -> TextRow? {
         let statement = try prepare(
-            "SELECT items.revision, text_index.id, text_index.subject, text_index.body, text_index.metadata FROM items LEFT JOIN text_index ON items.id = text_index.id WHERE items.id = ?",
+            "SELECT items.revision, text_snapshot.id, text_snapshot.subject, text_snapshot.body, text_snapshot.metadata FROM items LEFT JOIN text_snapshot ON items.id = text_snapshot.id WHERE items.id = ?",
             [id])
         defer { sqlite3_finalize(statement) }
         let step = sqlite3_step(statement)

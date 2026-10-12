@@ -32,6 +32,16 @@ int tractanda_authenticate_password(const char *username, const char *password, 
 // 0 = credentials denied, -1 = broker/protocol/peer verification failure.
 int tractanda_authenticate_password_broker(
     const char *socket_path, const char *username, const char *password, uint32_t expected_uid);
+// Spawns one owned process group with only explicit stdio inherited. Parent pipe endpoints
+// are CLOEXEC/nonblocking and >=3; caller must kill-group/waitpid and close every endpoint.
+// Returns 0 on success, -1 with errno on failure; no child exists after a spawn failure.
+int tractanda_document_spawn(
+    const char *executable, const char *const argv[], int32_t *pid,
+    int32_t *input, int32_t *output, int32_t *error);
+// Observe an owned child's exit without reaping, retaining PID/group ownership until cleanup.
+int tractanda_document_exited(int32_t pid);
+// Thread-scoped SIGPIPE suppression; preserves the process's global signal policy.
+int64_t tractanda_document_write(int32_t fd, const void *bytes, size_t count);
 int tractanda_lock(const char *path);
 // Describes the immediately preceding tractanda_lock failure on this thread.
 // A non-zero result from tractanda_lock_was_busy means another live lock holder
@@ -39,11 +49,14 @@ int tractanda_lock(const char *path);
 int tractanda_lock_was_busy(void);
 int tractanda_unlock(int descriptor);
 int tractanda_publish(const char *path, const void *bytes, size_t count);
+// Atomically moves a complete private directory without replacing an existing destination.
+int tractanda_publish_directory_at(int source_parent, const char *source, int target_parent, const char *target);
 int tractanda_listen(const char *path);
 int tractanda_listen_mode(const char *path, uint32_t mode);
 // Removes only this user's dead Unix socket; refuses live sockets and other file types/owners.
 int tractanda_remove_stale_socket(const char *path);
 int tractanda_connect(const char *path);
+int tractanda_socket_receive_timeout(int fd, uint32_t milliseconds);
 int tractanda_accept(int listener);
 int tractanda_start_signals(void);
 int tractanda_stopping(void);

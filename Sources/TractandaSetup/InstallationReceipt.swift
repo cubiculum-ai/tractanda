@@ -20,6 +20,9 @@ struct InstallationReceipt: Codable, Equatable {
     var board: [String: String]
     var definitionSHA256: String?
     var releases: [String: String]
+    var documentExtraction: DocumentExtractionPayload?
+    var documentScratchDirectory: String?
+    var documentPreparationDirectory: String?
     var embedding: EmbeddingPayload?
     var embeddingDefinitionSHA256: String?
     var embeddingConfigured: Bool
@@ -46,6 +49,9 @@ struct InstallationReceipt: Codable, Equatable {
         board = [:]
         definitionSHA256 = nil
         releases = [release.path: manifestSHA256]
+        documentExtraction = nil
+        documentScratchDirectory = nil
+        documentPreparationDirectory = nil
         embedding = nil
         embeddingDefinitionSHA256 = nil
         embeddingConfigured = false

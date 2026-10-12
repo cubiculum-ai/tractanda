@@ -17,7 +17,7 @@ let usage = """
       tractanda seed STORE [--index-directory PATH]
       tractanda configure-access STORE TAGGED_CONFIG_JSON OPERATION_ID [--index-directory PATH]
       tractanda serve STORE SOCKET [--max-requests N] [--index-directory PATH]
-      tractanda daemon STORE SOCKET [--index-directory PATH] [--http-port PORT|--no-http] [--managed] [--view ID | --project-root ID --status-root ID [--project ID]]
+      tractanda daemon STORE SOCKET [--index-directory PATH] [--http-port PORT|--no-http] [--managed] [--document-converter PATH --document-model-directory PATH --document-scratch-directory PATH] [--attachment-upload-idle-seconds N] [--attachment-staged-byte-quota N] [--attachment-minimum-free-bytes N] [--rebuild-no-progress-seconds N] [--view ID | --project-root ID --status-root ID [--project ID]]
       tractanda connections list|add|default|remove ...
       tractanda service prepare|install|activate|start|stop|status|uninstall ...
       tractanda uuid-v1 [COUNT]
@@ -29,6 +29,8 @@ let usage = """
       tractanda request SOCKET [JSON_FILE]          (otherwise reads stdin)
       tractanda call SOCKET METHOD [ARGUMENTS_JSON] (otherwise reads stdin)
       tractanda info SOCKET
+      tractanda describe SOCKET [TOPIC]           (overview, types, or properties)
+      tractanda extracted-text SOCKET ITEM_ID... (bounded source text and current citation locators)
       tractanda get SOCKET ITEM_ID...
       tractanda query SOCKET EXPRESSION
       tractanda search SOCKET LITERAL_PHRASE
@@ -40,7 +42,26 @@ let usage = """
       tractanda delete|restore|copy SOCKET ITEM_ID BASE_REVISION OPERATION_ID
       tractanda include|exclude|reset SOCKET ITEM_ID BASE_REVISION OPERATION_ID CATEGORY_ID
       tractanda criteria SOCKET ITEM_ID BASE_REVISION OPERATION_ID EXPRESSION
-      tractanda rebuild SOCKET
+      tractanda attachment SOCKET begin ITEM_ID BASE_REVISION OPERATION_ID FILE [MEDIA_TYPE]
+      tractanda attachment SOCKET resume RECEIPT_ID
+      tractanda attachment SOCKET status UPLOAD_ID
+      tractanda attachment SOCKET abort RECEIPT_ID_OR_UPLOAD_ID
+      tractanda document-job SOCKET start ITEM_ID BASE_REVISION ATTACHMENT_ID OPERATION_ID
+      tractanda document-job SOCKET status|cancel|resume|discard JOB_ID
+      tractanda document-job SOCKET list [AFTER_JOB_ID|-] [LIMIT]
+      tractanda document-job SOCKET rebase JOB_ID BASE_REVISION
+      tractanda document-job SOCKET page JOB_ID PAGE_NUMBER
+      tractanda attach SOCKET ITEM_ID BASE_REVISION OPERATION_ID FILE [MEDIA_TYPE]
+      tractanda attachments SOCKET ITEM_ID [REVISION_ID]
+      tractanda export-attachment SOCKET ITEM_ID ATTACHMENT_ID DESTINATION [REVISION_ID]
+      tractanda extract-attachment SOCKET ITEM_ID BASE_REVISION OPERATION_ID ATTACHMENT_ID
+      tractanda extract-document SOCKET ITEM_ID BASE_REVISION ATTACHMENT_ID OPERATION_ID
+      tractanda attachment-document SOCKET ITEM_ID ATTACHMENT_ID [--revision REVISION_ID] [--page N] [--max-bytes N]
+      tractanda detach SOCKET ITEM_ID BASE_REVISION OPERATION_ID ATTACHMENT_ID
+      tractanda export-item SOCKET ITEM_ID DESTINATION_DIRECTORY
+      tractanda rebuild SOCKET [OPERATION_ID]
+      tractanda rebuild-status SOCKET [JOB_ID]
+      tractanda rebuild-cancel SOCKET JOB_ID
       tractanda kanban SOCKET VIEW_ITEM_ID
       tractanda export-kanban SOCKET VIEW_ITEM_ID HTML_OR_JSON_FILE
       tractanda install-categories SOCKET TEMPLATE_JSON IANA_TIME_ZONE
@@ -209,6 +230,110 @@ func run() throws {
     let socket = args[1]
     let connection = try selectedConnection ?? ConnectionPreferences().resolve(socketPath: socket)
     switch command {
+    case "describe":
+        guard args.count <= 3 else { throw TractandaError("usage", usage) }
+        output(
+            try call(connection, "TractandaStore/describe", ["topic": args.count > 2 ? args[2] : "overview"]))
+    case "extracted-text":
+        try require(3)
+        output(
+            try call(
+                connection, "TractandaItem/extractedText",
+                ["ids": Array(args.dropFirst(2)), "projection": "source"]))
+    case "extract-attachment":
+        try require(6)
+        output(
+            try JSON.encode(
+                ItemClient(connection: connection).extractAttachmentText(
+                    itemID: args[2],
+                    expectedRevisionID: args[3], attachmentID: args[5], operationID: args[4])))
+    case "extract-document":
+        guard args.count == 6 else { throw TractandaError("usage", usage) }
+        output(
+            try call(
+                connection, "TractandaAttachment/extractDocument",
+                [
+                    "itemID": args[2], "expectedRevisionID": args[3],
+                    "attachmentID": args[4], "operationID": args[5],
+                ]))
+    case "attachment-document":
+        try require(4)
+        var revisionID: String?
+        var pageNumber: Int?
+        var maxBytes = 1_048_576
+        var seenDocumentOptions: Set<String> = []
+        var index = 4
+        while index < args.count {
+            guard index + 1 < args.count else { throw TractandaError("usage", usage) }
+            let option = args[index]
+            let value = args[index + 1]
+            guard seenDocumentOptions.insert(option).inserted else { throw TractandaError("usage", usage) }
+            switch option {
+            case "--revision":
+                guard revisionID == nil, !value.hasPrefix("--") else { throw TractandaError("usage", usage) }
+                revisionID = value
+            case "--page":
+                guard pageNumber == nil, let parsed = Int(value), parsed > 0 else {
+                    throw TractandaError("usage", usage)
+                }
+                pageNumber = parsed
+            case "--max-bytes":
+                guard let parsed = Int(value), (4096...2_097_152).contains(parsed) else {
+                    throw TractandaError("usage", usage)
+                }
+                maxBytes = parsed
+            default: throw TractandaError("usage", usage)
+            }
+            index += 2
+        }
+        var readArguments: [String: Any] = ["itemID": args[2], "attachmentID": args[3], "maxBytes": maxBytes]
+        if let revisionID { readArguments["revisionID"] = revisionID }
+        if let pageNumber { readArguments["pageNumber"] = pageNumber }
+        output(try call(connection, "TractandaAttachment/document", readArguments))
+    case "attachment", "document-job":
+        try AttachmentCommand.run(
+            [command] + Array(args.dropFirst(2)),
+            transport: CoreAttachmentCommandTransport(client: ItemClient(connection: connection)),
+            source: CoreAttachmentCommandSource(),
+            receipts: AttachmentReceiptStore.configured(endpoint: connection.socketPath), emit: output)
+    case "attach":
+        try require(6)
+        output(
+            try JSON.encode(
+                AttachmentFiles.attach(
+                    client: ItemClient(connection: connection), source: URL(fileURLWithPath: args[5]),
+                    itemID: args[2], expectedRevisionID: args[3], operationID: args[4],
+                    mediaType: args.count > 6 ? args[6] : "application/octet-stream")))
+    case "attachments":
+        try require(3)
+        output(
+            try JSON.encode(
+                ItemClient(connection: connection).listAttachments(
+                    itemID: args[2], revisionID: args.count > 3 ? args[3] : nil)))
+    case "export-attachment":
+        try require(5)
+        let destination = URL(fileURLWithPath: args[4])
+        let descriptor = try AttachmentFiles.export(
+            client: ItemClient(connection: connection), itemID: args[2], attachmentID: args[3],
+            destination: destination, revisionID: args.count > 5 ? args[5] : nil)
+        output(try JSON.encode(descriptor))
+    case "detach":
+        try require(6)
+        output(
+            try JSON.encode(
+                ItemClient(connection: connection).detachAttachment(
+                    itemID: args[2], expectedRevisionID: args[3], attachmentID: args[5], operationID: args[4])
+            ))
+    case "export-item":
+        try require(4)
+        let client = ItemClient(connection: connection)
+        let destination = URL(fileURLWithPath: args[3], isDirectory: true)
+        let revision = try ItemDirectoryExport.export(
+            client: client, itemID: args[2], destination: destination)
+        output(
+            try JSON.encode([
+                "itemID": revision.itemID, "revisionID": revision.revisionID, "exportedTo": destination.path,
+            ]))
     case "install-categories":
         try require(4)
         let template = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: args[2])))
@@ -326,9 +451,17 @@ func run() throws {
         try require(3)
         let input = try args.count > 3 ? Data(args[3].utf8) : FileHandle.standardInput.readToEnd() ?? Data()
         output(try call(connection, args[2], JSONSerialization.jsonObject(with: input)))
-    case "info", "rebuild":
+    case "info":
+        output(try call(connection, "TractandaStore/info", [:]))
+    case "rebuild":
+        let operationID = args.count > 2 ? args[2] : Identifier.make()
+        output(try call(connection, "TractandaStore/rebuild", ["operationID": operationID]))
+    case "rebuild-status":
         output(
-            try call(connection, command == "info" ? "TractandaStore/info" : "TractandaStore/rebuild", [:]))
+            try call(connection, "TractandaStore/rebuildStatus", args.count > 2 ? ["jobID": args[2]] : [:]))
+    case "rebuild-cancel":
+        try require(3)
+        output(try call(connection, "TractandaStore/rebuildCancel", ["jobID": args[2]]))
     case "get":
         try require(3)
         output(try call(connection, "TractandaItem/get", ["ids": Array(args.dropFirst(2))]))

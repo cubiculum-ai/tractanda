@@ -275,4 +275,29 @@ final class ConnectionTests: XCTestCase {
         }
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), [])
     }
+    func testConnectionFailureRetainsPOSIXCauseAndPermissionAdvice() throws {
+        let connection = ServerConnection(
+            socketPath: "/tmp/diagnostic-fixture.sock", managedService: "diagnostic-fixture")
+        for code in [EPERM, EACCES] {
+            let cause = LocalTransport.connectionFailure(socket: connection.socketPath, errorCode: code)
+            let diagnostic = connection.connectionDiagnostic(cause)
+            XCTAssertEqual(diagnostic.code, "connectionFailed")
+            XCTAssertEqual(diagnostic.osError, code)
+            XCTAssertTrue(diagnostic.message.contains(String(cString: strerror(code))))
+            XCTAssertTrue(diagnostic.message.contains("errno \(code)"))
+            XCTAssertTrue(diagnostic.message.contains("sandbox"))
+            XCTAssertFalse(diagnostic.message.contains("Start its server"))
+            XCTAssertTrue(ServerConnection.isPermissionDenied(diagnostic))
+            XCTAssertEqual(try JSON.decode(TractandaError.self, JSON.encode(diagnostic)), diagnostic)
+        }
+        let missing = connection.connectionDiagnostic(
+            LocalTransport.connectionFailure(socket: connection.socketPath, errorCode: ENOENT))
+        XCTAssertFalse(ServerConnection.isPermissionDenied(missing))
+        XCTAssertTrue(missing.message.contains("Start its server"))
+        XCTAssertEqual(missing.osError, ENOENT)
+        let legacy = try JSON.decode(
+            TractandaError.self, Data("{\"code\":\"connectionFailed\",\"message\":\"old reply\"}".utf8))
+        XCTAssertNil(legacy.osError)
+    }
+
 }

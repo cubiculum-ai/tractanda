@@ -143,6 +143,7 @@ final class CanonicalCatalogueReader {
         let database = try requireDatabase()
         for (key, expected) in [
             ("identity", identity), ("schema", "11"), ("engine", "tractanda-sqlite-catalogue-v11"),
+            ("itemTextProfile", ItemTextContent.profile),
         ] {
             let statement = try prepare("SELECT value FROM main.checkpoint_meta WHERE key=?")
             defer { sqlite3_finalize(statement) }

@@ -11,12 +11,17 @@ public struct DaemonConfiguration: Codable, Sendable {
     public let projectRootID: String?
     public let statusRootID: String?
     public let initialProjectID: String?
+    public let rebuildNoProgressTimeoutSeconds: Double?
+    public let attachmentUploadPolicy: AttachmentUploadPolicy?
+    public let documentConverter: DocumentConverterConfiguration?
 
     public init(
         storePath: String, indexDirectory: String? = nil, socketPath: String, httpPort: Int? = 48_728,
         managed: Bool = false,
         viewItemID: String? = nil, projectRootID: String? = nil, statusRootID: String? = nil,
-        initialProjectID: String? = nil
+        initialProjectID: String? = nil, documentConverter: DocumentConverterConfiguration? = nil,
+        attachmentUploadPolicy: AttachmentUploadPolicy? = nil,
+        rebuildNoProgressTimeoutSeconds: Double? = nil
     ) {
         self.storePath = storePath
         self.indexDirectory = indexDirectory
@@ -27,8 +32,23 @@ public struct DaemonConfiguration: Codable, Sendable {
         self.projectRootID = projectRootID
         self.statusRootID = statusRootID
         self.initialProjectID = initialProjectID
+        self.documentConverter = documentConverter
+        self.attachmentUploadPolicy = attachmentUploadPolicy
+        self.rebuildNoProgressTimeoutSeconds = rebuildNoProgressTimeoutSeconds
     }
     public func validate() throws {
+        guard
+            rebuildNoProgressTimeoutSeconds == nil
+                || (rebuildNoProgressTimeoutSeconds!.isFinite && rebuildNoProgressTimeoutSeconds! > 0)
+        else {
+            throw TractandaError(
+                "invalidConfiguration", "Rebuild no-progress timeout must be positive and finite.")
+        }
+        guard !managed || documentConverter == nil else {
+            throw TractandaError(
+                "invalidConfiguration",
+                "Prototype document conversion requires an explicitly configured disposable daemon.")
+        }
         guard storePath.hasPrefix("/"), storePath != "/", !storePath.contains("\0") else {
             throw TractandaError("invalidConfiguration", "Choose a dedicated absolute store path.")
         }

@@ -6,6 +6,15 @@ import XCTest
 @testable import TractandaVectors
 
 final class Vec1IndexTests: XCTestCase {
+    /// Deterministic test identities; production injects Core's real node/time UUIDv1 generator.
+    private func generationSupplier() -> () throws -> String {
+        var ticks: UInt64 = 0
+        return {
+            ticks += 1
+            return String(format: "%08llx-0000-1000-8000-0123456789ab", ticks)
+        }
+    }
+
     private func fixture(_ body: (String) throws -> Void) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -24,7 +33,8 @@ final class Vec1IndexTests: XCTestCase {
 
     func testExactCosineSearchUsesOnlyAuthorizedItems() throws {
         try fixture { path in
-            let index = try Vec1Index(path: path, dimensions: 2, profileID: "profile-a")
+            let index = try Vec1Index(
+                path: path, dimensions: 2, profileID: "profile-a", makeGenerationID: generationSupplier())
             try index.replace(
                 itemID: "private", records: [record("private-0", item: "private", vector: [1, 0])])
             try index.replace(
@@ -45,7 +55,8 @@ final class Vec1IndexTests: XCTestCase {
 
     func testRevisionRelabelDoesNotReembed() throws {
         try fixture { path in
-            let index = try Vec1Index(path: path, dimensions: 2, profileID: "profile-a")
+            let index = try Vec1Index(
+                path: path, dimensions: 2, profileID: "profile-a", makeGenerationID: generationSupplier())
             try index.replace(itemID: "item", records: [record("item-0", item: "item", vector: [1, 0])])
             let before = try index.records()
             try index.updateRevision(itemID: "item", revisionID: "r2", contentHash: "h2")
@@ -64,7 +75,8 @@ final class Vec1IndexTests: XCTestCase {
     func testReplaceDeleteReopenAndResetAreDurable() throws {
         try fixture { path in
             do {
-                let index = try Vec1Index(path: path, dimensions: 2, profileID: "profile-a")
+                let index = try Vec1Index(
+                    path: path, dimensions: 2, profileID: "profile-a", makeGenerationID: generationSupplier())
                 try index.replace(itemID: "item", records: [record("old", item: "item", vector: [1, 0])])
                 try index.replace(itemID: "item", records: [record("new", item: "item", vector: [0, 1])])
                 XCTAssertEqual(try index.records().map(\.id), ["new"])
@@ -72,7 +84,8 @@ final class Vec1IndexTests: XCTestCase {
                 XCTAssertTrue(try index.records().isEmpty)
                 try index.replace(itemID: "item", records: [record("reopen", item: "item", vector: [1, 0])])
             }
-            let reopened = try Vec1Index(path: path, dimensions: 2, profileID: "profile-a")
+            let reopened = try Vec1Index(
+                path: path, dimensions: 2, profileID: "profile-a", makeGenerationID: generationSupplier())
             XCTAssertEqual(try reopened.records().map(\.id), ["reopen"])
             try reopened.reset()
             XCTAssertTrue(try reopened.records().isEmpty)
@@ -81,9 +94,16 @@ final class Vec1IndexTests: XCTestCase {
 
     func testRejectsProfileDimensionAndMalformedVectors() throws {
         try fixture { path in
-            let index = try Vec1Index(path: path, dimensions: 2, profileID: "profile-a")
-            XCTAssertThrowsError(try Vec1Index(path: path, dimensions: 3, profileID: "profile-a"))
-            XCTAssertThrowsError(try Vec1Index(path: path, dimensions: 2, profileID: "profile-b"))
+            let index = try Vec1Index(
+                path: path, dimensions: 2, profileID: "profile-a", makeGenerationID: generationSupplier())
+            XCTAssertThrowsError(
+                try Vec1Index(
+                    path: path, dimensions: 3, profileID: "profile-a", makeGenerationID: generationSupplier())
+            )
+            XCTAssertThrowsError(
+                try Vec1Index(
+                    path: path, dimensions: 2, profileID: "profile-b", makeGenerationID: generationSupplier())
+            )
             XCTAssertThrowsError(
                 try index.replace(itemID: "item", records: [record("wrong", item: "item", vector: [1])]))
             XCTAssertThrowsError(
@@ -118,7 +138,8 @@ final class Vec1IndexTests: XCTestCase {
 
     func testBestPerItemFiltersCurrentRecordsBeforeItsLimit() throws {
         try fixture { path in
-            let index = try Vec1Index(path: path, dimensions: 2, profileID: "profile-a")
+            let index = try Vec1Index(
+                path: path, dimensions: 2, profileID: "profile-a", makeGenerationID: generationSupplier())
             var current: [Vec1RecordFilter] = []
             for number in 0..<300 {
                 let itemID = "item-\(number)"

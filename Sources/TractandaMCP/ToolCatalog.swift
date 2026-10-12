@@ -13,11 +13,13 @@ struct ToolDefinition: Sendable {
     let isPaged: Bool
     let idempotent: Bool
     let destructive: Bool
+    let requiredFeature: String?
 
     init(
         _ name: String, method: String, description: String, properties: [String: Value],
         required: [String] = [], readOnly: Bool = true, isPaged: Bool = false,
-        idempotent: Bool? = nil, destructive: Bool = false, includesOutputSchema: Bool = true
+        idempotent: Bool? = nil, destructive: Bool = false, requiredFeature: String? = nil,
+        includesOutputSchema: Bool = true
     ) {
         nativeMethod = method
         self.description = description
@@ -28,6 +30,7 @@ struct ToolDefinition: Sendable {
         self.isPaged = isPaged
         self.idempotent = idempotent ?? readOnly
         self.destructive = destructive
+        self.requiredFeature = requiredFeature
         tool = Tool(
             name: name, description: description,
             inputSchema: .object([
@@ -89,6 +92,37 @@ struct ToolDefinition: Sendable {
                 throw TractandaError("invalidArguments", "ids must be distinct.")
             }
         }
+        if nativeMethod == "TractandaItem/extractedTextUnit" {
+            for key in ["unit", "offset"] where arguments[key] != nil {
+                guard let value = arguments[key]?.intValue, value >= 0, value < Int.max else {
+                    throw TractandaError(
+                        "invalidArguments", "\(key) must be a nonnegative UTF8 unit/offset integer.")
+                }
+            }
+            if let limit = arguments["limit"] {
+                guard let value = limit.intValue, (1...262_144).contains(value) else {
+                    throw TractandaError("invalidArguments", "limit must be 1 through 262144 UTF8 bytes.")
+                }
+            }
+        }
+        if nativeMethod == "TractandaAttachment/content" {
+            if let offset = arguments["offset"] {
+                guard let value = offset.intValue, let checked = Int64(exactly: value), checked >= 0 else {
+                    throw TractandaError(
+                        "invalidArguments", "offset must be a nonnegative Int64 byte offset.")
+                }
+            } else {
+                arguments["offset"] = .int(0)
+            }
+            if let limit = arguments["limit"] {
+                guard let value = limit.intValue, (1...65_536).contains(value) else {
+                    throw TractandaError(
+                        "invalidArguments", "limit must be an integer from 1 through 65536 bytes.")
+                }
+            } else {
+                arguments["limit"] = .int(4_096)
+            }
+        }
         for key in ["categoryPath", "excludedCategoryIDs"] {
             if let path = arguments[key] {
                 guard let values = path.arrayValue, values.count <= 32,
@@ -114,9 +148,14 @@ struct ToolDefinition: Sendable {
             throw TractandaError("invalidArguments", "projection and properties are mutually exclusive.")
         }
         if let maxBytes = arguments["maxBytes"] {
-            guard let count = maxBytes.intValue, (8_192...524_288).contains(count) else {
+            let allowedBytes =
+                nativeMethod == "TractandaAttachment/document"
+                ? (4_096...262_144) : (8_192...524_288)
+            guard let count = maxBytes.intValue, allowedBytes.contains(count) else {
                 throw TractandaError(
-                    "invalidArguments", "maxBytes must be an integer from 8192 through 524288.")
+                    "invalidArguments",
+                    "maxBytes must be an integer from \(allowedBytes.lowerBound) through \(allowedBytes.upperBound)."
+                )
             }
         }
         if let sort = arguments["sort"] {
@@ -143,15 +182,96 @@ struct ToolDefinition: Sendable {
         if arguments["viewID"] != nil && arguments["sort"] != nil {
             throw TractandaError("invalidArguments", "viewID cannot be combined with inline sort.")
         }
+        if nativeMethod == "TractandaDocumentJob/list", arguments["limit"] == nil {
+            arguments["limit"] = .int(32)
+        }
+        if nativeMethod == "TractandaAttachment/document", arguments["maxBytes"] == nil {
+            arguments["maxBytes"] = .int(65_536)
+        }
+        try validateDocumentJobArguments(arguments)
         return arguments
+    }
+
+    private func validateDocumentJobArguments(_ arguments: [String: Value]) throws {
+        switch nativeMethod {
+        case "TractandaAttachment/document":
+            try validateUUIDv1(arguments["itemID"]?.stringValue, field: "itemID")
+            try validateUUIDv1(arguments["attachmentID"]?.stringValue, field: "attachmentID")
+            if let revisionID = arguments["revisionID"] {
+                try validateUUIDv1(revisionID.stringValue, field: "revisionID")
+            }
+            guard let rawPage = arguments["pageNumber"]?.intValue,
+                let pageNumber = Int64(exactly: rawPage), pageNumber > 0
+            else {
+                throw TractandaError("invalidArguments", "pageNumber must be a positive exact Int64.")
+            }
+            guard let maxBytes = arguments["maxBytes"]?.intValue, (4_096...262_144).contains(maxBytes) else {
+                throw TractandaError(
+                    "invalidArguments", "maxBytes must be an integer from 4096 through 262144.")
+            }
+        case "TractandaDocumentJob/start":
+            for key in ["itemID", "expectedRevisionID", "attachmentID"] {
+                try validateUUIDv1(arguments[key]?.stringValue, field: key)
+            }
+            guard let operationID = arguments["operationID"]?.stringValue,
+                !operationID.isEmpty, operationID.utf8.count <= 200, !operationID.contains("\0")
+            else {
+                throw TractandaError(
+                    "invalidArguments", "operationID must contain 1 through 200 UTF-8 bytes without NUL.")
+            }
+        case "TractandaDocumentJob/status", "TractandaDocumentJob/cancel",
+            "TractandaDocumentJob/resume", "TractandaDocumentJob/discard":
+            try validateUUIDv1(arguments["jobID"]?.stringValue, field: "jobID")
+        case "TractandaDocumentJob/rebase":
+            try validateUUIDv1(arguments["jobID"]?.stringValue, field: "jobID")
+            try validateUUIDv1(arguments["expectedRevisionID"]?.stringValue, field: "expectedRevisionID")
+        case "TractandaDocumentJob/page":
+            try validateUUIDv1(arguments["jobID"]?.stringValue, field: "jobID")
+            guard let value = arguments["pageNumber"]?.intValue,
+                let pageNumber = Int64(exactly: value), pageNumber > 0
+            else {
+                throw TractandaError("invalidArguments", "pageNumber must be a positive exact Int64.")
+            }
+        case "TractandaDocumentJob/list":
+            if let afterJobID = arguments["afterJobID"] {
+                try validateUUIDv1(afterJobID.stringValue, field: "afterJobID")
+            }
+            let limit: Int
+            if let supplied = arguments["limit"] {
+                guard let parsed = supplied.intValue else {
+                    throw TractandaError("invalidArguments", "limit must be an integer from 1 through 64.")
+                }
+                limit = parsed
+            } else {
+                limit = 32
+            }
+            guard (1...64).contains(limit) else {
+                throw TractandaError("invalidArguments", "limit must be an integer from 1 through 64.")
+            }
+        default:
+            break
+        }
+    }
+
+    private func validateUUIDv1(_ value: String?, field: String) throws {
+        guard let value, (try? Identifier.validate(value)) != nil,
+            UUID(uuidString: value)?.version1Components != nil
+        else {
+            throw TractandaError("invalidArguments", "\(field) must be a canonical lowercase UUIDv1.")
+        }
     }
 }
 
 enum ToolCatalog {
+    private static let documentJobsFeature = "tractanda.document-jobs.v1"
     private static let text: Value = .object(["type": .string("string")])
     private static let identifier: Value = .object([
         "type": .string("string"),
         "description": .string("Canonical lowercase UUID returned by the server."),
+    ])
+    private static let uuidV1Identifier: Value = .object([
+        "type": .string("string"),
+        "description": .string("Canonical lowercase UUIDv1 returned by the server."),
     ])
     private static let operation: Value = .object([
         "type": .string("string"),
@@ -228,7 +348,8 @@ enum ToolCatalog {
                 description: definition.description, properties: definition.properties,
                 required: definition.required.sorted(), readOnly: definition.readOnly,
                 isPaged: definition.isPaged, idempotent: definition.idempotent,
-                destructive: definition.destructive, includesOutputSchema: includesOutputSchema)
+                destructive: definition.destructive, requiredFeature: definition.requiredFeature,
+                includesOutputSchema: includesOutputSchema)
         }
     }
 
@@ -276,7 +397,7 @@ enum ToolCatalog {
         .init(
             "tractanda_extracted_text", method: "TractandaItem/extractedText",
             description:
-                "Diagnose search coverage for readable current items. Returns item/revision identity, extractionProfile, byte counts and separate FTS/semantic index freshness. source returns canonical semantic input before chunking; fts returns the three FTS input fields; summary omits text. It never follows references or extracts attachments. No silent truncation: follow remainingIDs; retry oversizedIDs with summary. maxBytes covers the native result, not MCP framing. Requires tractanda.extracted-text.v1; read the served query/semantic references.",
+                "Diagnose search coverage for readable current items. Returns item/revision identity, extractionProfile, byte counts and separate FTS/semantic index freshness. source returns inlineFieldsAndRepresentations; saved v2 pages are explicitly omitted with sourceComplete false and coverage. Use tractanda_extracted_text_unit for them; fts returns the three inline extraction fields; FTS status verifies actual ordinary owned values; summary omits text. It never follows references or extracts attachments. No silent truncation: follow remainingIDs; retry oversizedIDs with summary. maxBytes covers the native result, not MCP framing. Requires tractanda.extracted-text.v1; read the served query/semantic references.",
             properties: [
                 "ids": .object([
                     "type": .string("array"), "items": identifier,
@@ -292,6 +413,126 @@ enum ToolCatalog {
                     "maximum": .int(524_288), "default": .int(65_536),
                 ]),
             ], required: ["ids"]),
+        .init(
+            "tractanda_extracted_text_unit", method: "TractandaItem/extractedTextUnit",
+            description:
+                "Read one bounded current source unit, including saved v2 document pages. Requires fresh tractanda.extracted-text-units.v1. Pin expectedRevisionID from current get/diagnostics; follow next.unit/offset with the same revision. unit/offset and spans count UTF8 bytes. Canonical verification covers only the selected window, length, locator and spans; indexConsistency covers component metadata. Whole-document and global placement verification are explicitly false. No silent truncation; reduce limit on responseTooLarge. Native and serialized MCP wrapper budgets both apply.",
+            properties: [
+                "itemID": identifier, "expectedRevisionID": identifier,
+                "unit": .object(["type": .string("integer"), "minimum": .int(0)]),
+                "offset": .object(["type": .string("integer"), "minimum": .int(0), "default": .int(0)]),
+                "limit": .object([
+                    "type": .string("integer"), "minimum": .int(1), "maximum": .int(262_144),
+                    "default": .int(65_536),
+                ]),
+                "maxBytes": .object([
+                    "type": .string("integer"), "minimum": .int(8_192), "maximum": .int(524_288),
+                    "default": .int(524_288),
+                ]),
+            ], required: ["itemID", "expectedRevisionID", "unit"],
+            requiredFeature: ServerFeature.extractedTextUnits.rawValue),
+        .init(
+            "tractanda_attachments", method: "TractandaAttachment/list",
+            description:
+                "List immutable attachment descriptors for a readable current item or an explicitly pinned revision. Current permissions govern historical reads. Returns attachment IDs, display filename, media type, byte count and SHA-256; it never returns payload bytes. Requires native feature tractanda.attachment-lifecycle.v1.",
+            properties: ["itemID": identifier, "revisionID": identifier],
+            required: ["itemID"], requiredFeature: ServerFeature.attachmentLifecycle.rawValue),
+        .init(
+            "tractanda_attachment_content", method: "TractandaAttachment/content",
+            description:
+                "Read a bounded byte slice from one readable immutable attachment. Requires itemID and attachmentID; revisionID optionally pins an immutable historical revision. offset is a byte offset (not a character offset), default 0, and limit is bytes, default 4096 and maximum 65536. Follow nextOffset until isComplete; verify the joined bytes against attachment.sha256 and byteCount. Pin the list result's revisionID across continuation calls; the server still rechecks current permissions for every chunk. Data is base64 of original bytes. Never pass a path. Requires native feature tractanda.attachment-lifecycle.v1.",
+            properties: [
+                "itemID": identifier, "revisionID": identifier, "attachmentID": identifier,
+                "offset": .object([
+                    "type": .string("integer"), "minimum": .int(0), "maximum": .int(Int.max),
+                    "default": .int(0), "description": .string("Byte offset into the immutable original."),
+                ]),
+                "limit": .object([
+                    "type": .string("integer"), "minimum": .int(1), "maximum": .int(65_536),
+                    "default": .int(4_096),
+                    "description": .string("Maximum original bytes in this response."),
+                ]),
+            ], required: ["itemID", "attachmentID"],
+            requiredFeature: ServerFeature.attachmentLifecycle.rawValue),
+        .init(
+            "tractanda_attachment_document_page", method: "TractandaAttachment/document",
+            description:
+                "Read one selected page from a saved canonical extraction, optionally pinned to a revision. Returns canonical item/revision/representation identity, source provenance, total page count and citation-bearing page content. pageNumber is required; this tool never reads a whole representation. maxBytes defaults to 65536 and is capped at 262144 native-result bytes; MCP also checks serialized wrapper size and returns responseTooLarge without truncation. For unusually large pages, lower maxBytes or use bounded source windows/original attachment chunks. Current permissions are rechecked for historical reads. Requires native feature tractanda.attachment-document.v1.",
+            properties: [
+                "itemID": uuidV1Identifier, "revisionID": uuidV1Identifier,
+                "attachmentID": uuidV1Identifier,
+                "pageNumber": .object([
+                    "type": .string("integer"), "minimum": .int(1), "maximum": .int(Int.max),
+                    "description": .string("Positive exact Int64 page ordinal."),
+                ]),
+                "maxBytes": .object([
+                    "type": .string("integer"), "minimum": .int(4_096),
+                    "maximum": .int(262_144), "default": .int(65_536),
+                ]),
+            ], required: ["itemID", "attachmentID", "pageNumber"],
+            requiredFeature: ServerFeature.attachmentDocument.rawValue),
+        .init(
+            "tractanda_document_job_start", method: "TractandaDocumentJob/start",
+            description:
+                "Start or replay one durable extraction job for the specified original revision and attachment. Reuse the exact operationID and payload after an uncertain reply. A successful admission may be queued or paused if local conversion configuration is unavailable; native authorization and source checks remain authoritative. Requires fresh native feature tractanda.document-jobs.v1.",
+            properties: [
+                "itemID": uuidV1Identifier, "expectedRevisionID": uuidV1Identifier,
+                "attachmentID": uuidV1Identifier, "operationID": operation,
+            ], required: ["itemID", "expectedRevisionID", "attachmentID", "operationID"],
+            readOnly: false, idempotent: true, requiredFeature: documentJobsFeature),
+        .init(
+            "tractanda_document_job_status", method: "TractandaDocumentJob/status",
+            description:
+                "Read the current status of a durable job owned by this actor or readable by an administrator. Page counts and processing coverage make no OCR accuracy claim. This remains available when conversion configuration is not ready. Requires fresh native feature tractanda.document-jobs.v1.",
+            properties: ["jobID": uuidV1Identifier], required: ["jobID"],
+            requiredFeature: documentJobsFeature),
+        .init(
+            "tractanda_document_job_cancel", method: "TractandaDocumentJob/cancel",
+            description:
+                "Request bounded cancellation of this actor's durable job. Accepted page outcomes remain recoverable. Current native authorization is checked. Requires fresh native feature tractanda.document-jobs.v1.",
+            properties: ["jobID": uuidV1Identifier], required: ["jobID"],
+            readOnly: false, idempotent: false, requiredFeature: documentJobsFeature),
+        .init(
+            "tractanda_document_job_resume", method: "TractandaDocumentJob/resume",
+            description:
+                "Resume a paused or cancelled durable job after the native service revalidates current authority, source identity and configuration. Requires fresh native feature tractanda.document-jobs.v1.",
+            properties: ["jobID": uuidV1Identifier], required: ["jobID"],
+            readOnly: false, idempotent: false, requiredFeature: documentJobsFeature),
+        .init(
+            "tractanda_document_job_rebase", method: "TractandaDocumentJob/rebase",
+            description:
+                "Deliberately change only the publication revision expectation for an unfinished job. Original source revision/provenance and accepted pages remain fixed; native authorization and current revision are rechecked. Requires fresh native feature tractanda.document-jobs.v1.",
+            properties: ["jobID": uuidV1Identifier, "expectedRevisionID": uuidV1Identifier],
+            required: ["jobID", "expectedRevisionID"],
+            readOnly: false, idempotent: false, requiredFeature: documentJobsFeature),
+        .init(
+            "tractanda_document_job_page", method: "TractandaDocumentJob/page",
+            description:
+                "Read one bounded provisional page outcome from a durable job. It has no canonical revision identity or citation; after completion, use tractanda_attachment_document_page for saved canonical page content and its citations. This never returns the whole document. MCP checks the fully serialized wrapper against its response budget and returns responseTooLarge without truncation. Requires fresh native feature tractanda.document-jobs.v1.",
+            properties: [
+                "jobID": uuidV1Identifier,
+                "pageNumber": .object([
+                    "type": .string("integer"), "minimum": .int(1), "maximum": .int(Int.max),
+                    "description": .string("Positive exact Int64 page ordinal."),
+                ]),
+            ], required: ["jobID", "pageNumber"], requiredFeature: documentJobsFeature),
+        .init(
+            "tractanda_document_job_discard", method: "TractandaDocumentJob/discard",
+            description:
+                "Explicitly discard only this job's staged or uncommitted work after reconciling any canonical commit receipt. Canonical committed content and immutable history are preserved. Current native authorization is checked. Requires fresh native feature tractanda.document-jobs.v1.",
+            properties: ["jobID": uuidV1Identifier], required: ["jobID"],
+            readOnly: false, idempotent: false, destructive: true, requiredFeature: documentJobsFeature),
+        .init(
+            "tractanda_document_jobs", method: "TractandaDocumentJob/list",
+            description:
+                "List a bounded page of this actor's discoverable durable jobs. Use nextJobID as afterJobID; limit defaults to 32 and is at most 64. This does not expose other actors' jobs unless native administrator authorization permits it. Requires fresh native feature tractanda.document-jobs.v1.",
+            properties: [
+                "afterJobID": uuidV1Identifier,
+                "limit": .object([
+                    "type": .string("integer"), "minimum": .int(1),
+                    "maximum": .int(64), "default": .int(32),
+                ]),
+            ], requiredFeature: documentJobsFeature),
         .init(
             "tractanda_memberships", method: "TractandaCategory/memberships",
             description:

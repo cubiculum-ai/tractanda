@@ -1,4 +1,5 @@
 import Foundation
+import TractandaVectors
 import XCTest
 
 @testable import TractandaCore
@@ -167,59 +168,86 @@ final class SemanticServiceTests: XCTestCase {
         }
         func hasCurrent(itemID: String, profileID: String, contentHash: String) throws -> Bool { false }
         func rebind(_ snapshot: SemanticSnapshot) throws {}
-        func replace(_ snapshot: SemanticSnapshot, chunks: [SemanticChunk], vectors: [[Double]]) throws {}
-        func prune(profileID: String, keeping itemIDs: Set<String>) throws {}
-        func search(vector: [Double], profileID: String, current: [SemanticSnapshot], limit: Int) throws
-            -> [SemanticIndexedPassage]
-        { [] }
+        func begin(_ snapshot: SemanticSnapshot) throws -> Vec1Generation {
+            throw TractandaError("semanticIndex", "injected")
+        }
+        func append(_ generation: Vec1Generation, chunks: [SemanticChunk], vectors: [[Double]]) throws {}
+        func publish(_ generation: Vec1Generation, count: Int64) throws {}
+        func discard(_ generation: Vec1Generation) throws {}
+        func prune(profileID: String, current: (String) throws -> Bool) throws {}
+        func cleanup() throws {}
+        func search(
+            vector: [Double], profileID: String, limit: Int,
+            current: (_ visit: (SemanticSnapshot) throws -> Void) throws -> Void
+        ) throws -> [SemanticIndexedPassage] { [] }
         func reset() throws {}
     }
-
     private final class CountingStorage: SemanticVectorStorage {
         private let backing = SemanticMemoryStorage()
         private(set) var identityCalls = 0
         private(set) var pruneCalls = 0
         private(set) var rebindCalls = 0
         private(set) var replaceCalls = 0
-
         func resetCounts() {
             identityCalls = 0
             pruneCalls = 0
             rebindCalls = 0
             replaceCalls = 0
         }
-
         func identity(itemID: String, profileID: String) throws -> SemanticIndexedIdentity? {
             identityCalls += 1
             return try backing.identity(itemID: itemID, profileID: profileID)
         }
-
         func hasCurrent(itemID: String, profileID: String, contentHash: String) throws -> Bool {
             try backing.hasCurrent(itemID: itemID, profileID: profileID, contentHash: contentHash)
         }
-
         func rebind(_ snapshot: SemanticSnapshot) throws {
             rebindCalls += 1
             try backing.rebind(snapshot)
         }
-
-        func replace(_ snapshot: SemanticSnapshot, chunks: [SemanticChunk], vectors: [[Double]]) throws {
+        func begin(_ snapshot: SemanticSnapshot) throws -> Vec1Generation { try backing.begin(snapshot) }
+        func append(_ generation: Vec1Generation, chunks: [SemanticChunk], vectors: [[Double]]) throws {
+            try backing.append(generation, chunks: chunks, vectors: vectors)
+        }
+        // The former whole-replacement counter now counts complete atomic publication only.
+        func publish(_ generation: Vec1Generation, count: Int64) throws {
             replaceCalls += 1
-            try backing.replace(snapshot, chunks: chunks, vectors: vectors)
+            try backing.publish(generation, count: count)
         }
-
-        func prune(profileID: String, keeping itemIDs: Set<String>) throws {
+        func discard(_ generation: Vec1Generation) throws { try backing.discard(generation) }
+        func prune(profileID: String, current: (String) throws -> Bool) throws {
             pruneCalls += 1
-            try backing.prune(profileID: profileID, keeping: itemIDs)
+            try backing.prune(profileID: profileID, current: current)
         }
-
+        func cleanup() throws { try backing.cleanup() }
         func search(
-            vector: [Double], profileID: String, current: [SemanticSnapshot], limit: Int
+            vector: [Double], profileID: String, limit: Int,
+            current: (_ visit: (SemanticSnapshot) throws -> Void) throws -> Void
         ) throws -> [SemanticIndexedPassage] {
-            try backing.search(vector: vector, profileID: profileID, current: current, limit: limit)
+            try backing.search(vector: vector, profileID: profileID, limit: limit, current: current)
         }
-
         func reset() throws { try backing.reset() }
+    }
+    private func seed(
+        _ storage: SemanticVectorStorage, store: ItemStore, revision: Revision,
+        configuration: SemanticConfiguration, firstOnly: Bool = false
+    ) throws {
+        let corpus = try XCTUnwrap(
+            store.captureIndexedCorpus(itemID: revision.itemID, expectedRevisionID: revision.revisionID))
+        defer { try? store.releaseIndexedCorpus(corpus) }
+        let snapshot = SemanticSnapshot(
+            corpus: corpus, profileID: try SemanticSource.profileID(configuration),
+            dimensions: configuration.dimensions)
+        let generation = try storage.begin(snapshot)
+        var cursor = try SemanticChunkCursor(
+            snapshot: corpus, chunkBytes: configuration.chunkBytes, overlapBytes: configuration.overlapBytes)
+        var count: Int64 = 0
+        while let chunk = try cursor.next() {
+            try storage.append(generation, chunks: [chunk], vectors: [[1, 0]])
+            count += 1
+            if firstOnly { break }
+        }
+        try storage.publish(generation, count: count)
     }
 
     func testMaintenanceSkipsUnchangedHundredItemStoreAndOnlyRebindsNewHead() throws {
@@ -235,14 +263,7 @@ final class SemanticServiceTests: XCTestCase {
                 let revision = try note(
                     store, subject: "Item \(index)", body: "body \(index)", operation: "item-\(index)")
                 revisions.append(revision)
-                let corpus = ItemTextContent.corpus(for: revision)
-                let snapshot = SemanticSnapshot(
-                    itemID: revision.itemID, revisionID: revision.revisionID, subject: corpus.subject,
-                    body: corpus.body, sourceText: corpus.sourceText, profileID: profile,
-                    contentHash: try SemanticSource.contentHash(sourceText: corpus.sourceText))
-                let chunks = try SemanticChunker.chunks(
-                    snapshot.sourceText, chunkBytes: config.chunkBytes, overlapBytes: config.overlapBytes)
-                try storage.replace(snapshot, chunks: chunks, vectors: chunks.map { _ in [1.0, 0.0] })
+                try seed(storage, store: store, revision: revision, configuration: config)
             }
             _ = try service.configure(config, expectedConfigurationID: nil)
             service.maintain()
@@ -396,17 +417,8 @@ final class SemanticServiceTests: XCTestCase {
             let corpus = ItemTextContent.corpus(for: item)
             XCTAssertEqual(service.textDiagnostics(for: item, corpus: corpus)["status"] as? String, "missing")
             let profile = try SemanticSource.profileID(configuration)
-            let hash = try SemanticSource.contentHash(sourceText: corpus.sourceText)
             XCTAssertEqual(service.textDiagnostics(for: item, corpus: corpus)["status"] as? String, "missing")
-            let chunk = try XCTUnwrap(
-                SemanticChunker.chunks(
-                    corpus.sourceText, chunkBytes: configuration.chunkBytes,
-                    overlapBytes: configuration.overlapBytes
-                ).first)
-            let snapshot = SemanticSnapshot(
-                itemID: item.itemID, revisionID: item.revisionID, subject: corpus.subject, body: corpus.body,
-                sourceText: corpus.sourceText, profileID: profile, contentHash: hash)
-            try storage.replace(snapshot, chunks: [chunk], vectors: [[1, 0]])
+            try seed(storage, store: store, revision: item, configuration: configuration, firstOnly: true)
             XCTAssertEqual(service.textDiagnostics(for: item, corpus: corpus)["status"] as? String, "current")
             let revised = try store.commit(
                 CommitRequest(
@@ -416,10 +428,11 @@ final class SemanticServiceTests: XCTestCase {
             XCTAssertEqual(
                 service.textDiagnostics(for: revised, corpus: ItemTextContent.corpus(for: revised))["status"]
                     as? String, "stale")
+            let rebound = try XCTUnwrap(
+                store.captureIndexedCorpus(itemID: revised.itemID, expectedRevisionID: revised.revisionID))
+            defer { try? store.releaseIndexedCorpus(rebound) }
             try storage.rebind(
-                SemanticSnapshot(
-                    itemID: revised.itemID, revisionID: revised.revisionID, subject: corpus.subject,
-                    body: corpus.body, sourceText: corpus.sourceText, profileID: profile, contentHash: hash))
+                .init(corpus: rebound, profileID: profile, dimensions: configuration.dimensions))
             XCTAssertEqual(
                 service.textDiagnostics(for: revised, corpus: ItemTextContent.corpus(for: revised))["status"]
                     as? String, "current")
@@ -914,6 +927,10 @@ final class SemanticServiceTests: XCTestCase {
             drain(service)
             let status = try store.withAccess(forUID: store.ownerUID) { try service.status() }
             XCTAssertEqual(status["model"] as? String, "replacement")
+            XCTAssertEqual(
+                status["indexedItems"] as? Int, 1,
+                "cancelled old configuration work must not impose provider-failure backoff on the replacement"
+            )
 
             let failedService = SemanticService(store: store) { _, _, _ in
                 calls.increment()

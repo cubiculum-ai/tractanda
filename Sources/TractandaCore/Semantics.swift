@@ -58,6 +58,13 @@ public enum ItemSemantics {
         for key in revision.fields.keys where key.isEmpty || key.contains("\0") {
             throw TractandaError("invalidKey", "Empty/NUL property key.")
         }
+        _ = try AttachmentDescriptor.descriptors(in: revision.fields)
+        for representation in try AttachmentTextRepresentation.representations(in: revision.fields) {
+            try AttachmentTextDecoder.validate(representation)
+        }
+        for representation in try AttachmentDocumentRepresentation.representations(in: revision.fields) {
+            try AttachmentDocumentValidator.validate(representation)
+        }
         _ = try RoleSemantics.holdings(revision)
         _ = try CategoryHierarchy.parents(of: revision)
         _ = try ItemReferenceLabel.labels(in: revision)

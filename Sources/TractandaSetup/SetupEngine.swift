@@ -115,6 +115,9 @@ public final class SetupEngine {
                     "This installation needs its existing embedding payload; this bundled embedding transition requires an explicit reconfiguration."
                 )
             }
+            if previous?.documentExtraction != nil && manifest.documentExtraction == nil {
+                throw SetupError("An upgrade cannot silently remove the configured document payload.")
+            }
             if manifest.embedding != nil && (previous?.port ?? options.port) == 65535 {
                 throw SetupError(
                     "Choose an HTTP port below 65535 so the local embedding service has a separate port.")
@@ -170,6 +173,8 @@ public final class SetupEngine {
                     return isSupportedBundledEmbeddingTransition(from: old, to: manifest.embedding)
                 } ?? false
             if embeddingUpgrade { try prepareBundledEmbeddingUpgrade(&receipt) }
+            receipt.documentExtraction = manifest.documentExtraction
+            try prepareDocumentState(&receipt, uid: account.uid)
             receipt.embedding = manifest.embedding
             receipt.release = release.path
             receipt.manifestSHA256 = digest
@@ -262,36 +267,64 @@ public final class SetupEngine {
                         "Installation failed and semantic configuration rollback also failed; services were left stopped and this preparing receipt retains the recovery snapshot for an explicit retry. \(definitions) \(error.localizedDescription) \(semanticRollbackError.localizedDescription)"
                     )
                 }
-                if let oldDefinition {
-                    try writeProtected(oldDefinition, to: definition, mode: 0o644)
-                } else if exists(definition) {
-                    try FileManager.default.removeItem(at: definition)
-                }
-                if let oldEmbeddingDefinition {
-                    try writeProtected(oldEmbeddingDefinition, to: embeddingDefinition, mode: 0o644)
-                } else if exists(embeddingDefinition) {
-                    try FileManager.default.removeItem(at: embeddingDefinition)
-                }
-                if let previous, previous.state == .active {
-                    var rollback = previous
-                    rollback.releases[release.path] = digest
-                    try writeReceipt(rollback)
-                    try? loadEmbedding(previous)
-                    try? load(previous.instance)
-                } else {
-                    receipt.state = .preparing
-                    receipt.embeddingDefinitionSHA256 = oldEmbeddingDefinition.map {
-                        SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined()
-                    }
-                    receipt.definitionSHA256 = oldDefinition.map {
-                        SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined()
-                    }
-                    try writeReceipt(receipt)
-                }
+                try restoreRegistrationSnapshot(
+                    &receipt, previous: previous, release: release, digest: digest,
+                    oldDefinition: oldDefinition, oldEmbeddingDefinition: oldEmbeddingDefinition)
                 throw SetupError(
                     "Installation did not become ready; registrations were rolled back and data retained. \(error.localizedDescription)"
                 )
             }
+        }
+    }
+
+    /// Private per-instance state survives runtime switches and uninstall.
+    func prepareDocumentState(_ receipt: inout InstallationReceipt, uid: UInt32) throws {
+        if receipt.documentExtraction != nil {
+            let documents = roots.configuration.appendingPathComponent("document-state")
+                .appendingPathComponent(receipt.instance)
+            try ensureRootDirectory(documents)
+            let scratch = documents.appendingPathComponent("scratch")
+            let preparation = documents.appendingPathComponent("prepared")
+            try ensureServiceDirectory(scratch, uid: uid, mode: 0o700)
+            try ensureServiceDirectory(preparation, uid: uid, mode: 0o700)
+            receipt.documentScratchDirectory = scratch.path
+            receipt.documentPreparationDirectory = preparation.path
+        }
+    }
+
+    /// Restore precisely the previously owned definitions and receipt after candidate startup fails.
+    /// Caller stops candidate processes and restores profiles/client links before entering here.
+    func restoreRegistrationSnapshot(
+        _ receipt: inout InstallationReceipt, previous: InstallationReceipt?, release: URL, digest: String,
+        oldDefinition: Data?, oldEmbeddingDefinition: Data?
+    ) throws {
+        let definition = definitionURL(receipt.instance)
+        let embeddingDefinition = embeddingDefinitionURL(receipt.instance)
+        if let oldDefinition {
+            try writeProtected(oldDefinition, to: definition, mode: 0o644)
+        } else if exists(definition) {
+            try FileManager.default.removeItem(at: definition)
+        }
+        if let oldEmbeddingDefinition {
+            try writeProtected(oldEmbeddingDefinition, to: embeddingDefinition, mode: 0o644)
+        } else if exists(embeddingDefinition) {
+            try FileManager.default.removeItem(at: embeddingDefinition)
+        }
+        if let previous, previous.state == .active {
+            var rollback = previous
+            rollback.releases[release.path] = digest
+            try writeReceipt(rollback)
+            try? loadEmbedding(previous)
+            try? load(previous.instance)
+        } else {
+            receipt.state = .preparing
+            receipt.embeddingDefinitionSHA256 = oldEmbeddingDefinition.map {
+                SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined()
+            }
+            receipt.definitionSHA256 = oldDefinition.map {
+                SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined()
+            }
+            try writeReceipt(receipt)
         }
     }
 
@@ -409,6 +442,7 @@ public final class SetupEngine {
             roots.software.appendingPathComponent("releases"), clientLink,
             roots.configuration.appendingPathComponent("receipts"),
             roots.configuration.appendingPathComponent("logs"),
+            roots.configuration.appendingPathComponent("document-state"),
             roots.configuration.appendingPathComponent("connections.json"),
             roots.configuration.appendingPathComponent("installer.lock"), roots.runtime,
         ]
@@ -480,6 +514,17 @@ public final class SetupEngine {
             "daemon", receipt.store, receipt.socket, "--index-directory", receipt.indexDirectory,
             "--managed", "--http-port", String(receipt.port),
         ]
+        if let document = receipt.documentExtraction {
+            guard document == .pinned else { throw SetupError("Unsupported document receipt.") }
+            let paths = try documentStatePaths(receipt)
+            let release = URL(fileURLWithPath: receipt.release)
+            arguments += [
+                "--document-converter", release.appendingPathComponent(document.converterPath).path,
+                "--document-model-directory", release.appendingPathComponent(document.modelDirectory).path,
+                "--document-scratch-directory", paths.scratch,
+                "--document-preparation-directory", paths.preparation,
+            ]
+        }
         if let project = receipt.board["projectID"], let projects = receipt.board["projectRootID"],
             let status = receipt.board["statusRootID"]
         {
@@ -498,7 +543,45 @@ public final class SetupEngine {
         if let node = receipt.uuidNode { dictionary["EnvironmentVariables"] = ["TRACTANDA_UUID_NODE": node] }
         return try PropertyListSerialization.data(fromPropertyList: dictionary, format: .xml, options: 0)
     }
+    func documentStatePaths(_ receipt: InstallationReceipt) throws -> (scratch: String, preparation: String) {
+        let root = roots.configuration.appendingPathComponent("document-state").appendingPathComponent(
+            receipt.instance)
+        let scratch = root.appendingPathComponent("scratch").path
+        let preparation = root.appendingPathComponent("prepared").path
+        guard receipt.documentScratchDirectory == scratch,
+            receipt.documentPreparationDirectory == preparation
+        else { throw SetupError("Document workspace differs from the owned instance paths.") }
+        return (scratch, preparation)
+    }
+
+    /// Configuration readiness only; successful inference is a separate validation gate.
+    func verifyDocumentReadiness(_ receipt: InstallationReceipt, info: [String: Any]) throws {
+        let extraction = info["documentExtraction"] as? [String: Any]
+        guard let document = receipt.documentExtraction else {
+            guard extraction?["state"] as? String == "unavailable" else {
+                throw SetupError("Unexpected document configuration in the running service.")
+            }
+            return
+        }
+        let release = URL(fileURLWithPath: receipt.release)
+        guard let identityObject = extraction?["identity"] as? [String: Any] else {
+            throw SetupError("Running document identity is unavailable.")
+        }
+        let identityBytes = try JSONSerialization.data(withJSONObject: identityObject)
+        let identity = try JSONDecoder().decode(DocumentConverterIdentity.self, from: identityBytes)
+        guard extraction?["state"] as? String == "configured", identity == document.identity,
+            extraction?["executableSHA256"] as? String
+                == (try sha256(release.appendingPathComponent(document.converterPath))),
+            extraction?["requiresPreparedInput"] as? Bool == true,
+            (info["documentJobs"] as? [String: Any])?["protocol"] as? String == document.workerProtocol
+        else { throw SetupError("Running document configuration differs from the owned release.") }
+    }
+
     func waitUntilReady(_ receipt: InstallationReceipt) throws {
+        if let document = receipt.documentExtraction {
+            guard document == .pinned else { throw SetupError("Unsupported document receipt.") }
+            _ = try documentStatePaths(receipt)
+        }
         if let readinessCheck {
             try readinessCheck(receipt.socket, roots.platform.serviceUser, receipt.port)
             return
@@ -516,6 +599,7 @@ public final class SetupEngine {
                 else {
                     throw SetupError("Service identity or admission policy differs from the installation.")
                 }
+                try verifyDocumentReadiness(receipt, info: info)
                 let http = try runner.run(
                     "/usr/bin/curl",
                     [

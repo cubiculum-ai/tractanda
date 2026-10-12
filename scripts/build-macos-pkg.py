@@ -39,6 +39,8 @@ def stage_payload(bundle, payload, manifest):
                 ('tractanda', 'tractanda-tui', 'tractanda-mcp', 'tractanda-setup')]
     if manifest.get('embedding'):
         binaries.append(payload / 'bin/tractanda-embeddings')
+    if manifest.get('documentExtraction'):
+        binaries.append(payload / manifest['documentExtraction']['converterPath'])
     for target in binaries + sorted((payload / 'bin').glob('*.bundle')) + sorted((payload / 'lib').glob('*.dylib')):
         run('/usr/bin/codesign', '--verify', '--strict', target)
 
@@ -96,7 +98,7 @@ def remove_component_metadata(component, stage, payload, scripts):
                    cwd=expanded, check=True)
 
 
-def license_html(notice, markdown, model_notices=None):
+def license_html(notice, markdown, model_notices=None, document_notices=None):
     """Render the headings, paragraphs and inline markup used by this license."""
     def inline(text):
         text = html.escape(text)
@@ -129,6 +131,13 @@ def license_html(notice, markdown, model_notices=None):
                 raise ValueError('Missing plain legal text in ' + name)
             parts.append('<h2>' + title + '</h2><pre style="white-space:pre-wrap;font:inherit">'
                          + text[1] + '</pre>')
+    if document_notices:
+        parts.append('<h1>Bundled native document model</h1>')
+        parts.append('<p>' + inline((document_notices / 'Granite-Docling-MODEL-NOTICE.md').read_text()).replace('\n', '<br>') + '</p>')
+        for name, title in (('Granite-Docling-LICENSE', 'Granite Docling Apache 2.0 license'),
+                            ('Pillow-LICENSE', 'Pillow preprocessing license')):
+            parts.append('<h2>' + title + '</h2><pre style="white-space:pre-wrap;font:inherit">'
+                         + html.escape((document_notices / name).read_text()) + '</pre>')
     return '\n'.join(parts) + '\n</html>\n'
 
 
@@ -166,7 +175,8 @@ def main():
             shutil.copy2(root / 'scripts/macos-package' / name, resources / name)
         (resources / 'License.html').write_text(license_html(
             (root / 'NOTICE').read_text(), (root / 'LICENSE').read_text(),
-            bundle / 'licenses/Granite' if manifest.get('embedding') else None))
+            bundle / 'licenses/Granite' if manifest.get('embedding') else None,
+            bundle / 'licenses/Docling' if manifest.get('documentExtraction') else None))
         component = stage / 'Tractanda.pkg'
         components = stage / 'components.plist'
         run('/usr/bin/pkgbuild', '--analyze', '--root', payload, components)
@@ -188,7 +198,8 @@ def main():
         ET.SubElement(distribution, 'license', file='License.html', **{'mime-type': 'text/html'})
         ET.SubElement(distribution, 'conclusion', file='Conclusion.html', **{'mime-type': 'text/html'})
         ET.SubElement(ET.SubElement(distribution, 'choices-outline'), 'line', choice='tractanda')
-        choice = ET.SubElement(distribution, 'choice', id='tractanda', title='Tractanda', description='Shared server, terminal client and local embeddings')
+        choice = ET.SubElement(distribution, 'choice', id='tractanda', title='Tractanda', description='Shared server, terminal client, local embeddings and native document extraction'
+                      if manifest.get('documentExtraction') else 'Shared server, terminal client and local embeddings')
         ET.SubElement(choice, 'pkg-ref', id=identifier)
         ET.SubElement(distribution, 'pkg-ref', id=identifier, version=manifest['version'], auth='Root',
                       **{'installKBytes': str((sum(f['size'] for f in manifest['files']) + 1023) // 1024)}).text = component.name

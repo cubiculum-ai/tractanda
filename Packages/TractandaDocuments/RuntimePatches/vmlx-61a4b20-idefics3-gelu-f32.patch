@@ -1,0 +1,25 @@
+--- a/Libraries/MLXVLM/Models/Idefics3.swift
++++ b/Libraries/MLXVLM/Models/Idefics3.swift
+@@ -477,7 +477,13 @@
+         }
+ 
+         func callAsFunction(_ x: MLXArray) -> MLXArray {
+-            let out = fc2(activation(fc1(x)))
++            let projected = fc1(x)
++            // Match fused PyTorch tanh GELU: low-precision inputs use Float32
++            // internal arithmetic and retain their original output dtype.
++            let work = projected.dtype == .bfloat16 || projected.dtype == .float16
++                ? projected.asType(.float32) : projected
++            let activated = activation(work).asType(projected.dtype)
++            let out = fc2(activated)
+             return out
+         }
+     }
+@@ -622,6 +628,7 @@
+ // MARK: - Model
+ 
+ public class Idefics3: Module, VLMModel, KVCacheDimensionProvider {
++    public static let tractandaVisionGELUPatchIdentifier = "idefics3-vision-gelu-f32-v1"
+     @ModuleInfo(key: "vision_model") private var visionModel: Vision.VisionModel
+     @ModuleInfo(
+         key: "language_model"

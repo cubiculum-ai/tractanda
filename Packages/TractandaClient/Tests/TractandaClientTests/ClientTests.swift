@@ -122,3 +122,230 @@ func object(_ value: some Encodable) throws -> Any {
     draft.body = String(repeating: "界", count: 30_000)
     #expect(throws: TractandaError.self) { try draft.makeRequest() }
 }
+
+@Test func attachmentClientPreservesChunkOffsetsAndMetadata() async throws {
+    let descriptor = try AttachmentDescriptor(
+        attachmentID: "c151fc20-bff6-11f1-8000-001122334455", filename: "notes.pdf",
+        mediaType: "application/pdf", byteCount: 3,
+        sha256: String(repeating: "a", count: 64))
+    let transport = try ScriptedTransport([
+        reply(
+            "TractandaAttachment/begin",
+            object(
+                AttachmentUploadResult(
+                    uploadID: descriptor.attachmentID, attachment: descriptor, offset: 0,
+                    chunkBytes: 262_144, expiresAt: "2026-09-28T13:00:00Z", committed: nil))),
+        reply("TractandaAttachment/upload", ["offset": 3]),
+        reply(
+            "TractandaAttachment/list",
+            object(
+                AttachmentListResult(
+                    itemID: "item", revisionID: "revision", attachments: [descriptor]))),
+        reply(
+            "TractandaAttachment/content",
+            object(
+                AttachmentContentResult(
+                    attachment: descriptor, offset: 0, nextOffset: 3, isComplete: true, data: Data("abc".utf8)
+                ))),
+    ])
+    let client = ItemClient(transport: transport)
+    let upload = try await client.beginAttachment(
+        AttachmentUploadRequest(
+            itemID: "item", expectedRevisionID: "revision", operationID: "attach",
+            filename: descriptor.filename, mediaType: descriptor.mediaType,
+            byteCount: descriptor.byteCount, sha256: descriptor.sha256))
+    #expect(upload.attachment == descriptor)
+    #expect(
+        try await client.appendAttachment(
+            uploadID: descriptor.attachmentID, offset: 0, data: Data("abc".utf8)) == 3)
+    #expect(try await client.listAttachments(itemID: "item").attachments == [descriptor])
+    #expect(
+        try await client.attachmentContent(itemID: "item", attachmentID: descriptor.attachmentID).data
+            == Data("abc".utf8))
+    let requests = await transport.requests
+    let envelope = try JSONSerialization.jsonObject(with: requests[1]) as! [String: Any]
+    let calls = envelope["methodCalls"] as! [[Any]]
+    let args = calls[0][1] as! [String: Any]
+    #expect(args["offset"] as? Int == 0)
+    #expect(args["data"] as? String == "YWJj")
+}
+
+@Test func attachmentFinishAndDetachDecodeCompactReceipts() async throws {
+    let parent = try revision(String(repeating: "large parent", count: 1_000))
+    let receipt = AttachmentCommitResult(
+        CommitResult(revision: parent, wasReplayed: false, isIndexReady: true, warnings: []))
+    let transport = try ScriptedTransport([
+        reply("TractandaAttachment/finish", object(receipt)),
+        reply("TractandaAttachment/detach", object(receipt)),
+    ])
+    let client = ItemClient(transport: transport)
+    let finish = try await client.finishAttachment(uploadID: "upload")
+    #expect(finish.itemID == parent.itemID)
+    #expect(finish.revisionID == parent.revisionID)
+    let detach = try await client.detachAttachment(
+        itemID: parent.itemID, expectedRevisionID: parent.revisionID,
+        attachmentID: "attachment", operationID: "detach")
+    #expect(detach.revisionID == parent.revisionID)
+    let encoded = try JSON.encode(receipt)
+    #expect(encoded.count < 1_024)
+    #expect(!String(decoding: encoded, as: UTF8.self).contains("large parent"))
+}
+
+@Test func attachmentTextExtractionUsesGuardedCompactRequest() async throws {
+    let item = try revision("source")
+    let receipt = AttachmentCommitResult(
+        CommitResult(revision: item, wasReplayed: true, isIndexReady: true, warnings: []))
+    let transport = try ScriptedTransport([reply("TractandaAttachment/extractText", object(receipt))])
+    let result = try await ItemClient(transport: transport).extractAttachmentText(
+        itemID: item.itemID,
+        expectedRevisionID: item.revisionID, attachmentID: "attachment", operationID: "extract")
+    #expect(result.itemID == item.itemID)
+    #expect(result.wasReplayed)
+    let requests = await transport.requests
+    let request = try JSONSerialization.jsonObject(with: requests[0]) as! [String: Any]
+    let calls = request["methodCalls"] as! [[Any]]
+    let fields = calls[0][1] as! [String: Any]
+    #expect(fields["expectedRevisionID"] as? String == item.revisionID)
+    #expect(fields["operationID"] as? String == "extract")
+    #expect(fields["attachmentID"] as? String == "attachment")
+    #expect(fields["changes"] == nil)
+}
+
+@Test func originalContentRetriesOnlyPendingIntegrityAndPreservesExactRequest() async throws {
+    let id = Identifier.make()
+    let descriptor = try AttachmentDescriptor(
+        attachmentID: "b1023f62-c510-11f1-a9ab-842f575e6ac5", filename: "original.pdf",
+        mediaType: "application/pdf", byteCount: 0, sha256: String(repeating: "0", count: 64))
+    let result = AttachmentContentResult(
+        attachment: descriptor, offset: 0, nextOffset: 0, isComplete: true, data: Data())
+    let transport = try ScriptedTransport([
+        reply(
+            "error",
+            [
+                "type": "attachmentVerifying", "description": "Pending", "retryable": true,
+                "verifiedBytes": 0, "totalBytes": 0,
+            ]),
+        reply("TractandaAttachment/content", object(result)),
+    ])
+    let content = try await ItemClient(transport: transport).attachmentContent(
+        itemID: id, revisionID: id, attachmentID: descriptor.attachmentID)
+    #expect(content.isComplete)
+    let requests = await transport.requests
+    #expect(requests.count == 2)
+    #expect(requests[0] == requests[1])
+    let forbidden = try ScriptedTransport([reply("error", ["type": "forbidden", "description": "Revoked"])])
+    await #expect(throws: TractandaError("forbidden", "Revoked")) {
+        try await ItemClient(transport: forbidden).attachmentContent(
+            itemID: id, attachmentID: descriptor.attachmentID)
+    }
+    #expect(await forbidden.requests.count == 1)
+}
+
+@Test func pendingOriginalIntegrityRetryRemainsCancellable() async throws {
+    let pending = try reply("error", ["type": "attachmentVerifying", "description": "Pending"])
+    let transport = ScriptedTransport([pending])
+    let task = Task {
+        try await ItemClient(transport: transport).finishAttachment(uploadID: Identifier.make())
+    }
+    while await transport.requests.isEmpty { await Task.yield() }
+    task.cancel()
+    await #expect(throws: CancellationError.self) { try await task.value }
+    #expect(await transport.requests.count == 1)
+}
+
+@Test func copyPendingRetriesPreserveTheGuardedIntent() async throws {
+    let copied = try revision("Copied")
+    let request = CommitRequest(
+        action: .copy, itemID: copied.itemID, expectedRevisionID: copied.revisionID, operationID: "fixture")
+    let result = CommitResult(revision: copied, wasReplayed: false, isIndexReady: true, warnings: [])
+    let transport = try ScriptedTransport([
+        reply("error", ["type": "attachmentCopyPending", "description": "Copying", "retryable": true]),
+        reply("TractandaItem/commit", object(result)),
+    ])
+    #expect(try await ItemClient(transport: transport).commit(request).revision == copied)
+    let requests = await transport.requests
+    #expect(requests.count == 2)
+    #expect(requests[0] == requests[1])
+}
+
+@Test func storeRebuildCallsKeepIntentAndBoundedInt64Progress() async throws {
+    let status = StoreRebuildStatus(
+        jobID: "70863dec-b0ea-11f1-ae72-842f575e6ac5", operationID: "rebuild-intent",
+        state: "running", phase: "verifyingCanonicalClosure", recordsVerified: 1 << 33,
+        originalBytesVerified: 1 << 48, documentPagesVerified: 1 << 34,
+        updatedAt: "2026-10-11T18:00:00Z")
+    let bytes = try JSON.encode(status)
+    #expect(bytes.count < 4096)
+    let value = try JSONSerialization.jsonObject(with: bytes)
+    let transport = ScriptedTransport([
+        try reply("TractandaStore/rebuild", value), try reply("TractandaStore/rebuildStatus", value),
+        try reply("TractandaStore/rebuildCancel", value),
+    ])
+    let client = ItemClient(transport: transport)
+    #expect(try await client.beginStoreRebuild(operationID: "rebuild-intent") == status)
+    #expect(try await client.storeRebuildStatus(jobID: status.jobID) == status)
+    #expect(try await client.cancelStoreRebuild(jobID: status.jobID) == status)
+    let sent = await transport.requests
+    let begin = try JSONSerialization.jsonObject(with: sent[0]) as! [String: Any]
+    let args = (begin["methodCalls"] as! [[Any]])[0][1] as! [String: String]
+    #expect(args == ["operationID": "rebuild-intent"])
+}
+
+@Test func documentJobsUseCompactLifecycleAndPreserveInt64PageOrdinals() async throws {
+    let id = "f37f6680-a69d-11f1-8d84-842f575e6ac5"
+    let status = DocumentJobStatus(
+        jobID: id, itemID: id, attachmentID: id, sourceRevisionID: id,
+        expectedRevisionID: id, state: "running", reasonCode: nil, pageCount: Int64.max,
+        acceptedPages: 0, coverage: try DocumentCoverage(converted: 0), discarded: false, committed: nil)
+    let page = DocumentJobPage(
+        jobID: id,
+        outcome: try DocumentStoredPage(
+            pageNumber: Int64.max,
+            sourceSHA256: String(repeating: "a", count: 64), status: "unsupported", failureCode: "explicit"))
+    let methods = ["start", "status", "cancel", "resume", "rebase", "page", "list", "discard"]
+    let responses = try methods.map { method in
+        let value: Any
+        if method == "page" {
+            value = try object(page)
+        } else if method == "list" {
+            value = try object(DocumentJobList(jobs: [status], nextJobID: nil))
+        } else {
+            value = try object(status)
+        }
+        return try reply("TractandaDocumentJob/" + method, value)
+    }
+    let transport = ScriptedTransport(responses)
+    let client = ItemClient(transport: transport)
+    _ = try await client.startDocumentJob(
+        DocumentJobStart(itemID: id, expectedRevisionID: id, attachmentID: id, operationID: "job"))
+    _ = try await client.documentJob(id)
+    _ = try await client.cancelDocumentJob(id)
+    _ = try await client.resumeDocumentJob(id)
+    _ = try await client.rebaseDocumentJob(id, expectedRevisionID: id)
+    #expect(try await client.documentJobPage(id, pageNumber: Int64.max).outcome.pageNumber == Int64.max)
+    _ = try await client.documentJobs(afterJobID: id, limit: 1)
+    _ = try await client.discardDocumentJob(id)
+    let requests = await transport.requests
+    #expect(requests.count == 8)
+    let wire = try #require(String(data: requests[5], encoding: .utf8)).filter { !$0.isWhitespace }
+    #expect(wire.contains("\"pageNumber\":" + String(Int64.max)))
+    #expect(try JSON.encode(page).count < 512)
+}
+@Test func documentJobProvisionalFlagAndCountsCannotMasqueradeAsCanonical() async throws {
+    let id = "f37f6680-a69d-11f1-8d84-842f575e6ac5"
+    let outcome = try DocumentStoredPage(
+        pageNumber: 1, sourceSHA256: String(repeating: "a", count: 64), status: "failed",
+        failureCode: "explicit")
+    let transport = ScriptedTransport([
+        try reply(
+            "TractandaDocumentJob/page", ["jobID": id, "provisional": false, "outcome": object(outcome)])
+    ])
+    await #expect(throws: (any Error).self) {
+        try await ItemClient(transport: transport).documentJobPage(id, pageNumber: 1)
+    }
+    let malformed = DocumentJobStatus(
+        jobID: id, itemID: id, attachmentID: id, sourceRevisionID: id,
+        expectedRevisionID: id, state: "completed", reasonCode: nil, pageCount: 100, acceptedPages: 1,
+        coverage: try DocumentCoverage(converted: 1), discarded: false, committed: nil)
+    #expect(throws: (any Error).self) { try malformed.validate() }
+}
