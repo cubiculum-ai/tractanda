@@ -171,9 +171,14 @@ final class MCPTests: XCTestCase {
             let args = call[1] as! [String: Any]
             if method == "TractandaStore/info" {
                 return try JSONSerialization.data(withJSONObject: [
-                    "methodResponses": [[method, [
-                        "features": [ServerFeature.attachmentLifecycle.rawValue],
-                    ], call[2]]]
+                    "methodResponses": [
+                        [
+                            method,
+                            [
+                                "features": [ServerFeature.attachmentLifecycle.rawValue]
+                            ], call[2],
+                        ]
+                    ]
                 ])
             }
             let offset = (args["offset"] as! NSNumber).intValue
@@ -185,11 +190,16 @@ final class MCPTests: XCTestCase {
                     operationID: args["operationID"] as? String, offset: offset,
                     limit: (args["limit"] as? NSNumber)?.intValue, pageNumber: nil))
             return try JSONSerialization.data(withJSONObject: [
-                "methodResponses": [[method, [
-                    "attachment": ["attachmentID": "22222222-2222-4222-8222-222222222222"],
-                    "offset": offset, "nextOffset": offset + 1, "isComplete": false,
-                    "data": Data([0xA5]).base64EncodedString(),
-                ], call[2]]]
+                "methodResponses": [
+                    [
+                        method,
+                        [
+                            "attachment": ["attachmentID": "22222222-2222-4222-8222-222222222222"],
+                            "offset": offset, "nextOffset": offset + 1, "isComplete": false,
+                            "data": Data([0xA5]).base64EncodedString(),
+                        ], call[2],
+                    ]
+                ]
             ])
         })
         let definition = try XCTUnwrap(
