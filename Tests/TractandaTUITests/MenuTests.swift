@@ -253,6 +253,25 @@ final class MenuTests: XCTestCase {
         XCTAssertTrue(try fixture.store.candidates().isEmpty)
     }
 
+    func testEscapeClosesMenuBeforeReturningFromTemporarySearch() throws {
+        let fixture = try Fixture()
+        let item = try fixture.item("Needle search item")
+        let app = try fixture.app()
+        app.handle(.text("f"))
+        app.handle(.paste("Needle"))
+        app.handle(.control(19))
+        XCTAssertTrue(screen(app).contains("Search results"))
+        app.handle(.function(10))
+        XCTAssertTrue(screen(app).contains("Command menu"))
+        app.handle(.escape)
+        XCTAssertFalse(screen(app).contains("Command menu"))
+        XCTAssertTrue(screen(app).contains("Search results"))
+        app.handle(.escape)
+        XCTAssertFalse(screen(app).contains("Search results"))
+        XCTAssertTrue(screen(app).contains("Returned from temporary search"))
+        XCTAssertEqual(try fixture.store.get(item.itemID), item)
+    }
+
     func testConvenienceKeysRefreshAndRestoreAllItemsWithoutEditing() throws {
         let fixture = try Fixture()
         let item = try fixture.item("Before refresh")

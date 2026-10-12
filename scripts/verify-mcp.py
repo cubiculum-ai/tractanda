@@ -201,10 +201,15 @@ def exercise(binary, adapter, root, checks):
             client.initialize()
             catalog = client.request("tools/list")["tools"]
             catalog_names = {tool["name"] for tool in catalog}
-            assert len(catalog) == 24 and len(catalog_names) == 24
+            assert len(catalog) == 36 and len(catalog_names) == 36
             assert {
                 "tractanda_semantic_status", "tractanda_semantic_search", "tractanda_semantic_results",
                 "tractanda_semantic_configure", "tractanda_semantic_rebuild", "tractanda_semantic_reset",
+                "tractanda_extracted_text_unit", "tractanda_attachments", "tractanda_attachment_content",
+                "tractanda_attachment_document_page", "tractanda_document_job_start",
+                "tractanda_document_job_status", "tractanda_document_job_cancel",
+                "tractanda_document_job_resume", "tractanda_document_job_rebase",
+                "tractanda_document_job_page", "tractanda_document_job_discard", "tractanda_document_jobs",
             } <= catalog_names
             for tool in catalog:
                 assert tool["inputSchema"]["additionalProperties"] is False
@@ -213,7 +218,8 @@ def exercise(binary, adapter, root, checks):
             client.request("tools/list", {"cursor": "invalid"}, error=-32602)
             client.request("unknown-method", error=-32601)
             references = client.request("resources/list")["resources"]
-            assert len(references) == 5
+            assert len(references) == 6
+            assert "tractanda://reference/document-jobs" in {reference["uri"] for reference in references}
             for reference in references:
                 assert len(client.resource(reference["uri"])["text"]) > 100
             assert len(client.request("resources/templates/list")["resourceTemplates"]) == 2

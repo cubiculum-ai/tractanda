@@ -115,7 +115,7 @@ def main():
                 check(abs(suggestion['score'] - manifest['score']) < 1e-9, 'Category text tokenization and scores agree across the transfer')
             check(call('reset',categoryID=category)['status'] == 'untrained', 'Per-category reset discards derived learning')
             check(client.get(ipc.item_id(manifest['accepted'])) == manifest['accepted'], 'Reset leaves feedback and manual assignments intact')
-            client.call('TractandaStore/rebuild')
+            client.rebuild("verify-learning-rebuild")
             check(cli('learn',category)['status'] == 'ready', 'Rebuilt index can train again from canonical files')
         if args.export:
             args.export.mkdir(parents=True,exist_ok=True)

@@ -321,8 +321,9 @@ def main():
                 choose(ui, "x", "TUI Family", "Exclude item"); ui.wait("No items.")
                 assert client.call("TractandaItem/query", {"viewID": wire.item_id(view)})["ids"] == []
                 ui.send("a"); ui.wait("All readable items")
-                ui.send("f"); ui.wait("Filter items"); ui.send(b"\x15")
-                ui.paste('subject == "Family café 文 revised"'); ui.send(b"\x13"); ui.wait("Filter applied")
+                ui.send("f"); ui.wait("Search items"); ui.send(b"\x15")
+                ui.paste("Family"); ui.send(b"\t\t")
+                ui.paste('subject == "Family café 文 revised"'); ui.send(b"\x13"); ui.wait("Text search ready")
                 choose(ui, "u", "TUI Family", "Reset shared decision")
                 deadline = time.monotonic() + 8
                 while wire.item_id(category) in client.get(identity)["fields"]["categoryOverrides"]["value"]:
@@ -342,8 +343,9 @@ def main():
                 checks.append("Concurrent edit rejected without overwrite; stale draft survives resizing; cancel and refresh recover the current item")
 
                 ui.send("?"); ui.wait("Tractanda help"); ui.resize(60, 16); ui.wait("Tractanda help")
-                ui.send(ESC); ui.wait("A All")
-                ui.send("/"); ui.wait("Command menu"); ui.send(ESC); ui.wait("A All", absent="Command menu")
+                ui.send(ESC); ui.wait("A All", absent="Tractanda help")
+                ui.send("/"); ui.wait("Command menu"); ui.send(ESC); ui.wait("Search results", absent="Command menu")
+                ui.send(ESC); ui.wait("Returned from temporary search", absent="Search results")
                 ui.close()
                 checks.append("Help/menu cancellation and normal exit restore original termios, cursor and main screen")
 

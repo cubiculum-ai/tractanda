@@ -59,7 +59,7 @@ def verify(binary):
             subprocess.check_output([binary, "export-attachment", str(socket), item, descriptor["attachmentID"], str(historical), wire.revision_id(attached_revision)])
             assert historical.read_bytes() == content
             before = list(store.glob("items/**/*.tractanda"))
-            client.call("TractandaStore/rebuild")
+            client.rebuild("verify-attachments-rebuild")
             assert list(store.glob("items/**/*.tractanda")) == before
         check_capacity(root)
         return {"passed": True, "payloadBytes": len(content), "expectedFixtureCapBytes": 16*1024*1024,

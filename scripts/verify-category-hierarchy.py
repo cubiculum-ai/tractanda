@@ -77,7 +77,7 @@ def main():
                 checks.append('canonical-only transfer preserves IDs, heads, inheritance, saved view and timezone-sensitive results')
             before = wire.manifest(store)
             result = snapshot(client, ids)
-            client.call('TractandaStore/rebuild', {})
+            client.rebuild("verify-category-hierarchy-rebuild")
             assert snapshot(client, ids) == result and wire.manifest(store) == before
             midnight = client.call('TractandaItem/query', {'categoryPath': [ids['when.deadlines.today']], 'at': '2026-09-10T00:00:00Z'})
             assert midnight['ids'] == [ids['due-note']]

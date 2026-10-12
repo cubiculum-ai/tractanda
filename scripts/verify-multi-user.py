@@ -133,7 +133,7 @@ class Fixture:
     def server(self):
         account = pwd.getpwnam(self.names["service"])
         with tempfile.TemporaryFile() as log:
-            process = subprocess.Popen([self.binary, "serve", str(self.store), str(self.socket)],
+            process = subprocess.Popen([self.binary, "daemon", str(self.store), str(self.socket), "--no-http"],
                 user=account.pw_uid, group=account.pw_gid, extra_groups=[], stdout=subprocess.DEVNULL, stderr=log)
             self.process = process
             try:
@@ -180,7 +180,7 @@ class Fixture:
         self.commit("agent", {"body": text("unauthorized edit")}, base=first, error="forbidden")
         second = self.commit("bob", {"body": text("Bob edited this")}, base=first, operation="bob-edit")["revision"]
         self.commit("bob", {"permissions": self.permissions(0o666)}, base=second, error="forbidden")
-        self.call("bob", "TractandaStore/rebuild", error="forbidden")
+        self.call("bob", "TractandaStore/rebuild", {"operationID": "denied-rebuild"}, error="forbidden")
         self.commit("bob", {"accessConfiguration": self.config}, class_id="AccessConfigurationItem", error="forbidden")
         assert self.get("bob", self.configuration_item)["notFound"]
         copied = self.commit("bob", base=second, action="copy")["revision"]
@@ -248,7 +248,7 @@ class Fixture:
         latest = self.commit("alice", {"permissions": self.permissions(0o660, self.acl)}, base=revoked)["revision"]
         retry = self.commit("bob", {"body": text("Bob edited this")}, base=self.first, operation="bob-edit")
         assert retry["replayed"] and retry["revision"] == self.second
-        self.call("service", "TractandaStore/rebuild")
+        wire_module.wait_for_rebuild(lambda method, args: self.call("service", method, args), "multi-user-rebuild")
         assert self.call("bob", "TractandaItem/history", {"itemID": identity(latest)})["total"] == 4
         self.checks.append("canonical-only recovery, preserved aliases and receipts, current policy gates all history and retries")
 

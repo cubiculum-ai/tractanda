@@ -75,6 +75,9 @@ class Client:
         assert response[0] == method, response
         return response[1]
 
+    def rebuild(self, operation="verifier-rebuild", timeout=20):
+        return wait_for_rebuild(self.call, operation=operation, timeout=timeout)
+
     def get(self, identity):
         return self.call("TractandaItem/get", {"ids": [identity]})["list"][0]
 
@@ -82,10 +85,22 @@ class Client:
         return self.call("TractandaItem/commit", request)
 
 
+def wait_for_rebuild(call, operation, timeout=20):
+    status = call("TractandaStore/rebuild", {"operationID": operation})
+    deadline = time.monotonic() + timeout
+    while status["state"] in {"queued", "running", "stopping"}:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Disposable asynchronous rebuild did not finish within its bound")
+        time.sleep(0.02)
+        status = call("TractandaStore/rebuildStatus", {"jobID": status["jobID"]})
+    assert status["state"] == "completed" and status["indexTrusted"], status
+    return status
+
+
 @contextlib.contextmanager
 def server(binary, store, path):
     with tempfile.TemporaryFile() as log:
-        process = subprocess.Popen([binary, "serve", str(store), str(path)], stdout=subprocess.DEVNULL, stderr=log)
+        process = subprocess.Popen([binary, "daemon", str(store), str(path), "--no-http"], stdout=subprocess.DEVNULL, stderr=log)
         try:
             deadline = time.monotonic() + 10
             while not path.exists():
@@ -218,7 +233,7 @@ def main():
                 client.commit(request)
             before = snapshot(client, fixture)
             previous_state = client.call("TractandaStore/info")["state"]
-            client.call("TractandaStore/rebuild")
+            client.rebuild("ipc-rebuild")
             assert client.call("TractandaStore/info")["state"] != previous_state
             assert snapshot(client, fixture) == before
         canonical_before = manifest(store)

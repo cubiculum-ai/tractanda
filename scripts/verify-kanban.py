@@ -91,7 +91,7 @@ def main():
                     shutil.copytree(source / 'items', store / 'items')
                     manifest = json.loads((source / 'manifest.json').read_text())
                     fixture = manifest['fixture']
-                native = subprocess.Popen([binary,'serve',str(store),str(socket)], stdout=log, stderr=log)
+                native = subprocess.Popen([binary,'daemon',str(store),str(socket),'--no-http'], stdout=log, stderr=log)
                 wait_for(socket,native)
                 if not options.import_from:
                     spec=importlib.util.spec_from_file_location('category_fixture',Path(__file__).with_name('category-board-fixture.py'))
@@ -180,7 +180,14 @@ def main():
                 check(method_result('TractandaItem/commit',spoofed)[1]['type'] == 'invalidArguments', 'HTTP caller cannot choose canonical actor')
                 check(cli('get',socket,first_id)['list'][0]['fields']['categoryOverrides']['value'][fixture['columns']['doing']]['value'] == 'include', 'HTTP edit is visible through the independent CLI')
                 before = cli('kanban',socket,board_id)
-                method_result('TractandaStore/rebuild',{})
+                rebuild = method_result('TractandaStore/rebuild', {'operationID': 'kanban-verifier-rebuild'})[1]
+                rebuild_deadline = time.monotonic() + 20
+                while rebuild['state'] in {'queued', 'running', 'stopping'}:
+                    if time.monotonic() >= rebuild_deadline:
+                        raise TimeoutError('Disposable Kanban rebuild did not complete within20seconds')
+                    time.sleep(0.02)
+                    rebuild = method_result('TractandaStore/rebuildStatus', {'jobID': rebuild['jobID']})[1]
+                check(rebuild['state'] == 'completed' and rebuild['indexTrusted'], 'Asynchronous rebuild completes with a trusted index')
                 after = cli('kanban',socket,board_id)
                 check(before['tasks'] == after['tasks'], 'Rebuild preserves current tasks, IDs, references and order')
                 check(after['viewRevisionID'] == initial['viewRevisionID'], 'Task edits do not revise the board item')
@@ -191,7 +198,7 @@ def main():
                 stop(web);web=None
                 stop(native);native=None
                 shutil.rmtree(store/'index')
-                native = subprocess.Popen([binary,'serve',str(store),str(socket)],stdout=log,stderr=log)
+                native = subprocess.Popen([binary,'daemon',str(store),str(socket),'--no-http'],stdout=log,stderr=log)
                 wait_for(socket,native)
                 recovered = cli('kanban',socket,board_id)
                 check(recovered['tasks'] == after['tasks'], 'Restart without the database reconstructs the complete board')

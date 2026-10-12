@@ -39,10 +39,12 @@ def main():
             })}) for name, rule in [("North", "rank >= 0"), ("South", "rank >= 65")]]
             items = [create({"subject": wire.text(f"Item {i:02d}"), "rank": tagged("integer", i),
                 "body": wire.text(f"Preview for item {i:02d} — café 文")}) for i in range(70)]
-            with tui.terminal(binary, path, root / "recovery/pending.json") as ui:
+            initial_view = create({"subject": wire.text("Ranked fixture view"), "viewDefinition": tagged("object", {
+                "language": wire.text("tractanda.spotlight.v0"), "expression": wire.text("rank >= 0"),
+            })})
+            with tui.terminal(binary, path, root / "recovery/pending.json", arguments=[str(path), "--view", wire.item_id(initial_view)]) as ui:
                 ui.wait("Preview")
-                ui.send("f"); ui.wait("Filter items"); ui.paste("rank >= 0")
-                ui.send(b"\x13"); ui.wait("Filter applied")
+                ui.wait("rank >= 0")
                 recent = sorted(items, key=lambda item: (
                     -datetime.datetime.fromisoformat(item['fields']['modifiedAt']['value'].replace('Z','+00:00')).timestamp(),
                     wire.item_id(item)))
@@ -95,7 +97,7 @@ def main():
                 ui.send(b"\t\x15"); ui.paste("10"); ui.send(b"\x13"); ui.wait("Column staged")
                 ui.send(ESC + b"[D" + ESC + b"[D" + b"\x13"); ui.wait("Columns applied")
                 assert "Rank 文" in ui.screen
-                ui.send("s"); ui.wait("Save view as"); ui.paste("TUI view fixture"); ui.send(b"\x13")
+                ui.send(ESC + b"S"); ui.wait("Save view as"); ui.paste("TUI view fixture"); ui.send(b"\x13")
                 ui.wait("Saved one revision")
                 view = tui.wait_item(client, 'subject == "TUI view fixture"', ui)
                 identity = wire.item_id(view)
@@ -113,7 +115,7 @@ def main():
                 snapshots.append({"name": "saved-view", "columns": 120, "rows": 35, "screen": ui.screen})
                 checks.append("Column editing, reordering, save/open and server section queries retain layout and full-result order")
                 before = wire.manifest(store)
-                client.call("TractandaStore/rebuild")
+                client.rebuild("verify-tui-views-rebuild")
                 assert wire.manifest(store) == before
                 assert client.call("TractandaItem/query", {"viewID": identity, "position": 64})["ids"] == page["ids"]
                 ui.send("r"); ui.wait("Refreshed"); assert "Rank 文" in ui.screen

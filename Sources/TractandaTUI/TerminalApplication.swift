@@ -2093,7 +2093,7 @@ public final class TerminalApplication {
             beginItemSearch()
             return
         }
-        if searchReturn != nil, form == nil, panel == nil {
+        if searchReturn != nil, form == nil, panel == nil, !isMenuOpen {
             if command == .goBack || command == .cancel || command == .parent {
                 execute { try finishItemSearch() }
                 return
