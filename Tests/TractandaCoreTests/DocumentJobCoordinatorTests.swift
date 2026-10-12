@@ -665,20 +665,25 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         let history = fixture.store.appendingPathComponent("document-job-history")
             .appendingPathComponent(String(queued.jobID.prefix(2))).appendingPathComponent(
                 queued.jobID + ".json")
+        let activeRecord = fixture.store.appendingPathComponent("document-jobs").appendingPathComponent(
+            queued.jobID)
+        let staged = fixture.store.appendingPathComponent("documents/.staging").appendingPathComponent(
+            queued.jobID)
         for _ in 0..<200 {
             try capacity(fixture.root)
-            if FileManager.default.fileExists(atPath: history.path) { break }
+            // History is synchronized before active-record removal. Observe the complete archive,
+            // not that valid intermediate step, before asserting disposal acknowledgement.
+            if FileManager.default.fileExists(atPath: history.path)
+                && !FileManager.default.fileExists(atPath: activeRecord.path)
+                && !FileManager.default.fileExists(atPath: staged.path)
+            {
+                break
+            }
             try await Task.sleep(for: .milliseconds(20))
         }
         XCTAssertTrue(FileManager.default.fileExists(atPath: history.path))
-        XCTAssertFalse(
-            FileManager.default.fileExists(
-                atPath: fixture.store
-                    .appendingPathComponent("document-jobs").appendingPathComponent(queued.jobID).path))
-        XCTAssertFalse(
-            FileManager.default.fileExists(
-                atPath: fixture.store
-                    .appendingPathComponent("documents/.staging").appendingPathComponent(queued.jobID).path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: activeRecord.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: staged.path))
         await coordinator.close()
     }
 
