@@ -67,7 +67,57 @@ final class DocumentJobIntegrationTests: XCTestCase {
         }
     }
 
-    private func checkCapacity(at url: URL) throws {
+    private func checkCapacity(at url: URL, beforeMetadata: ((URL) throws -> Void)? = nil) throws {
+        for attempt in 0..<3 {
+            do {
+                try capacityAttempt(at: url, beforeMetadata: beforeMetadata)
+                return
+            } catch {
+                let failure = error as NSError
+                let underlying = failure.userInfo[NSUnderlyingErrorKey] as? NSError
+                let missing =
+                    (failure.domain == NSPOSIXErrorDomain && failure.code == ENOENT)
+                    || (failure.domain == NSCocoaErrorDomain && failure.code == NSFileReadNoSuchFileError
+                        && underlying.map { $0.domain == NSPOSIXErrorDomain && $0.code == Int(ENOENT) }
+                            == true)
+                guard attempt < 2, missing,
+                    let path = failure.userInfo[NSFilePathErrorKey] as? String,
+                    operationalInventoryPath(path, root: url)
+                else { throw error }
+            }
+        }
+    }
+
+    private func operationalInventoryPath(_ path: String, root: URL) -> Bool {
+        let url = URL(fileURLWithPath: path)
+        let name = url.lastPathComponent
+        let atomic =
+            name.hasPrefix(".checkpoint-") && name.hasSuffix(".tmp")
+            && UUID(uuidString: String(name.dropFirst(12).dropLast(4))) != nil
+        if url.deletingLastPathComponent().path == root.appendingPathComponent("store").path {
+            return name == ".tractanda-checkpoint-dirty" || atomic
+        }
+        let prefix = root.appendingPathComponent("store/document-jobs").path + "/"
+        guard path.hasPrefix(prefix) else { return false }
+        let parts = path.dropFirst(prefix.count).split(separator: "/").map(String.init)
+        guard parts.count >= 3, UUID(uuidString: parts[0])?.version1Components != nil,
+            parts[1] == "sessions", UUID(uuidString: parts[2])?.version1Components != nil
+        else { return false }
+        let dependency =
+            name.hasPrefix(".dependency-") && name.hasSuffix(".tmp")
+            && UUID(uuidString: String(name.dropFirst(12).dropLast(4))) != nil
+        return parts.count == 3 || (parts.count == 4 && (parts[3] == "binding.json" || dependency))
+    }
+
+    private var temporaryDirectory: URL {
+        #if os(Linux)
+            URL(fileURLWithPath: "/tmp")
+        #else
+            URL(fileURLWithPath: "/private/tmp")
+        #endif
+    }
+
+    private func capacityAttempt(at url: URL, beforeMetadata: ((URL) throws -> Void)?) throws {
         var values = statvfs()
         guard statvfs(url.path, &values) == 0, values.f_frsize > 0 else {
             throw TractandaError("resourceLimit", "Cannot inspect genuine fixture capacity.")
@@ -78,11 +128,16 @@ final class DocumentJobIntegrationTests: XCTestCase {
             throw TractandaError("resourceLimit", "Fixture needs a genuine 10 GiB reserve plus 16 MiB cap.")
         }
         if url.lastPathComponent.hasPrefix("mcp-document-e2e-") {
+            var owner = stat()
+            guard lstat(url.path, &owner) == 0, owner.st_uid == getuid(),
+                owner.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR), owner.st_mode & 0o077 == 0
+            else { throw TractandaError("resourceLimit", "Fixture inventory requires a private owned root.") }
             var bytes: UInt64 = 0
             if let files = FileManager.default.enumerator(
                 at: url, includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey])
             {
                 for case let file as URL in files {
+                    try beforeMetadata?(file)
                     let metadata = try file.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
                     if metadata.isRegularFile == true { bytes += UInt64(metadata.fileSize ?? 0) }
                     guard bytes <= cap else {
@@ -93,9 +148,42 @@ final class DocumentJobIntegrationTests: XCTestCase {
         }
     }
 
+    func testOperationalInventoryRetryIsBoundedAndCanonicalLossIsNotRetried() throws {
+        let root = temporaryDirectory.appendingPathComponent("mcp-document-e2e-" + UUID().uuidString)
+        try FileManager.default.createDirectory(
+            at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: root) }
+        try checkCapacity(at: root)
+        try Data([1]).write(to: root.appendingPathComponent("probe"))
+        let job = try UUID.makeVersion1().uuidString.lowercased()
+        let session = try UUID.makeVersion1().uuidString.lowercased()
+        let binding = root.appendingPathComponent(
+            "store/document-jobs/" + job + "/sessions/" + session + "/binding.json"
+        ).path
+        var attempts = 0
+        XCTAssertThrowsError(
+            try checkCapacity(at: root) { _ in
+                attempts += 1
+                throw NSError(
+                    domain: NSPOSIXErrorDomain, code: Int(ENOENT), userInfo: [NSFilePathErrorKey: binding])
+            })
+        XCTAssertEqual(attempts, 3)
+        attempts = 0
+        XCTAssertThrowsError(
+            try checkCapacity(at: root) { _ in
+                attempts += 1
+                throw NSError(
+                    domain: NSPOSIXErrorDomain, code: Int(ENOENT),
+                    userInfo: [
+                        NSFilePathErrorKey: root.appendingPathComponent("store/.tractanda/revision.json").path
+                    ])
+            })
+        XCTAssertEqual(attempts, 1)
+    }
+
     private func fixture() throws -> Fixture {
-        try checkCapacity(at: FileManager.default.temporaryDirectory)
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+        try checkCapacity(at: temporaryDirectory)
+        let root = temporaryDirectory.appendingPathComponent(
             "mcp-document-e2e-" + UUID().uuidString.lowercased(), isDirectory: true)
         try FileManager.default.createDirectory(
             at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])

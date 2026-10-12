@@ -105,7 +105,7 @@ final class DocumentWorkerProcessTests: XCTestCase {
         // Source+binary+output estimate <1MiB; cap16MiB and genuine reserve checked before compilation.
         let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
-        let platform = repository.appendingPathComponent("Sources/CTractandaPlatform/platform.c").path
+        let platform = repository.appendingPathComponent("Sources/CTractandaPlatform/Platform.c").path
             .replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
         let source = root.appendingPathComponent("harness.c")
         let executable = root.appendingPathComponent("harness")

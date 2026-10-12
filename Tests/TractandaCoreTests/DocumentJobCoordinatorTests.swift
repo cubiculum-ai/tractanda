@@ -26,6 +26,42 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         let request: DocumentJobStart
     }
     private func capacity(_ root: URL, beforeMetadata: ((URL) throws -> Void)? = nil) throws {
+        for attempt in 0..<3 {
+            do {
+                try capacityAttempt(root, beforeMetadata: beforeMetadata)
+                return
+            } catch {
+                let failure = error as NSError
+                let path = failure.userInfo[NSFilePathErrorKey] as? String
+                guard attempt < 2, failure.domain == NSPOSIXErrorDomain, failure.code == ENOENT,
+                    let path, operationalInventoryPath(path, root: root)
+                else { throw error }
+            }
+        }
+    }
+
+    private func operationalInventoryPath(_ path: String, root: URL) -> Bool {
+        let url = URL(fileURLWithPath: path)
+        let name = url.lastPathComponent
+        let atomic =
+            name.hasPrefix(".checkpoint-") && name.hasSuffix(".tmp")
+            && UUID(uuidString: String(name.dropFirst(12).dropLast(4))) != nil
+        if url.deletingLastPathComponent().path == root.appendingPathComponent("store").path {
+            return name == ".tractanda-checkpoint-dirty" || atomic
+        }
+        let prefix = root.appendingPathComponent("store/document-jobs").path + "/"
+        guard path.hasPrefix(prefix) else { return false }
+        let parts = path.dropFirst(prefix.count).split(separator: "/").map(String.init)
+        guard parts.count >= 3, UUID(uuidString: parts[0])?.version1Components != nil,
+            parts[1] == "sessions", UUID(uuidString: parts[2])?.version1Components != nil
+        else { return false }
+        let dependency =
+            name.hasPrefix(".dependency-") && name.hasSuffix(".tmp")
+            && UUID(uuidString: String(name.dropFirst(12).dropLast(4))) != nil
+        return parts.count == 3 || (parts.count == 4 && (parts[3] == "binding.json" || dependency))
+    }
+
+    private func capacityAttempt(_ root: URL, beforeMetadata: ((URL) throws -> Void)?) throws {
         var status = statvfs()
         guard statvfs(root.path, &status) == 0, status.f_frsize > 0 else {
             throw TractandaError("resourceLimit", "Cannot inspect genuine fixture capacity.")
@@ -72,11 +108,45 @@ final class DocumentJobCoordinatorTests: XCTestCase {
             do { try visit(directory) } catch FileMetadataError.posix(ENOENT) {
                 guard let promoted = promotedEntry(directory, root: root),
                     promoted.1.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR)
-                else { throw FileMetadataError.posix(ENOENT) }
+                else {
+                    throw NSError(
+                        domain: NSPOSIXErrorDomain, code: Int(ENOENT),
+                        userInfo: [NSFilePathErrorKey: directory.path])
+                }
                 try visit(promoted.0)
             }
         }
         try scan(root)
+    }
+
+    func testOperationalInventoryRetryIsBoundedAndCanonicalLossIsNotRetried() throws {
+        let root = temporaryDirectory.appendingPathComponent("job-coordinator-" + Identifier.make())
+        try FileManager.default.createDirectory(
+            at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: root) }
+        try capacity(root)
+        let file = root.appendingPathComponent("probe")
+        try Data([1]).write(to: file)
+        let marker = root.appendingPathComponent("store/.tractanda-checkpoint-dirty").path
+        var attempts = 0
+        XCTAssertThrowsError(
+            try capacity(root) { _ in
+                attempts += 1
+                throw NSError(
+                    domain: NSPOSIXErrorDomain, code: Int(ENOENT), userInfo: [NSFilePathErrorKey: marker])
+            })
+        XCTAssertEqual(attempts, 3)
+        attempts = 0
+        XCTAssertThrowsError(
+            try capacity(root) { _ in
+                attempts += 1
+                throw NSError(
+                    domain: NSPOSIXErrorDomain, code: Int(ENOENT),
+                    userInfo: [
+                        NSFilePathErrorKey: root.appendingPathComponent("store/.tractanda/revision.json").path
+                    ])
+            })
+        XCTAssertEqual(attempts, 1)
     }
 
     func testFixtureCapacityFollowsOnlyOwnedSealedPromotionCounterpart() throws {
