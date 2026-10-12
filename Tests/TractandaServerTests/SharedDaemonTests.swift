@@ -224,4 +224,74 @@ final class SharedDaemonTests: XCTestCase {
             FileManager.default.fileExists(atPath: store.appendingPathComponent("index/items.sqlite").path))
         await daemon.close()
     }
+
+    func testManagedDaemonAcceptsValidatedDocumentRuntime() async throws {
+        let root = try directory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let executable = root.appendingPathComponent("converter")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        let model = root.appendingPathComponent("model")
+        try FileManager.default.createDirectory(at: model, withIntermediateDirectories: false)
+        let scratch = root.appendingPathComponent("scratch")
+        let socket = root.appendingPathComponent("s")
+        let daemon = try await SharedDaemon.start(
+            configuration: .init(
+                storePath: root.appendingPathComponent("store").path,
+                indexDirectory: root.appendingPathComponent("index").path, socketPath: socket.path,
+                httpPort: nil, managed: true,
+                documentConverter: .init(
+                    executablePath: executable.path, modelDirectory: model.path,
+                    scratchDirectory: scratch.path)))
+        do {
+            let reply = try await nativeInfo(socket.path)
+            let object = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: reply) as? [String: Any])
+            let info = try XCTUnwrap((object["methodResponses"] as? [[Any]])?.first?[1] as? [String: Any])
+            let document = try XCTUnwrap(info["documentExtraction"] as? [String: Any])
+            XCTAssertEqual(document["state"] as? String, "configured")
+            XCTAssertEqual(document["requiresPreparedInput"] as? Bool, false)
+            XCTAssertEqual(
+                document["executableSHA256"] as? String, try DocumentProcess.executableSHA256(executable.path)
+            )
+            XCTAssertEqual(
+                document["identity"] as? [String: String],
+                try JSONDecoder().decode(
+                    [String: String].self, from: JSONEncoder().encode(DocumentConverterIdentity())))
+            let permissions =
+                try FileManager.default.attributesOfItem(atPath: scratch.path)[.posixPermissions] as? Int
+            XCTAssertEqual(permissions, 0o700)
+        } catch {
+            await daemon.close()
+            throw error
+        }
+        await daemon.close()
+
+        // Managed startup must still apply the existing executable/path/permission gates.
+        for invalid in [
+            DocumentConverterConfiguration(
+                executablePath: "relative", modelDirectory: model.path, scratchDirectory: scratch.path),
+            DocumentConverterConfiguration(
+                executablePath: executable.path, modelDirectory: model.path,
+                scratchDirectory: root.appendingPathComponent("store").path),
+        ] {
+            do {
+                _ = try await SharedDaemon.start(
+                    configuration: .init(
+                        storePath: root.appendingPathComponent("store").path,
+                        indexDirectory: root.appendingPathComponent("index").path, socketPath: socket.path,
+                        httpPort: nil, managed: true, documentConverter: invalid))
+                XCTFail("Invalid managed document configuration must be rejected")
+            } catch let error as TractandaError {
+                XCTAssertEqual(error.code, "invalidDocumentConfiguration")
+            }
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o777], ofItemAtPath: executable.path)
+        XCTAssertThrowsError(
+            try DocumentConverterConfiguration(
+                executablePath: executable.path, modelDirectory: model.path, scratchDirectory: scratch.path
+            ).validate(
+                storeRoot: root.appendingPathComponent("store"),
+                indexDirectory: root.appendingPathComponent("index")))
+    }
 }

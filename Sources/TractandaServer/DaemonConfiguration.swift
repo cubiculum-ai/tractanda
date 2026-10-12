@@ -44,11 +44,6 @@ public struct DaemonConfiguration: Codable, Sendable {
             throw TractandaError(
                 "invalidConfiguration", "Rebuild no-progress timeout must be positive and finite.")
         }
-        guard !managed || documentConverter == nil else {
-            throw TractandaError(
-                "invalidConfiguration",
-                "Prototype document conversion requires an explicitly configured disposable daemon.")
-        }
         guard storePath.hasPrefix("/"), storePath != "/", !storePath.contains("\0") else {
             throw TractandaError("invalidConfiguration", "Choose a dedicated absolute store path.")
         }
