@@ -173,12 +173,62 @@ class PackageTests(unittest.TestCase):
         skipped = helper.parent / 'UnsafeTests.bundle'; skipped.mkdir(); (skipped / 'link').symlink_to(helper)
         selected = helper.parent / 'Selected.bundle'; selected.mkdir(); (selected / 'link').symlink_to(helper)
         output = self.root / 'output'
+        canonical_formats = {
+            'profile': 'tractanda.canonical-formats.v1',
+            'readerLevel': 14,
+            'writerLevel': 14,
+            'read': [1, 2],
+            'write': [2],
+            'capabilities': [
+                'tractanda.authority-causal.v1', 'tractanda.authority-review.v1',
+                'tractanda.authority.v1', 'tractanda.document-placement.v1',
+                'tractanda.peer-documents.v1', 'tractanda.peer-enrollment-approval.v1',
+                'tractanda.peer-enrollment-activation.v1', 'tractanda.peer-enrollment-target.v1',
+                'tractanda.peer-lifecycle.v1', 'tractanda.peer-origin-admission.v1',
+                'tractanda.peer-originals.v1', 'tractanda.payload-placement.v1',
+                'tractanda.shared-authority.v1',
+            ],
+            'writeCapabilities': [
+                'tractanda.authority-causal.v1', 'tractanda.authority-review.v1',
+                'tractanda.authority.v1', 'tractanda.document-placement.v1',
+                'tractanda.peer-documents.v1', 'tractanda.peer-enrollment-approval.v1',
+                'tractanda.peer-enrollment-activation.v1', 'tractanda.peer-enrollment-target.v1',
+                'tractanda.peer-lifecycle.v1', 'tractanda.peer-origin-admission.v1',
+                'tractanda.peer-originals.v1', 'tractanda.payload-placement.v1',
+                'tractanda.shared-authority.v1',
+            ],
+        }
+        source_commit = '0123456789abcdef0123456789abcdef01234567'
         argv = ['packager', '--build-products', str(products), '--output', str(output),
                 '--embeddings-host', str(helper), '--model-directory', str(model)]
         def public(_root, destination):
             for name in ('LICENSE', 'README.md', 'NOTICE', 'Gemma-Terms.html', 'Gemma-Prohibited-Use-Policy.html'):
                 path = destination / 'licenses/Granite' / name; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b'tiny notice')
-        with patch.object(sys, 'argv', argv), patch.object(packager, 'run', return_value='arm64'), \
+        def run(*args):
+            if args[0] == '/usr/bin/lipo' and len(args) == 3 and args[1] == '-archs':
+                self.assertTrue(Path(args[2]).is_file())
+                return 'arm64'
+            if args[0] == '/usr/bin/otool' and len(args) == 3 and args[1] == '-L':
+                return f'{args[2]}:\n'
+            if args[0] == '/usr/bin/otool' and len(args) == 3 and args[1] == '-l':
+                return ''
+            if args[0] == '/usr/bin/xcrun' and args[1:4] == ('swift-stdlib-tool', '--copy', '--platform'):
+                self.assertEqual(args[4], 'macosx')
+                return ''
+            if args[0] == '/usr/bin/install_name_tool' and args[1:3] == ('-add_rpath', '@executable_path/../lib'):
+                self.assertTrue(Path(args[3]).is_file())
+                return ''
+            if args[0] == '/usr/bin/codesign':
+                return ''
+            if args[0] == 'git' and args[1:] == ('-C', str(packager.ROOT), 'rev-parse', 'HEAD'):
+                return source_commit
+            if args[0] == str(output / 'bin/tractanda-setup'):
+                if args[1:] == ('--canonical-format-support',):
+                    return json.dumps(canonical_formats)
+                if args[1:] == ('plan', '--bundle', str(output)):
+                    return ''
+            raise AssertionError(f'Unexpected packaging command: {args!r}')
+        with patch.object(sys, 'argv', argv), patch.object(packager, 'run', side_effect=run), \
                 patch.object(packager, 'embedding_descriptor', return_value={'modelDirectory': 'models/tiny', 'model': 'fixture'}), \
                 patch.object(packager, 'copy_public_source', side_effect=public), contextlib.redirect_stdout(__import__('io').StringIO()):
             with self.assertRaisesRegex(ValueError, 'link'): packager.main()
@@ -187,7 +237,10 @@ class PackageTests(unittest.TestCase):
             packager.main()
         self.assertTrue((output / 'bin/Selected.bundle/resource').is_file())
         self.assertFalse((output / 'bin/UnsafeTests.bundle').exists())
-        inventory = json.loads((output / 'bundle-manifest.json').read_text())['files']
+        manifest = json.loads((output / 'bundle-manifest.json').read_text())
+        self.assertEqual(manifest['canonicalFormats'], canonical_formats)
+        self.assertEqual(manifest['sourceCommit'], source_commit)
+        inventory = manifest['files']
         self.assertFalse(any('UnsafeTests.bundle' in row['path'] for row in inventory))
 
     def test_signed_metal_layout_keeps_verified_contents_and_colocates_same_bytes(self):
