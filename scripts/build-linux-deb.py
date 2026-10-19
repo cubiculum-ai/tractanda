@@ -157,16 +157,20 @@ def verify_archive(package, expected, control=False):
     flag = '--ctrl-tarfile' if control else '--fsys-tarfile'
     process = subprocess.Popen(['dpkg-deb', flag, str(package)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
     found = set()
+    root_seen = False
     directories = {str(parent) for name in expected for parent in Path(name).parents if str(parent) != '.'}
     try:
         with tarfile.open(fileobj=process.stdout, mode='r|') as archive:
             for member in archive:
                 name = member.name.removeprefix('./').rstrip('/')
-                if not name:
-                    continue
-                B.safe_path(name)
                 if member.uid != 0 or member.gid != 0 or member.mode & 0o7000 or not (member.isdir() or member.isfile()):
                     raise ValueError('Debian archive has unexpected ownership/type.')
+                if member.name in ('.', './'):
+                    if root_seen or not member.isdir() or member.size != 0 or member.mode & 0o777 != 0o755:
+                        raise ValueError('Debian archive has unexpected root directory metadata.')
+                    root_seen = True
+                    continue
+                B.safe_path(name)
                 if member.isdir():
                     if name not in directories or member.mode & 0o777 != 0o755:
                         raise ValueError('Debian archive has an unexpected directory or mode.')

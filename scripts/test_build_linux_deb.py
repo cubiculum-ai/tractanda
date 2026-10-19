@@ -152,6 +152,48 @@ class LinuxDebTests(unittest.TestCase):
                 else:
                     with self.assertRaises(ValueError):D.verify_archive(Path('fixture.deb'),{'usr/bin/file':row})
 
+    def test_archive_accepts_only_standard_root_directory_metadata(self):
+        data = b'tiny package file'
+        expected = {'usr/bin/file': dict(size=len(data), mode=0o755,
+                                        sha256=hashlib.sha256(data).hexdigest())}
+        class Process:
+            def __init__(self, raw): self.stdout = io.BytesIO(raw)
+            def wait(self, timeout): return 0
+            def poll(self): return 0
+        cases = [('.', tarfile.DIRTYPE, 0, 0o755, True),
+                 ('./', tarfile.DIRTYPE, 0, 0o755, True),
+                 ('.', tarfile.REGTYPE, 0, 0o755, False),
+                 ('./', tarfile.SYMTYPE, 0, 0o755, False),
+                 ('.', tarfile.LNKTYPE, 0, 0o755, False),
+                 ('.', tarfile.DIRTYPE, 1001, 0o755, False),
+                 ('.', tarfile.DIRTYPE, 0, 0o700, False),
+                 ('../', tarfile.DIRTYPE, 0, 0o755, False),
+                 ('usr/../', tarfile.DIRTYPE, 0, 0o755, False),
+                 ('/tmp/', tarfile.DIRTYPE, 0, 0o755, False),
+                 ('', tarfile.REGTYPE, 0, 0o755, False)]
+        for name, kind, uid, mode, accepted in cases:
+            with self.subTest(name=name, kind=kind, uid=uid, mode=mode):
+                out = io.BytesIO()
+                with tarfile.open(fileobj=out, mode='w') as archive:
+                    info = tarfile.TarInfo(name); info.type = kind
+                    info.uid = uid; info.mode = mode
+                    info.linkname = 'usr/bin/file' if kind in (tarfile.SYMTYPE, tarfile.LNKTYPE) else ''
+                    archive.addfile(info)
+                    info = tarfile.TarInfo('usr/bin/file'); info.size = len(data); info.mode = 0o755
+                    archive.addfile(info, io.BytesIO(data))
+                with patch.object(D.subprocess, 'Popen', return_value=Process(out.getvalue())):
+                    if accepted: D.verify_archive(Path('fixture.deb'), expected)
+                    else:
+                        with self.assertRaises(ValueError): D.verify_archive(Path('fixture.deb'), expected)
+        out = io.BytesIO()
+        with tarfile.open(fileobj=out, mode='w') as archive:
+            for _ in range(2):
+                info = tarfile.TarInfo('.'); info.type = tarfile.DIRTYPE; info.mode = 0o755
+                archive.addfile(info)
+        with patch.object(D.subprocess, 'Popen', return_value=Process(out.getvalue())):
+            with self.assertRaisesRegex(ValueError, 'root directory'):
+                D.verify_archive(Path('fixture.deb'), {})
+
     def test_build_waits_verifies_publishes_inventory_and_cleans_only_owned_success_stage(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);bundle,manifest,closure=self.fixture(root)
