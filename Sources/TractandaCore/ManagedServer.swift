@@ -11,16 +11,19 @@ public enum ManagedServer {
         public let projectRootID: String?
         public let statusRootID: String?
         public let initialProjectID: String?
+        public let peerRuntimeConfigurationPath: String?
 
         public init(
             httpPort: Int? = 48_728, viewItemID: String? = nil, projectRootID: String? = nil,
-            statusRootID: String? = nil, initialProjectID: String? = nil
+            statusRootID: String? = nil, initialProjectID: String? = nil,
+            peerRuntimeConfigurationPath: String? = nil
         ) {
             self.httpPort = httpPort
             self.viewItemID = viewItemID
             self.projectRootID = projectRootID
             self.statusRootID = statusRootID
             self.initialProjectID = initialProjectID
+            self.peerRuntimeConfigurationPath = peerRuntimeConfigurationPath
         }
 
         func validate() throws {
@@ -35,6 +38,15 @@ public enum ManagedServer {
             }
             for value in [viewItemID, projectRootID, statusRootID, initialProjectID].compactMap({ $0 }) {
                 try Identifier.validate(value)
+            }
+            guard peerRuntimeConfigurationPath == nil
+                || (peerRuntimeConfigurationPath!.hasPrefix("/") && peerRuntimeConfigurationPath! != "/"
+                    && peerRuntimeConfigurationPath!.utf8.count <= 4096
+                    && !peerRuntimeConfigurationPath!.contains("\0")
+                    && !peerRuntimeConfigurationPath!.contains("\n")
+                    && !peerRuntimeConfigurationPath!.contains("\r"))
+            else {
+                throw TractandaError("invalidService", "Peer runtime configuration path must be absolute.")
             }
         }
     }
@@ -238,7 +250,7 @@ public enum ManagedServer {
         let arguments =
             record.nativeProgramArguments
             ?? [record.binaryPath, "serve", record.storePath, record.connection.socketPath, "--managed"]
-        guard arguments.count <= 13, arguments.count >= 5, arguments[0] == record.binaryPath,
+        guard arguments.count <= 15, arguments.count >= 5, arguments[0] == record.binaryPath,
             arguments[2] == record.storePath, arguments[3] == record.connection.socketPath,
             arguments[4] == "--managed", ["serve", "daemon"].contains(arguments[1])
         else {
@@ -274,29 +286,43 @@ public enum ManagedServer {
         default:
             throw TractandaError("invalidService", "Managed daemon registration has an invalid HTTP mode.")
         }
-        if index == arguments.count { return arguments }
-        if arguments[index] == "--view" {
-            guard index + 2 == arguments.count else {
+        if index < arguments.count, arguments[index] == "--view" {
+            guard index + 2 <= arguments.count else {
                 throw TractandaError(
                     "invalidService", "Managed daemon registration has invalid view arguments.")
             }
             try Identifier.validate(arguments[index + 1])
-            return arguments
+            index += 2
+        } else if index < arguments.count, arguments[index] == "--project-root" {
+            guard arguments[index] == "--project-root", index + 3 < arguments.count,
+                arguments[index + 2] == "--status-root"
+            else {
+                throw TractandaError("invalidService", "Managed daemon registration has invalid board arguments.")
+            }
+            try Identifier.validate(arguments[index + 1])
+            try Identifier.validate(arguments[index + 3])
+            index += 4
+            if index < arguments.count, arguments[index] == "--project" {
+                guard index + 2 <= arguments.count else {
+                    throw TractandaError(
+                        "invalidService", "Managed daemon registration has invalid project arguments.")
+                }
+                try Identifier.validate(arguments[index + 1])
+                index += 2
+            } else if index < arguments.count, arguments[index] != "--peer-runtime-config" {
+                throw TractandaError("invalidService", "Managed daemon registration has invalid project arguments.")
+            }
+        } else if index < arguments.count, arguments[index] != "--peer-runtime-config" {
+            throw TractandaError("invalidService", "Managed daemon registration has invalid trailing arguments.")
         }
-        guard arguments[index] == "--project-root", index + 3 < arguments.count,
-            arguments[index + 2] == "--status-root"
-        else {
-            throw TractandaError("invalidService", "Managed daemon registration has invalid board arguments.")
+        if index < arguments.count {
+            guard index + 2 == arguments.count, arguments[index] == "--peer-runtime-config",
+                arguments[index + 1].hasPrefix("/"), arguments[index + 1] != "/",
+                arguments[index + 1].utf8.count <= 4096
+            else {
+                throw TractandaError("invalidService", "Managed daemon registration has invalid peer runtime arguments.")
+            }
         }
-        try Identifier.validate(arguments[index + 1])
-        try Identifier.validate(arguments[index + 3])
-        index += 4
-        if index == arguments.count { return arguments }
-        guard index + 2 == arguments.count, arguments[index] == "--project" else {
-            throw TractandaError(
-                "invalidService", "Managed daemon registration has invalid project arguments.")
-        }
-        try Identifier.validate(arguments[index + 1])
         return arguments
     }
 
@@ -315,6 +341,9 @@ public enum ManagedServer {
         } else if let projectRoot = options.projectRootID, let statusRoot = options.statusRootID {
             arguments += ["--project-root", projectRoot, "--status-root", statusRoot]
             if let project = options.initialProjectID { arguments += ["--project", project] }
+        }
+        if let path = options.peerRuntimeConfigurationPath {
+            arguments += ["--peer-runtime-config", path]
         }
         return try nativeProgramArguments(
             for: Registration(

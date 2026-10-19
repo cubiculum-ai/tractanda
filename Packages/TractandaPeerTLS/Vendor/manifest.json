@@ -1,0 +1,2849 @@
+{
+  "boringSSLRevision": "8eb25be6fa18d475291122887a7bccd3762ff236",
+  "files": {
+    "LICENSE.txt": {
+      "upstreamSHA256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "vendoredSHA256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    "NOTICE.txt": {
+      "upstreamSHA256": "03e8ca5c65a3df21fe1ab48eef91bca7d370db56c290d8ef16eaaa09ba322abe",
+      "vendoredSHA256": "03e8ca5c65a3df21fe1ab48eef91bca7d370db56c290d8ef16eaaa09ba322abe"
+    },
+    "Sources/CNIOBoringSSL/crypto/aes/aes.cc": {
+      "upstreamSHA256": "bf2fd39029cb4c7f6a900ed992aac753634e5ef0049f455511a2893d142c0c3b",
+      "vendoredSHA256": "bf2fd39029cb4c7f6a900ed992aac753634e5ef0049f455511a2893d142c0c3b"
+    },
+    "Sources/CNIOBoringSSL/crypto/armv8_feature_parsing.h": {
+      "upstreamSHA256": "d48c0b861ce6ecd9c478888b3c4b853c3bd947344be79d9fee6d7defbec159be",
+      "vendoredSHA256": "d48c0b861ce6ecd9c478888b3c4b853c3bd947344be79d9fee6d7defbec159be"
+    },
+    "Sources/CNIOBoringSSL/crypto/asn1/a_bitstr.cc": {
+      "upstreamSHA256": "27d01d1aa4c48cd0000b96f470eb9d87bd0464277a8adfa26e4c8e2af53cca32",
+      "vendoredSHA256": "27d01d1aa4c48cd0000b96f470eb9d87bd0464277a8adfa26e4c8e2af53cca32"
+    },
+    "Sources/CNIOBoringSSL/crypto/asn1/a_bool.cc": {
+      "upstreamSHA256": "65b952d218246a3477f79e28f8a7f05918446c362e0b1d27f0b6bd4f173ccd2c",
+      "vendoredSHA256": "65b952d218246a3477f79e28f8a7f05918446c362e0b1d27f0b6bd4f173ccd2c"
+    },
+    "Sources/CNIOBoringSSL/crypto/asn1/a_d2i_fp.cc": {
+      "upstreamSHA256": "9f45f21e42fb0a35b0b84c3afbebb56a9ebf75ac7567cddcff0cd20640093b46",
+      "vendoredSHA256": "9f45f21e42fb0a35b0b84c3afbebb56a9ebf75ac7567cddcff0cd20640093b46"
+    },
+    "Sources/CNIOBoringSSL/crypto/asn1/a_dup.cc": {
+      "upstreamSHA256": "221d59eedd05192035edf8f521b4ef9ed45f7a67035e5d855224662ca7aa7509",
+      "vendoredSHA256": "221d59eedd05192035edf8f521b4ef9ed45f7a67035e5d855224662ca7aa7509"
+    },
+    "Sources/CNIOBoringSSL/crypto/asn1/a_gentm.cc": {
+      "upstreamSHA256": "452c1085139f01f5ea2f9102a53eb55608ffe896b17e6f7c56a32e531cd92b8a",
+      "vendoredSHA256": "452c1085139f01f5ea2f9102a53eb55608ffe896b17e6f7c56a32e531cd92b8a"
+    },
+    "Sources/CNIOBoringSSL/crypto/asn1/a_i2d_fp.cc": {
+      "upstreamSHA256": "9470785419d7283e31f5b5579b5f16f25a4b775b4492be4045e14caaba458049",
+      "vendoredSHA256": "9470785419d7283e31f5b5579b5f16f25a4b775b4492be4045e14caaba458049"
+    },
+    "Sources/CNIOBoringSSL/crypto/asn1/a_int.cc": {
+      "upstreamSHA256": "6026bd02bb66d0111abfe10ad608e01e6d4c90eabc7da12cacaddb161dbfab91",
+      "vendoredSHA256": "6026bd02bb66d0111abfe10ad608e01e6d4c90eabc7da12cacaddb161dbfab91"
+    },
+    "Sources/CNIOBoringSSL/crypto/asn1/a_mbstr.cc": {
+      "upstreamSHA256": "eb5c7abf6fcea874ec647e2461addc7abf189ffe8a910a686ae1605b17fe6ae0",
+      "vendoredSHA256": "eb5c7abf6fcea874ec647e2461addc7abf189ffe8a910a686ae1605b17fe6ae0"
+    },
+    "Sources/CNIOBoringSSL/crypto/asn1/a_object.cc": {
+      "upstreamSHA256": "414bb7e9fd31e9b8412ca762801358fd3dbf0f85d5f3a2c0790cff7a5a539a65",
+      "vendoredSHA256": "414bb7e9fd31e9b8412ca762801358fd3dbf0f85d5f3a2c0790cff7a5a539a65"
+    },
+    "Sources/CNIOBoringSSL/crypto/asn1/a_octet.cc": {
+      "upstreamSHA256": "5f6f0af7863936b14cf3e97c889bace8306707684c16c3c565e0a9803ac5e652",
+      "vendoredSHA256": "5f6f0af7863936b14cf3e97c889bace8306707684c16c3c565e0a9803ac5e652"
+    },
+    "Sources/CNIOBoringSSL/crypto/asn1/a_strex.cc": {
+      "upstreamSHA256": "6fcbe27644fa9890e6f11f14324bcad3f6b1efcabf23194f9b030cde8f865214",
+      "vendoredSHA256": "6fcbe27644fa9890e6f11f14324bcad3f6b1efcabf23194f9b030cde8f865214"
+    },
+    "Sources/CNIOBoringSSL/crypto/asn1/a_strnid.cc": {
+      "upstreamSHA256": "8f7abde17590aefb27e79a88d1e31ba7fc5811f5bf8d99062c6c7498eadb9d3e",
+      "vendoredSHA256": "8f7abde17590aefb27e79a88d1e31ba7fc5811f5bf8d99062c6c7498eadb9d3e"
+    },
+    "Sources/CNIOBoringSSL/crypto/asn1/a_time.cc": {
+      "upstreamSHA256": "ed2d454436451ba27815a2fce55b23735e41467f4ce7f6b91ea6ea38eacbb11f",
+      "vendoredSHA256": "ed2d454436451ba27815a2fce55b23735e41467f4ce7f6b91ea6ea38eacbb11f"
+    },
+    "Sources/CNIOBoringSSL/crypto/asn1/a_type.cc": {
+      "upstreamSHA256": "d56cf682f667c30547ffc6eb3105e3abd039e39e9c96b5dec178118285132940",
+      "vendoredSHA256": "d56cf682f667c30547ffc6eb3105e3abd039e39e9c96b5dec178118285132940"
+    },
+    "Sources/CNIOBoringSSL/crypto/asn1/a_utctm.cc": {
+      "upstreamSHA256": "d51df51a5662781533165e3d5e1ad440774301031b633b7bc7683b2be2b81a0b",
+      "vendoredSHA256": "d51df51a5662781533165e3d5e1ad440774301031b633b7bc7683b2be2b81a0b"
+    },
+    "Sources/CNIOBoringSSL/crypto/asn1/asn1_lib.cc": {
+      "upstreamSHA256": "689e952af8589c457a2d89aa3f151a087ff321e76df4dbebef39f5abf229efd7",
+      "vendoredSHA256": "689e952af8589c457a2d89aa3f151a087ff321e76df4dbebef39f5abf229efd7"
+    },
+    "Sources/CNIOBoringSSL/crypto/asn1/asn1_par.cc": {
+      "upstreamSHA256": "319f8b15e8d099468c016edcb47150c2ded373832ddad9a597d13815235e9eb7",
+      "vendoredSHA256": "319f8b15e8d099468c016edcb47150c2ded373832ddad9a597d13815235e9eb7"
+    },
+    "Sources/CNIOBoringSSL/crypto/asn1/asn_pack.cc": {
+      "upstreamSHA256": "62e3e997666dd10f606a4279d86720c8681d90d772801fa33d306e397ce572bf",
+      "vendoredSHA256": "62e3e997666dd10f606a4279d86720c8681d90d772801fa33d306e397ce572bf"
+    },
+    "Sources/CNIOBoringSSL/crypto/asn1/f_int.cc": {
+      "upstreamSHA256": "7ca5e04c09642eb5d83fcbcb9355210f7a1609fbcfb3c958de6c5a08b6888e41",
+      "vendoredSHA256": "7ca5e04c09642eb5d83fcbcb9355210f7a1609fbcfb3c958de6c5a08b6888e41"
+    },
+    "Sources/CNIOBoringSSL/crypto/asn1/f_string.cc": {
+      "upstreamSHA256": "26bcf8f27d9c497c924b0daf4a3d3283f85419c5691dbbe185f2e9d59dc78ae6",
+      "vendoredSHA256": "26bcf8f27d9c497c924b0daf4a3d3283f85419c5691dbbe185f2e9d59dc78ae6"
+    },
+    "Sources/CNIOBoringSSL/crypto/asn1/internal.h": {
+      "upstreamSHA256": "6e884ebcb2f57fa7b25fcc084fe91b3cbeb65b7d69ca1f8a94fd080ef2ca8f81",
+      "vendoredSHA256": "6e884ebcb2f57fa7b25fcc084fe91b3cbeb65b7d69ca1f8a94fd080ef2ca8f81"
+    },
+    "Sources/CNIOBoringSSL/crypto/asn1/posix_time.cc": {
+      "upstreamSHA256": "0d5249e52b82d8452dd19d451c00b143164d261ce3b694c48eb844d01ad6c485",
+      "vendoredSHA256": "0d5249e52b82d8452dd19d451c00b143164d261ce3b694c48eb844d01ad6c485"
+    },
+    "Sources/CNIOBoringSSL/crypto/asn1/tasn_dec.cc": {
+      "upstreamSHA256": "913e9c6c11d2f10c7caaf4ae8ac812918bcaa8ed5c0dfb9305126e00611be193",
+      "vendoredSHA256": "913e9c6c11d2f10c7caaf4ae8ac812918bcaa8ed5c0dfb9305126e00611be193"
+    },
+    "Sources/CNIOBoringSSL/crypto/asn1/tasn_enc.cc": {
+      "upstreamSHA256": "1c2b1ac5a316fc32a055e2899030598810243478edfb436a89a6e8758190fd9e",
+      "vendoredSHA256": "1c2b1ac5a316fc32a055e2899030598810243478edfb436a89a6e8758190fd9e"
+    },
+    "Sources/CNIOBoringSSL/crypto/asn1/tasn_fre.cc": {
+      "upstreamSHA256": "0ffc938e072d032198d1da32524eeea6a281f0659f6bbfdc3870e9b0bec255c4",
+      "vendoredSHA256": "0ffc938e072d032198d1da32524eeea6a281f0659f6bbfdc3870e9b0bec255c4"
+    },
+    "Sources/CNIOBoringSSL/crypto/asn1/tasn_new.cc": {
+      "upstreamSHA256": "071d05eb3b359acf5a29336e9d1b7d22a8fe1cb556d1591532c796e294a2dfbe",
+      "vendoredSHA256": "071d05eb3b359acf5a29336e9d1b7d22a8fe1cb556d1591532c796e294a2dfbe"
+    },
+    "Sources/CNIOBoringSSL/crypto/asn1/tasn_typ.cc": {
+      "upstreamSHA256": "e3b2372a6ab0d3278b114866df3f5be0dcf41dca074d6ecd94f03493f65c2bd7",
+      "vendoredSHA256": "e3b2372a6ab0d3278b114866df3f5be0dcf41dca074d6ecd94f03493f65c2bd7"
+    },
+    "Sources/CNIOBoringSSL/crypto/asn1/tasn_utl.cc": {
+      "upstreamSHA256": "f01fd7839e79bb92659a7371db934f22ab7ca303c664e5ed8810d9ab46cc6b05",
+      "vendoredSHA256": "f01fd7839e79bb92659a7371db934f22ab7ca303c664e5ed8810d9ab46cc6b05"
+    },
+    "Sources/CNIOBoringSSL/crypto/base64/base64.cc": {
+      "upstreamSHA256": "b0d3d19ce47db8b16958c56f3a2bb42baeeef40ced7c754b561b218f2f714f05",
+      "vendoredSHA256": "b0d3d19ce47db8b16958c56f3a2bb42baeeef40ced7c754b561b218f2f714f05"
+    },
+    "Sources/CNIOBoringSSL/crypto/bcm_support.h": {
+      "upstreamSHA256": "935d3cebe52dc929d95eeef1fa589dc5ba42123f21868a16b9fd8cb1165dc474",
+      "vendoredSHA256": "935d3cebe52dc929d95eeef1fa589dc5ba42123f21868a16b9fd8cb1165dc474"
+    },
+    "Sources/CNIOBoringSSL/crypto/bio/bio.cc": {
+      "upstreamSHA256": "c45ea82353882013db4e9336911f596f8b0fd1c5210005f17db234088d6c748d",
+      "vendoredSHA256": "c45ea82353882013db4e9336911f596f8b0fd1c5210005f17db234088d6c748d"
+    },
+    "Sources/CNIOBoringSSL/crypto/bio/bio_mem.cc": {
+      "upstreamSHA256": "0f38c239c7c31309fdfee5ff05a3b9f81a791a1c4622457173d14e15cf136eff",
+      "vendoredSHA256": "0f38c239c7c31309fdfee5ff05a3b9f81a791a1c4622457173d14e15cf136eff"
+    },
+    "Sources/CNIOBoringSSL/crypto/bio/connect.cc": {
+      "upstreamSHA256": "37710f52bc76bfbab42b344a748ea8b104c79f7d76f246c9a3486444d7e46ce3",
+      "vendoredSHA256": "37710f52bc76bfbab42b344a748ea8b104c79f7d76f246c9a3486444d7e46ce3"
+    },
+    "Sources/CNIOBoringSSL/crypto/bio/errno.cc": {
+      "upstreamSHA256": "866ac7f729a893794928d8ada7c6810202c165761367b9e18355a69af6881dce",
+      "vendoredSHA256": "866ac7f729a893794928d8ada7c6810202c165761367b9e18355a69af6881dce"
+    },
+    "Sources/CNIOBoringSSL/crypto/bio/fd.cc": {
+      "upstreamSHA256": "f1a0b68898644a80c094001195fbb2ed6377adaebf2c23e0a372087977e42f9c",
+      "vendoredSHA256": "f1a0b68898644a80c094001195fbb2ed6377adaebf2c23e0a372087977e42f9c"
+    },
+    "Sources/CNIOBoringSSL/crypto/bio/file.cc": {
+      "upstreamSHA256": "4f6bd2cbb5953252f4183c67899e9d83ef330019a5a3569d6dae5360aab4f869",
+      "vendoredSHA256": "4f6bd2cbb5953252f4183c67899e9d83ef330019a5a3569d6dae5360aab4f869"
+    },
+    "Sources/CNIOBoringSSL/crypto/bio/hexdump.cc": {
+      "upstreamSHA256": "f519be77012a7bac0ad59a10c1e86cf2a6b97c63426fe500b4f8531a969e44b3",
+      "vendoredSHA256": "f519be77012a7bac0ad59a10c1e86cf2a6b97c63426fe500b4f8531a969e44b3"
+    },
+    "Sources/CNIOBoringSSL/crypto/bio/internal.h": {
+      "upstreamSHA256": "f79a232ab5dfaca6ebb34799e79f94247ce0595f379e32e9689dcdc70725c030",
+      "vendoredSHA256": "f79a232ab5dfaca6ebb34799e79f94247ce0595f379e32e9689dcdc70725c030"
+    },
+    "Sources/CNIOBoringSSL/crypto/bio/pair.cc": {
+      "upstreamSHA256": "ff252cc143e8ba8d1b02b92e1ce58b7a276e7be6e699420b4a08c1a30f4f110d",
+      "vendoredSHA256": "ff252cc143e8ba8d1b02b92e1ce58b7a276e7be6e699420b4a08c1a30f4f110d"
+    },
+    "Sources/CNIOBoringSSL/crypto/bio/printf.cc": {
+      "upstreamSHA256": "22867af3bd10028f80ff644dad8b4ce5f2b669c3ce05827106f05b5610c64da1",
+      "vendoredSHA256": "22867af3bd10028f80ff644dad8b4ce5f2b669c3ce05827106f05b5610c64da1"
+    },
+    "Sources/CNIOBoringSSL/crypto/bio/socket.cc": {
+      "upstreamSHA256": "e10a2c0f349673c3826008cbfc667180bc846dbddc5dd05bab1c8c2f24baf940",
+      "vendoredSHA256": "e10a2c0f349673c3826008cbfc667180bc846dbddc5dd05bab1c8c2f24baf940"
+    },
+    "Sources/CNIOBoringSSL/crypto/bio/socket_helper.cc": {
+      "upstreamSHA256": "c42fe4ee90884248c3b8ed72becd68028b3bceb08c8e264274648ae353e67085",
+      "vendoredSHA256": "c42fe4ee90884248c3b8ed72becd68028b3bceb08c8e264274648ae353e67085"
+    },
+    "Sources/CNIOBoringSSL/crypto/blake2/blake2.cc": {
+      "upstreamSHA256": "6b7b697cbcbafe673f152c2e771b5b89e91056540cb8d94196144b94facfc5b4",
+      "vendoredSHA256": "6b7b697cbcbafe673f152c2e771b5b89e91056540cb8d94196144b94facfc5b4"
+    },
+    "Sources/CNIOBoringSSL/crypto/bn/bn_asn1.cc": {
+      "upstreamSHA256": "16e731e6b8994ae28130a8eb56a8e9e13e567fa19f1b6b5cd184320a0714ab19",
+      "vendoredSHA256": "16e731e6b8994ae28130a8eb56a8e9e13e567fa19f1b6b5cd184320a0714ab19"
+    },
+    "Sources/CNIOBoringSSL/crypto/bn/convert.cc": {
+      "upstreamSHA256": "455104d851fe0f64a926f53d2c453aee4148e418a486e8f63857598b17f91c18",
+      "vendoredSHA256": "455104d851fe0f64a926f53d2c453aee4148e418a486e8f63857598b17f91c18"
+    },
+    "Sources/CNIOBoringSSL/crypto/bn/div.cc": {
+      "upstreamSHA256": "ba99206d3a74819c2ecdeeb4555ed9e84a3e4f75ae3333a227e5eb4b41330b0c",
+      "vendoredSHA256": "ba99206d3a74819c2ecdeeb4555ed9e84a3e4f75ae3333a227e5eb4b41330b0c"
+    },
+    "Sources/CNIOBoringSSL/crypto/bn/exponentiation.cc": {
+      "upstreamSHA256": "8bdd8cc0cd4b7e1071cb1329b849a7f1df786532eb769c9218501140149ae7c7",
+      "vendoredSHA256": "8bdd8cc0cd4b7e1071cb1329b849a7f1df786532eb769c9218501140149ae7c7"
+    },
+    "Sources/CNIOBoringSSL/crypto/bn/sqrt.cc": {
+      "upstreamSHA256": "1ebf8931b8bdc866f3bc4068f4d9edc249a8771501b40b2724ae2791b5c8af98",
+      "vendoredSHA256": "1ebf8931b8bdc866f3bc4068f4d9edc249a8771501b40b2724ae2791b5c8af98"
+    },
+    "Sources/CNIOBoringSSL/crypto/buf/buf.cc": {
+      "upstreamSHA256": "fde4755eb8cabd172d38458e447f9c8beab5e91dbed5a1e47177beee7ed77a85",
+      "vendoredSHA256": "fde4755eb8cabd172d38458e447f9c8beab5e91dbed5a1e47177beee7ed77a85"
+    },
+    "Sources/CNIOBoringSSL/crypto/bytestring/asn1_compat.cc": {
+      "upstreamSHA256": "92d6f6d86c01b27eb78faca069ce49ab10d3d483388f38f9c3aadaa4618c9e96",
+      "vendoredSHA256": "92d6f6d86c01b27eb78faca069ce49ab10d3d483388f38f9c3aadaa4618c9e96"
+    },
+    "Sources/CNIOBoringSSL/crypto/bytestring/ber.cc": {
+      "upstreamSHA256": "aee647076fee74db4d4361fe327c3d58c4b92d55fd7fb5129f1033056d19b3c0",
+      "vendoredSHA256": "aee647076fee74db4d4361fe327c3d58c4b92d55fd7fb5129f1033056d19b3c0"
+    },
+    "Sources/CNIOBoringSSL/crypto/bytestring/cbb.cc": {
+      "upstreamSHA256": "1635099793c7f1ca40dc905391682c9bc351c8220c784a7b04aaa701ce70ae6c",
+      "vendoredSHA256": "1635099793c7f1ca40dc905391682c9bc351c8220c784a7b04aaa701ce70ae6c"
+    },
+    "Sources/CNIOBoringSSL/crypto/bytestring/cbs.cc": {
+      "upstreamSHA256": "a154d06efcbc6b41c737b3d478c16a895333e7da8389d4613faff9b38a69624b",
+      "vendoredSHA256": "a154d06efcbc6b41c737b3d478c16a895333e7da8389d4613faff9b38a69624b"
+    },
+    "Sources/CNIOBoringSSL/crypto/bytestring/internal.h": {
+      "upstreamSHA256": "e2ca8e21519ea1cfbff517d5f1065e508bc99af42753e761095043f8cf716c52",
+      "vendoredSHA256": "e2ca8e21519ea1cfbff517d5f1065e508bc99af42753e761095043f8cf716c52"
+    },
+    "Sources/CNIOBoringSSL/crypto/bytestring/unicode.cc": {
+      "upstreamSHA256": "b1126e79607c5cd468340cee4198968d8d653961a69a7ebe14472cbfed87725f",
+      "vendoredSHA256": "b1126e79607c5cd468340cee4198968d8d653961a69a7ebe14472cbfed87725f"
+    },
+    "Sources/CNIOBoringSSL/crypto/chacha/chacha.cc": {
+      "upstreamSHA256": "e0ab5e26029cfa49c5121c906e6373d17b0a6cc65ea8b824b15845b0e28a37c0",
+      "vendoredSHA256": "e0ab5e26029cfa49c5121c906e6373d17b0a6cc65ea8b824b15845b0e28a37c0"
+    },
+    "Sources/CNIOBoringSSL/crypto/chacha/internal.h": {
+      "upstreamSHA256": "ce6f04edee67f0b4c1f32f461e46ed12eb0e3c995d89c74c6f08f6eeccd936a5",
+      "vendoredSHA256": "ce6f04edee67f0b4c1f32f461e46ed12eb0e3c995d89c74c6f08f6eeccd936a5"
+    },
+    "Sources/CNIOBoringSSL/crypto/cipher/derive_key.cc": {
+      "upstreamSHA256": "f603abc6989ce233419c19337b059809b9271471462289267402cd6bd8a4d19d",
+      "vendoredSHA256": "f603abc6989ce233419c19337b059809b9271471462289267402cd6bd8a4d19d"
+    },
+    "Sources/CNIOBoringSSL/crypto/cipher/e_aesctrhmac.cc": {
+      "upstreamSHA256": "d46a451f315bf851498c221c1afe9e18cdab89dfa7fd9d922e876049fb3e0e05",
+      "vendoredSHA256": "d46a451f315bf851498c221c1afe9e18cdab89dfa7fd9d922e876049fb3e0e05"
+    },
+    "Sources/CNIOBoringSSL/crypto/cipher/e_aeseax.cc": {
+      "upstreamSHA256": "0d99e0dee6e4e4c6c3b0b6e7ef96e922d04b54da24c91e2e4ace554a315b4cc2",
+      "vendoredSHA256": "0d99e0dee6e4e4c6c3b0b6e7ef96e922d04b54da24c91e2e4ace554a315b4cc2"
+    },
+    "Sources/CNIOBoringSSL/crypto/cipher/e_aesgcmsiv.cc": {
+      "upstreamSHA256": "f6f96c925cd66acf506a9b01fd23536acefb5ad4e1146bb6dc5afa455114f2e4",
+      "vendoredSHA256": "f6f96c925cd66acf506a9b01fd23536acefb5ad4e1146bb6dc5afa455114f2e4"
+    },
+    "Sources/CNIOBoringSSL/crypto/cipher/e_chacha20poly1305.cc": {
+      "upstreamSHA256": "7597b81d40a1131095a715010c378e041bf4118190d72978ffebab1a814d167e",
+      "vendoredSHA256": "7597b81d40a1131095a715010c378e041bf4118190d72978ffebab1a814d167e"
+    },
+    "Sources/CNIOBoringSSL/crypto/cipher/e_des.cc": {
+      "upstreamSHA256": "c71583895ee2ad1a9cb190194ac9ca2fba96904cba86928568ee510b6528cb31",
+      "vendoredSHA256": "c71583895ee2ad1a9cb190194ac9ca2fba96904cba86928568ee510b6528cb31"
+    },
+    "Sources/CNIOBoringSSL/crypto/cipher/e_null.cc": {
+      "upstreamSHA256": "f9ac4a374a2cbdd6d497fdfda648d740bc37eeab91a5c43a5bb187f692f68654",
+      "vendoredSHA256": "f9ac4a374a2cbdd6d497fdfda648d740bc37eeab91a5c43a5bb187f692f68654"
+    },
+    "Sources/CNIOBoringSSL/crypto/cipher/e_rc2.cc": {
+      "upstreamSHA256": "db594eead9a65e51d7ca706ab0127f89a15c8b54858c2c3f3d80a05e636dc534",
+      "vendoredSHA256": "db594eead9a65e51d7ca706ab0127f89a15c8b54858c2c3f3d80a05e636dc534"
+    },
+    "Sources/CNIOBoringSSL/crypto/cipher/e_rc4.cc": {
+      "upstreamSHA256": "6ef638d07099b337d06f0d5e709321afb65752bf088f2d46b40546e107ec7b5b",
+      "vendoredSHA256": "6ef638d07099b337d06f0d5e709321afb65752bf088f2d46b40546e107ec7b5b"
+    },
+    "Sources/CNIOBoringSSL/crypto/cipher/e_tls.cc": {
+      "upstreamSHA256": "2529e11d09349e2aa53714acc03c68c1926fad3a82538d7ca2e92cd40401c734",
+      "vendoredSHA256": "2529e11d09349e2aa53714acc03c68c1926fad3a82538d7ca2e92cd40401c734"
+    },
+    "Sources/CNIOBoringSSL/crypto/cipher/get_cipher.cc": {
+      "upstreamSHA256": "cef13d89ceb86ee127ec19081ef31b0035946da13737eec01e460c2fb0192cfb",
+      "vendoredSHA256": "cef13d89ceb86ee127ec19081ef31b0035946da13737eec01e460c2fb0192cfb"
+    },
+    "Sources/CNIOBoringSSL/crypto/cipher/internal.h": {
+      "upstreamSHA256": "b4edf4619cf4a765966c6ea0a4d757347e85907aab7286900bc5008bca3359c6",
+      "vendoredSHA256": "b4edf4619cf4a765966c6ea0a4d757347e85907aab7286900bc5008bca3359c6"
+    },
+    "Sources/CNIOBoringSSL/crypto/cipher/tls_cbc.cc": {
+      "upstreamSHA256": "45270a6fc4f6dcc5fd3ce41431d20a96fc5aabfd4119f05816201211e0eb1601",
+      "vendoredSHA256": "45270a6fc4f6dcc5fd3ce41431d20a96fc5aabfd4119f05816201211e0eb1601"
+    },
+    "Sources/CNIOBoringSSL/crypto/cms/cms.cc": {
+      "upstreamSHA256": "c7993b6bafcc30fe79271dd325d74cffbab72b1fca67b2330c21cf49ae02b4e5",
+      "vendoredSHA256": "c7993b6bafcc30fe79271dd325d74cffbab72b1fca67b2330c21cf49ae02b4e5"
+    },
+    "Sources/CNIOBoringSSL/crypto/conf/conf.cc": {
+      "upstreamSHA256": "5d67c990c9c0e93c1c0634dc157412f52f89f200a9a44e77a9d11918848fbce1",
+      "vendoredSHA256": "5d67c990c9c0e93c1c0634dc157412f52f89f200a9a44e77a9d11918848fbce1"
+    },
+    "Sources/CNIOBoringSSL/crypto/conf/internal.h": {
+      "upstreamSHA256": "0ec5be943c6ef624b6ed342ff4d048bbb6fd70637eacf3e55fb24424e2512d82",
+      "vendoredSHA256": "0ec5be943c6ef624b6ed342ff4d048bbb6fd70637eacf3e55fb24424e2512d82"
+    },
+    "Sources/CNIOBoringSSL/crypto/cpu_aarch64_apple.cc": {
+      "upstreamSHA256": "17585fae48d3c8f0ebae98a2b054dc653648b69b30d0ad52e053f823ca481b05",
+      "vendoredSHA256": "17585fae48d3c8f0ebae98a2b054dc653648b69b30d0ad52e053f823ca481b05"
+    },
+    "Sources/CNIOBoringSSL/crypto/cpu_aarch64_fuchsia.cc": {
+      "upstreamSHA256": "74fd1c02eb0ea36d0a0b1d7b95abe59a7f3eb38deb1566ffb7d95bdb59e9d1cc",
+      "vendoredSHA256": "74fd1c02eb0ea36d0a0b1d7b95abe59a7f3eb38deb1566ffb7d95bdb59e9d1cc"
+    },
+    "Sources/CNIOBoringSSL/crypto/cpu_aarch64_linux.cc": {
+      "upstreamSHA256": "916e2cf8289cc8c39786ebe311a34bcef054c7ed5c8fc1e3938b275cb6c6a9c6",
+      "vendoredSHA256": "916e2cf8289cc8c39786ebe311a34bcef054c7ed5c8fc1e3938b275cb6c6a9c6"
+    },
+    "Sources/CNIOBoringSSL/crypto/cpu_aarch64_openbsd.cc": {
+      "upstreamSHA256": "445f2219554af83bf3c94ac5fb151b926b23699a0be78f66835dd497c17eb713",
+      "vendoredSHA256": "445f2219554af83bf3c94ac5fb151b926b23699a0be78f66835dd497c17eb713"
+    },
+    "Sources/CNIOBoringSSL/crypto/cpu_aarch64_sysreg.cc": {
+      "upstreamSHA256": "c441fcb313fd3434b5b30f914779da19901209dfbe1294913d273ea0c4cdf6c0",
+      "vendoredSHA256": "c441fcb313fd3434b5b30f914779da19901209dfbe1294913d273ea0c4cdf6c0"
+    },
+    "Sources/CNIOBoringSSL/crypto/cpu_aarch64_win.cc": {
+      "upstreamSHA256": "bdc823721179823a825557c29c3c88b14b5eed469fc49f80d8ec4a6de2cde13b",
+      "vendoredSHA256": "bdc823721179823a825557c29c3c88b14b5eed469fc49f80d8ec4a6de2cde13b"
+    },
+    "Sources/CNIOBoringSSL/crypto/cpu_arm_freebsd.cc": {
+      "upstreamSHA256": "8e1b11f55537d5623635a127f54f79c5e9251c6806fff27f37648d8a136cdc63",
+      "vendoredSHA256": "8e1b11f55537d5623635a127f54f79c5e9251c6806fff27f37648d8a136cdc63"
+    },
+    "Sources/CNIOBoringSSL/crypto/cpu_arm_linux.cc": {
+      "upstreamSHA256": "bc51fd0a1641adb23fe2654feb550e818eaf50edd7fb29158845ae4d0f8217b8",
+      "vendoredSHA256": "bc51fd0a1641adb23fe2654feb550e818eaf50edd7fb29158845ae4d0f8217b8"
+    },
+    "Sources/CNIOBoringSSL/crypto/cpu_arm_linux.h": {
+      "upstreamSHA256": "b2a440c550eb1619da878293f780f7aa35ee6c25669f9f1d02ed3ecb628d9ff8",
+      "vendoredSHA256": "b2a440c550eb1619da878293f780f7aa35ee6c25669f9f1d02ed3ecb628d9ff8"
+    },
+    "Sources/CNIOBoringSSL/crypto/cpu_intel.cc": {
+      "upstreamSHA256": "fe093fb2ff18a0390a31f95a3955ea1cffe7cd801b97cc54aff2537f2f6babea",
+      "vendoredSHA256": "fe093fb2ff18a0390a31f95a3955ea1cffe7cd801b97cc54aff2537f2f6babea"
+    },
+    "Sources/CNIOBoringSSL/crypto/crypto.cc": {
+      "upstreamSHA256": "180fbe4e6eef204c68e78f8772f6c7215d61038c7ed0581f95a5c1e828b44a33",
+      "vendoredSHA256": "180fbe4e6eef204c68e78f8772f6c7215d61038c7ed0581f95a5c1e828b44a33"
+    },
+    "Sources/CNIOBoringSSL/crypto/curve25519/asm/x25519-asm-arm.S": {
+      "upstreamSHA256": "be2fbd49cd69066f1fb71f1899dc5c7ac56f2974148f310d34b045986e1cd258",
+      "vendoredSHA256": "be2fbd49cd69066f1fb71f1899dc5c7ac56f2974148f310d34b045986e1cd258"
+    },
+    "Sources/CNIOBoringSSL/crypto/curve25519/curve25519.cc": {
+      "upstreamSHA256": "0fca59ef92d2e000901796deee0a5648e408a530314327fdc3b81623662d2826",
+      "vendoredSHA256": "0fca59ef92d2e000901796deee0a5648e408a530314327fdc3b81623662d2826"
+    },
+    "Sources/CNIOBoringSSL/crypto/curve25519/curve25519_64_adx.cc": {
+      "upstreamSHA256": "46fec052bfa62d280904cec13790c5c95234915dc695a46dfc40ca3e0b79c5d3",
+      "vendoredSHA256": "46fec052bfa62d280904cec13790c5c95234915dc695a46dfc40ca3e0b79c5d3"
+    },
+    "Sources/CNIOBoringSSL/crypto/curve25519/curve25519_tables.h": {
+      "upstreamSHA256": "0f9cb0a3f4e8c3eb97d1d0edade0e8abd2d575143ed65f5089dcf72f3dcffd07",
+      "vendoredSHA256": "0f9cb0a3f4e8c3eb97d1d0edade0e8abd2d575143ed65f5089dcf72f3dcffd07"
+    },
+    "Sources/CNIOBoringSSL/crypto/curve25519/internal.h": {
+      "upstreamSHA256": "e9137c134fcc6eaa20425449e26d58c7abf36d2d8b6fe15eb04c25ad2ed4cdc7",
+      "vendoredSHA256": "e9137c134fcc6eaa20425449e26d58c7abf36d2d8b6fe15eb04c25ad2ed4cdc7"
+    },
+    "Sources/CNIOBoringSSL/crypto/curve25519/spake25519.cc": {
+      "upstreamSHA256": "c63c03278feaf34192ec7c0dffffe0c4db6fca7c8abc562acdada3a6ca22b0cf",
+      "vendoredSHA256": "c63c03278feaf34192ec7c0dffffe0c4db6fca7c8abc562acdada3a6ca22b0cf"
+    },
+    "Sources/CNIOBoringSSL/crypto/des/des.cc": {
+      "upstreamSHA256": "c0ba9ce8aa376fd33c8c4396c2dd5c4aa2de13ca3f8a74630b56f31cdb7bcfe7",
+      "vendoredSHA256": "c0ba9ce8aa376fd33c8c4396c2dd5c4aa2de13ca3f8a74630b56f31cdb7bcfe7"
+    },
+    "Sources/CNIOBoringSSL/crypto/des/internal.h": {
+      "upstreamSHA256": "8f97ae8ef84671164b5a8b350ac3e77c9bbca7bcf6450468c014718978381e7c",
+      "vendoredSHA256": "8f97ae8ef84671164b5a8b350ac3e77c9bbca7bcf6450468c014718978381e7c"
+    },
+    "Sources/CNIOBoringSSL/crypto/dh/dh_asn1.cc": {
+      "upstreamSHA256": "5ce1cd91747eafa1445e3818ca016f44fa64d89e3db3635ba60aaaa73d5e4a8a",
+      "vendoredSHA256": "5ce1cd91747eafa1445e3818ca016f44fa64d89e3db3635ba60aaaa73d5e4a8a"
+    },
+    "Sources/CNIOBoringSSL/crypto/dh/params.cc": {
+      "upstreamSHA256": "fb8c6c3643dd542fb602ecbf91a15812a85b442b57a6086af74071c3dbd177f5",
+      "vendoredSHA256": "fb8c6c3643dd542fb602ecbf91a15812a85b442b57a6086af74071c3dbd177f5"
+    },
+    "Sources/CNIOBoringSSL/crypto/digest/digest_extra.cc": {
+      "upstreamSHA256": "56a7c6db9dc013f28c3305d109b8fa6162b9f03022931336db5d3fc712c055f2",
+      "vendoredSHA256": "56a7c6db9dc013f28c3305d109b8fa6162b9f03022931336db5d3fc712c055f2"
+    },
+    "Sources/CNIOBoringSSL/crypto/dsa/dsa.cc": {
+      "upstreamSHA256": "411ed4630b703aecf3a9ecb744ed720709d513b1ef08482dfedfede0b2cad672",
+      "vendoredSHA256": "411ed4630b703aecf3a9ecb744ed720709d513b1ef08482dfedfede0b2cad672"
+    },
+    "Sources/CNIOBoringSSL/crypto/dsa/dsa_asn1.cc": {
+      "upstreamSHA256": "86b4932a484a36742ce299c229c0005bd94d4f29693cc417aec416daf42f3480",
+      "vendoredSHA256": "86b4932a484a36742ce299c229c0005bd94d4f29693cc417aec416daf42f3480"
+    },
+    "Sources/CNIOBoringSSL/crypto/dsa/internal.h": {
+      "upstreamSHA256": "71dcc883a773275a2bc25133d1d007fb2375c130330749051bbaa607e921b1f8",
+      "vendoredSHA256": "71dcc883a773275a2bc25133d1d007fb2375c130330749051bbaa607e921b1f8"
+    },
+    "Sources/CNIOBoringSSL/crypto/ec/ec_asn1.cc": {
+      "upstreamSHA256": "dd4acde25397b5418b84fe14e7061d465aa275bca46082af9dde6f903aa62c71",
+      "vendoredSHA256": "dd4acde25397b5418b84fe14e7061d465aa275bca46082af9dde6f903aa62c71"
+    },
+    "Sources/CNIOBoringSSL/crypto/ec/ec_derive.cc": {
+      "upstreamSHA256": "2eb58dec4b891279ad62a6592e36d338794bf111fbcafd8e44d60f73bf895fb1",
+      "vendoredSHA256": "2eb58dec4b891279ad62a6592e36d338794bf111fbcafd8e44d60f73bf895fb1"
+    },
+    "Sources/CNIOBoringSSL/crypto/ec/hash_to_curve.cc": {
+      "upstreamSHA256": "87bcf2778940cf7548866cc558350ba19fae048b8a06d7e95e6e0bfa95ee38df",
+      "vendoredSHA256": "87bcf2778940cf7548866cc558350ba19fae048b8a06d7e95e6e0bfa95ee38df"
+    },
+    "Sources/CNIOBoringSSL/crypto/ec/internal.h": {
+      "upstreamSHA256": "93b2d3452aec7ad141319ed802f58f18e09f7284c1b348bfa922815438b436f4",
+      "vendoredSHA256": "93b2d3452aec7ad141319ed802f58f18e09f7284c1b348bfa922815438b436f4"
+    },
+    "Sources/CNIOBoringSSL/crypto/ecdh/ecdh.cc": {
+      "upstreamSHA256": "24746017c3c193f669410c743aa60509dbe5b077e166cc83cc6fe96f2bbf3c5c",
+      "vendoredSHA256": "24746017c3c193f669410c743aa60509dbe5b077e166cc83cc6fe96f2bbf3c5c"
+    },
+    "Sources/CNIOBoringSSL/crypto/ecdsa/ecdsa_asn1.cc": {
+      "upstreamSHA256": "0d4d9684a2f851c63cdb9b3d11a042777eda1b23be1bd7b75c2c2d55fe4eb71d",
+      "vendoredSHA256": "0d4d9684a2f851c63cdb9b3d11a042777eda1b23be1bd7b75c2c2d55fe4eb71d"
+    },
+    "Sources/CNIOBoringSSL/crypto/ecdsa/ecdsa_p1363.cc": {
+      "upstreamSHA256": "6e3da26b320fa8f3734fb26cd1ea5c74e2b1c8188bd3e18e872148cdcebfe99c",
+      "vendoredSHA256": "6e3da26b320fa8f3734fb26cd1ea5c74e2b1c8188bd3e18e872148cdcebfe99c"
+    },
+    "Sources/CNIOBoringSSL/crypto/engine/engine.cc": {
+      "upstreamSHA256": "99c783cbe24f38404ced4e538e3651de08d61787304de7e84ab5586bcf76cca4",
+      "vendoredSHA256": "99c783cbe24f38404ced4e538e3651de08d61787304de7e84ab5586bcf76cca4"
+    },
+    "Sources/CNIOBoringSSL/crypto/err/err.cc": {
+      "upstreamSHA256": "0851d0b4a0430f0e026aa0a83211a453b5ba8b8c832934fc2284afc25937dbe1",
+      "vendoredSHA256": "0851d0b4a0430f0e026aa0a83211a453b5ba8b8c832934fc2284afc25937dbe1"
+    },
+    "Sources/CNIOBoringSSL/crypto/err/internal.h": {
+      "upstreamSHA256": "33ed4b9b185d551d6ad258083874bb08e66618ac95e3d41e91e51ed287beaaf8",
+      "vendoredSHA256": "33ed4b9b185d551d6ad258083874bb08e66618ac95e3d41e91e51ed287beaaf8"
+    },
+    "Sources/CNIOBoringSSL/crypto/evp/evp.cc": {
+      "upstreamSHA256": "d513f2a2a756b1fed49602fdb2b8553e749d4f32931f6f353c07c7e37ce8d3d2",
+      "vendoredSHA256": "d513f2a2a756b1fed49602fdb2b8553e749d4f32931f6f353c07c7e37ce8d3d2"
+    },
+    "Sources/CNIOBoringSSL/crypto/evp/evp_asn1.cc": {
+      "upstreamSHA256": "da9b16e22b62b6d7efa1c331b53d3018026f458825f4de53009410acdf9d86af",
+      "vendoredSHA256": "da9b16e22b62b6d7efa1c331b53d3018026f458825f4de53009410acdf9d86af"
+    },
+    "Sources/CNIOBoringSSL/crypto/evp/evp_ctx.cc": {
+      "upstreamSHA256": "958df5f191fff4f3c5f407191b887f7af8bedf456ec68d24c33465e65b2ecf1c",
+      "vendoredSHA256": "958df5f191fff4f3c5f407191b887f7af8bedf456ec68d24c33465e65b2ecf1c"
+    },
+    "Sources/CNIOBoringSSL/crypto/evp/evp_kem.cc": {
+      "upstreamSHA256": "95b5ca1d8f2c59e90f6695ab0052afbd4fb483fdf8aee5a202afbb0898170ecb",
+      "vendoredSHA256": "95b5ca1d8f2c59e90f6695ab0052afbd4fb483fdf8aee5a202afbb0898170ecb"
+    },
+    "Sources/CNIOBoringSSL/crypto/evp/internal.h": {
+      "upstreamSHA256": "b066840b8f3c03c606b70b0b4ae9418d7a5f7dd07179b991438f84db8a24635e",
+      "vendoredSHA256": "b066840b8f3c03c606b70b0b4ae9418d7a5f7dd07179b991438f84db8a24635e"
+    },
+    "Sources/CNIOBoringSSL/crypto/evp/p_dh.cc": {
+      "upstreamSHA256": "c3178e54ae0388b325d46bcb1964337dfe23be82898e8189b3ad675d70666b10",
+      "vendoredSHA256": "c3178e54ae0388b325d46bcb1964337dfe23be82898e8189b3ad675d70666b10"
+    },
+    "Sources/CNIOBoringSSL/crypto/evp/p_dsa.cc": {
+      "upstreamSHA256": "67c63ba451eaa746747f7ff326f05ed24d3ab6abbb789e03542a9ba8aa8fe3a7",
+      "vendoredSHA256": "67c63ba451eaa746747f7ff326f05ed24d3ab6abbb789e03542a9ba8aa8fe3a7"
+    },
+    "Sources/CNIOBoringSSL/crypto/evp/p_ec.cc": {
+      "upstreamSHA256": "a3137276ebf0bb48666f026bd55b3d6e842dc767ded67c26df049d7f4ed88613",
+      "vendoredSHA256": "a3137276ebf0bb48666f026bd55b3d6e842dc767ded67c26df049d7f4ed88613"
+    },
+    "Sources/CNIOBoringSSL/crypto/evp/p_ed25519.cc": {
+      "upstreamSHA256": "6f832ebcbb79d52b0496c7d1bdd0db9211bb79af657e12b12372eda55547e849",
+      "vendoredSHA256": "6f832ebcbb79d52b0496c7d1bdd0db9211bb79af657e12b12372eda55547e849"
+    },
+    "Sources/CNIOBoringSSL/crypto/evp/p_hkdf.cc": {
+      "upstreamSHA256": "7e6b2cc7fe201061a5d86d8412812083c7d37680ebbb273feb226ae081301382",
+      "vendoredSHA256": "7e6b2cc7fe201061a5d86d8412812083c7d37680ebbb273feb226ae081301382"
+    },
+    "Sources/CNIOBoringSSL/crypto/evp/p_mldsa.cc": {
+      "upstreamSHA256": "2954a4b84ef617898d63cdeb36c407650e8c1f39768d5e781d67554feeda9c49",
+      "vendoredSHA256": "2954a4b84ef617898d63cdeb36c407650e8c1f39768d5e781d67554feeda9c49"
+    },
+    "Sources/CNIOBoringSSL/crypto/evp/p_mlkem.cc": {
+      "upstreamSHA256": "7d1d9092aaa7bc558be9e0ae6de91be003d27c74ee16958dcdc90e2fd97c55d2",
+      "vendoredSHA256": "7d1d9092aaa7bc558be9e0ae6de91be003d27c74ee16958dcdc90e2fd97c55d2"
+    },
+    "Sources/CNIOBoringSSL/crypto/evp/p_rsa.cc": {
+      "upstreamSHA256": "c89879b6a19d3baaa6720f390c1cc93bd45f3536a628b116d7dd916c9bb81e4c",
+      "vendoredSHA256": "c89879b6a19d3baaa6720f390c1cc93bd45f3536a628b116d7dd916c9bb81e4c"
+    },
+    "Sources/CNIOBoringSSL/crypto/evp/p_x25519.cc": {
+      "upstreamSHA256": "1dbaee9a41c8323e09985e5dca37bd30d686645c94cc9e866982039f3ea01d33",
+      "vendoredSHA256": "1dbaee9a41c8323e09985e5dca37bd30d686645c94cc9e866982039f3ea01d33"
+    },
+    "Sources/CNIOBoringSSL/crypto/evp/p_xwing.cc": {
+      "upstreamSHA256": "49366491516a735f3399cffd2c386dbecee99e8bc8073d898349e887d132f312",
+      "vendoredSHA256": "49366491516a735f3399cffd2c386dbecee99e8bc8073d898349e887d132f312"
+    },
+    "Sources/CNIOBoringSSL/crypto/evp/pbkdf.cc": {
+      "upstreamSHA256": "716b3fd9f2b6e070303ee68b02f88fe4eb1b13f8a2777c7c2230cea2c56d2f67",
+      "vendoredSHA256": "716b3fd9f2b6e070303ee68b02f88fe4eb1b13f8a2777c7c2230cea2c56d2f67"
+    },
+    "Sources/CNIOBoringSSL/crypto/evp/print.cc": {
+      "upstreamSHA256": "ffe11254a9e2f5e4bed6f261a67215353d66f0a6a35cb32abb3dac00bd5c71dd",
+      "vendoredSHA256": "ffe11254a9e2f5e4bed6f261a67215353d66f0a6a35cb32abb3dac00bd5c71dd"
+    },
+    "Sources/CNIOBoringSSL/crypto/evp/scrypt.cc": {
+      "upstreamSHA256": "c21739e14980f077bc35bb1abb79f6415d590399d14563e9a1e5681a78e510d8",
+      "vendoredSHA256": "c21739e14980f077bc35bb1abb79f6415d590399d14563e9a1e5681a78e510d8"
+    },
+    "Sources/CNIOBoringSSL/crypto/evp/sign.cc": {
+      "upstreamSHA256": "acfd5ac44d427ea39a54372bb466e44808330a27d1b665851679087db9ecf8f5",
+      "vendoredSHA256": "acfd5ac44d427ea39a54372bb466e44808330a27d1b665851679087db9ecf8f5"
+    },
+    "Sources/CNIOBoringSSL/crypto/ex_data.cc": {
+      "upstreamSHA256": "1811b6807888be6cba659326ec087b7de0c040351b5a5aaf9c7a4a4cbd035c18",
+      "vendoredSHA256": "1811b6807888be6cba659326ec087b7de0c040351b5a5aaf9c7a4a4cbd035c18"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/aes/aes.cc.inc": {
+      "upstreamSHA256": "8f87893bd18f2f9d271aad7884fbbf195da473ed5f1df8cac5cf011016b08d74",
+      "vendoredSHA256": "8f87893bd18f2f9d271aad7884fbbf195da473ed5f1df8cac5cf011016b08d74"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/aes/aes_nohw.cc.inc": {
+      "upstreamSHA256": "ebd235ffdbe7de8128c7011c1c01f443aff0e209cf36cac52d993e84f3c1ae13",
+      "vendoredSHA256": "ebd235ffdbe7de8128c7011c1c01f443aff0e209cf36cac52d993e84f3c1ae13"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/aes/cbc.cc.inc": {
+      "upstreamSHA256": "23792a8cb2ca87ccebe3d82b6c1c76f16d8805dd236aa93d7e712df76f311434",
+      "vendoredSHA256": "23792a8cb2ca87ccebe3d82b6c1c76f16d8805dd236aa93d7e712df76f311434"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/aes/cfb.cc.inc": {
+      "upstreamSHA256": "60cccb27a6b10c9ea057529567bf16b8645b0c59a2acc7ecc655f1b05449aaf8",
+      "vendoredSHA256": "60cccb27a6b10c9ea057529567bf16b8645b0c59a2acc7ecc655f1b05449aaf8"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/aes/ctr.cc.inc": {
+      "upstreamSHA256": "796abd9236509e594458d200fc4e4f648af1673df59d43d9d8ad543789501d1e",
+      "vendoredSHA256": "796abd9236509e594458d200fc4e4f648af1673df59d43d9d8ad543789501d1e"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/aes/gcm.cc.inc": {
+      "upstreamSHA256": "62aedc5e7c64cb42c93cf6ced3e324cebe77db10f7fb8e76105f737e690bda79",
+      "vendoredSHA256": "62aedc5e7c64cb42c93cf6ced3e324cebe77db10f7fb8e76105f737e690bda79"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/aes/gcm_nohw.cc.inc": {
+      "upstreamSHA256": "7411729f88482bf82c053794ac19d7fb988bce60b77ddc863b6b8b2d12f9abc1",
+      "vendoredSHA256": "7411729f88482bf82c053794ac19d7fb988bce60b77ddc863b6b8b2d12f9abc1"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/aes/internal.h": {
+      "upstreamSHA256": "1a616dbf71d1c7d96a070b2f8600cc76b7a3b50cecdd3a172832e8723bb027e2",
+      "vendoredSHA256": "1a616dbf71d1c7d96a070b2f8600cc76b7a3b50cecdd3a172832e8723bb027e2"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/aes/key_wrap.cc.inc": {
+      "upstreamSHA256": "ae39d6d38ffa5f05942a3ada9badb88e437e3842702d298361c593c02533b118",
+      "vendoredSHA256": "ae39d6d38ffa5f05942a3ada9badb88e437e3842702d298361c593c02533b118"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/aes/mode_wrappers.cc.inc": {
+      "upstreamSHA256": "68c61ff720c25b048cb1cf46523c2a78f3c8b2354a6cf4811bb8948d0aac566d",
+      "vendoredSHA256": "68c61ff720c25b048cb1cf46523c2a78f3c8b2354a6cf4811bb8948d0aac566d"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/aes/ofb.cc.inc": {
+      "upstreamSHA256": "28428fc2639d0351f36a3ba1214ba661b53956390a06352270c877ae6e5f89d7",
+      "vendoredSHA256": "28428fc2639d0351f36a3ba1214ba661b53956390a06352270c877ae6e5f89d7"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/bcm.cc": {
+      "upstreamSHA256": "fe489d5b870fc27d9f8c64a4d9a0fef41ebc89c44ddf3d6f63949904441601fc",
+      "vendoredSHA256": "fe489d5b870fc27d9f8c64a4d9a0fef41ebc89c44ddf3d6f63949904441601fc"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/bcm_interface.h": {
+      "upstreamSHA256": "a1b655ac98c48d2bb557a680bc022856d000d95ae61882b680231e9d11d4360e",
+      "vendoredSHA256": "a1b655ac98c48d2bb557a680bc022856d000d95ae61882b680231e9d11d4360e"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/bn/add.cc.inc": {
+      "upstreamSHA256": "245e496ecf830737b4aff9fdb99e03962311ba66dd4fb8f749026f0f5f41f2e0",
+      "vendoredSHA256": "245e496ecf830737b4aff9fdb99e03962311ba66dd4fb8f749026f0f5f41f2e0"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/bn/asm/x86_64-gcc.cc.inc": {
+      "upstreamSHA256": "85445b63cbcb229fb8b19442aa51ddc2e6e23049f5deb98684adc475f020dbea",
+      "vendoredSHA256": "85445b63cbcb229fb8b19442aa51ddc2e6e23049f5deb98684adc475f020dbea"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/bn/bn.cc.inc": {
+      "upstreamSHA256": "00470d23e3becf1c8a4061e60d2541391fc864469e19d377bf222055da368a0d",
+      "vendoredSHA256": "00470d23e3becf1c8a4061e60d2541391fc864469e19d377bf222055da368a0d"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/bn/bytes.cc.inc": {
+      "upstreamSHA256": "f3a6115334354442e1e068707168658e9665b7c33a28e80766274ade5a428ad3",
+      "vendoredSHA256": "f3a6115334354442e1e068707168658e9665b7c33a28e80766274ade5a428ad3"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/bn/cmp.cc.inc": {
+      "upstreamSHA256": "771f498886b638a65faeac2f2463a7d8a5252081408608ea57fe962da78194bd",
+      "vendoredSHA256": "771f498886b638a65faeac2f2463a7d8a5252081408608ea57fe962da78194bd"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/bn/ctx.cc.inc": {
+      "upstreamSHA256": "391360e2adfe43d5afe9b6e503294c73563c82d2fa60558b5b7accaabc12bf3b",
+      "vendoredSHA256": "391360e2adfe43d5afe9b6e503294c73563c82d2fa60558b5b7accaabc12bf3b"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/bn/div.cc.inc": {
+      "upstreamSHA256": "93fcbd4c954ce7a913b177949bb73fac512c3b1f626896872648030481d5d341",
+      "vendoredSHA256": "93fcbd4c954ce7a913b177949bb73fac512c3b1f626896872648030481d5d341"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/bn/div_extra.cc.inc": {
+      "upstreamSHA256": "044bf1cf4a6fa8f6ef14caa6ce29fd672343928a5a59e11f0bc273927c75e7ba",
+      "vendoredSHA256": "044bf1cf4a6fa8f6ef14caa6ce29fd672343928a5a59e11f0bc273927c75e7ba"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/bn/exponentiation.cc.inc": {
+      "upstreamSHA256": "a5d6b6dc7af32f874557c2ec7b386f3c88e0ffe90057a7e3df281475fbec59e2",
+      "vendoredSHA256": "a5d6b6dc7af32f874557c2ec7b386f3c88e0ffe90057a7e3df281475fbec59e2"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/bn/gcd.cc.inc": {
+      "upstreamSHA256": "992fac2f9bfcc2987e0bf0e83e33191b34e8783b2cb03acfed383a9bc3464eac",
+      "vendoredSHA256": "992fac2f9bfcc2987e0bf0e83e33191b34e8783b2cb03acfed383a9bc3464eac"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/bn/gcd_extra.cc.inc": {
+      "upstreamSHA256": "e45b1f90c9663bedb8b8c4e841b3a1ee92bc6debbd8b7ec3ef3365e0186df1ee",
+      "vendoredSHA256": "e45b1f90c9663bedb8b8c4e841b3a1ee92bc6debbd8b7ec3ef3365e0186df1ee"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/bn/generic.cc.inc": {
+      "upstreamSHA256": "88f521507fea0507633d465cf2ae4d67245c12d63cb34eeabc0e3723d5bf2cef",
+      "vendoredSHA256": "88f521507fea0507633d465cf2ae4d67245c12d63cb34eeabc0e3723d5bf2cef"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/bn/internal.h": {
+      "upstreamSHA256": "3a7f670af124f9e0687e7e61ffcb8c1db6b667fa7a1e2a16c8c1588616a6a51d",
+      "vendoredSHA256": "3a7f670af124f9e0687e7e61ffcb8c1db6b667fa7a1e2a16c8c1588616a6a51d"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/bn/jacobi.cc.inc": {
+      "upstreamSHA256": "4e1ad24f43bc990869d97a7bdc98bdf67f06658323b8b5737a7bb5fee6a97733",
+      "vendoredSHA256": "4e1ad24f43bc990869d97a7bdc98bdf67f06658323b8b5737a7bb5fee6a97733"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/bn/montgomery.cc.inc": {
+      "upstreamSHA256": "ece5bd3ea65f5ebc6f06288e5e3c5edd4ecfea2332d25f3e848f2a75681f7a49",
+      "vendoredSHA256": "ece5bd3ea65f5ebc6f06288e5e3c5edd4ecfea2332d25f3e848f2a75681f7a49"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/bn/montgomery_inv.cc.inc": {
+      "upstreamSHA256": "df15ef824486e7503ed0a889b6f269139c7a6bd50fd6dbe1507d064a1c75bdab",
+      "vendoredSHA256": "df15ef824486e7503ed0a889b6f269139c7a6bd50fd6dbe1507d064a1c75bdab"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/bn/mul.cc.inc": {
+      "upstreamSHA256": "ebc7afaa5b66f92ea01b232fec07cc8183c5bc8c7958ccd2b915c91b1e45036d",
+      "vendoredSHA256": "ebc7afaa5b66f92ea01b232fec07cc8183c5bc8c7958ccd2b915c91b1e45036d"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/bn/prime.cc.inc": {
+      "upstreamSHA256": "af7048109b409d58a2c655797ffad7edd099f404447b1478f12fab0276ec4757",
+      "vendoredSHA256": "af7048109b409d58a2c655797ffad7edd099f404447b1478f12fab0276ec4757"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/bn/random.cc.inc": {
+      "upstreamSHA256": "aaccb15f844e84313a03fac81fa49a37086e75a0abef40794d2381a6310cf925",
+      "vendoredSHA256": "aaccb15f844e84313a03fac81fa49a37086e75a0abef40794d2381a6310cf925"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/bn/rsaz_exp.cc.inc": {
+      "upstreamSHA256": "4498a6fea069f96eb4c75846e79e92828f23aaa053d42763644906417fed7a73",
+      "vendoredSHA256": "4498a6fea069f96eb4c75846e79e92828f23aaa053d42763644906417fed7a73"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/bn/rsaz_exp.h": {
+      "upstreamSHA256": "bbee17854904420041a32046b66c529e1f7896896dffb65f66b340557b04ad5a",
+      "vendoredSHA256": "bbee17854904420041a32046b66c529e1f7896896dffb65f66b340557b04ad5a"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/bn/shift.cc.inc": {
+      "upstreamSHA256": "8dc6b70f3a7067e9c78501350ec87643f3b2c5ac128ae3732ecf6a82ef2142c9",
+      "vendoredSHA256": "8dc6b70f3a7067e9c78501350ec87643f3b2c5ac128ae3732ecf6a82ef2142c9"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/bn/sqrt.cc.inc": {
+      "upstreamSHA256": "fe0df45c25448adb8e6563d8a4abeb443bedaffc3fcfbeae4ec44f01613a75a3",
+      "vendoredSHA256": "fe0df45c25448adb8e6563d8a4abeb443bedaffc3fcfbeae4ec44f01613a75a3"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/cipher/aead.cc.inc": {
+      "upstreamSHA256": "53e6fada2a5afe7a32f7fe7bb4a44103e3650409e54d83bbfaf966fd4bb5deba",
+      "vendoredSHA256": "53e6fada2a5afe7a32f7fe7bb4a44103e3650409e54d83bbfaf966fd4bb5deba"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/cipher/cipher.cc.inc": {
+      "upstreamSHA256": "9597b860840aff1fdc07d13a7d4f933f5634dc5ee928bd2a75ec2728e965db68",
+      "vendoredSHA256": "9597b860840aff1fdc07d13a7d4f933f5634dc5ee928bd2a75ec2728e965db68"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/cipher/e_aes.cc.inc": {
+      "upstreamSHA256": "00255395e225c14ca54ada2edb41244b76b0a743dd06348d81ef0be40f8679a4",
+      "vendoredSHA256": "00255395e225c14ca54ada2edb41244b76b0a743dd06348d81ef0be40f8679a4"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/cipher/e_aesccm.cc.inc": {
+      "upstreamSHA256": "cfa352173991332553145724e0ca7e8792b5dc6abf5c422a81a3827ad7d7fe5f",
+      "vendoredSHA256": "cfa352173991332553145724e0ca7e8792b5dc6abf5c422a81a3827ad7d7fe5f"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/cipher/internal.h": {
+      "upstreamSHA256": "0b053dc7f0028ff4b25460ecdf0898a25878ac762ffdcb34445ba50e93b04d74",
+      "vendoredSHA256": "0b053dc7f0028ff4b25460ecdf0898a25878ac762ffdcb34445ba50e93b04d74"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/cmac/cmac.cc.inc": {
+      "upstreamSHA256": "e50484fe190b58ddefd4a6362c6fb7a37cf72db8194d6b4052c5eb52d0eebfe2",
+      "vendoredSHA256": "e50484fe190b58ddefd4a6362c6fb7a37cf72db8194d6b4052c5eb52d0eebfe2"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/delocate.h": {
+      "upstreamSHA256": "e3fde17ed23934c76da1dd4ba921dfafc1427aa6cd5faa6b671203b72c9a63b4",
+      "vendoredSHA256": "e3fde17ed23934c76da1dd4ba921dfafc1427aa6cd5faa6b671203b72c9a63b4"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/dh/check.cc.inc": {
+      "upstreamSHA256": "9b7855c7ad8069d3cf265cb35bcde120e5ae13594892f8c9f3133ecc208bd2e2",
+      "vendoredSHA256": "9b7855c7ad8069d3cf265cb35bcde120e5ae13594892f8c9f3133ecc208bd2e2"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/dh/dh.cc.inc": {
+      "upstreamSHA256": "c14ef54024bc95950eafa44fefddf7e7b9317f29652200572278d8ee3e60b786",
+      "vendoredSHA256": "c14ef54024bc95950eafa44fefddf7e7b9317f29652200572278d8ee3e60b786"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/dh/internal.h": {
+      "upstreamSHA256": "849c527f42b1217d4d58f3a6c8edbc333dc38c0a3b02caf4f13074211657cd21",
+      "vendoredSHA256": "849c527f42b1217d4d58f3a6c8edbc333dc38c0a3b02caf4f13074211657cd21"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/digest/digest.cc.inc": {
+      "upstreamSHA256": "056e680f5992f150e9de6de020739d64f3da2f3777c9c5221e33e8e8bad52aec",
+      "vendoredSHA256": "056e680f5992f150e9de6de020739d64f3da2f3777c9c5221e33e8e8bad52aec"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/digest/digests.cc.inc": {
+      "upstreamSHA256": "7d8b8c55436c9739e94c93236d3d250b775d2813716ee8e805baa91fd58a08b0",
+      "vendoredSHA256": "7d8b8c55436c9739e94c93236d3d250b775d2813716ee8e805baa91fd58a08b0"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/digest/internal.h": {
+      "upstreamSHA256": "9b0e12b399325a6fcfe711bda587559fc710e328845d0b230dfc47934e482120",
+      "vendoredSHA256": "9b0e12b399325a6fcfe711bda587559fc710e328845d0b230dfc47934e482120"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/digest/md32_common.h": {
+      "upstreamSHA256": "47807685faba66e6ea4c84f40d99d5ecf8f1ade2066421e45545b80e067ac76b",
+      "vendoredSHA256": "47807685faba66e6ea4c84f40d99d5ecf8f1ade2066421e45545b80e067ac76b"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/digestsign/digestsign.cc.inc": {
+      "upstreamSHA256": "133914a1a4803a8920bb9d7f2f5624233112d2e16589e213341de2d8d09a7164",
+      "vendoredSHA256": "133914a1a4803a8920bb9d7f2f5624233112d2e16589e213341de2d8d09a7164"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/ec/builtin_curves.h": {
+      "upstreamSHA256": "711a02a0aaa010a66287168aa9432a1a226a264ef527f43f54b7b037c7841ce8",
+      "vendoredSHA256": "711a02a0aaa010a66287168aa9432a1a226a264ef527f43f54b7b037c7841ce8"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/ec/ec.cc.inc": {
+      "upstreamSHA256": "78a013e65cbe2e89bb3fa37dedc4101996d716f28cc5159bb6790be329d7c244",
+      "vendoredSHA256": "78a013e65cbe2e89bb3fa37dedc4101996d716f28cc5159bb6790be329d7c244"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/ec/ec_key.cc.inc": {
+      "upstreamSHA256": "56beaac2b74c38ae82374f7cb4e519025189f767c60e9d7da1ba8206e78d7dec",
+      "vendoredSHA256": "56beaac2b74c38ae82374f7cb4e519025189f767c60e9d7da1ba8206e78d7dec"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/ec/ec_montgomery.cc.inc": {
+      "upstreamSHA256": "5faf67a6c62e42598d42cdb584c2a205d4aaf138fa70fa2b6839c8a486cf540b",
+      "vendoredSHA256": "5faf67a6c62e42598d42cdb584c2a205d4aaf138fa70fa2b6839c8a486cf540b"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/ec/felem.cc.inc": {
+      "upstreamSHA256": "7694ff4b156b4015b1be10655f00c955ae08fb898de86c5b77471e08f36c76ff",
+      "vendoredSHA256": "7694ff4b156b4015b1be10655f00c955ae08fb898de86c5b77471e08f36c76ff"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/ec/internal.h": {
+      "upstreamSHA256": "5ad46c171b64be7a1ea9e0d2c9e65f07854e3c48895574cd826f9ea36d6f29cf",
+      "vendoredSHA256": "5ad46c171b64be7a1ea9e0d2c9e65f07854e3c48895574cd826f9ea36d6f29cf"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/ec/oct.cc.inc": {
+      "upstreamSHA256": "e625c84563b76e077fb531497f7c783cd01f38c627e6d7035d61ea8ee8964e4c",
+      "vendoredSHA256": "e625c84563b76e077fb531497f7c783cd01f38c627e6d7035d61ea8ee8964e4c"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/ec/p256-nistz-table.h": {
+      "upstreamSHA256": "b870af803543a374659df6ffa43058de2cf1bdbf1b9b0448ca1e308e857af6bd",
+      "vendoredSHA256": "b870af803543a374659df6ffa43058de2cf1bdbf1b9b0448ca1e308e857af6bd"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/ec/p256-nistz.cc.inc": {
+      "upstreamSHA256": "56dd5db80a45bbdb31cc5aec52bb4e75887000bec4b060a2cca04b443a36d91a",
+      "vendoredSHA256": "56dd5db80a45bbdb31cc5aec52bb4e75887000bec4b060a2cca04b443a36d91a"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/ec/p256-nistz.h": {
+      "upstreamSHA256": "1913118f4536e394a5402c167661f3526a797399e743c7780fc0749426c5a232",
+      "vendoredSHA256": "1913118f4536e394a5402c167661f3526a797399e743c7780fc0749426c5a232"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/ec/p256.cc.inc": {
+      "upstreamSHA256": "f120452775e5f9963547926e6556bb1b35ad735c60cdbc64945062cb2cae7918",
+      "vendoredSHA256": "f120452775e5f9963547926e6556bb1b35ad735c60cdbc64945062cb2cae7918"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/ec/p256_table.h": {
+      "upstreamSHA256": "08da299899fe944c293a9675cd463d8223c9ab858786384221bc191284c5c4c0",
+      "vendoredSHA256": "08da299899fe944c293a9675cd463d8223c9ab858786384221bc191284c5c4c0"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/ec/scalar.cc.inc": {
+      "upstreamSHA256": "7fe2543005be8d6ca1a159ff585f57c0281b10b047d3bce95a9720eaa5bb17a2",
+      "vendoredSHA256": "7fe2543005be8d6ca1a159ff585f57c0281b10b047d3bce95a9720eaa5bb17a2"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/ec/simple.cc.inc": {
+      "upstreamSHA256": "f16b195fe5e57b371b4f0f26f3f3aa32c8d1eeca1f6f4cc83a6733967c413f4e",
+      "vendoredSHA256": "f16b195fe5e57b371b4f0f26f3f3aa32c8d1eeca1f6f4cc83a6733967c413f4e"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/ec/simple_mul.cc.inc": {
+      "upstreamSHA256": "2dca4c3920eb379ff85fd9350537be19ddc45f31a4c88022bfd7f7e76557d932",
+      "vendoredSHA256": "2dca4c3920eb379ff85fd9350537be19ddc45f31a4c88022bfd7f7e76557d932"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/ec/util.cc.inc": {
+      "upstreamSHA256": "6ef25c99c3ab4ddc4083e932d54e7e0af33697cc411d30d22346043ec0f213e6",
+      "vendoredSHA256": "6ef25c99c3ab4ddc4083e932d54e7e0af33697cc411d30d22346043ec0f213e6"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/ec/wnaf.cc.inc": {
+      "upstreamSHA256": "f6355105bdf951f5577cb4d2ecb0c8da048a1b6ba18ae00ef4333326702012bb",
+      "vendoredSHA256": "f6355105bdf951f5577cb4d2ecb0c8da048a1b6ba18ae00ef4333326702012bb"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/ecdh/ecdh.cc.inc": {
+      "upstreamSHA256": "db2b5d0cbeb4808b34e7209962fc8494a1b1aaa336e2e00dfbc02b51c9088a7f",
+      "vendoredSHA256": "db2b5d0cbeb4808b34e7209962fc8494a1b1aaa336e2e00dfbc02b51c9088a7f"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/ecdsa/ecdsa.cc.inc": {
+      "upstreamSHA256": "78a87ae4f365d32d4a2979ecb3a0fbea5d71bd416977f11a153e78948000d67f",
+      "vendoredSHA256": "78a87ae4f365d32d4a2979ecb3a0fbea5d71bd416977f11a153e78948000d67f"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/ecdsa/internal.h": {
+      "upstreamSHA256": "04cdc862f7ea2c23c73a511212bb544d7bfa9c9bd9878b1f4cbb771066328c71",
+      "vendoredSHA256": "04cdc862f7ea2c23c73a511212bb544d7bfa9c9bd9878b1f4cbb771066328c71"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/entropy/internal.h": {
+      "upstreamSHA256": "74597552ad1e22a716c5374210c1a988071c96d6d237455069e9ba41550caa13",
+      "vendoredSHA256": "74597552ad1e22a716c5374210c1a988071c96d6d237455069e9ba41550caa13"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/entropy/jitter.cc.inc": {
+      "upstreamSHA256": "f715f0d33fe790437c96afe522921c5456a5c7402f589dfd422e2e9ed5277084",
+      "vendoredSHA256": "f715f0d33fe790437c96afe522921c5456a5c7402f589dfd422e2e9ed5277084"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/entropy/sha512.cc.inc": {
+      "upstreamSHA256": "a63d85e36147c4cf4c702ecfaf585fb420d73f8b4aab2d81e48f4c5e696bb5c8",
+      "vendoredSHA256": "a63d85e36147c4cf4c702ecfaf585fb420d73f8b4aab2d81e48f4c5e696bb5c8"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/fips_shared_support.cc": {
+      "upstreamSHA256": "572067cc546a2262738dfad97299e539b17210f4edf5c95789475d966e999536",
+      "vendoredSHA256": "572067cc546a2262738dfad97299e539b17210f4edf5c95789475d966e999536"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/hkdf/hkdf.cc.inc": {
+      "upstreamSHA256": "2662f4b8308cb375e51f40b37199218d97932903efa5a92634a06307e5656930",
+      "vendoredSHA256": "2662f4b8308cb375e51f40b37199218d97932903efa5a92634a06307e5656930"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/hmac/hmac.cc.inc": {
+      "upstreamSHA256": "3a716d9e32e4736a044d350fd3a906128e33c75dcd174476304eae31621178df",
+      "vendoredSHA256": "3a716d9e32e4736a044d350fd3a906128e33c75dcd174476304eae31621178df"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/keccak/internal.h": {
+      "upstreamSHA256": "4a458975dfa82da87007360c790eefb006148cf86f731dac7c94d82b34c95ba7",
+      "vendoredSHA256": "4a458975dfa82da87007360c790eefb006148cf86f731dac7c94d82b34c95ba7"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/keccak/keccak.cc.inc": {
+      "upstreamSHA256": "4fe34e9757f356125666cf7d60105987790b6812317b9b90c9439800321e2a0b",
+      "vendoredSHA256": "4fe34e9757f356125666cf7d60105987790b6812317b9b90c9439800321e2a0b"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/mldsa/fips_known_values.inc": {
+      "upstreamSHA256": "874f9467e36f87fec20c7d6d26c60c8811fbd435ca360dde03bef905b235f91f",
+      "vendoredSHA256": "874f9467e36f87fec20c7d6d26c60c8811fbd435ca360dde03bef905b235f91f"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/mldsa/mldsa.cc.inc": {
+      "upstreamSHA256": "ead91d96f3e0e446397f6ede0b4fcc40ae39ed6c32e7d81d2e206926054a33e7",
+      "vendoredSHA256": "ead91d96f3e0e446397f6ede0b4fcc40ae39ed6c32e7d81d2e206926054a33e7"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/mlkem/fips_known_values.inc": {
+      "upstreamSHA256": "41e434b2c8ec95286eb81fd47334ed0db3be650ed451cb31147c20199d0d2934",
+      "vendoredSHA256": "41e434b2c8ec95286eb81fd47334ed0db3be650ed451cb31147c20199d0d2934"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/mlkem/mlkem.cc.inc": {
+      "upstreamSHA256": "2bd382e8232810e4f246b132155bf5d09cfb1db19c8cb5c505caec94a9a9ab1a",
+      "vendoredSHA256": "2bd382e8232810e4f246b132155bf5d09cfb1db19c8cb5c505caec94a9a9ab1a"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/rand/android_entropy_client.cc.inc": {
+      "upstreamSHA256": "dbb74f0627de638da7a0958d815137d4a271223d5dc3f21bab6be965a23df801",
+      "vendoredSHA256": "dbb74f0627de638da7a0958d815137d4a271223d5dc3f21bab6be965a23df801"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/rand/ctrdrbg.cc.inc": {
+      "upstreamSHA256": "c98bb0d2a6381bed0037897eec3cfdc959b999a3ce1d03c2f12316c07675269c",
+      "vendoredSHA256": "c98bb0d2a6381bed0037897eec3cfdc959b999a3ce1d03c2f12316c07675269c"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/rand/internal.h": {
+      "upstreamSHA256": "f18333116bf5fd1b0c47a1fceee2e14c69f4e3332f79fd78d710531a5ccbb480",
+      "vendoredSHA256": "f18333116bf5fd1b0c47a1fceee2e14c69f4e3332f79fd78d710531a5ccbb480"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/rand/rand.cc.inc": {
+      "upstreamSHA256": "dc078a431d31ed101dbee23bc0efbabeed000a7428f7831eee4956f212f39818",
+      "vendoredSHA256": "dc078a431d31ed101dbee23bc0efbabeed000a7428f7831eee4956f212f39818"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/rsa/internal.h": {
+      "upstreamSHA256": "b730382849927680efd6684fef95af80fc9bdcd69e7d1da0afb2aea03288fe47",
+      "vendoredSHA256": "b730382849927680efd6684fef95af80fc9bdcd69e7d1da0afb2aea03288fe47"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/rsa/padding.cc.inc": {
+      "upstreamSHA256": "ff192730a849cd2170bf5218734a619eaa19e046cdaff151ab5a723199c907de",
+      "vendoredSHA256": "ff192730a849cd2170bf5218734a619eaa19e046cdaff151ab5a723199c907de"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/rsa/rsa.cc.inc": {
+      "upstreamSHA256": "d319ecc95a36d9ca4876eb250f870ed05d3f6d71baaca27f4b88da419fda2bf1",
+      "vendoredSHA256": "d319ecc95a36d9ca4876eb250f870ed05d3f6d71baaca27f4b88da419fda2bf1"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/rsa/rsa_impl.cc.inc": {
+      "upstreamSHA256": "8b500e5dca3157346cd36575f597b1c3aca6e059a932d5d701ca40d8f74c4142",
+      "vendoredSHA256": "8b500e5dca3157346cd36575f597b1c3aca6e059a932d5d701ca40d8f74c4142"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/self_check/fips.cc.inc": {
+      "upstreamSHA256": "82b33bae9b03dc9853d00034860ccf0c95077d2e8f399aeac62baaec31f8d0a6",
+      "vendoredSHA256": "82b33bae9b03dc9853d00034860ccf0c95077d2e8f399aeac62baaec31f8d0a6"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/self_check/self_check.cc.inc": {
+      "upstreamSHA256": "8350194851e6cb90a6da94568150178a54d2def70f2016e358d3facc15133ba7",
+      "vendoredSHA256": "8350194851e6cb90a6da94568150178a54d2def70f2016e358d3facc15133ba7"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/service_indicator/internal.h": {
+      "upstreamSHA256": "00063b24aaeb3057e85f74105f9f46e2203252bc6d976b2b4ed2b5b324f179a4",
+      "vendoredSHA256": "00063b24aaeb3057e85f74105f9f46e2203252bc6d976b2b4ed2b5b324f179a4"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/service_indicator/service_indicator.cc.inc": {
+      "upstreamSHA256": "01bce4f854c00070f5544bc9e8b6bfd29a48d7201519ba7ff6d4976c60a43d3e",
+      "vendoredSHA256": "01bce4f854c00070f5544bc9e8b6bfd29a48d7201519ba7ff6d4976c60a43d3e"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/sha/internal.h": {
+      "upstreamSHA256": "fbea3e62a5ce09f726c6e86c14c2894adf074613f458c7e9d46ae0e749b801b3",
+      "vendoredSHA256": "fbea3e62a5ce09f726c6e86c14c2894adf074613f458c7e9d46ae0e749b801b3"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/sha/sha1.cc.inc": {
+      "upstreamSHA256": "c14fbaba0297a8786d6335c5221cb8c259acc3b3605b2d84735961a17ee25701",
+      "vendoredSHA256": "c14fbaba0297a8786d6335c5221cb8c259acc3b3605b2d84735961a17ee25701"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/sha/sha256.cc.inc": {
+      "upstreamSHA256": "30708c671c7233fafe44c278d4f7478889345771f55c536b8d858750ff48ff4b",
+      "vendoredSHA256": "30708c671c7233fafe44c278d4f7478889345771f55c536b8d858750ff48ff4b"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/sha/sha512.cc.inc": {
+      "upstreamSHA256": "cddce47e753736bb8106334f3475e3c191c6b2ab9dc8446f79a1f76d6eb2393b",
+      "vendoredSHA256": "cddce47e753736bb8106334f3475e3c191c6b2ab9dc8446f79a1f76d6eb2393b"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/slhdsa/address.h": {
+      "upstreamSHA256": "722a6aa6755d603f2f368e36f13241e89d8dbedad590249c14f23dfe822baa15",
+      "vendoredSHA256": "722a6aa6755d603f2f368e36f13241e89d8dbedad590249c14f23dfe822baa15"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/slhdsa/fips_known_values.inc": {
+      "upstreamSHA256": "753dec3502077fad60bf4feaa384fac7fd1e377143f55578a261171f22a02d74",
+      "vendoredSHA256": "753dec3502077fad60bf4feaa384fac7fd1e377143f55578a261171f22a02d74"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/slhdsa/fors.cc.inc": {
+      "upstreamSHA256": "af4da971bde5185594924d516ba2324b1392e69809626982f5343f1beb2df36b",
+      "vendoredSHA256": "af4da971bde5185594924d516ba2324b1392e69809626982f5343f1beb2df36b"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/slhdsa/fors.h": {
+      "upstreamSHA256": "3aecb8234584bba1754c34d4a0942c65241bcf785645c443610c76a6960ee482",
+      "vendoredSHA256": "3aecb8234584bba1754c34d4a0942c65241bcf785645c443610c76a6960ee482"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/slhdsa/merkle.cc.inc": {
+      "upstreamSHA256": "3a30dac7e51d19a4bbccc8687e096f06decd92356b1a246ff134e36c6a5e37b7",
+      "vendoredSHA256": "3a30dac7e51d19a4bbccc8687e096f06decd92356b1a246ff134e36c6a5e37b7"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/slhdsa/merkle.h": {
+      "upstreamSHA256": "9c58a65bd4503f0b456d987fb18442e34a597e5c01b7428ecd73591411dd5029",
+      "vendoredSHA256": "9c58a65bd4503f0b456d987fb18442e34a597e5c01b7428ecd73591411dd5029"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/slhdsa/params.h": {
+      "upstreamSHA256": "1af616971e869ce669fcf63ff3fad16f3cf65b73aeb948a15dc39b3ee0307805",
+      "vendoredSHA256": "1af616971e869ce669fcf63ff3fad16f3cf65b73aeb948a15dc39b3ee0307805"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/slhdsa/slhdsa.cc.inc": {
+      "upstreamSHA256": "c4e0a71094813d53c1551ea39583388939995a6168eeee8f1c45aff9ec7e1c2c",
+      "vendoredSHA256": "c4e0a71094813d53c1551ea39583388939995a6168eeee8f1c45aff9ec7e1c2c"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/slhdsa/thash.cc.inc": {
+      "upstreamSHA256": "35510008e4634213d7039762e4b5e3d472598af66eba53da2473d6379209ece7",
+      "vendoredSHA256": "35510008e4634213d7039762e4b5e3d472598af66eba53da2473d6379209ece7"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/slhdsa/thash.h": {
+      "upstreamSHA256": "1c97b40e7192d070750e390e6e5edc895ec83e2228a4134c1e1ad568d8aff6e0",
+      "vendoredSHA256": "1c97b40e7192d070750e390e6e5edc895ec83e2228a4134c1e1ad568d8aff6e0"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/slhdsa/wots.cc.inc": {
+      "upstreamSHA256": "c60d5e110af6eb9a4e8a606d012feb340c9bdf7e5b412bc97190eb47e88869ae",
+      "vendoredSHA256": "c60d5e110af6eb9a4e8a606d012feb340c9bdf7e5b412bc97190eb47e88869ae"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/slhdsa/wots.h": {
+      "upstreamSHA256": "e2603f944971c967f0aae1bd8440931a09444e968b423494ab3db836d860f58b",
+      "vendoredSHA256": "e2603f944971c967f0aae1bd8440931a09444e968b423494ab3db836d860f58b"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/tls/internal.h": {
+      "upstreamSHA256": "9199d49d5e52f18c746149544a1bb825559617e2b147452d9fc6564a36cfe2d5",
+      "vendoredSHA256": "9199d49d5e52f18c746149544a1bb825559617e2b147452d9fc6564a36cfe2d5"
+    },
+    "Sources/CNIOBoringSSL/crypto/fipsmodule/tls/kdf.cc.inc": {
+      "upstreamSHA256": "4731a2152eb70f1236fe1f693b26acd929d56dce76d0652db13971ff17971423",
+      "vendoredSHA256": "4731a2152eb70f1236fe1f693b26acd929d56dce76d0652db13971ff17971423"
+    },
+    "Sources/CNIOBoringSSL/crypto/fuzzer_mode.cc": {
+      "upstreamSHA256": "0bcf0bf3f4463c8c09ab33a916ad9fff650321c9828386a2ed9ceb95ef05da9a",
+      "vendoredSHA256": "0bcf0bf3f4463c8c09ab33a916ad9fff650321c9828386a2ed9ceb95ef05da9a"
+    },
+    "Sources/CNIOBoringSSL/crypto/hpke/hpke.cc": {
+      "upstreamSHA256": "c0f8b3cba711f84478a03b8e2f116e3e9010a1b34e7d60c86e10448da8c2ce39",
+      "vendoredSHA256": "c0f8b3cba711f84478a03b8e2f116e3e9010a1b34e7d60c86e10448da8c2ce39"
+    },
+    "Sources/CNIOBoringSSL/crypto/hrss/asm/poly_rq_mul.S": {
+      "upstreamSHA256": "f501c54ee5adaae1e3dfde88c205672b748a338843825f6f4640e4c60cbe41b0",
+      "vendoredSHA256": "f501c54ee5adaae1e3dfde88c205672b748a338843825f6f4640e4c60cbe41b0"
+    },
+    "Sources/CNIOBoringSSL/crypto/hrss/hrss.cc": {
+      "upstreamSHA256": "6f0cd4ad92ccf0e3ee8de47b6600d720d940b2c545855155381442cfa5126481",
+      "vendoredSHA256": "6f0cd4ad92ccf0e3ee8de47b6600d720d940b2c545855155381442cfa5126481"
+    },
+    "Sources/CNIOBoringSSL/crypto/hrss/internal.h": {
+      "upstreamSHA256": "dce9f2320058624882228203ee6448dd1827a933e958052d2fdc8a77727b6c82",
+      "vendoredSHA256": "dce9f2320058624882228203ee6448dd1827a933e958052d2fdc8a77727b6c82"
+    },
+    "Sources/CNIOBoringSSL/crypto/internal.h": {
+      "upstreamSHA256": "1906120e49f5ed903176957a9d12f9dc49e98d18e53ea7db20e527755e709e27",
+      "vendoredSHA256": "1906120e49f5ed903176957a9d12f9dc49e98d18e53ea7db20e527755e709e27"
+    },
+    "Sources/CNIOBoringSSL/crypto/lhash/internal.h": {
+      "upstreamSHA256": "38ec1addc870416eff63b073c2b6e26f3cb02d61a963653ec817486569992199",
+      "vendoredSHA256": "38ec1addc870416eff63b073c2b6e26f3cb02d61a963653ec817486569992199"
+    },
+    "Sources/CNIOBoringSSL/crypto/lhash/lhash.cc": {
+      "upstreamSHA256": "166dc38203a8405606e3ef0bf36982ab632bbd5782631c06e0c7005043f1c5e7",
+      "vendoredSHA256": "166dc38203a8405606e3ef0bf36982ab632bbd5782631c06e0c7005043f1c5e7"
+    },
+    "Sources/CNIOBoringSSL/crypto/md4/md4.cc": {
+      "upstreamSHA256": "30d2a4922f279884bd19aaab59d00512753c3eaa8c2aa34bfdda74e96f3983e8",
+      "vendoredSHA256": "30d2a4922f279884bd19aaab59d00512753c3eaa8c2aa34bfdda74e96f3983e8"
+    },
+    "Sources/CNIOBoringSSL/crypto/md5/internal.h": {
+      "upstreamSHA256": "908ad511da7847dbd23f608cdb20a9d26de52e4e64d6c9ff1a5d3fa38c25a93d",
+      "vendoredSHA256": "908ad511da7847dbd23f608cdb20a9d26de52e4e64d6c9ff1a5d3fa38c25a93d"
+    },
+    "Sources/CNIOBoringSSL/crypto/md5/md5.cc": {
+      "upstreamSHA256": "dfba8735b9a591ced856cbaaa99275a55fba65f2e1b52e61d26587709a012195",
+      "vendoredSHA256": "dfba8735b9a591ced856cbaaa99275a55fba65f2e1b52e61d26587709a012195"
+    },
+    "Sources/CNIOBoringSSL/crypto/mem.cc": {
+      "upstreamSHA256": "0e1d553b4934a613ffaf948edace5c6ce33449d6d848c0fa33d01c3ec0e3e379",
+      "vendoredSHA256": "0e1d553b4934a613ffaf948edace5c6ce33449d6d848c0fa33d01c3ec0e3e379"
+    },
+    "Sources/CNIOBoringSSL/crypto/mem_internal.h": {
+      "upstreamSHA256": "9e897ab07bed4d1bac7ffc2d57ff4a3e91cbc48db7c8c2a6f0246bb65ca87d6d",
+      "vendoredSHA256": "9e897ab07bed4d1bac7ffc2d57ff4a3e91cbc48db7c8c2a6f0246bb65ca87d6d"
+    },
+    "Sources/CNIOBoringSSL/crypto/mldsa/mldsa.cc": {
+      "upstreamSHA256": "a4704a7c6187de9c1c14862c9e0087c625b0356041473662ca1b80735d9d0159",
+      "vendoredSHA256": "a4704a7c6187de9c1c14862c9e0087c625b0356041473662ca1b80735d9d0159"
+    },
+    "Sources/CNIOBoringSSL/crypto/mlkem/mlkem.cc": {
+      "upstreamSHA256": "701b10aa5a9bd825e0fe2b42eb39ccec872b1b9c0e32c7d7e16e9ad1433592c1",
+      "vendoredSHA256": "701b10aa5a9bd825e0fe2b42eb39ccec872b1b9c0e32c7d7e16e9ad1433592c1"
+    },
+    "Sources/CNIOBoringSSL/crypto/obj/obj.cc": {
+      "upstreamSHA256": "0085d04b2a2a308e0e9cc9875d0aff51fe109221498e357b3026c8b03064786b",
+      "vendoredSHA256": "0085d04b2a2a308e0e9cc9875d0aff51fe109221498e357b3026c8b03064786b"
+    },
+    "Sources/CNIOBoringSSL/crypto/obj/obj_dat.h": {
+      "upstreamSHA256": "ccf1e75c36ffdab186d72e8c27eafbe833ad4afcd7888a36623eadb608b09c73",
+      "vendoredSHA256": "ccf1e75c36ffdab186d72e8c27eafbe833ad4afcd7888a36623eadb608b09c73"
+    },
+    "Sources/CNIOBoringSSL/crypto/obj/obj_xref.cc": {
+      "upstreamSHA256": "eaf8c5bceb9b8a80b0140ab481f5c2c37cd5e44f81a4dde02d32056a9d9f1cdd",
+      "vendoredSHA256": "eaf8c5bceb9b8a80b0140ab481f5c2c37cd5e44f81a4dde02d32056a9d9f1cdd"
+    },
+    "Sources/CNIOBoringSSL/crypto/params_internal.h": {
+      "upstreamSHA256": "25f8e9273d5d5a3edad817ae6319b4292320d513aad1a0efc357f759e74964b0",
+      "vendoredSHA256": "25f8e9273d5d5a3edad817ae6319b4292320d513aad1a0efc357f759e74964b0"
+    },
+    "Sources/CNIOBoringSSL/crypto/pem/internal.h": {
+      "upstreamSHA256": "9e12d44622c4f81df955ab2f22218f21f91d5b941f3f78b4c1df22f6e5ea4b3e",
+      "vendoredSHA256": "9e12d44622c4f81df955ab2f22218f21f91d5b941f3f78b4c1df22f6e5ea4b3e"
+    },
+    "Sources/CNIOBoringSSL/crypto/pem/pem_all.cc": {
+      "upstreamSHA256": "1433d6712eeb0e9aa9fcefdeef9080ba1ed88f2edf9e1d5ae4f75207ab24fef7",
+      "vendoredSHA256": "1433d6712eeb0e9aa9fcefdeef9080ba1ed88f2edf9e1d5ae4f75207ab24fef7"
+    },
+    "Sources/CNIOBoringSSL/crypto/pem/pem_info.cc": {
+      "upstreamSHA256": "9678ad1c778def7adb06eb87bcb2f0eb48232f765877ad3e044fda4141c0faa6",
+      "vendoredSHA256": "9678ad1c778def7adb06eb87bcb2f0eb48232f765877ad3e044fda4141c0faa6"
+    },
+    "Sources/CNIOBoringSSL/crypto/pem/pem_lib.cc": {
+      "upstreamSHA256": "a95fa05b627b2910e726c458bcab179bd942557a6ded579569c40d3df9826f8c",
+      "vendoredSHA256": "a95fa05b627b2910e726c458bcab179bd942557a6ded579569c40d3df9826f8c"
+    },
+    "Sources/CNIOBoringSSL/crypto/pem/pem_oth.cc": {
+      "upstreamSHA256": "1536ae708b088508c5fc29d3f92cbf85d61d4790680064b761bcbd2d4e71f798",
+      "vendoredSHA256": "1536ae708b088508c5fc29d3f92cbf85d61d4790680064b761bcbd2d4e71f798"
+    },
+    "Sources/CNIOBoringSSL/crypto/pem/pem_pk8.cc": {
+      "upstreamSHA256": "c637fb62a777ae40766ad408b838be4ca9fcb75d03fd0ccfc1ad210b5fcf4baf",
+      "vendoredSHA256": "c637fb62a777ae40766ad408b838be4ca9fcb75d03fd0ccfc1ad210b5fcf4baf"
+    },
+    "Sources/CNIOBoringSSL/crypto/pem/pem_pkey.cc": {
+      "upstreamSHA256": "14b595f018f80408e43d6375c8e14c9e32f3ac698b38699c54fecba37374e4d7",
+      "vendoredSHA256": "14b595f018f80408e43d6375c8e14c9e32f3ac698b38699c54fecba37374e4d7"
+    },
+    "Sources/CNIOBoringSSL/crypto/pem/pem_x509.cc": {
+      "upstreamSHA256": "785b91b8edc12208d694953bd4f34fa0f50d14980e0da2fd1a5f94885311ba36",
+      "vendoredSHA256": "785b91b8edc12208d694953bd4f34fa0f50d14980e0da2fd1a5f94885311ba36"
+    },
+    "Sources/CNIOBoringSSL/crypto/pem/pem_xaux.cc": {
+      "upstreamSHA256": "45530b9afae541c6fbe43bfe5d9abe93473742cf3d3568a06eb075b35756c19a",
+      "vendoredSHA256": "45530b9afae541c6fbe43bfe5d9abe93473742cf3d3568a06eb075b35756c19a"
+    },
+    "Sources/CNIOBoringSSL/crypto/pkcs7/internal.h": {
+      "upstreamSHA256": "71d625aa810fe681e554479d897c1637ed9a196a8595997dbd8997fd58591120",
+      "vendoredSHA256": "71d625aa810fe681e554479d897c1637ed9a196a8595997dbd8997fd58591120"
+    },
+    "Sources/CNIOBoringSSL/crypto/pkcs7/pkcs7.cc": {
+      "upstreamSHA256": "4ac1366f48b6d06a71f691572dd13ace0151ef096329f9c74a87bf4f4b2c7e37",
+      "vendoredSHA256": "4ac1366f48b6d06a71f691572dd13ace0151ef096329f9c74a87bf4f4b2c7e37"
+    },
+    "Sources/CNIOBoringSSL/crypto/pkcs7/pkcs7_x509.cc": {
+      "upstreamSHA256": "8f846b9c3ae294d52b0d45f1adbb336beafacfecfa62540fb72d64f79cb30fc4",
+      "vendoredSHA256": "8f846b9c3ae294d52b0d45f1adbb336beafacfecfa62540fb72d64f79cb30fc4"
+    },
+    "Sources/CNIOBoringSSL/crypto/pkcs8/internal.h": {
+      "upstreamSHA256": "82efb731e4c900412fe0aa62241cb33000054527942dc264e51df95641d43760",
+      "vendoredSHA256": "82efb731e4c900412fe0aa62241cb33000054527942dc264e51df95641d43760"
+    },
+    "Sources/CNIOBoringSSL/crypto/pkcs8/p5_pbev2.cc": {
+      "upstreamSHA256": "880ba266d663b1aa653061f83d7515aab0df8a3b4db86a97cc0f4fcb5471ff23",
+      "vendoredSHA256": "880ba266d663b1aa653061f83d7515aab0df8a3b4db86a97cc0f4fcb5471ff23"
+    },
+    "Sources/CNIOBoringSSL/crypto/pkcs8/pkcs8.cc": {
+      "upstreamSHA256": "4c20669a97c539dd02cd97e042ec739fa049fdbfc61da8704a9f713818fd50e7",
+      "vendoredSHA256": "4c20669a97c539dd02cd97e042ec739fa049fdbfc61da8704a9f713818fd50e7"
+    },
+    "Sources/CNIOBoringSSL/crypto/pkcs8/pkcs8_x509.cc": {
+      "upstreamSHA256": "c31872d084f0ba197dfecb60bc1c47190ec0607024f29ba629c407d467ac6b26",
+      "vendoredSHA256": "c31872d084f0ba197dfecb60bc1c47190ec0607024f29ba629c407d467ac6b26"
+    },
+    "Sources/CNIOBoringSSL/crypto/poly1305/internal.h": {
+      "upstreamSHA256": "c32d0f1bd43ac697592772c2a2e1837f138a74711c47973d217591881bec5578",
+      "vendoredSHA256": "c32d0f1bd43ac697592772c2a2e1837f138a74711c47973d217591881bec5578"
+    },
+    "Sources/CNIOBoringSSL/crypto/poly1305/poly1305.cc": {
+      "upstreamSHA256": "ff08ccf212fb867defc915033ccf09a40819ebcd5589e20b81854fc63187d21a",
+      "vendoredSHA256": "ff08ccf212fb867defc915033ccf09a40819ebcd5589e20b81854fc63187d21a"
+    },
+    "Sources/CNIOBoringSSL/crypto/poly1305/poly1305_arm.cc": {
+      "upstreamSHA256": "1d79f46f49c4737b96f10041164f59b392ca1321a6ec3876aa28f4431701e150",
+      "vendoredSHA256": "1d79f46f49c4737b96f10041164f59b392ca1321a6ec3876aa28f4431701e150"
+    },
+    "Sources/CNIOBoringSSL/crypto/poly1305/poly1305_arm_asm.S": {
+      "upstreamSHA256": "9855736af233204139b50ce3fd173b80863cfccfc457859bb87b44ecfa0ae053",
+      "vendoredSHA256": "9855736af233204139b50ce3fd173b80863cfccfc457859bb87b44ecfa0ae053"
+    },
+    "Sources/CNIOBoringSSL/crypto/poly1305/poly1305_vec.cc": {
+      "upstreamSHA256": "2dcd60a6aeb705c9de03c8250d0b56fb37e73aaab3c50a7adbd25886bdef5469",
+      "vendoredSHA256": "2dcd60a6aeb705c9de03c8250d0b56fb37e73aaab3c50a7adbd25886bdef5469"
+    },
+    "Sources/CNIOBoringSSL/crypto/pool/internal.h": {
+      "upstreamSHA256": "279c726defea5a3d6aa8de2432231089627fc75ca24137cd9b2d3dbe56f7a2f3",
+      "vendoredSHA256": "279c726defea5a3d6aa8de2432231089627fc75ca24137cd9b2d3dbe56f7a2f3"
+    },
+    "Sources/CNIOBoringSSL/crypto/pool/pool.cc": {
+      "upstreamSHA256": "79a8b08cbb821a5dd79cbfdc47d4192bff9194e729c416141dc8648316d80dda",
+      "vendoredSHA256": "79a8b08cbb821a5dd79cbfdc47d4192bff9194e729c416141dc8648316d80dda"
+    },
+    "Sources/CNIOBoringSSL/crypto/rand/deterministic.cc": {
+      "upstreamSHA256": "d223c4ed877acbc7587790be307041762eae346d0cab3bac7af1f2356af72c0c",
+      "vendoredSHA256": "d223c4ed877acbc7587790be307041762eae346d0cab3bac7af1f2356af72c0c"
+    },
+    "Sources/CNIOBoringSSL/crypto/rand/fork_detect.cc": {
+      "upstreamSHA256": "f1a1ebc6550329c6e19ea96f2bc071300ee207ea1a8e6f3c67791bd730c0afbd",
+      "vendoredSHA256": "f1a1ebc6550329c6e19ea96f2bc071300ee207ea1a8e6f3c67791bd730c0afbd"
+    },
+    "Sources/CNIOBoringSSL/crypto/rand/forkunsafe.cc": {
+      "upstreamSHA256": "fbd769cb299c4c278023196cd3fa9103d70667976dfd312c84a2eb813b4eec1c",
+      "vendoredSHA256": "fbd769cb299c4c278023196cd3fa9103d70667976dfd312c84a2eb813b4eec1c"
+    },
+    "Sources/CNIOBoringSSL/crypto/rand/getentropy.cc": {
+      "upstreamSHA256": "ffd2555dd4a62b80ddae13ec9917276f65b17450ac3d34469871cbab392f4f2f",
+      "vendoredSHA256": "ffd2555dd4a62b80ddae13ec9917276f65b17450ac3d34469871cbab392f4f2f"
+    },
+    "Sources/CNIOBoringSSL/crypto/rand/internal.h": {
+      "upstreamSHA256": "8b724b99b24f77ce9eef8490fc7666ba7154d0093f05365b20e2034dab949da8",
+      "vendoredSHA256": "8b724b99b24f77ce9eef8490fc7666ba7154d0093f05365b20e2034dab949da8"
+    },
+    "Sources/CNIOBoringSSL/crypto/rand/ios.cc": {
+      "upstreamSHA256": "675181d5425ccdadf955c5fd86c955981d345d088a16ff4e7599d98dc3eebc31",
+      "vendoredSHA256": "675181d5425ccdadf955c5fd86c955981d345d088a16ff4e7599d98dc3eebc31"
+    },
+    "Sources/CNIOBoringSSL/crypto/rand/passive.cc": {
+      "upstreamSHA256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "vendoredSHA256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "Sources/CNIOBoringSSL/crypto/rand/rand.cc": {
+      "upstreamSHA256": "2a7723f540093313a2aa866c0cc8b3afd03b31759b1d164945b9f7fa1a0140a4",
+      "vendoredSHA256": "2a7723f540093313a2aa866c0cc8b3afd03b31759b1d164945b9f7fa1a0140a4"
+    },
+    "Sources/CNIOBoringSSL/crypto/rand/trusty.cc": {
+      "upstreamSHA256": "4f7d4368c03cdf3b3063b4ed0ee77744446b7f23b43f3086b20417ea15915eb6",
+      "vendoredSHA256": "4f7d4368c03cdf3b3063b4ed0ee77744446b7f23b43f3086b20417ea15915eb6"
+    },
+    "Sources/CNIOBoringSSL/crypto/rand/urandom.cc": {
+      "upstreamSHA256": "d2ff822bc2c5c80024d13f93af11246ec50457a21b173b0af45b0cf815effee5",
+      "vendoredSHA256": "d2ff822bc2c5c80024d13f93af11246ec50457a21b173b0af45b0cf815effee5"
+    },
+    "Sources/CNIOBoringSSL/crypto/rand/windows.cc": {
+      "upstreamSHA256": "7a42950e60b46be62c82c6543a261b54d337f060653939ed43f0421c2bbcc948",
+      "vendoredSHA256": "7a42950e60b46be62c82c6543a261b54d337f060653939ed43f0421c2bbcc948"
+    },
+    "Sources/CNIOBoringSSL/crypto/rc4/rc4.cc": {
+      "upstreamSHA256": "1430fe4140a077fe91f78341b8dcc6dd3d9ca7850d18cb937df3e3b0e983484f",
+      "vendoredSHA256": "1430fe4140a077fe91f78341b8dcc6dd3d9ca7850d18cb937df3e3b0e983484f"
+    },
+    "Sources/CNIOBoringSSL/crypto/refcount.cc": {
+      "upstreamSHA256": "7098aa404bb5e7dce02364e99cf15c5021f60cd26a74aba821c2847c4525d59c",
+      "vendoredSHA256": "7098aa404bb5e7dce02364e99cf15c5021f60cd26a74aba821c2847c4525d59c"
+    },
+    "Sources/CNIOBoringSSL/crypto/rsa/internal.h": {
+      "upstreamSHA256": "e775dc69bf63799357b3cbea12f0541a1ce1cf428706d7308921d89095e4fb82",
+      "vendoredSHA256": "e775dc69bf63799357b3cbea12f0541a1ce1cf428706d7308921d89095e4fb82"
+    },
+    "Sources/CNIOBoringSSL/crypto/rsa/rsa_asn1.cc": {
+      "upstreamSHA256": "88dc4c2b5940aa8c70d34d5fbfcfe48e6fe985634d03c7fee7aba4e186fcfadb",
+      "vendoredSHA256": "88dc4c2b5940aa8c70d34d5fbfcfe48e6fe985634d03c7fee7aba4e186fcfadb"
+    },
+    "Sources/CNIOBoringSSL/crypto/rsa/rsa_crypt.cc": {
+      "upstreamSHA256": "6ae7a7fc25763dd61aea0caddac23e5961def615611b339cb09920807520d7de",
+      "vendoredSHA256": "6ae7a7fc25763dd61aea0caddac23e5961def615611b339cb09920807520d7de"
+    },
+    "Sources/CNIOBoringSSL/crypto/rsa/rsa_extra.cc": {
+      "upstreamSHA256": "092d215e116df2eb247e811c94323701caf3e2d83bfee59bcab4ebf6a163cdd2",
+      "vendoredSHA256": "092d215e116df2eb247e811c94323701caf3e2d83bfee59bcab4ebf6a163cdd2"
+    },
+    "Sources/CNIOBoringSSL/crypto/rsa/rsa_print.cc": {
+      "upstreamSHA256": "b4317e2f1e05ce1172518d0eca954d27ba5d10d00d958046f46bc19e6289d704",
+      "vendoredSHA256": "b4317e2f1e05ce1172518d0eca954d27ba5d10d00d958046f46bc19e6289d704"
+    },
+    "Sources/CNIOBoringSSL/crypto/sha/sha1.cc": {
+      "upstreamSHA256": "fe41badcd06611619f6b81e953df49e51c378a83824c12aa7b3532390278f65a",
+      "vendoredSHA256": "fe41badcd06611619f6b81e953df49e51c378a83824c12aa7b3532390278f65a"
+    },
+    "Sources/CNIOBoringSSL/crypto/sha/sha256.cc": {
+      "upstreamSHA256": "a4f7bb4dd814c709e44bb78612d9605731d40c974deab5dc28a10957e0ab55ce",
+      "vendoredSHA256": "a4f7bb4dd814c709e44bb78612d9605731d40c974deab5dc28a10957e0ab55ce"
+    },
+    "Sources/CNIOBoringSSL/crypto/sha/sha512.cc": {
+      "upstreamSHA256": "b82cfdbc585fc40cd73e832bbdcb947318bdee8f2eb3c6fc7e9a91a3d0e1eaf8",
+      "vendoredSHA256": "b82cfdbc585fc40cd73e832bbdcb947318bdee8f2eb3c6fc7e9a91a3d0e1eaf8"
+    },
+    "Sources/CNIOBoringSSL/crypto/siphash/siphash.cc": {
+      "upstreamSHA256": "d8e131dd59cede7683be4dc9d772e26349e87d38e94d206b305669bbb65d6dae",
+      "vendoredSHA256": "d8e131dd59cede7683be4dc9d772e26349e87d38e94d206b305669bbb65d6dae"
+    },
+    "Sources/CNIOBoringSSL/crypto/slhdsa/slhdsa.cc": {
+      "upstreamSHA256": "4b4d397bff306caf631917ce995f1f624526512d26aef1cff8e9b82a5cc960bc",
+      "vendoredSHA256": "4b4d397bff306caf631917ce995f1f624526512d26aef1cff8e9b82a5cc960bc"
+    },
+    "Sources/CNIOBoringSSL/crypto/spake2plus/internal.h": {
+      "upstreamSHA256": "99d55a23cd3d7243bc01e10c2805a7eaf60e0ab708cc64cb8398e5344cf9dd22",
+      "vendoredSHA256": "99d55a23cd3d7243bc01e10c2805a7eaf60e0ab708cc64cb8398e5344cf9dd22"
+    },
+    "Sources/CNIOBoringSSL/crypto/spake2plus/spake2plus.cc": {
+      "upstreamSHA256": "897104d3026bdcc28505c5005453231d596f999702968311d6c8851a24c40e32",
+      "vendoredSHA256": "897104d3026bdcc28505c5005453231d596f999702968311d6c8851a24c40e32"
+    },
+    "Sources/CNIOBoringSSL/crypto/stack/stack.cc": {
+      "upstreamSHA256": "1a2eacdadbfe4798b3fc1708cb6facb237494859fa3dd3f76601da3474d1f17c",
+      "vendoredSHA256": "1a2eacdadbfe4798b3fc1708cb6facb237494859fa3dd3f76601da3474d1f17c"
+    },
+    "Sources/CNIOBoringSSL/crypto/thread.cc": {
+      "upstreamSHA256": "f0fa711e98b03a33398c9d55d7db89504eba22d769bd120abfa47dae33a6dad3",
+      "vendoredSHA256": "f0fa711e98b03a33398c9d55d7db89504eba22d769bd120abfa47dae33a6dad3"
+    },
+    "Sources/CNIOBoringSSL/crypto/thread_none.cc": {
+      "upstreamSHA256": "87ae16482e046251e2e41ab8d2174679441f104fcf13765535e38f70bfb49d0c",
+      "vendoredSHA256": "87ae16482e046251e2e41ab8d2174679441f104fcf13765535e38f70bfb49d0c"
+    },
+    "Sources/CNIOBoringSSL/crypto/thread_pthread.cc": {
+      "upstreamSHA256": "d8c4b73560017aa75c8aff3ba6872708dff0e65b9a12668f5b6bb4e868f47f58",
+      "vendoredSHA256": "d8c4b73560017aa75c8aff3ba6872708dff0e65b9a12668f5b6bb4e868f47f58"
+    },
+    "Sources/CNIOBoringSSL/crypto/thread_win.cc": {
+      "upstreamSHA256": "b6d668cb8ce1f46a49f8a34a8df6c5ceb4a726daf0ac09f7625ead09ed108864",
+      "vendoredSHA256": "b6d668cb8ce1f46a49f8a34a8df6c5ceb4a726daf0ac09f7625ead09ed108864"
+    },
+    "Sources/CNIOBoringSSL/crypto/trust_token/internal.h": {
+      "upstreamSHA256": "f1fb29aa8b731c9c4a18e0aa558cddf67291cb3b5c6eb0a6ee2399e3edfc24fa",
+      "vendoredSHA256": "f1fb29aa8b731c9c4a18e0aa558cddf67291cb3b5c6eb0a6ee2399e3edfc24fa"
+    },
+    "Sources/CNIOBoringSSL/crypto/trust_token/pmbtoken.cc": {
+      "upstreamSHA256": "1d27a77ac7f6c4ed33b1f2eb9bf4cc217e1cadf33d0050f92b01304fc9091faf",
+      "vendoredSHA256": "1d27a77ac7f6c4ed33b1f2eb9bf4cc217e1cadf33d0050f92b01304fc9091faf"
+    },
+    "Sources/CNIOBoringSSL/crypto/trust_token/trust_token.cc": {
+      "upstreamSHA256": "92e96635795e09b02d33b2ad73db2b4e52c9ac852be883cc314fd3354e8b6879",
+      "vendoredSHA256": "92e96635795e09b02d33b2ad73db2b4e52c9ac852be883cc314fd3354e8b6879"
+    },
+    "Sources/CNIOBoringSSL/crypto/trust_token/voprf.cc": {
+      "upstreamSHA256": "1dd096fcdcdb00cbd5576c12df7cc1def3b452516a97e37f1e0bdfc233d671e3",
+      "vendoredSHA256": "1dd096fcdcdb00cbd5576c12df7cc1def3b452516a97e37f1e0bdfc233d671e3"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/a_digest.cc": {
+      "upstreamSHA256": "6236c2df2d88c62528f5531413d7265aec2464d6b0683600c2f126513ad5be0c",
+      "vendoredSHA256": "6236c2df2d88c62528f5531413d7265aec2464d6b0683600c2f126513ad5be0c"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/a_sign.cc": {
+      "upstreamSHA256": "6eda1f87aec5cedf28d2cd7ebac823ee6e668e9b19b6eb031100571c67ae7680",
+      "vendoredSHA256": "6eda1f87aec5cedf28d2cd7ebac823ee6e668e9b19b6eb031100571c67ae7680"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/a_verify.cc": {
+      "upstreamSHA256": "a4c48fd4af3cd571aa0f96fa15a624bbee81a4a12aadb39de0baec5737e61f54",
+      "vendoredSHA256": "a4c48fd4af3cd571aa0f96fa15a624bbee81a4a12aadb39de0baec5737e61f54"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/algorithm.cc": {
+      "upstreamSHA256": "dd71af9ef7cde3c496875706a949c771d3267f6e45bbf1da4745d1152a7aa66e",
+      "vendoredSHA256": "dd71af9ef7cde3c496875706a949c771d3267f6e45bbf1da4745d1152a7aa66e"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/asn1_gen.cc": {
+      "upstreamSHA256": "820d659e80579f8e5f6925a228f0c0dbf28a9267e394b5c348ccc0c2e5a89fe7",
+      "vendoredSHA256": "820d659e80579f8e5f6925a228f0c0dbf28a9267e394b5c348ccc0c2e5a89fe7"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/by_dir.cc": {
+      "upstreamSHA256": "b50d20067a2dd42a87353d7fe99f7cc81cea4a3c044c6ed4c1df981e4ba316e0",
+      "vendoredSHA256": "b50d20067a2dd42a87353d7fe99f7cc81cea4a3c044c6ed4c1df981e4ba316e0"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/by_file.cc": {
+      "upstreamSHA256": "e8061264a19b2ed4c6386ee553a92abef1357113efa31fc909318413c9a1364a",
+      "vendoredSHA256": "e8061264a19b2ed4c6386ee553a92abef1357113efa31fc909318413c9a1364a"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/i2d_pr.cc": {
+      "upstreamSHA256": "054f57a06c9dbe8f189a67cb92d7aedbfcd8bdaba1c761f57b4c586d6cbfeca3",
+      "vendoredSHA256": "054f57a06c9dbe8f189a67cb92d7aedbfcd8bdaba1c761f57b4c586d6cbfeca3"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/internal.h": {
+      "upstreamSHA256": "c6e0a7c8566eb6fe53ecb6e8b37c8d1f73eae44f7f9d454203bd84aa6597bfb6",
+      "vendoredSHA256": "c6e0a7c8566eb6fe53ecb6e8b37c8d1f73eae44f7f9d454203bd84aa6597bfb6"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/name_print.cc": {
+      "upstreamSHA256": "db01787eb195f422bfd49c94db102dfc74bdb52b8d7d5aebe4ff54ef34f99c76",
+      "vendoredSHA256": "db01787eb195f422bfd49c94db102dfc74bdb52b8d7d5aebe4ff54ef34f99c76"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/policy.cc": {
+      "upstreamSHA256": "4ee815aabd1e8638247516e63b1ab375fbeef5cb43555bad946ff6bc5bf89bc4",
+      "vendoredSHA256": "4ee815aabd1e8638247516e63b1ab375fbeef5cb43555bad946ff6bc5bf89bc4"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/rsa_pss.cc": {
+      "upstreamSHA256": "7a603e20fdf8bbed948c69c87d0e60dbf7781a237b60cc079bf23d4350f15705",
+      "vendoredSHA256": "7a603e20fdf8bbed948c69c87d0e60dbf7781a237b60cc079bf23d4350f15705"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/t_crl.cc": {
+      "upstreamSHA256": "e37ab0a4003496315c971f18c58d59fa9a9723ae9bc4b6f631b51ddb0c200f9e",
+      "vendoredSHA256": "e37ab0a4003496315c971f18c58d59fa9a9723ae9bc4b6f631b51ddb0c200f9e"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/t_req.cc": {
+      "upstreamSHA256": "96adfdab8603679f084e14cb5c77c3f5179a0db76c63f94162d9a56fa3527f77",
+      "vendoredSHA256": "96adfdab8603679f084e14cb5c77c3f5179a0db76c63f94162d9a56fa3527f77"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/t_x509.cc": {
+      "upstreamSHA256": "a295c9ffef69baa29f4bd912baa1c0cd63289c00eb4b0154e495068e4afe5bab",
+      "vendoredSHA256": "a295c9ffef69baa29f4bd912baa1c0cd63289c00eb4b0154e495068e4afe5bab"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/t_x509a.cc": {
+      "upstreamSHA256": "8fca4058aff2163c7511659727fb5c41ac4268855c4b3f3b7d94544a944c597b",
+      "vendoredSHA256": "8fca4058aff2163c7511659727fb5c41ac4268855c4b3f3b7d94544a944c597b"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/v3_akey.cc": {
+      "upstreamSHA256": "25c7b0a53bc5c347d54792899b1b778bfe484ae500e2fc7dcc85b64195dc7085",
+      "vendoredSHA256": "25c7b0a53bc5c347d54792899b1b778bfe484ae500e2fc7dcc85b64195dc7085"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/v3_akeya.cc": {
+      "upstreamSHA256": "80a0e0f319ee8c55a113f466f8ff618984ca3b7ae665237d0e1957227d753cb1",
+      "vendoredSHA256": "80a0e0f319ee8c55a113f466f8ff618984ca3b7ae665237d0e1957227d753cb1"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/v3_alt.cc": {
+      "upstreamSHA256": "9a99739257d3bb67f81d3cdcf831e069b25062809aba9deb91698ad3c5802104",
+      "vendoredSHA256": "9a99739257d3bb67f81d3cdcf831e069b25062809aba9deb91698ad3c5802104"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/v3_bcons.cc": {
+      "upstreamSHA256": "d8640b73016a586fda796407615438be6aee04bc95ea64d6ce2121f74fd6f03f",
+      "vendoredSHA256": "d8640b73016a586fda796407615438be6aee04bc95ea64d6ce2121f74fd6f03f"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/v3_bitst.cc": {
+      "upstreamSHA256": "1a2cce426f66354da427ba3bcfb8b00e4a88ac330feab6c42fad2f3587b098be",
+      "vendoredSHA256": "1a2cce426f66354da427ba3bcfb8b00e4a88ac330feab6c42fad2f3587b098be"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/v3_conf.cc": {
+      "upstreamSHA256": "f87ec6bbd697fcb4b41e8ac3444373c42409ed3bb73cd498b1f65210cc6cc9c7",
+      "vendoredSHA256": "f87ec6bbd697fcb4b41e8ac3444373c42409ed3bb73cd498b1f65210cc6cc9c7"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/v3_cpols.cc": {
+      "upstreamSHA256": "c824983602e17fd9afa29aede862815fd51d7d1c79d7c7d9ba5795842debcc88",
+      "vendoredSHA256": "c824983602e17fd9afa29aede862815fd51d7d1c79d7c7d9ba5795842debcc88"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/v3_crld.cc": {
+      "upstreamSHA256": "262a83c922f68efd098fc4ed34cfd95b41a884e108a8d9385eea91236b2bc0ce",
+      "vendoredSHA256": "262a83c922f68efd098fc4ed34cfd95b41a884e108a8d9385eea91236b2bc0ce"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/v3_enum.cc": {
+      "upstreamSHA256": "a994805a54e7e38a795a6c8d5c1dd440b8814717fe708855105564b9956a6471",
+      "vendoredSHA256": "a994805a54e7e38a795a6c8d5c1dd440b8814717fe708855105564b9956a6471"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/v3_extku.cc": {
+      "upstreamSHA256": "b635bd2bd1a13a5a4a59c55a5e835ae0fb19a8fb3b8b42a51ace8638090863da",
+      "vendoredSHA256": "b635bd2bd1a13a5a4a59c55a5e835ae0fb19a8fb3b8b42a51ace8638090863da"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/v3_genn.cc": {
+      "upstreamSHA256": "a079166ee810ff34caa59f06983163bfd034275b3e90142316cadd1605164e9b",
+      "vendoredSHA256": "a079166ee810ff34caa59f06983163bfd034275b3e90142316cadd1605164e9b"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/v3_ia5.cc": {
+      "upstreamSHA256": "90a4c27a20d3af7f6ec4f0aa87246cba2d4e83018e9f086246fb3e702b67db68",
+      "vendoredSHA256": "90a4c27a20d3af7f6ec4f0aa87246cba2d4e83018e9f086246fb3e702b67db68"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/v3_info.cc": {
+      "upstreamSHA256": "fa2eb754b7e79c3f6b4fe91e2532ed556b3d71ea73bd032198d568d1cb2757f2",
+      "vendoredSHA256": "fa2eb754b7e79c3f6b4fe91e2532ed556b3d71ea73bd032198d568d1cb2757f2"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/v3_int.cc": {
+      "upstreamSHA256": "d2c1021950c91efbadee4d879a686cc1eb3850c6b37200f2648913c28497bfe1",
+      "vendoredSHA256": "d2c1021950c91efbadee4d879a686cc1eb3850c6b37200f2648913c28497bfe1"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/v3_lib.cc": {
+      "upstreamSHA256": "950b63787007bab916a750db5d05608c295b073a1526d0e48e600cb280718469",
+      "vendoredSHA256": "950b63787007bab916a750db5d05608c295b073a1526d0e48e600cb280718469"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/v3_ncons.cc": {
+      "upstreamSHA256": "09d64f992931f8de2f697b6006a405962c5abd482afb906aa09056412a069a0a",
+      "vendoredSHA256": "09d64f992931f8de2f697b6006a405962c5abd482afb906aa09056412a069a0a"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/v3_ocsp.cc": {
+      "upstreamSHA256": "acb3540a2e2b465162e13414aba28cdf5470d5898871b1dd6f17aeb5ef5395c5",
+      "vendoredSHA256": "acb3540a2e2b465162e13414aba28cdf5470d5898871b1dd6f17aeb5ef5395c5"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/v3_pcons.cc": {
+      "upstreamSHA256": "e36c6f604afd4d71b190e670329b57998b6f9240980a0a9a63f99ae3f61fe5cc",
+      "vendoredSHA256": "e36c6f604afd4d71b190e670329b57998b6f9240980a0a9a63f99ae3f61fe5cc"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/v3_pmaps.cc": {
+      "upstreamSHA256": "e83bc859a44c8d72164736b7651f6dac370cf49e97df3d21ccdd5cde5fce65ab",
+      "vendoredSHA256": "e83bc859a44c8d72164736b7651f6dac370cf49e97df3d21ccdd5cde5fce65ab"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/v3_prn.cc": {
+      "upstreamSHA256": "7ffb4d79695f2680d2d87834e391a0743be34e2bb5e0aa0693f3879f926149c6",
+      "vendoredSHA256": "7ffb4d79695f2680d2d87834e391a0743be34e2bb5e0aa0693f3879f926149c6"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/v3_purp.cc": {
+      "upstreamSHA256": "79a073cc4ffd3a38bce443162ae2fc371467a4366682fc12bf93141d21cc2670",
+      "vendoredSHA256": "79a073cc4ffd3a38bce443162ae2fc371467a4366682fc12bf93141d21cc2670"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/v3_skey.cc": {
+      "upstreamSHA256": "5d5653ba8e927b0d047c332975673e9fa9f3e48e6f28de4078380098f583a43a",
+      "vendoredSHA256": "5d5653ba8e927b0d047c332975673e9fa9f3e48e6f28de4078380098f583a43a"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/v3_utl.cc": {
+      "upstreamSHA256": "40a4b4c62f96082dc1a239e114e36e6f51ddf5c88c93cb6d911ef3fdbd85f2fd",
+      "vendoredSHA256": "40a4b4c62f96082dc1a239e114e36e6f51ddf5c88c93cb6d911ef3fdbd85f2fd"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x509.cc": {
+      "upstreamSHA256": "61b5d42f2439d711a92627f6984a93a8a1e51a213e2a5a4e4f829c4f074c6d15",
+      "vendoredSHA256": "61b5d42f2439d711a92627f6984a93a8a1e51a213e2a5a4e4f829c4f074c6d15"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x509_att.cc": {
+      "upstreamSHA256": "1fc49feec2fe7091de1c683c472bd51d1b9fe8434476320414fe3525005edd58",
+      "vendoredSHA256": "1fc49feec2fe7091de1c683c472bd51d1b9fe8434476320414fe3525005edd58"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x509_cmp.cc": {
+      "upstreamSHA256": "9c51f1aedb558218ffff92b36371911578df7f1ac3fe2fa12e3804a04bb9cda7",
+      "vendoredSHA256": "9c51f1aedb558218ffff92b36371911578df7f1ac3fe2fa12e3804a04bb9cda7"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x509_d2.cc": {
+      "upstreamSHA256": "8c5ab82adb58d67f1a7e0c3608207d607a1f940d07313c75a657219416d81353",
+      "vendoredSHA256": "8c5ab82adb58d67f1a7e0c3608207d607a1f940d07313c75a657219416d81353"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x509_def.cc": {
+      "upstreamSHA256": "90819fd33ac4693dc0edd24682ce5f166275198512ecb7cfcffd5241e476d81d",
+      "vendoredSHA256": "90819fd33ac4693dc0edd24682ce5f166275198512ecb7cfcffd5241e476d81d"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x509_ext.cc": {
+      "upstreamSHA256": "2f0491a047ec9a605678af9c5b49d7abdc20ad3ffe35c12ebdba80f868c58d44",
+      "vendoredSHA256": "2f0491a047ec9a605678af9c5b49d7abdc20ad3ffe35c12ebdba80f868c58d44"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x509_lu.cc": {
+      "upstreamSHA256": "e73eed5f476a6364334ae63317cd7060ef120020e550e44cca95c45c80eac6fc",
+      "vendoredSHA256": "e73eed5f476a6364334ae63317cd7060ef120020e550e44cca95c45c80eac6fc"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x509_mtc.cc": {
+      "upstreamSHA256": "df19dd2a3fc771cb568914835b579ad8fe2e71e7a8eb90d11b187add80b991d7",
+      "vendoredSHA256": "df19dd2a3fc771cb568914835b579ad8fe2e71e7a8eb90d11b187add80b991d7"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x509_obj.cc": {
+      "upstreamSHA256": "f60f1b85392245a278d01888dd0ec05138519092e7e17555cf7995336b44e1c8",
+      "vendoredSHA256": "f60f1b85392245a278d01888dd0ec05138519092e7e17555cf7995336b44e1c8"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x509_req.cc": {
+      "upstreamSHA256": "aa6753b28e435891c65506f8f640cd00dea49a4acf5eb5fc8248005fc47cb3c3",
+      "vendoredSHA256": "aa6753b28e435891c65506f8f640cd00dea49a4acf5eb5fc8248005fc47cb3c3"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x509_set.cc": {
+      "upstreamSHA256": "93543189ed9063adc1dea3682a8c706f88e4c553108a6002c742c1f4aa4ac108",
+      "vendoredSHA256": "93543189ed9063adc1dea3682a8c706f88e4c553108a6002c742c1f4aa4ac108"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x509_trs.cc": {
+      "upstreamSHA256": "b68539a7e3997573f39394a54f612226dc4ac2f0aa231e18ea7264618398e378",
+      "vendoredSHA256": "b68539a7e3997573f39394a54f612226dc4ac2f0aa231e18ea7264618398e378"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x509_txt.cc": {
+      "upstreamSHA256": "1e06f16dd3f4fe60aaf2051e95bd7617dc6112585532bf220080573342715c8d",
+      "vendoredSHA256": "1e06f16dd3f4fe60aaf2051e95bd7617dc6112585532bf220080573342715c8d"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x509_v3.cc": {
+      "upstreamSHA256": "3606f857604f75b39cabb5009d4f25ce0b421aeb33527e3b027d3e0bf57b1c53",
+      "vendoredSHA256": "3606f857604f75b39cabb5009d4f25ce0b421aeb33527e3b027d3e0bf57b1c53"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x509_vfy.cc": {
+      "upstreamSHA256": "b52b5387730eafb7fff6e45da03c4b6b8734b907318a45beaefaf31f63aa657c",
+      "vendoredSHA256": "b52b5387730eafb7fff6e45da03c4b6b8734b907318a45beaefaf31f63aa657c"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x509_vpm.cc": {
+      "upstreamSHA256": "f40556106a438db8e6ed717917ac8281c16fa44d49f97583b5266cfe5d1151eb",
+      "vendoredSHA256": "f40556106a438db8e6ed717917ac8281c16fa44d49f97583b5266cfe5d1151eb"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x509cset.cc": {
+      "upstreamSHA256": "34e5646488e8ad963424385fd1e2b87045a03c7daeb05a8f76a5aa263e643fe7",
+      "vendoredSHA256": "34e5646488e8ad963424385fd1e2b87045a03c7daeb05a8f76a5aa263e643fe7"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x509name.cc": {
+      "upstreamSHA256": "da9c32bcdb5dc927222f5c990f1cce036125bba5821ea6cc31178be17096628a",
+      "vendoredSHA256": "da9c32bcdb5dc927222f5c990f1cce036125bba5821ea6cc31178be17096628a"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x509rset.cc": {
+      "upstreamSHA256": "4c739bb0fcf870050ecb7b038de978de39f8cfb559080d2b89656b85196f0159",
+      "vendoredSHA256": "4c739bb0fcf870050ecb7b038de978de39f8cfb559080d2b89656b85196f0159"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x509spki.cc": {
+      "upstreamSHA256": "dc069863efc68872b4313d310942c14fdf6b28e1074a5808d9220a30205c8854",
+      "vendoredSHA256": "dc069863efc68872b4313d310942c14fdf6b28e1074a5808d9220a30205c8854"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x_algor.cc": {
+      "upstreamSHA256": "c94ba764edad5baa6eda53940ddefc00efb0b94e8a19eefc6df8546627ea883c",
+      "vendoredSHA256": "c94ba764edad5baa6eda53940ddefc00efb0b94e8a19eefc6df8546627ea883c"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x_all.cc": {
+      "upstreamSHA256": "ddac45da3b878fbd85dbbbdacac229dbfd0eeb88fc367ddea7a3bb1cabdf1445",
+      "vendoredSHA256": "ddac45da3b878fbd85dbbbdacac229dbfd0eeb88fc367ddea7a3bb1cabdf1445"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x_attrib.cc": {
+      "upstreamSHA256": "725b36915fa6812e5c6a855322ce2639459edd179aa69a64b70d89192da9125b",
+      "vendoredSHA256": "725b36915fa6812e5c6a855322ce2639459edd179aa69a64b70d89192da9125b"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x_crl.cc": {
+      "upstreamSHA256": "d916d27bddb8454cddbc0e1d28e8ba45248a0fc254440e1e01bd832ac14074d7",
+      "vendoredSHA256": "d916d27bddb8454cddbc0e1d28e8ba45248a0fc254440e1e01bd832ac14074d7"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x_exten.cc": {
+      "upstreamSHA256": "d1ea2bbdbd3e3d91acd52b6d2ff9e3c4c9756683183dd120ad2c68361222b0aa",
+      "vendoredSHA256": "d1ea2bbdbd3e3d91acd52b6d2ff9e3c4c9756683183dd120ad2c68361222b0aa"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x_name.cc": {
+      "upstreamSHA256": "45c3afe7f22ebeae3c86f71a00a8a803e5c2ab09f8f4e4f6d71e5e8d9d62216f",
+      "vendoredSHA256": "45c3afe7f22ebeae3c86f71a00a8a803e5c2ab09f8f4e4f6d71e5e8d9d62216f"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x_pubkey.cc": {
+      "upstreamSHA256": "234741de58362a858e69ab12d28e2d74942427ed16f3db9bd6c3435231a84f2a",
+      "vendoredSHA256": "234741de58362a858e69ab12d28e2d74942427ed16f3db9bd6c3435231a84f2a"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x_req.cc": {
+      "upstreamSHA256": "cde11719fc68ed72e3a88e77ffced63825141325a21155846cf687b6f10e31a5",
+      "vendoredSHA256": "cde11719fc68ed72e3a88e77ffced63825141325a21155846cf687b6f10e31a5"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x_sig.cc": {
+      "upstreamSHA256": "1ce3caf458c6c836a4ac9ac755154889f20a33cf36899ed92ca357b7ddfb98c1",
+      "vendoredSHA256": "1ce3caf458c6c836a4ac9ac755154889f20a33cf36899ed92ca357b7ddfb98c1"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x_spki.cc": {
+      "upstreamSHA256": "f0877e3667a1666dcba38c047552533dbcf3970fb60f8695136724e393740b0b",
+      "vendoredSHA256": "f0877e3667a1666dcba38c047552533dbcf3970fb60f8695136724e393740b0b"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x_x509.cc": {
+      "upstreamSHA256": "13cf13bdee1e4c3808b4f67acbd8559220720ef44d12026488d29d87ebdf27a6",
+      "vendoredSHA256": "13cf13bdee1e4c3808b4f67acbd8559220720ef44d12026488d29d87ebdf27a6"
+    },
+    "Sources/CNIOBoringSSL/crypto/x509/x_x509a.cc": {
+      "upstreamSHA256": "974ca8db788f00b578308bf6f447603efb30b4e8e74d6a6f7b5e870dcf505ac9",
+      "vendoredSHA256": "974ca8db788f00b578308bf6f447603efb30b4e8e74d6a6f7b5e870dcf505ac9"
+    },
+    "Sources/CNIOBoringSSL/crypto/xwing/xwing.cc": {
+      "upstreamSHA256": "288c2863a4e55bec4dc4a1239dcd7382ad2cbd996f4912c88ab60501b239e365",
+      "vendoredSHA256": "288c2863a4e55bec4dc4a1239dcd7382ad2cbd996f4912c88ab60501b239e365"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/aes-gcm-avx2-x86_64-apple.S": {
+      "upstreamSHA256": "e506bdaf00c85d0a2e352059f163b829a0ee8dc740e2ba233c9f251c5d034206",
+      "vendoredSHA256": "e506bdaf00c85d0a2e352059f163b829a0ee8dc740e2ba233c9f251c5d034206"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/aes-gcm-avx2-x86_64-linux.S": {
+      "upstreamSHA256": "c2b9e40620ce9e85d4aa8b59163e023a66e10885d06a03cf3816bff971271eaa",
+      "vendoredSHA256": "c2b9e40620ce9e85d4aa8b59163e023a66e10885d06a03cf3816bff971271eaa"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/aes-gcm-avx512-x86_64-apple.S": {
+      "upstreamSHA256": "5f25f477d0509140af6f9c8e883f9afde9dacfd3df03b0ec41321fb87c50241e",
+      "vendoredSHA256": "5f25f477d0509140af6f9c8e883f9afde9dacfd3df03b0ec41321fb87c50241e"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/aes-gcm-avx512-x86_64-linux.S": {
+      "upstreamSHA256": "d3f1e3bc93b041c1d4d8163e2fb52893c0d6a12b6ee01d12da5342442d083deb",
+      "vendoredSHA256": "d3f1e3bc93b041c1d4d8163e2fb52893c0d6a12b6ee01d12da5342442d083deb"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/aesni-gcm-x86_64-apple.S": {
+      "upstreamSHA256": "c7c29a541d5f9fa7dc93e3829c7c266e5e26a833435e73b5bc25309629be82d4",
+      "vendoredSHA256": "c7c29a541d5f9fa7dc93e3829c7c266e5e26a833435e73b5bc25309629be82d4"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/aesni-gcm-x86_64-linux.S": {
+      "upstreamSHA256": "db6a0fb6f6e720ff34049b962847485871c0fc622fdae37aed352e1edd645aa5",
+      "vendoredSHA256": "db6a0fb6f6e720ff34049b962847485871c0fc622fdae37aed352e1edd645aa5"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/aesni-x86-apple.S": {
+      "upstreamSHA256": "271f2653d542ac3379ebe5a17a614f920a2e47f775e0805abb1f7561daa8fb54",
+      "vendoredSHA256": "271f2653d542ac3379ebe5a17a614f920a2e47f775e0805abb1f7561daa8fb54"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/aesni-x86-linux.S": {
+      "upstreamSHA256": "ebb88a73719dd11a4a245493717d70d064eb711839577261066e77c1aa5e10ed",
+      "vendoredSHA256": "ebb88a73719dd11a4a245493717d70d064eb711839577261066e77c1aa5e10ed"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/aesni-x86_64-apple.S": {
+      "upstreamSHA256": "1549fc6aec1b119e2100138d12b4a996566b5e4ad7188ccfbd6f02b4f79990f4",
+      "vendoredSHA256": "1549fc6aec1b119e2100138d12b4a996566b5e4ad7188ccfbd6f02b4f79990f4"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/aesni-x86_64-linux.S": {
+      "upstreamSHA256": "2f8c0bcf41260b3c589339c4dfb3b7190eadc61794be7c1f9cfedb92e40982a2",
+      "vendoredSHA256": "2f8c0bcf41260b3c589339c4dfb3b7190eadc61794be7c1f9cfedb92e40982a2"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/aesv8-armv7-linux.S": {
+      "upstreamSHA256": "70417142ff5aecacc324995fb725a85dff2e26fb97043d8ffc8ca0d5cc98782e",
+      "vendoredSHA256": "70417142ff5aecacc324995fb725a85dff2e26fb97043d8ffc8ca0d5cc98782e"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/aesv8-armv8-apple.S": {
+      "upstreamSHA256": "0db8759cd29346e2d34750dbe2b844e5a9f4b4fba32d71e26a30a222c5a9922a",
+      "vendoredSHA256": "0db8759cd29346e2d34750dbe2b844e5a9f4b4fba32d71e26a30a222c5a9922a"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/aesv8-armv8-linux.S": {
+      "upstreamSHA256": "63739362abb56890e590cfbeca065f9fd6c3ad2a6e1d11c6b7bdb67cf335e5d9",
+      "vendoredSHA256": "63739362abb56890e590cfbeca065f9fd6c3ad2a6e1d11c6b7bdb67cf335e5d9"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/aesv8-armv8-win.S": {
+      "upstreamSHA256": "4e05b2c906968b2ad3b70e08acf860fdcd6dc320edae7f4b4d28d0f8d4f22ffd",
+      "vendoredSHA256": "4e05b2c906968b2ad3b70e08acf860fdcd6dc320edae7f4b4d28d0f8d4f22ffd"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/aesv8-gcm-armv8-apple.S": {
+      "upstreamSHA256": "092f4db8de5b3ee6ae032165c2d89222fbbdab67a6e8ac80330a55ea559211b9",
+      "vendoredSHA256": "092f4db8de5b3ee6ae032165c2d89222fbbdab67a6e8ac80330a55ea559211b9"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/aesv8-gcm-armv8-linux.S": {
+      "upstreamSHA256": "a5d71f5563947328b72c3aa6fc8bd8d36113a8f79aa84ddee2410e938065da93",
+      "vendoredSHA256": "a5d71f5563947328b72c3aa6fc8bd8d36113a8f79aa84ddee2410e938065da93"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/aesv8-gcm-armv8-win.S": {
+      "upstreamSHA256": "b818ff019e67c3c061f9c26e296bc21368f86fd11b1a8240fa644906f4ef465f",
+      "vendoredSHA256": "b818ff019e67c3c061f9c26e296bc21368f86fd11b1a8240fa644906f4ef465f"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/armv4-mont-linux.S": {
+      "upstreamSHA256": "9830d4160fb065e14667ca10b996312832a10299967a764e3d1f02592ebbf336",
+      "vendoredSHA256": "9830d4160fb065e14667ca10b996312832a10299967a764e3d1f02592ebbf336"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/armv8-mont-apple.S": {
+      "upstreamSHA256": "63ad4e272a006c313f5f5ee82d8ed76a44abfba98671abe58f02946bfa2a2206",
+      "vendoredSHA256": "63ad4e272a006c313f5f5ee82d8ed76a44abfba98671abe58f02946bfa2a2206"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/armv8-mont-linux.S": {
+      "upstreamSHA256": "450df6375c31b46a4c57d9c7254b68eeeb00dba72b32f57e80bf6d670338b8aa",
+      "vendoredSHA256": "450df6375c31b46a4c57d9c7254b68eeeb00dba72b32f57e80bf6d670338b8aa"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/armv8-mont-win.S": {
+      "upstreamSHA256": "23f02d135237c533f9ee6adfcff110a0ac9ab7a9a9f52acb5296e4eb6c39e34d",
+      "vendoredSHA256": "23f02d135237c533f9ee6adfcff110a0ac9ab7a9a9f52acb5296e4eb6c39e34d"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/bn-586-apple.S": {
+      "upstreamSHA256": "91e8beb4b30535a71d5db924fb86324d8e561bf07632dcb4d5abc85d349caea2",
+      "vendoredSHA256": "91e8beb4b30535a71d5db924fb86324d8e561bf07632dcb4d5abc85d349caea2"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/bn-586-linux.S": {
+      "upstreamSHA256": "be8ac71fe46916620f8ed6165ba5dce192598b59f5c061c6b86c05b754a79071",
+      "vendoredSHA256": "be8ac71fe46916620f8ed6165ba5dce192598b59f5c061c6b86c05b754a79071"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/bn-armv8-apple.S": {
+      "upstreamSHA256": "91026fe02d04996f811de0da127c0d63f59f3611bb5d337e7a7968aac659b849",
+      "vendoredSHA256": "91026fe02d04996f811de0da127c0d63f59f3611bb5d337e7a7968aac659b849"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/bn-armv8-linux.S": {
+      "upstreamSHA256": "350f469ea2911ac8e0fa5cccc8599c72db7571a0bae43aa64a9fce3794277aa4",
+      "vendoredSHA256": "350f469ea2911ac8e0fa5cccc8599c72db7571a0bae43aa64a9fce3794277aa4"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/bn-armv8-win.S": {
+      "upstreamSHA256": "6bfd57dc7f92b90062eb788e2a3cb2bce88b0ceb7ff8200e8a141a51b2749f85",
+      "vendoredSHA256": "6bfd57dc7f92b90062eb788e2a3cb2bce88b0ceb7ff8200e8a141a51b2749f85"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/bsaes-armv7-linux.S": {
+      "upstreamSHA256": "a250bb651cb97cfd70f0a0a4852e91acc719025b1d42e281d8dbb1b810858681",
+      "vendoredSHA256": "a250bb651cb97cfd70f0a0a4852e91acc719025b1d42e281d8dbb1b810858681"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/co-586-apple.S": {
+      "upstreamSHA256": "fb62459d8cc47e40dbce1c92263cc39b5b1997fdf3c213bb5d41f5251483d731",
+      "vendoredSHA256": "fb62459d8cc47e40dbce1c92263cc39b5b1997fdf3c213bb5d41f5251483d731"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/co-586-linux.S": {
+      "upstreamSHA256": "2491c824067ee8715ea91e96381b1278d21003cb08a4683054017035255c397e",
+      "vendoredSHA256": "2491c824067ee8715ea91e96381b1278d21003cb08a4683054017035255c397e"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/ghash-armv4-linux.S": {
+      "upstreamSHA256": "fef5204603b661649c48418800dacaf72e5c92a05af7dede88b9387df5cdf8d7",
+      "vendoredSHA256": "fef5204603b661649c48418800dacaf72e5c92a05af7dede88b9387df5cdf8d7"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/ghash-neon-armv8-apple.S": {
+      "upstreamSHA256": "74e1cd7265f6993b587ffd45f492c0ee98ff1d364e743a93b7706abe09579c6d",
+      "vendoredSHA256": "74e1cd7265f6993b587ffd45f492c0ee98ff1d364e743a93b7706abe09579c6d"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/ghash-neon-armv8-linux.S": {
+      "upstreamSHA256": "a1b00801c25a576fffe36223ded790087842c4e951fa2e460384f18b1e174b6c",
+      "vendoredSHA256": "a1b00801c25a576fffe36223ded790087842c4e951fa2e460384f18b1e174b6c"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/ghash-neon-armv8-win.S": {
+      "upstreamSHA256": "86f8dd89f24427e1d7e77be74a59c1fa158b7859bd22b69a8f31fdeeb724d609",
+      "vendoredSHA256": "86f8dd89f24427e1d7e77be74a59c1fa158b7859bd22b69a8f31fdeeb724d609"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/ghash-ssse3-x86-apple.S": {
+      "upstreamSHA256": "2285fd38198d9bcfaec42bc6eb29b96a645cf0be3777e70bbf92eecc79219735",
+      "vendoredSHA256": "2285fd38198d9bcfaec42bc6eb29b96a645cf0be3777e70bbf92eecc79219735"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/ghash-ssse3-x86-linux.S": {
+      "upstreamSHA256": "635e4059083cb0939520a21cf6db62f2bf0ffe6bd67ab6788f7bf537ecda33d6",
+      "vendoredSHA256": "635e4059083cb0939520a21cf6db62f2bf0ffe6bd67ab6788f7bf537ecda33d6"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/ghash-ssse3-x86_64-apple.S": {
+      "upstreamSHA256": "bd5679f976935aa2c1e5e8900ffb94c73b4ecd64aa37f9a2157727398d4ba889",
+      "vendoredSHA256": "bd5679f976935aa2c1e5e8900ffb94c73b4ecd64aa37f9a2157727398d4ba889"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/ghash-ssse3-x86_64-linux.S": {
+      "upstreamSHA256": "01244f37b01756df9c493ba95428c9b5c568a82a4a17154ae4e9363caa2e232b",
+      "vendoredSHA256": "01244f37b01756df9c493ba95428c9b5c568a82a4a17154ae4e9363caa2e232b"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/ghash-x86-apple.S": {
+      "upstreamSHA256": "6ace830e8e755e92db304649cc126738394a76375874c42a6e7e829e53498669",
+      "vendoredSHA256": "6ace830e8e755e92db304649cc126738394a76375874c42a6e7e829e53498669"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/ghash-x86-linux.S": {
+      "upstreamSHA256": "1ec02ea29abf4f0e69ac2dd7ec712b8e5f1b2e2e10dd9e58fbd24983c1acba82",
+      "vendoredSHA256": "1ec02ea29abf4f0e69ac2dd7ec712b8e5f1b2e2e10dd9e58fbd24983c1acba82"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/ghash-x86_64-apple.S": {
+      "upstreamSHA256": "147bca06f3fb00f4130720bdc9f79f6064ec1204ebd999f55e23fe33ddb0bb09",
+      "vendoredSHA256": "147bca06f3fb00f4130720bdc9f79f6064ec1204ebd999f55e23fe33ddb0bb09"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/ghash-x86_64-linux.S": {
+      "upstreamSHA256": "aa55ca23429b2d9190ef8f2e62ca4d1e3fedec78107ae3835ad71cfd52f3cae9",
+      "vendoredSHA256": "aa55ca23429b2d9190ef8f2e62ca4d1e3fedec78107ae3835ad71cfd52f3cae9"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/ghashv8-armv7-linux.S": {
+      "upstreamSHA256": "0a0ce6a5dc01c9b074e6229071438936d0cb00bc2c9e3d91eeb2012ee470f19f",
+      "vendoredSHA256": "0a0ce6a5dc01c9b074e6229071438936d0cb00bc2c9e3d91eeb2012ee470f19f"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/ghashv8-armv8-apple.S": {
+      "upstreamSHA256": "99b2da92ec94386bc4b68cf4b779accb346b66db251606145d1859c09d233076",
+      "vendoredSHA256": "99b2da92ec94386bc4b68cf4b779accb346b66db251606145d1859c09d233076"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/ghashv8-armv8-linux.S": {
+      "upstreamSHA256": "cb1e6a1fdbb392e7996b6b3d719c4df1e0c9c0686ac14ffd2e4fba5ec59109b8",
+      "vendoredSHA256": "cb1e6a1fdbb392e7996b6b3d719c4df1e0c9c0686ac14ffd2e4fba5ec59109b8"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/ghashv8-armv8-win.S": {
+      "upstreamSHA256": "537b1d06b1d26c320333f9a13e5854050b41f7fc44267094e62aa9320a46e941",
+      "vendoredSHA256": "537b1d06b1d26c320333f9a13e5854050b41f7fc44267094e62aa9320a46e941"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/p256-armv8-asm-apple.S": {
+      "upstreamSHA256": "eeb028105e1af98b99f593a55f15d5a7914189e24ace4be37c9ef22b9c975cd4",
+      "vendoredSHA256": "eeb028105e1af98b99f593a55f15d5a7914189e24ace4be37c9ef22b9c975cd4"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/p256-armv8-asm-linux.S": {
+      "upstreamSHA256": "6d6b315badbf6b1556b7e53526ec31c4df77d983f7f186f37a2fc17270b9bc37",
+      "vendoredSHA256": "6d6b315badbf6b1556b7e53526ec31c4df77d983f7f186f37a2fc17270b9bc37"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/p256-armv8-asm-win.S": {
+      "upstreamSHA256": "897487a9d5a3a6922571497cf966b06b02592ec2ddd7cf88de8bcc07f72d745e",
+      "vendoredSHA256": "897487a9d5a3a6922571497cf966b06b02592ec2ddd7cf88de8bcc07f72d745e"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/p256-x86_64-asm-apple.S": {
+      "upstreamSHA256": "7d428941e2d24282d486420bdd502a4ca6f9585f3a4fcca892b5f3a140f14927",
+      "vendoredSHA256": "7d428941e2d24282d486420bdd502a4ca6f9585f3a4fcca892b5f3a140f14927"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/p256-x86_64-asm-linux.S": {
+      "upstreamSHA256": "f0ca3f5dcbee5605b8f62939b8ad049197384d5da4ba1af867f990df18fc38ab",
+      "vendoredSHA256": "f0ca3f5dcbee5605b8f62939b8ad049197384d5da4ba1af867f990df18fc38ab"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/p256_beeu-armv8-asm-apple.S": {
+      "upstreamSHA256": "f73602a056c1d0d23b452525630e21939bdd9763d8d5b1fa268b50194d77ecc8",
+      "vendoredSHA256": "f73602a056c1d0d23b452525630e21939bdd9763d8d5b1fa268b50194d77ecc8"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/p256_beeu-armv8-asm-linux.S": {
+      "upstreamSHA256": "a36d9f6c6360c4d21786aecb2e808aea213eec6dd7b3222762b01f20d9bec821",
+      "vendoredSHA256": "a36d9f6c6360c4d21786aecb2e808aea213eec6dd7b3222762b01f20d9bec821"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/p256_beeu-armv8-asm-win.S": {
+      "upstreamSHA256": "1abd4ecd697c1287d304de8161ecda1f3e6dbe18ba22ba0cea3101f3c6954330",
+      "vendoredSHA256": "1abd4ecd697c1287d304de8161ecda1f3e6dbe18ba22ba0cea3101f3c6954330"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/p256_beeu-x86_64-asm-apple.S": {
+      "upstreamSHA256": "e2f85a0a2e302c56812dcff9b4a97431be9fb7a834d818d7b01a7c96a08da535",
+      "vendoredSHA256": "e2f85a0a2e302c56812dcff9b4a97431be9fb7a834d818d7b01a7c96a08da535"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/p256_beeu-x86_64-asm-linux.S": {
+      "upstreamSHA256": "762a80b7d1d4453b1b697335e5dc306b9d15d26c83d06b4ef3634e32e7d17d88",
+      "vendoredSHA256": "762a80b7d1d4453b1b697335e5dc306b9d15d26c83d06b4ef3634e32e7d17d88"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/rdrand-x86_64-apple.S": {
+      "upstreamSHA256": "6701bed11125dd6b5b5b4bb70ba2f35ce192279d74e2fe7abe6d69fd1626bbb1",
+      "vendoredSHA256": "6701bed11125dd6b5b5b4bb70ba2f35ce192279d74e2fe7abe6d69fd1626bbb1"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/rdrand-x86_64-linux.S": {
+      "upstreamSHA256": "5df0f9feddbc1c20f9274b8d4d6dabebbf3d2dc3da579e14d8db4cb01660b59d",
+      "vendoredSHA256": "5df0f9feddbc1c20f9274b8d4d6dabebbf3d2dc3da579e14d8db4cb01660b59d"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/rsaz-avx2-apple.S": {
+      "upstreamSHA256": "5d228dd0fd3496f88065467128fdbf2324a876028fb3b8f2ffbe148d8e682ae4",
+      "vendoredSHA256": "5d228dd0fd3496f88065467128fdbf2324a876028fb3b8f2ffbe148d8e682ae4"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/rsaz-avx2-linux.S": {
+      "upstreamSHA256": "bc2f1ac8bbe5e77b50d5ba52cbb9b7638b79bae8b68774cff4806035d1dd1a8c",
+      "vendoredSHA256": "bc2f1ac8bbe5e77b50d5ba52cbb9b7638b79bae8b68774cff4806035d1dd1a8c"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/sha1-586-apple.S": {
+      "upstreamSHA256": "ce57280c144848d453471e1a6ab63834a25f73029ef5304db124c93094816714",
+      "vendoredSHA256": "ce57280c144848d453471e1a6ab63834a25f73029ef5304db124c93094816714"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/sha1-586-linux.S": {
+      "upstreamSHA256": "68a66e7981ef124f50c5fd576b2b4db27642890bbcb56196ddf75aba6544dc56",
+      "vendoredSHA256": "68a66e7981ef124f50c5fd576b2b4db27642890bbcb56196ddf75aba6544dc56"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/sha1-armv4-large-linux.S": {
+      "upstreamSHA256": "248fec2bf9c16fad03291d224f65be5fe5c941d36b77bcedef81e54bb41b3b4b",
+      "vendoredSHA256": "248fec2bf9c16fad03291d224f65be5fe5c941d36b77bcedef81e54bb41b3b4b"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/sha1-armv8-apple.S": {
+      "upstreamSHA256": "6ba99bf666a9c9f5fe90ff06d1d69d85347611b130bd58a4652f2f5025a02871",
+      "vendoredSHA256": "6ba99bf666a9c9f5fe90ff06d1d69d85347611b130bd58a4652f2f5025a02871"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/sha1-armv8-linux.S": {
+      "upstreamSHA256": "52d3f1bebe16273f61c6133939fa5fa58d1dc6246b23e834de6cc5d9a548551d",
+      "vendoredSHA256": "52d3f1bebe16273f61c6133939fa5fa58d1dc6246b23e834de6cc5d9a548551d"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/sha1-armv8-win.S": {
+      "upstreamSHA256": "3facf6aaf61a01bed5dba0d13e95a584c613d016914776e8cfd6e8d4d9130ea4",
+      "vendoredSHA256": "3facf6aaf61a01bed5dba0d13e95a584c613d016914776e8cfd6e8d4d9130ea4"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/sha1-x86_64-apple.S": {
+      "upstreamSHA256": "ae83e2a601d59da5fb61eaa4e4b9bd0f34711833545ca483dc40f9fc995a907f",
+      "vendoredSHA256": "ae83e2a601d59da5fb61eaa4e4b9bd0f34711833545ca483dc40f9fc995a907f"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/sha1-x86_64-linux.S": {
+      "upstreamSHA256": "e14e5ddf226ffc21da2e30e1b60aac6021953c9babeb7f60e392064742a6d5ae",
+      "vendoredSHA256": "e14e5ddf226ffc21da2e30e1b60aac6021953c9babeb7f60e392064742a6d5ae"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/sha256-586-apple.S": {
+      "upstreamSHA256": "c06ba326eeb3eb2ee2fa2c91598df9f3ef81b269ebeb9d8d9375066ac951f62f",
+      "vendoredSHA256": "c06ba326eeb3eb2ee2fa2c91598df9f3ef81b269ebeb9d8d9375066ac951f62f"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/sha256-586-linux.S": {
+      "upstreamSHA256": "717e464ccaab701e43c8d141d7a57a63c1b1dedb394246c585ac488e9621093f",
+      "vendoredSHA256": "717e464ccaab701e43c8d141d7a57a63c1b1dedb394246c585ac488e9621093f"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/sha256-armv4-linux.S": {
+      "upstreamSHA256": "b95cb3c329db370ffa02ca725a9bd66831daf5b3d4f9d091a17c58894a47e585",
+      "vendoredSHA256": "b95cb3c329db370ffa02ca725a9bd66831daf5b3d4f9d091a17c58894a47e585"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/sha256-armv8-apple.S": {
+      "upstreamSHA256": "bcf671f84058955b9e85c10922af797a7ad2d31fec36ec47990f97cc04a2d8c1",
+      "vendoredSHA256": "bcf671f84058955b9e85c10922af797a7ad2d31fec36ec47990f97cc04a2d8c1"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/sha256-armv8-linux.S": {
+      "upstreamSHA256": "c625b52d87af2c63f13bc4ad2558552ac363f6bdbee7d8ba5cf9ac6d2d890161",
+      "vendoredSHA256": "c625b52d87af2c63f13bc4ad2558552ac363f6bdbee7d8ba5cf9ac6d2d890161"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/sha256-armv8-win.S": {
+      "upstreamSHA256": "dc05b82a760e4f076233eb43bacf05fe6c1633d0f63a3cd278a822116b4a90f1",
+      "vendoredSHA256": "dc05b82a760e4f076233eb43bacf05fe6c1633d0f63a3cd278a822116b4a90f1"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/sha256-x86_64-apple.S": {
+      "upstreamSHA256": "0cc64f3b408ec51eea6c284b049beb79e5a4f10c0a7a546aefa17706d58d8b28",
+      "vendoredSHA256": "0cc64f3b408ec51eea6c284b049beb79e5a4f10c0a7a546aefa17706d58d8b28"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/sha256-x86_64-linux.S": {
+      "upstreamSHA256": "9f3cfc815c99deb2efe31852483ba016a2566f420eebd51c809c2ace44b116b2",
+      "vendoredSHA256": "9f3cfc815c99deb2efe31852483ba016a2566f420eebd51c809c2ace44b116b2"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/sha512-586-apple.S": {
+      "upstreamSHA256": "3540874a0fc30e1f1a4faf60b8ce86473aa36d8bd37ff260e06ad65e5b179edd",
+      "vendoredSHA256": "3540874a0fc30e1f1a4faf60b8ce86473aa36d8bd37ff260e06ad65e5b179edd"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/sha512-586-linux.S": {
+      "upstreamSHA256": "b76c142f4e4175f0d9329d43dec1160e1ca3423a7bb4086dafb7779b3875d3db",
+      "vendoredSHA256": "b76c142f4e4175f0d9329d43dec1160e1ca3423a7bb4086dafb7779b3875d3db"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/sha512-armv4-linux.S": {
+      "upstreamSHA256": "aa8b1feaf3b231e71e15de89f644116c5e27b577b5d5c49237bfbc6b4086153e",
+      "vendoredSHA256": "aa8b1feaf3b231e71e15de89f644116c5e27b577b5d5c49237bfbc6b4086153e"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/sha512-armv8-apple.S": {
+      "upstreamSHA256": "f0865884bc76e8d8c1d06dea29c30315dc8ee71826dc37553c3aae699984a4fa",
+      "vendoredSHA256": "f0865884bc76e8d8c1d06dea29c30315dc8ee71826dc37553c3aae699984a4fa"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/sha512-armv8-linux.S": {
+      "upstreamSHA256": "1401dc9987d3f189761ae9e7df60f1635215af6a353903502dffadcedb15545f",
+      "vendoredSHA256": "1401dc9987d3f189761ae9e7df60f1635215af6a353903502dffadcedb15545f"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/sha512-armv8-win.S": {
+      "upstreamSHA256": "21dc5e23eea44a4e351491fa1dc65d3317612e13a5aeaadd57a2d500098700d5",
+      "vendoredSHA256": "21dc5e23eea44a4e351491fa1dc65d3317612e13a5aeaadd57a2d500098700d5"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/sha512-x86_64-apple.S": {
+      "upstreamSHA256": "6dbbb7427e9d89a7bce34f902cbbc20a94660e8b74ba57980d183d941db8a147",
+      "vendoredSHA256": "6dbbb7427e9d89a7bce34f902cbbc20a94660e8b74ba57980d183d941db8a147"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/sha512-x86_64-linux.S": {
+      "upstreamSHA256": "8f989794cbda71315a9aa0dfc4bec91ddcfcfc7316729987735cec268889f9ff",
+      "vendoredSHA256": "8f989794cbda71315a9aa0dfc4bec91ddcfcfc7316729987735cec268889f9ff"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/vpaes-armv7-linux.S": {
+      "upstreamSHA256": "d5684c21fbe02ee9b65d5175046b47adc235a734e6b67fa7b200c21f94deff6b",
+      "vendoredSHA256": "d5684c21fbe02ee9b65d5175046b47adc235a734e6b67fa7b200c21f94deff6b"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/vpaes-armv8-apple.S": {
+      "upstreamSHA256": "413d8c0150a50b0303e959ca93422b8af5a5152d7348e7b6abc83b7ed2f8542a",
+      "vendoredSHA256": "413d8c0150a50b0303e959ca93422b8af5a5152d7348e7b6abc83b7ed2f8542a"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/vpaes-armv8-linux.S": {
+      "upstreamSHA256": "c751c98f42aa065cb8ac8b743bfbc58fb547c3f086cfe9c4aca34d247b903c42",
+      "vendoredSHA256": "c751c98f42aa065cb8ac8b743bfbc58fb547c3f086cfe9c4aca34d247b903c42"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/vpaes-armv8-win.S": {
+      "upstreamSHA256": "2bba50b7a190de72d84271e59db86ca5343426cb3d154033d7b13eeafa884d7d",
+      "vendoredSHA256": "2bba50b7a190de72d84271e59db86ca5343426cb3d154033d7b13eeafa884d7d"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/vpaes-x86-apple.S": {
+      "upstreamSHA256": "a0459bdaa1f74c52a71c5a08e11c10bf12ec40c22943025ff0c6d12262b52296",
+      "vendoredSHA256": "a0459bdaa1f74c52a71c5a08e11c10bf12ec40c22943025ff0c6d12262b52296"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/vpaes-x86-linux.S": {
+      "upstreamSHA256": "4a06d83b3bc61a6486b0625f350f92ceeba39e68ce53c27ea04cf2e04e6047a3",
+      "vendoredSHA256": "4a06d83b3bc61a6486b0625f350f92ceeba39e68ce53c27ea04cf2e04e6047a3"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/vpaes-x86_64-apple.S": {
+      "upstreamSHA256": "dec39a59dddf85040004654235951372826461d968c48aa113197ac2cd353b3f",
+      "vendoredSHA256": "dec39a59dddf85040004654235951372826461d968c48aa113197ac2cd353b3f"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/vpaes-x86_64-linux.S": {
+      "upstreamSHA256": "7c10c743469a456e78ea564128bc73a617cd54b0964e7298c929cdf4c490fc62",
+      "vendoredSHA256": "7c10c743469a456e78ea564128bc73a617cd54b0964e7298c929cdf4c490fc62"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/x86-mont-apple.S": {
+      "upstreamSHA256": "fe6a2adf898c24599f58b0cefa183c859f922dfa4b6cf12e7a23a681b7a9983d",
+      "vendoredSHA256": "fe6a2adf898c24599f58b0cefa183c859f922dfa4b6cf12e7a23a681b7a9983d"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/x86-mont-linux.S": {
+      "upstreamSHA256": "575d3bbe9177df5c077dbab9350d0ad21a5e79d2505c372abde703d7e18293d3",
+      "vendoredSHA256": "575d3bbe9177df5c077dbab9350d0ad21a5e79d2505c372abde703d7e18293d3"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/x86_64-mont-apple.S": {
+      "upstreamSHA256": "ec422c09e56d437908f6fdb2d922f6c246cc7f2b7b54b090da631dff29f218f1",
+      "vendoredSHA256": "ec422c09e56d437908f6fdb2d922f6c246cc7f2b7b54b090da631dff29f218f1"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/x86_64-mont-linux.S": {
+      "upstreamSHA256": "2e2c288553baaca46f146ce755bf92b451ad483941e3fffcfc6ac89e1c9424d9",
+      "vendoredSHA256": "2e2c288553baaca46f146ce755bf92b451ad483941e3fffcfc6ac89e1c9424d9"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/x86_64-mont5-apple.S": {
+      "upstreamSHA256": "966c445f5e0cafdeabfbdd2d8beb39f26d770f93e90224b767ab2b742c354a79",
+      "vendoredSHA256": "966c445f5e0cafdeabfbdd2d8beb39f26d770f93e90224b767ab2b742c354a79"
+    },
+    "Sources/CNIOBoringSSL/gen/bcm/x86_64-mont5-linux.S": {
+      "upstreamSHA256": "58d736086dfcd0c122214befdbc68eed265c6ccf05714d9d33ae680da124ccf8",
+      "vendoredSHA256": "58d736086dfcd0c122214befdbc68eed265c6ccf05714d9d33ae680da124ccf8"
+    },
+    "Sources/CNIOBoringSSL/gen/crypto/aes128gcmsiv-x86_64-apple.S": {
+      "upstreamSHA256": "272f1f6a16dda4ea482e6f99d1f2913ce8d75b8f0b922d153c53bec9c18e6dae",
+      "vendoredSHA256": "272f1f6a16dda4ea482e6f99d1f2913ce8d75b8f0b922d153c53bec9c18e6dae"
+    },
+    "Sources/CNIOBoringSSL/gen/crypto/aes128gcmsiv-x86_64-linux.S": {
+      "upstreamSHA256": "284ff59e4b1bec2f73af64bd5e2cc2fb4048b59d99cf012651157f7d2fcc4a53",
+      "vendoredSHA256": "284ff59e4b1bec2f73af64bd5e2cc2fb4048b59d99cf012651157f7d2fcc4a53"
+    },
+    "Sources/CNIOBoringSSL/gen/crypto/chacha-armv4-linux.S": {
+      "upstreamSHA256": "b14f6db8865ebdb3fd9851457dd5b3e88961f0c618996bc241fd0add544fd82c",
+      "vendoredSHA256": "b14f6db8865ebdb3fd9851457dd5b3e88961f0c618996bc241fd0add544fd82c"
+    },
+    "Sources/CNIOBoringSSL/gen/crypto/chacha-armv8-apple.S": {
+      "upstreamSHA256": "80a04ff6c88a643f1d0ee36845f22ffa3082f05a76285ec6dadec7674476a448",
+      "vendoredSHA256": "80a04ff6c88a643f1d0ee36845f22ffa3082f05a76285ec6dadec7674476a448"
+    },
+    "Sources/CNIOBoringSSL/gen/crypto/chacha-armv8-linux.S": {
+      "upstreamSHA256": "13c77185bdf5387a40d00b9151b2a8dbf65912528d5903aa29051787e4c8ff2f",
+      "vendoredSHA256": "13c77185bdf5387a40d00b9151b2a8dbf65912528d5903aa29051787e4c8ff2f"
+    },
+    "Sources/CNIOBoringSSL/gen/crypto/chacha-armv8-win.S": {
+      "upstreamSHA256": "97766c9cf6a662d6cc1eab3196a37af05471e09b31108595a379a264134817cf",
+      "vendoredSHA256": "97766c9cf6a662d6cc1eab3196a37af05471e09b31108595a379a264134817cf"
+    },
+    "Sources/CNIOBoringSSL/gen/crypto/chacha-x86-apple.S": {
+      "upstreamSHA256": "18d7a6cd9f0f4398edd15e6b2b4d46cf7771ca3961e2ccab8557b83022a2ae13",
+      "vendoredSHA256": "18d7a6cd9f0f4398edd15e6b2b4d46cf7771ca3961e2ccab8557b83022a2ae13"
+    },
+    "Sources/CNIOBoringSSL/gen/crypto/chacha-x86-linux.S": {
+      "upstreamSHA256": "f997934d364a5a14b39ada102c95dec54e693e3bba6ea3fb406a2d65772f8258",
+      "vendoredSHA256": "f997934d364a5a14b39ada102c95dec54e693e3bba6ea3fb406a2d65772f8258"
+    },
+    "Sources/CNIOBoringSSL/gen/crypto/chacha-x86_64-apple.S": {
+      "upstreamSHA256": "c4ea601b2a070307df8965ff7f54159367f790941ef3c4ef7ca8e7535c444d98",
+      "vendoredSHA256": "c4ea601b2a070307df8965ff7f54159367f790941ef3c4ef7ca8e7535c444d98"
+    },
+    "Sources/CNIOBoringSSL/gen/crypto/chacha-x86_64-linux.S": {
+      "upstreamSHA256": "a3d46813a8b6363a09e942df0bc66abb8394fb5d7e4488a5a111b7acec9782b3",
+      "vendoredSHA256": "a3d46813a8b6363a09e942df0bc66abb8394fb5d7e4488a5a111b7acec9782b3"
+    },
+    "Sources/CNIOBoringSSL/gen/crypto/chacha20_poly1305_armv8-apple.S": {
+      "upstreamSHA256": "6de7104930ecf15de721aa57aee06973f5a8240d910792b6590660722ae4bdf1",
+      "vendoredSHA256": "6de7104930ecf15de721aa57aee06973f5a8240d910792b6590660722ae4bdf1"
+    },
+    "Sources/CNIOBoringSSL/gen/crypto/chacha20_poly1305_armv8-linux.S": {
+      "upstreamSHA256": "03295e7f7d13b4cabac3cafeed4fd3a782d41f58f8a0a9154ce9cc715714dcaf",
+      "vendoredSHA256": "03295e7f7d13b4cabac3cafeed4fd3a782d41f58f8a0a9154ce9cc715714dcaf"
+    },
+    "Sources/CNIOBoringSSL/gen/crypto/chacha20_poly1305_armv8-win.S": {
+      "upstreamSHA256": "9d46c0288ecce683ca87be7df9f953b389e8c1c766069f8d81bd699adbf2270a",
+      "vendoredSHA256": "9d46c0288ecce683ca87be7df9f953b389e8c1c766069f8d81bd699adbf2270a"
+    },
+    "Sources/CNIOBoringSSL/gen/crypto/chacha20_poly1305_x86_64-apple.S": {
+      "upstreamSHA256": "57c59e3aef6999deed7873b0daeb0dbf70077821598f568390abf538b92cfa96",
+      "vendoredSHA256": "57c59e3aef6999deed7873b0daeb0dbf70077821598f568390abf538b92cfa96"
+    },
+    "Sources/CNIOBoringSSL/gen/crypto/chacha20_poly1305_x86_64-linux.S": {
+      "upstreamSHA256": "f153340f39f488bfb0fca8b432e67ac64fd8966266d6f8657208b40d46d78137",
+      "vendoredSHA256": "f153340f39f488bfb0fca8b432e67ac64fd8966266d6f8657208b40d46d78137"
+    },
+    "Sources/CNIOBoringSSL/gen/crypto/err_data.cc": {
+      "upstreamSHA256": "657a0496c3f258a725dfaf3052a2db4c0ee516dd5616bdd5a8ca958f41e0a6aa",
+      "vendoredSHA256": "657a0496c3f258a725dfaf3052a2db4c0ee516dd5616bdd5a8ca958f41e0a6aa"
+    },
+    "Sources/CNIOBoringSSL/gen/crypto/md5-586-apple.S": {
+      "upstreamSHA256": "c46eb4ebccb945b643fb1cd2fed7f0114966bab7b8adfd20bfcd4a8aa19aabf7",
+      "vendoredSHA256": "c46eb4ebccb945b643fb1cd2fed7f0114966bab7b8adfd20bfcd4a8aa19aabf7"
+    },
+    "Sources/CNIOBoringSSL/gen/crypto/md5-586-linux.S": {
+      "upstreamSHA256": "c553e896446bf3b6c294b80731f68dec03b091c32256c68230fc47987a72cc7c",
+      "vendoredSHA256": "c553e896446bf3b6c294b80731f68dec03b091c32256c68230fc47987a72cc7c"
+    },
+    "Sources/CNIOBoringSSL/gen/crypto/md5-x86_64-apple.S": {
+      "upstreamSHA256": "1df3bf88dd7263bbc9aa30ce5a708ca96cbfefa5e87a3554e639e4f5a699a5d0",
+      "vendoredSHA256": "1df3bf88dd7263bbc9aa30ce5a708ca96cbfefa5e87a3554e639e4f5a699a5d0"
+    },
+    "Sources/CNIOBoringSSL/gen/crypto/md5-x86_64-linux.S": {
+      "upstreamSHA256": "7c9d0c49df509a59f339b78e9d9a5204da1fd758ae019a35e13b1cd11368000a",
+      "vendoredSHA256": "7c9d0c49df509a59f339b78e9d9a5204da1fd758ae019a35e13b1cd11368000a"
+    },
+    "Sources/CNIOBoringSSL/hash.txt": {
+      "upstreamSHA256": "690a041d4f35ae56fc9259b21599bf82bf10322a40f72a10a09289c05eaa26ec",
+      "vendoredSHA256": "690a041d4f35ae56fc9259b21599bf82bf10322a40f72a10a09289c05eaa26ec"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL.h": {
+      "upstreamSHA256": "59d0f1b39214b7da54e14f2c112581684272547e643be527f68471ff1b5f4d79",
+      "vendoredSHA256": "59d0f1b39214b7da54e14f2c112581684272547e643be527f68471ff1b5f4d79"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_aead.h": {
+      "upstreamSHA256": "82c41b0de53e2ef4d527c5ab379d80bfa44120b9e4ac5f6e6ab053356e65cba5",
+      "vendoredSHA256": "82c41b0de53e2ef4d527c5ab379d80bfa44120b9e4ac5f6e6ab053356e65cba5"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_aes.h": {
+      "upstreamSHA256": "e19b1044176568a02714ff4ed3d7296fe96705021f9ae78aab32aa974467880a",
+      "vendoredSHA256": "e19b1044176568a02714ff4ed3d7296fe96705021f9ae78aab32aa974467880a"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_arm_arch.h": {
+      "upstreamSHA256": "5d7e99df36133bb63f4a43d7f12cea6354b4d5bad2481cc93192966ddefd2e7c",
+      "vendoredSHA256": "5d7e99df36133bb63f4a43d7f12cea6354b4d5bad2481cc93192966ddefd2e7c"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_asm_base.h": {
+      "upstreamSHA256": "d20c0a9ab57eef8f5209219b40b7706d99505f655309c9f8e6e74573d77ab1c1",
+      "vendoredSHA256": "d20c0a9ab57eef8f5209219b40b7706d99505f655309c9f8e6e74573d77ab1c1"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_asn1.h": {
+      "upstreamSHA256": "e8d83e778784579efbb0cf8785d9d2796361b2504826437a5df869c3b31d658c",
+      "vendoredSHA256": "e8d83e778784579efbb0cf8785d9d2796361b2504826437a5df869c3b31d658c"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_asn1_mac.h": {
+      "upstreamSHA256": "03753852a856d8b497566d6e88e3154f06e7ac5d55c2b24b799f8952c8742bb3",
+      "vendoredSHA256": "03753852a856d8b497566d6e88e3154f06e7ac5d55c2b24b799f8952c8742bb3"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_asn1t.h": {
+      "upstreamSHA256": "dfd37e0e4b6beab54e7150cf3e19c1f88becbc71aec50778841e48a9d1719d56",
+      "vendoredSHA256": "dfd37e0e4b6beab54e7150cf3e19c1f88becbc71aec50778841e48a9d1719d56"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_base.h": {
+      "upstreamSHA256": "240ca7ba66eedb475fa7739ec97b1a1b56289c5876911d7f02e4f232db1cb96a",
+      "vendoredSHA256": "240ca7ba66eedb475fa7739ec97b1a1b56289c5876911d7f02e4f232db1cb96a"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_base64.h": {
+      "upstreamSHA256": "fb1b74746717a2c7de51c34c75a02bd1226dd989a46009c09aa5704bb05cf6f9",
+      "vendoredSHA256": "fb1b74746717a2c7de51c34c75a02bd1226dd989a46009c09aa5704bb05cf6f9"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_bio.h": {
+      "upstreamSHA256": "ae992faa3b86f388732567ef8eed1fc4e137d8bae0b14c18d62d94769c9ab573",
+      "vendoredSHA256": "ae992faa3b86f388732567ef8eed1fc4e137d8bae0b14c18d62d94769c9ab573"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_blake2.h": {
+      "upstreamSHA256": "2dde7ae4fc0a207d762a1e23d0649a5f6d79fa6558605afe3b3fbb2779dff066",
+      "vendoredSHA256": "2dde7ae4fc0a207d762a1e23d0649a5f6d79fa6558605afe3b3fbb2779dff066"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_blowfish.h": {
+      "upstreamSHA256": "184e642173148e7c230c42268d25f62863c41a54b866e5f173ad2906a9138954",
+      "vendoredSHA256": "184e642173148e7c230c42268d25f62863c41a54b866e5f173ad2906a9138954"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_bn.h": {
+      "upstreamSHA256": "3bd8306fae6d98c0646de3009fd2c6ced2b97c79885d8ccec07f9d288cc1a319",
+      "vendoredSHA256": "3bd8306fae6d98c0646de3009fd2c6ced2b97c79885d8ccec07f9d288cc1a319"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_buf.h": {
+      "upstreamSHA256": "9238f9b87c8d7df9328329d8f8ba278933e5686aa76084dcac29aae08ff1d630",
+      "vendoredSHA256": "9238f9b87c8d7df9328329d8f8ba278933e5686aa76084dcac29aae08ff1d630"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_buffer.h": {
+      "upstreamSHA256": "c93f217238fe4e56bfb46ac52d566c16967fb58fcd096554e6989f83495579e8",
+      "vendoredSHA256": "c93f217238fe4e56bfb46ac52d566c16967fb58fcd096554e6989f83495579e8"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_bytestring.h": {
+      "upstreamSHA256": "bc575abff81e615ea011fb7a603b3aa05cb28a50688b8e356add30d0bf768e42",
+      "vendoredSHA256": "bc575abff81e615ea011fb7a603b3aa05cb28a50688b8e356add30d0bf768e42"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_cast.h": {
+      "upstreamSHA256": "6711fc2b7c2b1d8de0deb49041527121c154857845c85102121b327a9fa1aabe",
+      "vendoredSHA256": "6711fc2b7c2b1d8de0deb49041527121c154857845c85102121b327a9fa1aabe"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_chacha.h": {
+      "upstreamSHA256": "8e01ad2cbbfbc4a773d366134e6e338a05ba571009671f321701a633f1cc768d",
+      "vendoredSHA256": "8e01ad2cbbfbc4a773d366134e6e338a05ba571009671f321701a633f1cc768d"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_cipher.h": {
+      "upstreamSHA256": "b412fb21b4e429dd3704fff21febeb52b04a4352b91e7c7260f412a918d95979",
+      "vendoredSHA256": "b412fb21b4e429dd3704fff21febeb52b04a4352b91e7c7260f412a918d95979"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_cmac.h": {
+      "upstreamSHA256": "b64b66ce9ee1e945285fcec1e461aebe25605c0341ef4581c5420e5ce4afaeb3",
+      "vendoredSHA256": "b64b66ce9ee1e945285fcec1e461aebe25605c0341ef4581c5420e5ce4afaeb3"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_cms.h": {
+      "upstreamSHA256": "e9a2e3a16f37e12ff8da42cb2a65b318f477c41cf200b0004e4a143f7baddb44",
+      "vendoredSHA256": "e9a2e3a16f37e12ff8da42cb2a65b318f477c41cf200b0004e4a143f7baddb44"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_conf.h": {
+      "upstreamSHA256": "afb4f7ea9029aef240c2fcb919cdbfbf008072f3d520a7e5291be67a1a5a20c8",
+      "vendoredSHA256": "afb4f7ea9029aef240c2fcb919cdbfbf008072f3d520a7e5291be67a1a5a20c8"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_configuration.h": {
+      "upstreamSHA256": "b5028d806663c79aabd0e1faa2e4a6666e1e2c4147de44b0e2b86cd0aa2067a2",
+      "vendoredSHA256": "b5028d806663c79aabd0e1faa2e4a6666e1e2c4147de44b0e2b86cd0aa2067a2"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_cpu.h": {
+      "upstreamSHA256": "124f7f618743387cb1cf27a188eded17aee5126fd678604f65934ac411129cc3",
+      "vendoredSHA256": "124f7f618743387cb1cf27a188eded17aee5126fd678604f65934ac411129cc3"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_crypto.h": {
+      "upstreamSHA256": "9dc72cb69dcd710c84ec5db8ec963bf34203df92b0ef02ce33ada38ce7ec8389",
+      "vendoredSHA256": "9dc72cb69dcd710c84ec5db8ec963bf34203df92b0ef02ce33ada38ce7ec8389"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_ctrdrbg.h": {
+      "upstreamSHA256": "fab404b8edd9cb662dd27a600ed218d31d5839242d318f643f4e04f69e77cfa3",
+      "vendoredSHA256": "fab404b8edd9cb662dd27a600ed218d31d5839242d318f643f4e04f69e77cfa3"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_curve25519.h": {
+      "upstreamSHA256": "02698bf2e87039aa97b860943eeb25d638cb0fec33f947d9666e2dec369f061c",
+      "vendoredSHA256": "02698bf2e87039aa97b860943eeb25d638cb0fec33f947d9666e2dec369f061c"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_des.h": {
+      "upstreamSHA256": "c09e0ad2cceb1926a98bdfd3e5579404742cd030f88f31da673265e9a1285a12",
+      "vendoredSHA256": "c09e0ad2cceb1926a98bdfd3e5579404742cd030f88f31da673265e9a1285a12"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_dh.h": {
+      "upstreamSHA256": "9cf66bd1bad3fe5cfb46d90c5f9a5306b9112da328defd85126d1433efe92751",
+      "vendoredSHA256": "9cf66bd1bad3fe5cfb46d90c5f9a5306b9112da328defd85126d1433efe92751"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_digest.h": {
+      "upstreamSHA256": "1765e9714a5f79e6d3ef9d4d8997e83e2705153623a28f7c9ae1bd01bd06249f",
+      "vendoredSHA256": "1765e9714a5f79e6d3ef9d4d8997e83e2705153623a28f7c9ae1bd01bd06249f"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_dsa.h": {
+      "upstreamSHA256": "4c40c6823c2dc032dc588f3178c316acbb155b1cf41a1c0b94fb6e83c130bdb2",
+      "vendoredSHA256": "4c40c6823c2dc032dc588f3178c316acbb155b1cf41a1c0b94fb6e83c130bdb2"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_dtls1.h": {
+      "upstreamSHA256": "14346432daeaa8635337867ead2c3c53c5f48be7ca620499c2bd32bee452a8e6",
+      "vendoredSHA256": "14346432daeaa8635337867ead2c3c53c5f48be7ca620499c2bd32bee452a8e6"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_e_os2.h": {
+      "upstreamSHA256": "cdeb61588b498592e559376c053f1108a1b3f9856ce73e17383e9307d4f26b22",
+      "vendoredSHA256": "cdeb61588b498592e559376c053f1108a1b3f9856ce73e17383e9307d4f26b22"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_ec.h": {
+      "upstreamSHA256": "ff3779bb5821eb8dc582e3d8f11daf6d3f80edbdb30f55517d82764e5ee6a0ab",
+      "vendoredSHA256": "ff3779bb5821eb8dc582e3d8f11daf6d3f80edbdb30f55517d82764e5ee6a0ab"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_ec_key.h": {
+      "upstreamSHA256": "b6030fc086335b2042384e1e84f71749dd421c0c486a8cef77a1a309043c030d",
+      "vendoredSHA256": "b6030fc086335b2042384e1e84f71749dd421c0c486a8cef77a1a309043c030d"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_ecdh.h": {
+      "upstreamSHA256": "28c2d2ab1986aef9b45b7b5c756bc5b3d5fd4ecb43c6a1ef84857799246f45d1",
+      "vendoredSHA256": "28c2d2ab1986aef9b45b7b5c756bc5b3d5fd4ecb43c6a1ef84857799246f45d1"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_ecdsa.h": {
+      "upstreamSHA256": "4fb41022934e0af428a41f83110738a9e1eee76ed8e02ef6c9abbd8f04cf165d",
+      "vendoredSHA256": "4fb41022934e0af428a41f83110738a9e1eee76ed8e02ef6c9abbd8f04cf165d"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_engine.h": {
+      "upstreamSHA256": "dddc59e5472da740b24d989e1357bf265e741834e9795e83f68886141cf8d325",
+      "vendoredSHA256": "dddc59e5472da740b24d989e1357bf265e741834e9795e83f68886141cf8d325"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_err.h": {
+      "upstreamSHA256": "38e25c7f7dc1b00e80f5a9a9d12e2a3e4e2a8f07b64f568adf073a10eaf7994a",
+      "vendoredSHA256": "38e25c7f7dc1b00e80f5a9a9d12e2a3e4e2a8f07b64f568adf073a10eaf7994a"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_evp.h": {
+      "upstreamSHA256": "1bc356741dc8c2ea39694a0256e3bd38234326124039a4c4c592a731859b065f",
+      "vendoredSHA256": "1bc356741dc8c2ea39694a0256e3bd38234326124039a4c4c592a731859b065f"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_evp_errors.h": {
+      "upstreamSHA256": "ae754759636a23de2613d98027f8cddae9228777ee4e0efed487fe790ca7aaf4",
+      "vendoredSHA256": "ae754759636a23de2613d98027f8cddae9228777ee4e0efed487fe790ca7aaf4"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_ex_data.h": {
+      "upstreamSHA256": "b4ff5206712830cb22cbd3b0201fe76a033b4a3c3b70c34488c73d531ac94abd",
+      "vendoredSHA256": "b4ff5206712830cb22cbd3b0201fe76a033b4a3c3b70c34488c73d531ac94abd"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_hkdf.h": {
+      "upstreamSHA256": "2afe1aea5a3b17ab7797e7de703d4ff5ba842fb92d7b0e8bd35c2a36b81d4267",
+      "vendoredSHA256": "2afe1aea5a3b17ab7797e7de703d4ff5ba842fb92d7b0e8bd35c2a36b81d4267"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_hmac.h": {
+      "upstreamSHA256": "52589693051654c133c75690252dbc3baf2a50f510103bf6d96fbad856ca399b",
+      "vendoredSHA256": "52589693051654c133c75690252dbc3baf2a50f510103bf6d96fbad856ca399b"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_hpke.h": {
+      "upstreamSHA256": "627e62525be07019983ed062fa03585b97723e5419ac385619d469f9dd543783",
+      "vendoredSHA256": "627e62525be07019983ed062fa03585b97723e5419ac385619d469f9dd543783"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_hrss.h": {
+      "upstreamSHA256": "937fd3b16f94dd3473d9f2122b976266e62819548e6be0b410444423290229f5",
+      "vendoredSHA256": "937fd3b16f94dd3473d9f2122b976266e62819548e6be0b410444423290229f5"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_is_boringssl.h": {
+      "upstreamSHA256": "9a5fc2426ef1dc80577ad05df4c127f39066f2766b7c4f1724f4a7e40e3c16c9",
+      "vendoredSHA256": "9a5fc2426ef1dc80577ad05df4c127f39066f2766b7c4f1724f4a7e40e3c16c9"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_kdf.h": {
+      "upstreamSHA256": "de3370314e254b3b20eb6e3e52c29f64653bad0d9cb5d99a5bc1dcdb29fa224e",
+      "vendoredSHA256": "de3370314e254b3b20eb6e3e52c29f64653bad0d9cb5d99a5bc1dcdb29fa224e"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_lhash.h": {
+      "upstreamSHA256": "8bdaaf52eeebda61ec73db59149ba3d4a1a82af0ad72710bd9e07f9b4b9fb63e",
+      "vendoredSHA256": "8bdaaf52eeebda61ec73db59149ba3d4a1a82af0ad72710bd9e07f9b4b9fb63e"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_md4.h": {
+      "upstreamSHA256": "1b2ac77271d76ae13a0878a6caee1d697e8e32fd3f424332d87722ae21502dc2",
+      "vendoredSHA256": "1b2ac77271d76ae13a0878a6caee1d697e8e32fd3f424332d87722ae21502dc2"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_md5.h": {
+      "upstreamSHA256": "027f63e1dd80bc2590b06abb7620032f1d126fd00612266e3ec6c6953025de93",
+      "vendoredSHA256": "027f63e1dd80bc2590b06abb7620032f1d126fd00612266e3ec6c6953025de93"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_mem.h": {
+      "upstreamSHA256": "fb74f6dd09d07401bcff07c7c62ef9a253e0640b1e5b0d2d92285399e9e924c2",
+      "vendoredSHA256": "fb74f6dd09d07401bcff07c7c62ef9a253e0640b1e5b0d2d92285399e9e924c2"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_mldsa.h": {
+      "upstreamSHA256": "49d46e044484a4dd0d83f5d06e3010059c5d74bcf1709078c2e3ca83c68e7f74",
+      "vendoredSHA256": "49d46e044484a4dd0d83f5d06e3010059c5d74bcf1709078c2e3ca83c68e7f74"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_mlkem.h": {
+      "upstreamSHA256": "83cb06446f162a99de86a08e83e2f0d4f385ee0e5be34497e90e2641de7529af",
+      "vendoredSHA256": "83cb06446f162a99de86a08e83e2f0d4f385ee0e5be34497e90e2641de7529af"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_nid.h": {
+      "upstreamSHA256": "043189cafd12e8a68d3b9d608fca0691bfba0b3d8be40d8c9e223fc22126f7da",
+      "vendoredSHA256": "043189cafd12e8a68d3b9d608fca0691bfba0b3d8be40d8c9e223fc22126f7da"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_obj.h": {
+      "upstreamSHA256": "4e64afc23ed05226fa276e687e62f7e3870b2dd34e1b7812e07d99fd6fc61d4a",
+      "vendoredSHA256": "4e64afc23ed05226fa276e687e62f7e3870b2dd34e1b7812e07d99fd6fc61d4a"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_obj_mac.h": {
+      "upstreamSHA256": "e72b95ace03aff0102aeeda1c66ff1e490b5ab2965e4b6a4de8a5b95da015df0",
+      "vendoredSHA256": "e72b95ace03aff0102aeeda1c66ff1e490b5ab2965e4b6a4de8a5b95da015df0"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_objects.h": {
+      "upstreamSHA256": "5e48e772a984c1fd0b5ad0f73d632815b576378d54e265842a72543d305010d1",
+      "vendoredSHA256": "5e48e772a984c1fd0b5ad0f73d632815b576378d54e265842a72543d305010d1"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_opensslconf.h": {
+      "upstreamSHA256": "5e7b8b9f8116f0470e26b6fab8133c907c2a0beb85b6b2f6b861dc0a93abb220",
+      "vendoredSHA256": "5e7b8b9f8116f0470e26b6fab8133c907c2a0beb85b6b2f6b861dc0a93abb220"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_opensslv.h": {
+      "upstreamSHA256": "839be8b5ae70a78a1c96c4ef94ea91096b9a8ce08dd80d4c2fbc16b9eefbbd0c",
+      "vendoredSHA256": "839be8b5ae70a78a1c96c4ef94ea91096b9a8ce08dd80d4c2fbc16b9eefbbd0c"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_ossl_typ.h": {
+      "upstreamSHA256": "ecce9869f5cd1e370baaa8e4af8144c0de43e00b208b2b35f939cb176bb07b8f",
+      "vendoredSHA256": "ecce9869f5cd1e370baaa8e4af8144c0de43e00b208b2b35f939cb176bb07b8f"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_params.h": {
+      "upstreamSHA256": "a602d94c5337a34bc7df67b54cf9bd7ae05661da78dfd2745a5036d192c60778",
+      "vendoredSHA256": "a602d94c5337a34bc7df67b54cf9bd7ae05661da78dfd2745a5036d192c60778"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_pem.h": {
+      "upstreamSHA256": "1eeafc578b4ae773c186d55d18ee5d4e60e38289a427bff47432b2704e8aee71",
+      "vendoredSHA256": "1eeafc578b4ae773c186d55d18ee5d4e60e38289a427bff47432b2704e8aee71"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_pkcs12.h": {
+      "upstreamSHA256": "9c657b1ad0cceb84d0fe6f24586622b136eef9679ad065fd52745213fc600e27",
+      "vendoredSHA256": "9c657b1ad0cceb84d0fe6f24586622b136eef9679ad065fd52745213fc600e27"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_pkcs7.h": {
+      "upstreamSHA256": "00b905843c03a0280f1fd69f4af2bb2d7489d2877db18bdf4bd506fc4c73bcfb",
+      "vendoredSHA256": "00b905843c03a0280f1fd69f4af2bb2d7489d2877db18bdf4bd506fc4c73bcfb"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_pkcs8.h": {
+      "upstreamSHA256": "ac3cba6dcbd33b073ecf7afa479a15c59b0b6e7c4e92721377ba56da5327194d",
+      "vendoredSHA256": "ac3cba6dcbd33b073ecf7afa479a15c59b0b6e7c4e92721377ba56da5327194d"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_poly1305.h": {
+      "upstreamSHA256": "bf513736c2f74f9d6b85f811880c196967b157d49d84156ade933a3a861a6a08",
+      "vendoredSHA256": "bf513736c2f74f9d6b85f811880c196967b157d49d84156ade933a3a861a6a08"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_pool.h": {
+      "upstreamSHA256": "0ce75b422f4e0505dab56f3eb6ec78f9a95ea43207eba258523a9126ebb4e37e",
+      "vendoredSHA256": "0ce75b422f4e0505dab56f3eb6ec78f9a95ea43207eba258523a9126ebb4e37e"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_posix_time.h": {
+      "upstreamSHA256": "73b928bcdc8f7608aea031b70d93101afe2f6dae1219ca86f24b19f34d46d91b",
+      "vendoredSHA256": "73b928bcdc8f7608aea031b70d93101afe2f6dae1219ca86f24b19f34d46d91b"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_prefix_symbols.h": {
+      "upstreamSHA256": "b15892dd6a75cceb52992d6a736f07604ae7b3aaf161b15ac2e8360afb90361e",
+      "vendoredSHA256": "b15892dd6a75cceb52992d6a736f07604ae7b3aaf161b15ac2e8360afb90361e"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_prefix_symbols_internal_S.h": {
+      "upstreamSHA256": "5ac6eb672b56070aa64ccb78ef92a61680ca300d3dee23630f6de07feeb2a889",
+      "vendoredSHA256": "5ac6eb672b56070aa64ccb78ef92a61680ca300d3dee23630f6de07feeb2a889"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_prefix_symbols_internal_c.h": {
+      "upstreamSHA256": "4853f027eaea49be8e8a8ff4228c808fbdbb407152ae17d7b3739354fe2c40be",
+      "vendoredSHA256": "4853f027eaea49be8e8a8ff4228c808fbdbb407152ae17d7b3739354fe2c40be"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_rand.h": {
+      "upstreamSHA256": "894148c6f3e70a919fc2c36e139476bab74e27f4adf455b44421296ff2c5628e",
+      "vendoredSHA256": "894148c6f3e70a919fc2c36e139476bab74e27f4adf455b44421296ff2c5628e"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_rc4.h": {
+      "upstreamSHA256": "633d27c0202ca528a2aa46bc50586068c35ab7f2f70f0d36420e84f52f14d86a",
+      "vendoredSHA256": "633d27c0202ca528a2aa46bc50586068c35ab7f2f70f0d36420e84f52f14d86a"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_ripemd.h": {
+      "upstreamSHA256": "b505f9ee1bdb8e69440a3387f4b71f279c65434b5646df60352ce948aa24fc7d",
+      "vendoredSHA256": "b505f9ee1bdb8e69440a3387f4b71f279c65434b5646df60352ce948aa24fc7d"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_rsa.h": {
+      "upstreamSHA256": "29cd8879315fe2f694cdf0c956dfd740a72c97bd79c4c3f6997272331c94d5fc",
+      "vendoredSHA256": "29cd8879315fe2f694cdf0c956dfd740a72c97bd79c4c3f6997272331c94d5fc"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_safestack.h": {
+      "upstreamSHA256": "452ce602199e2c4daa64cb1f99e13a3b44d6bcb369ec10544de18afd624b5f4f",
+      "vendoredSHA256": "452ce602199e2c4daa64cb1f99e13a3b44d6bcb369ec10544de18afd624b5f4f"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_service_indicator.h": {
+      "upstreamSHA256": "1c21bbef23b675f5b5f30d5f02004198b00e728ea9f3b68b8fe29454f58bd755",
+      "vendoredSHA256": "1c21bbef23b675f5b5f30d5f02004198b00e728ea9f3b68b8fe29454f58bd755"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_sha.h": {
+      "upstreamSHA256": "8b77fe8b96112b28ec1dbeece2811f0323c3776a5f7a9f6c3adb7c8886e9e0ff",
+      "vendoredSHA256": "8b77fe8b96112b28ec1dbeece2811f0323c3776a5f7a9f6c3adb7c8886e9e0ff"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_sha2.h": {
+      "upstreamSHA256": "916875f01787549a12b9c2d22b2582010da94a70ab6d1e19e9f02178354fdb3c",
+      "vendoredSHA256": "916875f01787549a12b9c2d22b2582010da94a70ab6d1e19e9f02178354fdb3c"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_siphash.h": {
+      "upstreamSHA256": "e68ab1809d50a86ec1bf09fabad3dfcc1bc7fcac90df888dc99fb3d68a6fbca2",
+      "vendoredSHA256": "e68ab1809d50a86ec1bf09fabad3dfcc1bc7fcac90df888dc99fb3d68a6fbca2"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_slhdsa.h": {
+      "upstreamSHA256": "1562fd5c1573af66fc9d23ce164179129b27738a7cafd3e53836b2507087e6ee",
+      "vendoredSHA256": "1562fd5c1573af66fc9d23ce164179129b27738a7cafd3e53836b2507087e6ee"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_span.h": {
+      "upstreamSHA256": "21a5c5d156b64c0d420c1d8b7552d6376889c62d66033f4d7cad5aa2b4f7250d",
+      "vendoredSHA256": "21a5c5d156b64c0d420c1d8b7552d6376889c62d66033f4d7cad5aa2b4f7250d"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_srtp.h": {
+      "upstreamSHA256": "45710d1faa190f28c6cf507da08774c8884bbd6f93cc97de50efc53b3940b90f",
+      "vendoredSHA256": "45710d1faa190f28c6cf507da08774c8884bbd6f93cc97de50efc53b3940b90f"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_ssl.h": {
+      "upstreamSHA256": "c3f10ea112174a610ef7e394ac25287f027feaf03df0cec814131dd026929d4e",
+      "vendoredSHA256": "c3f10ea112174a610ef7e394ac25287f027feaf03df0cec814131dd026929d4e"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_ssl3.h": {
+      "upstreamSHA256": "736ae50a6a767856809af8120f7fa646213e939673def2380b6244e36194c379",
+      "vendoredSHA256": "736ae50a6a767856809af8120f7fa646213e939673def2380b6244e36194c379"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_stack.h": {
+      "upstreamSHA256": "904ff83eafc080c3ee12fc78b3e5ffa3b7b2f360e4cf86f59e0058f0ec590917",
+      "vendoredSHA256": "904ff83eafc080c3ee12fc78b3e5ffa3b7b2f360e4cf86f59e0058f0ec590917"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_target.h": {
+      "upstreamSHA256": "92f91e96efbe79652af2b8a56b2b56ca163484a6567f4fa42b8b9c4f8c966c72",
+      "vendoredSHA256": "92f91e96efbe79652af2b8a56b2b56ca163484a6567f4fa42b8b9c4f8c966c72"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_thread.h": {
+      "upstreamSHA256": "a7de7433ba00611803c167f01812d265d5ef976a8dc778c147a66e5317fce751",
+      "vendoredSHA256": "a7de7433ba00611803c167f01812d265d5ef976a8dc778c147a66e5317fce751"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_time.h": {
+      "upstreamSHA256": "1ed66e05d51eb846bf74806f2442f1e70c9a61af9e791bbedb885fded24cc538",
+      "vendoredSHA256": "1ed66e05d51eb846bf74806f2442f1e70c9a61af9e791bbedb885fded24cc538"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_tls1.h": {
+      "upstreamSHA256": "8b140d7c77680b25a06a76002846abace9c14028d27bb404d4660c451b9977e3",
+      "vendoredSHA256": "8b140d7c77680b25a06a76002846abace9c14028d27bb404d4660c451b9977e3"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_tls_prf.h": {
+      "upstreamSHA256": "5847b7b557c1a1d5786b8a39d83a0853c71e06c127b4ff99da9fb486f698b821",
+      "vendoredSHA256": "5847b7b557c1a1d5786b8a39d83a0853c71e06c127b4ff99da9fb486f698b821"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_trust_token.h": {
+      "upstreamSHA256": "b2e9b58b7a76a8c90fe87e8ca9d7174ebc9432bc1273e62f144f29d01f26eced",
+      "vendoredSHA256": "b2e9b58b7a76a8c90fe87e8ca9d7174ebc9432bc1273e62f144f29d01f26eced"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_type_check.h": {
+      "upstreamSHA256": "4077c21c170a2ba66d21b1d69e7d5b072ce7cf1d5d0fa50b31cf1e1aa6765238",
+      "vendoredSHA256": "4077c21c170a2ba66d21b1d69e7d5b072ce7cf1d5d0fa50b31cf1e1aa6765238"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_types.h": {
+      "upstreamSHA256": "b5028d806663c79aabd0e1faa2e4a6666e1e2c4147de44b0e2b86cd0aa2067a2",
+      "vendoredSHA256": "b5028d806663c79aabd0e1faa2e4a6666e1e2c4147de44b0e2b86cd0aa2067a2"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_x509.h": {
+      "upstreamSHA256": "61b843e75165e0fed39b6dc0735ce253cdc9e52fe387890fd2db3f8b0a86571b",
+      "vendoredSHA256": "61b843e75165e0fed39b6dc0735ce253cdc9e52fe387890fd2db3f8b0a86571b"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_x509_vfy.h": {
+      "upstreamSHA256": "ed1148f7b0802157b74d73a598f03e6b0f7f5f9133527f37f2473d75cc5eb393",
+      "vendoredSHA256": "ed1148f7b0802157b74d73a598f03e6b0f7f5f9133527f37f2473d75cc5eb393"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_x509v3.h": {
+      "upstreamSHA256": "57cc9a8982a5049f222b40e89a5f9ccc66d303a94659264cac70d9a2b8a2acf4",
+      "vendoredSHA256": "57cc9a8982a5049f222b40e89a5f9ccc66d303a94659264cac70d9a2b8a2acf4"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_x509v3_errors.h": {
+      "upstreamSHA256": "bf5d6f21271973610b3ff1c0a017d0f7557b9b1799c29f7a12ae3004ce90280f",
+      "vendoredSHA256": "bf5d6f21271973610b3ff1c0a017d0f7557b9b1799c29f7a12ae3004ce90280f"
+    },
+    "Sources/CNIOBoringSSL/include/CNIOBoringSSL_xwing.h": {
+      "upstreamSHA256": "f05346c0853713975b7a29d6517354054058d0cb598323c03bc3c598a40577f2",
+      "vendoredSHA256": "f05346c0853713975b7a29d6517354054058d0cb598323c03bc3c598a40577f2"
+    },
+    "Sources/CNIOBoringSSL/include/module.modulemap": {
+      "upstreamSHA256": "3c8e3e7688d6f4a1e20e46ad92d82eedf68020d3ca1b2cc986dd4b357053f808",
+      "vendoredSHA256": "3c8e3e7688d6f4a1e20e46ad92d82eedf68020d3ca1b2cc986dd4b357053f808"
+    },
+    "Sources/CNIOBoringSSL/ssl/bio_ssl.cc": {
+      "upstreamSHA256": "1c3f57ca9fc10408d7c2f2c83df36cd4845baecb33f1067d578a4d99fd03541e",
+      "vendoredSHA256": "1c3f57ca9fc10408d7c2f2c83df36cd4845baecb33f1067d578a4d99fd03541e"
+    },
+    "Sources/CNIOBoringSSL/ssl/d1_both.cc": {
+      "upstreamSHA256": "d558b544a6efc548523e1be664edbbbf3a83046d97d6cd31a3d2f24e1a9e665e",
+      "vendoredSHA256": "d558b544a6efc548523e1be664edbbbf3a83046d97d6cd31a3d2f24e1a9e665e"
+    },
+    "Sources/CNIOBoringSSL/ssl/d1_lib.cc": {
+      "upstreamSHA256": "efa313e461765ab7cc27243c5c0a44bafb4055e6cf8fc89650151b70bab45588",
+      "vendoredSHA256": "efa313e461765ab7cc27243c5c0a44bafb4055e6cf8fc89650151b70bab45588"
+    },
+    "Sources/CNIOBoringSSL/ssl/d1_pkt.cc": {
+      "upstreamSHA256": "5659c616dfa08b4682c1a5e243f5c8698296e24a9405a1d24617e5167bde536f",
+      "vendoredSHA256": "5659c616dfa08b4682c1a5e243f5c8698296e24a9405a1d24617e5167bde536f"
+    },
+    "Sources/CNIOBoringSSL/ssl/d1_srtp.cc": {
+      "upstreamSHA256": "36a71840b6a005dada361259f9921f89e18538a2d0c1a3c22d8665398cb2d298",
+      "vendoredSHA256": "36a71840b6a005dada361259f9921f89e18538a2d0c1a3c22d8665398cb2d298"
+    },
+    "Sources/CNIOBoringSSL/ssl/dtls_method.cc": {
+      "upstreamSHA256": "e89e2749441c942dc794d0b0ea6025580b5c5ea4bd02c1ae62cf8d98504a6e8e",
+      "vendoredSHA256": "e89e2749441c942dc794d0b0ea6025580b5c5ea4bd02c1ae62cf8d98504a6e8e"
+    },
+    "Sources/CNIOBoringSSL/ssl/dtls_record.cc": {
+      "upstreamSHA256": "f0ca9de376125aab453e8efdec2e8c7538278f61301d85f3737e12cf1f794827",
+      "vendoredSHA256": "f0ca9de376125aab453e8efdec2e8c7538278f61301d85f3737e12cf1f794827"
+    },
+    "Sources/CNIOBoringSSL/ssl/encrypted_client_hello.cc": {
+      "upstreamSHA256": "02c3fdd5a9e1fea7bf015171adb7ab6fffddd83994077040aaff4b27edd0b59d",
+      "vendoredSHA256": "02c3fdd5a9e1fea7bf015171adb7ab6fffddd83994077040aaff4b27edd0b59d"
+    },
+    "Sources/CNIOBoringSSL/ssl/extensions.cc": {
+      "upstreamSHA256": "b79dd506741e3e8c1269d4980d031cf112a0d6e9290a64de4b85d2637d7e4b4e",
+      "vendoredSHA256": "b79dd506741e3e8c1269d4980d031cf112a0d6e9290a64de4b85d2637d7e4b4e"
+    },
+    "Sources/CNIOBoringSSL/ssl/handoff.cc": {
+      "upstreamSHA256": "09054e6cf77978ba012bb1ec39b55b03e46d07cf91fa189943fe63d3d2d6d0f9",
+      "vendoredSHA256": "09054e6cf77978ba012bb1ec39b55b03e46d07cf91fa189943fe63d3d2d6d0f9"
+    },
+    "Sources/CNIOBoringSSL/ssl/handshake.cc": {
+      "upstreamSHA256": "8a1510399bf586ce475faa6d2bca85e961525d804fd912bde8f0a43711d43371",
+      "vendoredSHA256": "8a1510399bf586ce475faa6d2bca85e961525d804fd912bde8f0a43711d43371"
+    },
+    "Sources/CNIOBoringSSL/ssl/handshake_client.cc": {
+      "upstreamSHA256": "8ec42deab80f9d9dede8e8b497308543ec5e9a81f3b43e78952834bc5b9cb7c1",
+      "vendoredSHA256": "8ec42deab80f9d9dede8e8b497308543ec5e9a81f3b43e78952834bc5b9cb7c1"
+    },
+    "Sources/CNIOBoringSSL/ssl/handshake_server.cc": {
+      "upstreamSHA256": "dc7f9973dedf53762e5679af613b80f2c334014779f988af77272b5022d548af",
+      "vendoredSHA256": "dc7f9973dedf53762e5679af613b80f2c334014779f988af77272b5022d548af"
+    },
+    "Sources/CNIOBoringSSL/ssl/internal.h": {
+      "upstreamSHA256": "87e6f768541d2144a91691b3973fd0a66da8fc08f59e56d63dfdddfee7b90069",
+      "vendoredSHA256": "87e6f768541d2144a91691b3973fd0a66da8fc08f59e56d63dfdddfee7b90069"
+    },
+    "Sources/CNIOBoringSSL/ssl/s3_both.cc": {
+      "upstreamSHA256": "7a579bddb31cfddd0dc6dada0858cee7e03ae26dba34a03986d7d7610b9c447c",
+      "vendoredSHA256": "7a579bddb31cfddd0dc6dada0858cee7e03ae26dba34a03986d7d7610b9c447c"
+    },
+    "Sources/CNIOBoringSSL/ssl/s3_lib.cc": {
+      "upstreamSHA256": "27a3834cb2bc1a66c88a85d7e16b635aa7d120ef97b3f74ceb00489df86490be",
+      "vendoredSHA256": "27a3834cb2bc1a66c88a85d7e16b635aa7d120ef97b3f74ceb00489df86490be"
+    },
+    "Sources/CNIOBoringSSL/ssl/s3_pkt.cc": {
+      "upstreamSHA256": "b9cbeeaf38487739fa46e3fca83eadfbfb5d4c2796be5eed11ae0033abeae5fe",
+      "vendoredSHA256": "b9cbeeaf38487739fa46e3fca83eadfbfb5d4c2796be5eed11ae0033abeae5fe"
+    },
+    "Sources/CNIOBoringSSL/ssl/ssl_aead_ctx.cc": {
+      "upstreamSHA256": "629c5776bd490f53a0291dd131e06e99ac6c7869ade1dc9532538f4a949db43b",
+      "vendoredSHA256": "629c5776bd490f53a0291dd131e06e99ac6c7869ade1dc9532538f4a949db43b"
+    },
+    "Sources/CNIOBoringSSL/ssl/ssl_asn1.cc": {
+      "upstreamSHA256": "379311b488e9ab549f58364d4cf620beb01f7bfbd75f4e7a34366b2f9136faa4",
+      "vendoredSHA256": "379311b488e9ab549f58364d4cf620beb01f7bfbd75f4e7a34366b2f9136faa4"
+    },
+    "Sources/CNIOBoringSSL/ssl/ssl_buffer.cc": {
+      "upstreamSHA256": "390e6aa42e596208fe8bf115c735c3e0b5f50b5c242d78d3678f06c43be63e47",
+      "vendoredSHA256": "390e6aa42e596208fe8bf115c735c3e0b5f50b5c242d78d3678f06c43be63e47"
+    },
+    "Sources/CNIOBoringSSL/ssl/ssl_cert.cc": {
+      "upstreamSHA256": "61a661288127d9bc11e3a5b5f26ce664c5986f9fbb044d15b4b2f8771ff32206",
+      "vendoredSHA256": "61a661288127d9bc11e3a5b5f26ce664c5986f9fbb044d15b4b2f8771ff32206"
+    },
+    "Sources/CNIOBoringSSL/ssl/ssl_cipher.cc": {
+      "upstreamSHA256": "55d4a0390c5c0bee883f672125ae7ea8902828a2347f65ccda918cd6ddbe8049",
+      "vendoredSHA256": "55d4a0390c5c0bee883f672125ae7ea8902828a2347f65ccda918cd6ddbe8049"
+    },
+    "Sources/CNIOBoringSSL/ssl/ssl_credential.cc": {
+      "upstreamSHA256": "3da33c667ea674fe2c0f80bd21e076aa2ec5335ec68a0d954db67523f1eefff9",
+      "vendoredSHA256": "3da33c667ea674fe2c0f80bd21e076aa2ec5335ec68a0d954db67523f1eefff9"
+    },
+    "Sources/CNIOBoringSSL/ssl/ssl_file.cc": {
+      "upstreamSHA256": "7dc067a6c0640414212711b8a88c9f1cff5625900e7f2c69850cb5e2c440d220",
+      "vendoredSHA256": "7dc067a6c0640414212711b8a88c9f1cff5625900e7f2c69850cb5e2c440d220"
+    },
+    "Sources/CNIOBoringSSL/ssl/ssl_key_share.cc": {
+      "upstreamSHA256": "d6c2d60461a46c536fbf95b6ab267d1f1aa22c087592c1c87ed43a785e68caf2",
+      "vendoredSHA256": "d6c2d60461a46c536fbf95b6ab267d1f1aa22c087592c1c87ed43a785e68caf2"
+    },
+    "Sources/CNIOBoringSSL/ssl/ssl_lib.cc": {
+      "upstreamSHA256": "ee4cc6b14d69b46bf8a09fbc8f62b19a2a019d0520ea2c42215b25c8a7d71174",
+      "vendoredSHA256": "ee4cc6b14d69b46bf8a09fbc8f62b19a2a019d0520ea2c42215b25c8a7d71174"
+    },
+    "Sources/CNIOBoringSSL/ssl/ssl_privkey.cc": {
+      "upstreamSHA256": "fe148e33973f686054646b499f828de6cbb504a2be00b1257c605b968946849a",
+      "vendoredSHA256": "fe148e33973f686054646b499f828de6cbb504a2be00b1257c605b968946849a"
+    },
+    "Sources/CNIOBoringSSL/ssl/ssl_session.cc": {
+      "upstreamSHA256": "0d8dc1d97b66a6afb436574b12f639c6638e1f1fd37a67a73eeb844e0a3ae663",
+      "vendoredSHA256": "0d8dc1d97b66a6afb436574b12f639c6638e1f1fd37a67a73eeb844e0a3ae663"
+    },
+    "Sources/CNIOBoringSSL/ssl/ssl_stat.cc": {
+      "upstreamSHA256": "ff6c0df2e63ffe77a648636f578d6edcd5cf030ac7637e03779ab1c03f2d7967",
+      "vendoredSHA256": "ff6c0df2e63ffe77a648636f578d6edcd5cf030ac7637e03779ab1c03f2d7967"
+    },
+    "Sources/CNIOBoringSSL/ssl/ssl_transcript.cc": {
+      "upstreamSHA256": "47c40a5b9bbaad541ec25bc3a2486494bec352fb6600ebeabb3941b273b69b1b",
+      "vendoredSHA256": "47c40a5b9bbaad541ec25bc3a2486494bec352fb6600ebeabb3941b273b69b1b"
+    },
+    "Sources/CNIOBoringSSL/ssl/ssl_versions.cc": {
+      "upstreamSHA256": "a31e47ed576201d49df6af56cfe67cd1bc51cad22fdcab97cd39a8728b69b065",
+      "vendoredSHA256": "a31e47ed576201d49df6af56cfe67cd1bc51cad22fdcab97cd39a8728b69b065"
+    },
+    "Sources/CNIOBoringSSL/ssl/ssl_x509.cc": {
+      "upstreamSHA256": "9fcac70f4908137d3f42266316196146e193be2502912933724d8a8120035f19",
+      "vendoredSHA256": "9fcac70f4908137d3f42266316196146e193be2502912933724d8a8120035f19"
+    },
+    "Sources/CNIOBoringSSL/ssl/t1_enc.cc": {
+      "upstreamSHA256": "0a8fd7109ec6163321822ac94b2eeb513081324a708d495da39cd6fe85ad01a5",
+      "vendoredSHA256": "0a8fd7109ec6163321822ac94b2eeb513081324a708d495da39cd6fe85ad01a5"
+    },
+    "Sources/CNIOBoringSSL/ssl/tls13_both.cc": {
+      "upstreamSHA256": "5d620d4065e6a3906a82b352361909451a6d12d246960eb1d0e045bc11cf7549",
+      "vendoredSHA256": "5d620d4065e6a3906a82b352361909451a6d12d246960eb1d0e045bc11cf7549"
+    },
+    "Sources/CNIOBoringSSL/ssl/tls13_client.cc": {
+      "upstreamSHA256": "41f2c5d5211540f1e20d68066b815472e235032190eb24d1776b043752c49106",
+      "vendoredSHA256": "41f2c5d5211540f1e20d68066b815472e235032190eb24d1776b043752c49106"
+    },
+    "Sources/CNIOBoringSSL/ssl/tls13_enc.cc": {
+      "upstreamSHA256": "a8c31e88cb128be16d82c7ef312f46b583b2db1300405aec6e4591c3a6f54122",
+      "vendoredSHA256": "a8c31e88cb128be16d82c7ef312f46b583b2db1300405aec6e4591c3a6f54122"
+    },
+    "Sources/CNIOBoringSSL/ssl/tls13_server.cc": {
+      "upstreamSHA256": "5e2d7cf2856802bbd540c97754fd5cb51d417cd78ff602e72db86abe3204adc4",
+      "vendoredSHA256": "5e2d7cf2856802bbd540c97754fd5cb51d417cd78ff602e72db86abe3204adc4"
+    },
+    "Sources/CNIOBoringSSL/ssl/tls_method.cc": {
+      "upstreamSHA256": "67f24c5675b3b939a57c5a79ee37645fc3a65793bf9f0ffeab224af9cfd63e04",
+      "vendoredSHA256": "67f24c5675b3b939a57c5a79ee37645fc3a65793bf9f0ffeab224af9cfd63e04"
+    },
+    "Sources/CNIOBoringSSL/ssl/tls_record.cc": {
+      "upstreamSHA256": "3c305cde4d8ed8564434b29527e037ffe3cd72ff78b68bb5d44215f6529189a4",
+      "vendoredSHA256": "3c305cde4d8ed8564434b29527e037ffe3cd72ff78b68bb5d44215f6529189a4"
+    },
+    "Sources/CNIOBoringSSL/third_party/fiat/asm/fiat_curve25519_adx_mul.S": {
+      "upstreamSHA256": "7e1baf5e908e108eecaf51f8c971eb5607fef5ce335010bcf7fc0768514a59a3",
+      "vendoredSHA256": "7e1baf5e908e108eecaf51f8c971eb5607fef5ce335010bcf7fc0768514a59a3"
+    },
+    "Sources/CNIOBoringSSL/third_party/fiat/asm/fiat_curve25519_adx_square.S": {
+      "upstreamSHA256": "2748e21c66d58ed9b785c6abf4b18b7f7f4333090280948ffabbb2fa5d4ec32a",
+      "vendoredSHA256": "2748e21c66d58ed9b785c6abf4b18b7f7f4333090280948ffabbb2fa5d4ec32a"
+    },
+    "Sources/CNIOBoringSSL/third_party/fiat/asm/fiat_p256_adx_mul.S": {
+      "upstreamSHA256": "d93c3ac65df4163b57c5a76b7684ac5481fc80325fa2b6ceaf85754f699631e0",
+      "vendoredSHA256": "d93c3ac65df4163b57c5a76b7684ac5481fc80325fa2b6ceaf85754f699631e0"
+    },
+    "Sources/CNIOBoringSSL/third_party/fiat/asm/fiat_p256_adx_sqr.S": {
+      "upstreamSHA256": "8f5e8df380a139b76bd375fd26b53c6fe62eaffca70c39dfff500ab01a3d235c",
+      "vendoredSHA256": "8f5e8df380a139b76bd375fd26b53c6fe62eaffca70c39dfff500ab01a3d235c"
+    },
+    "Sources/CNIOBoringSSL/third_party/fiat/bedrock_polyfill_platform.c.inc": {
+      "upstreamSHA256": "1acdc503b88bfe946f56f7e9baafa0be154369ab7b9b020a815ecb80b1551856",
+      "vendoredSHA256": "1acdc503b88bfe946f56f7e9baafa0be154369ab7b9b020a815ecb80b1551856"
+    },
+    "Sources/CNIOBoringSSL/third_party/fiat/bedrock_unverified_bareminimum.c.inc": {
+      "upstreamSHA256": "fa9470764a0b72cb2b5450a7d40dfa654d3e5e41858f4144af0cd028a043dd0a",
+      "vendoredSHA256": "fa9470764a0b72cb2b5450a7d40dfa654d3e5e41858f4144af0cd028a043dd0a"
+    },
+    "Sources/CNIOBoringSSL/third_party/fiat/bedrock_unverified_platform.c.inc": {
+      "upstreamSHA256": "04a7f86c4b835d928df11b72ece5125ccc6773fedaa56cf7b5ca394618c87623",
+      "vendoredSHA256": "04a7f86c4b835d928df11b72ece5125ccc6773fedaa56cf7b5ca394618c87623"
+    },
+    "Sources/CNIOBoringSSL/third_party/fiat/curve25519_32.h": {
+      "upstreamSHA256": "b820ffa9b5c9cd16457ebc8323a104f04206a490d7af51ec7accbf55b5437b4e",
+      "vendoredSHA256": "b820ffa9b5c9cd16457ebc8323a104f04206a490d7af51ec7accbf55b5437b4e"
+    },
+    "Sources/CNIOBoringSSL/third_party/fiat/curve25519_64.h": {
+      "upstreamSHA256": "24c9015874e9cfe6dd5824311c53b0becbb647f3d5cf1f874913a637681454fb",
+      "vendoredSHA256": "24c9015874e9cfe6dd5824311c53b0becbb647f3d5cf1f874913a637681454fb"
+    },
+    "Sources/CNIOBoringSSL/third_party/fiat/curve25519_64_adx.h": {
+      "upstreamSHA256": "cf38886f9ace6842295756d5973a71307c8d8be282336f81f8842b2994201323",
+      "vendoredSHA256": "cf38886f9ace6842295756d5973a71307c8d8be282336f81f8842b2994201323"
+    },
+    "Sources/CNIOBoringSSL/third_party/fiat/curve25519_64_msvc.h": {
+      "upstreamSHA256": "7ab5e0d33c04e4b371c17842697419422954d967eb5e2b0128fb11faed17c531",
+      "vendoredSHA256": "7ab5e0d33c04e4b371c17842697419422954d967eb5e2b0128fb11faed17c531"
+    },
+    "Sources/CNIOBoringSSL/third_party/fiat/p256_32.h": {
+      "upstreamSHA256": "fbae47dd1365bdc9b27b7f5d1612e5c99f0de441fdca602c3863a57a2422f0ce",
+      "vendoredSHA256": "fbae47dd1365bdc9b27b7f5d1612e5c99f0de441fdca602c3863a57a2422f0ce"
+    },
+    "Sources/CNIOBoringSSL/third_party/fiat/p256_64.h": {
+      "upstreamSHA256": "d3877f4c81bdce68e3df5f8bd0e6a22ef8c92ceb302016c51d40d02eb7a01153",
+      "vendoredSHA256": "d3877f4c81bdce68e3df5f8bd0e6a22ef8c92ceb302016c51d40d02eb7a01153"
+    },
+    "Sources/CNIOBoringSSL/third_party/fiat/p256_64_msvc.h": {
+      "upstreamSHA256": "02dd5ccd438c520cc83d43c1744b7b43d6a7081d79322f6cc955cf6fbdba021a",
+      "vendoredSHA256": "02dd5ccd438c520cc83d43c1744b7b43d6a7081d79322f6cc955cf6fbdba021a"
+    },
+    "Sources/CNIOBoringSSL/third_party/fiat/p256_field.c.inc": {
+      "upstreamSHA256": "a63b40e02442fa1b5d797bd77f63e0cec6ae3515441055b74f345d9275a1f63c",
+      "vendoredSHA256": "a63b40e02442fa1b5d797bd77f63e0cec6ae3515441055b74f345d9275a1f63c"
+    },
+    "Sources/CNIOBoringSSL/third_party/fiat/p256_field_32.br.c.inc": {
+      "upstreamSHA256": "dca2166158b2996a7b58ced6f84326bf02ee1076814094629fd5a802251517d8",
+      "vendoredSHA256": "dca2166158b2996a7b58ced6f84326bf02ee1076814094629fd5a802251517d8"
+    },
+    "Sources/CNIOBoringSSL/third_party/fiat/p256_field_64.br.c.inc": {
+      "upstreamSHA256": "2386bd3564da3d8da80fb8bec6037dd1f0e56d5ad1f7d43bff1ad96beb49eca8",
+      "vendoredSHA256": "2386bd3564da3d8da80fb8bec6037dd1f0e56d5ad1f7d43bff1ad96beb49eca8"
+    },
+    "Sources/CNIOBoringSSL/third_party/fiat/p256_point.br.c.inc": {
+      "upstreamSHA256": "921481600c879193a839904cd51b725d8ab50eccc7fecd06c50c32cb3e664ee8",
+      "vendoredSHA256": "921481600c879193a839904cd51b725d8ab50eccc7fecd06c50c32cb3e664ee8"
+    },
+    "Sources/CNIOBoringSSLShims/include/CNIOBoringSSLShims.h": {
+      "upstreamSHA256": "53a152b645f45280db9a92b726d798c012fdf2d630f3311c731706218344adb4",
+      "vendoredSHA256": "53a152b645f45280db9a92b726d798c012fdf2d630f3311c731706218344adb4"
+    },
+    "Sources/CNIOBoringSSLShims/shims.c": {
+      "upstreamSHA256": "f7711fb0b017c199bdd3c0797b756814d6266880b14d03db5fe78846b3bb52a9",
+      "vendoredSHA256": "f7711fb0b017c199bdd3c0797b756814d6266880b14d03db5fe78846b3bb52a9"
+    },
+    "Sources/NIOSSL/AndroidCABundle.swift": {
+      "upstreamSHA256": "24f76c939817e285c874c24442bae762c13dd9290f2cea3c4b8759ca2967d247",
+      "vendoredSHA256": "24f76c939817e285c874c24442bae762c13dd9290f2cea3c4b8759ca2967d247"
+    },
+    "Sources/NIOSSL/ByteBufferBIO.swift": {
+      "upstreamSHA256": "716245780e478793e6d510ed779c514d62e1e96c82b7a13d644ca4bfd399018d",
+      "vendoredSHA256": "716245780e478793e6d510ed779c514d62e1e96c82b7a13d644ca4bfd399018d"
+    },
+    "Sources/NIOSSL/CustomPrivateKey.swift": {
+      "upstreamSHA256": "3d38339d5dfc601afa078e9c2410c486f016d75f3b0944f96646c0491b7ffbce",
+      "vendoredSHA256": "3d38339d5dfc601afa078e9c2410c486f016d75f3b0944f96646c0491b7ffbce"
+    },
+    "Sources/NIOSSL/Docs.docc/TLSConfiguration.md": {
+      "upstreamSHA256": "3d4859ec2b948e6dcb9b7640d32edc1b078ba8d6f3aa95d95fc8bed446971706",
+      "vendoredSHA256": "3d4859ec2b948e6dcb9b7640d32edc1b078ba8d6f3aa95d95fc8bed446971706"
+    },
+    "Sources/NIOSSL/Docs.docc/index.md": {
+      "upstreamSHA256": "7dc7d5f6b9647840c456615ad25477dace8a758edb293bd8a6eb542cdb2fb2f8",
+      "vendoredSHA256": "7dc7d5f6b9647840c456615ad25477dace8a758edb293bd8a6eb542cdb2fb2f8"
+    },
+    "Sources/NIOSSL/Docs.docc/quantum-secure-tls.md": {
+      "upstreamSHA256": "96d1e68e3adbc197c3fc708b86ea71de79ead97534768f70c119c6ec4d52972c",
+      "vendoredSHA256": "96d1e68e3adbc197c3fc708b86ea71de79ead97534768f70c119c6ec4d52972c"
+    },
+    "Sources/NIOSSL/Docs.docc/trust-roots-behavior.md": {
+      "upstreamSHA256": "55af82d9c87f63307909b2ddcfca699e4a4852ea46c60ad371db83ccf049bf07",
+      "vendoredSHA256": "55af82d9c87f63307909b2ddcfca699e4a4852ea46c60ad371db83ccf049bf07"
+    },
+    "Sources/NIOSSL/FreeBSDCABundle.swift": {
+      "upstreamSHA256": "5c619fb11e7cb5d1003c2e17e38db29a8a747a63a120f4ffba3b37f8e8388c5a",
+      "vendoredSHA256": "5c619fb11e7cb5d1003c2e17e38db29a8a747a63a120f4ffba3b37f8e8388c5a"
+    },
+    "Sources/NIOSSL/IdentityVerification.swift": {
+      "upstreamSHA256": "b3669aa06101b8416ac46344a84c8b4d16f2b3cd9529cd2d3194918dacc37416",
+      "vendoredSHA256": "b3669aa06101b8416ac46344a84c8b4d16f2b3cd9529cd2d3194918dacc37416"
+    },
+    "Sources/NIOSSL/LinuxCABundle.swift": {
+      "upstreamSHA256": "cc61fb3b8603d6bcc5e44bcf9a11e0d059c90065018bb6caf6a81bc00a4e0251",
+      "vendoredSHA256": "cc61fb3b8603d6bcc5e44bcf9a11e0d059c90065018bb6caf6a81bc00a4e0251"
+    },
+    "Sources/NIOSSL/NIOSSLClientHandler.swift": {
+      "upstreamSHA256": "69cf0e499fb4ef0e9a9da02fd3d4584feaf6d0d148025b9485d3a055f9e6f47e",
+      "vendoredSHA256": "69cf0e499fb4ef0e9a9da02fd3d4584feaf6d0d148025b9485d3a055f9e6f47e"
+    },
+    "Sources/NIOSSL/NIOSSLHandler+Configuration.swift": {
+      "upstreamSHA256": "68673197945ca266e024867b8cbba3f6f7570d612fe990be281490dfab0861b5",
+      "vendoredSHA256": "68673197945ca266e024867b8cbba3f6f7570d612fe990be281490dfab0861b5"
+    },
+    "Sources/NIOSSL/NIOSSLHandler.swift": {
+      "upstreamSHA256": "23051a1813665e91607e1eea89a6e501184bfe9218bda5bd2e27798f91f1d5c6",
+      "vendoredSHA256": "0e002952cd825b25468ba3c0647830c8b671c3f79a2d27084a7f2e47e3265c8e"
+    },
+    "Sources/NIOSSL/NIOSSLServerHandler.swift": {
+      "upstreamSHA256": "76afe76efe9599eeb7fc6eb506cb1c84268e444dc15f8f867b6510fb70701e1f",
+      "vendoredSHA256": "76afe76efe9599eeb7fc6eb506cb1c84268e444dc15f8f867b6510fb70701e1f"
+    },
+    "Sources/NIOSSL/ObjectIdentifier.swift": {
+      "upstreamSHA256": "ca4f01b168afb79c02c34d694b49dc05fbf14870a9b00e6d15382233e4d546b4",
+      "vendoredSHA256": "ca4f01b168afb79c02c34d694b49dc05fbf14870a9b00e6d15382233e4d546b4"
+    },
+    "Sources/NIOSSL/PosixPort.swift": {
+      "upstreamSHA256": "36cd3a969fcb0954a9cc588aa910e7140a13ac8848ffc615bbdba2e1106f196b",
+      "vendoredSHA256": "36cd3a969fcb0954a9cc588aa910e7140a13ac8848ffc615bbdba2e1106f196b"
+    },
+    "Sources/NIOSSL/PrivacyInfo.xcprivacy": {
+      "upstreamSHA256": "42fb8a30dd8d7ba0900e1bf17fe64ed8c12cfdb8a9c791ab6b4e1eceb0f299c0",
+      "vendoredSHA256": "42fb8a30dd8d7ba0900e1bf17fe64ed8c12cfdb8a9c791ab6b4e1eceb0f299c0"
+    },
+    "Sources/NIOSSL/SSLCallbacks.swift": {
+      "upstreamSHA256": "66a2a62a94669999bd4c48fe258dc7c9f4c4c873ffd866dac61068582149d44f",
+      "vendoredSHA256": "66a2a62a94669999bd4c48fe258dc7c9f4c4c873ffd866dac61068582149d44f"
+    },
+    "Sources/NIOSSL/SSLCertificate.swift": {
+      "upstreamSHA256": "812bb634a96a9396a61fb1993f1ba26cf0ce8b6cbd9aaaaa4581842fa5f8c7e8",
+      "vendoredSHA256": "812bb634a96a9396a61fb1993f1ba26cf0ce8b6cbd9aaaaa4581842fa5f8c7e8"
+    },
+    "Sources/NIOSSL/SSLCertificateExtensions.swift": {
+      "upstreamSHA256": "4248106ac8063d4d13fb838c665c5d1cf023dca6eeea19a132a39b5bb657f760",
+      "vendoredSHA256": "4248106ac8063d4d13fb838c665c5d1cf023dca6eeea19a132a39b5bb657f760"
+    },
+    "Sources/NIOSSL/SSLCertificateName.swift": {
+      "upstreamSHA256": "cd766c95f984a62b1cbfb5940ea47506ee85a6a5cbd50cfa13360f6364fc1a99",
+      "vendoredSHA256": "cd766c95f984a62b1cbfb5940ea47506ee85a6a5cbd50cfa13360f6364fc1a99"
+    },
+    "Sources/NIOSSL/SSLConnection.swift": {
+      "upstreamSHA256": "f007ca27c8d099525fcc815fe4a027ec5bdba9e3dee81c9f2f092482184d6416",
+      "vendoredSHA256": "0dcb261f792afe81ade3ca0087bb011e79f5535c85c40ef63549555b1b785e70"
+    },
+    "Sources/NIOSSL/SSLContext.swift": {
+      "upstreamSHA256": "6905c962347dc78772be5656f81baaad670b3ea1005e422f987d94d3b9129532",
+      "vendoredSHA256": "04fe9ca9f9f7b12e43e29ebb9ea9a0d053e5a6dcae215462ed9652a1811cef99"
+    },
+    "Sources/NIOSSL/SSLErrors.swift": {
+      "upstreamSHA256": "ffdc86677c1fc3bd9c6b8c1fd2d2f24befa09f5d78ea780be4c8ed5423d17473",
+      "vendoredSHA256": "ffdc86677c1fc3bd9c6b8c1fd2d2f24befa09f5d78ea780be4c8ed5423d17473"
+    },
+    "Sources/NIOSSL/SSLInit.swift": {
+      "upstreamSHA256": "33ca68721cabc6276b28fb5b9ca06cffa1f3f6555996d01655af9ffc31e7213d",
+      "vendoredSHA256": "33ca68721cabc6276b28fb5b9ca06cffa1f3f6555996d01655af9ffc31e7213d"
+    },
+    "Sources/NIOSSL/SSLPKCS12Bundle.swift": {
+      "upstreamSHA256": "23da905422716caddc436d60b60fd6c5bb6f8bc6c0d8411732b2fbb33f69d2d6",
+      "vendoredSHA256": "23da905422716caddc436d60b60fd6c5bb6f8bc6c0d8411732b2fbb33f69d2d6"
+    },
+    "Sources/NIOSSL/SSLPrivateKey.swift": {
+      "upstreamSHA256": "2c444dfad6b4541723a8cc7a8709ce53e4a83d9c24a1817ac40a8a59d888381e",
+      "vendoredSHA256": "2c444dfad6b4541723a8cc7a8709ce53e4a83d9c24a1817ac40a8a59d888381e"
+    },
+    "Sources/NIOSSL/SSLPublicKey.swift": {
+      "upstreamSHA256": "401fa85fae4d2be90faac3db255743fd8181c6bf3fcd0bba1acef7582c2ef582",
+      "vendoredSHA256": "401fa85fae4d2be90faac3db255743fd8181c6bf3fcd0bba1acef7582c2ef582"
+    },
+    "Sources/NIOSSL/SecurityFrameworkCertificateVerification.swift": {
+      "upstreamSHA256": "edf2fb909a61d735f80262d171376ee1ac7304763ea82daad7485cb69c7204f1",
+      "vendoredSHA256": "edf2fb909a61d735f80262d171376ee1ac7304763ea82daad7485cb69c7204f1"
+    },
+    "Sources/NIOSSL/String+unsafeUninitializedCapacity.swift": {
+      "upstreamSHA256": "13370897a2b7622a98d13d2bcd59aa530ebd3a5e87faaeb5a2b2699eb2d1b9c5",
+      "vendoredSHA256": "13370897a2b7622a98d13d2bcd59aa530ebd3a5e87faaeb5a2b2699eb2d1b9c5"
+    },
+    "Sources/NIOSSL/SubjectAlternativeName.swift": {
+      "upstreamSHA256": "596a9cd0b43d8c71d379bff69642720c05bcb6f9fe6073372d48dd09780d554e",
+      "vendoredSHA256": "596a9cd0b43d8c71d379bff69642720c05bcb6f9fe6073372d48dd09780d554e"
+    },
+    "Sources/NIOSSL/SwiftCrypto/NIOSSLSecureBytes.swift": {
+      "upstreamSHA256": "643454b4734420ae2483a7ed64723f756debb324ef570eb2a98c858bc3262418",
+      "vendoredSHA256": "643454b4734420ae2483a7ed64723f756debb324ef570eb2a98c858bc3262418"
+    },
+    "Sources/NIOSSL/SwiftCrypto/RNG.swift": {
+      "upstreamSHA256": "1db9e518309fbfe3747d9cdfb155effb890f9583c560aecd1ca3f2ac1467f9c4",
+      "vendoredSHA256": "1db9e518309fbfe3747d9cdfb155effb890f9583c560aecd1ca3f2ac1467f9c4"
+    },
+    "Sources/NIOSSL/SwiftCrypto/SafeCompare.swift": {
+      "upstreamSHA256": "69ecd1fc2161ea6db21ddc7ecd6b6cbb830b6244c6c8e2312faf5aaeeb48c4ce",
+      "vendoredSHA256": "69ecd1fc2161ea6db21ddc7ecd6b6cbb830b6244c6c8e2312faf5aaeeb48c4ce"
+    },
+    "Sources/NIOSSL/SwiftCrypto/Zeroization.swift": {
+      "upstreamSHA256": "56d678c90f966232d0500ac081dcf2546367727333f12c13454ee5d49457d5f1",
+      "vendoredSHA256": "56d678c90f966232d0500ac081dcf2546367727333f12c13454ee5d49457d5f1"
+    },
+    "Sources/NIOSSL/TLSConfiguration.swift": {
+      "upstreamSHA256": "a14b7d2676c521239f59f25cdf8d1c3b9611cf5a2b7d31dab3ca94ab4be28337",
+      "vendoredSHA256": "a14b7d2676c521239f59f25cdf8d1c3b9611cf5a2b7d31dab3ca94ab4be28337"
+    },
+    "Sources/NIOSSL/UniversalBootstrapSupport.swift": {
+      "upstreamSHA256": "ff0ca4dc639b3d781df565ea991699c692ae525c5b94fa23dc3e208806b6c72f",
+      "vendoredSHA256": "ff0ca4dc639b3d781df565ea991699c692ae525c5b94fa23dc3e208806b6c72f"
+    },
+    "Sources/NIOSSL/UnsafeKeyAndChainTarget.swift": {
+      "upstreamSHA256": "4aefea393e11752c30ff10aab0f9b36236ebf16ed3d6db8aaca9d45c546ad505",
+      "vendoredSHA256": "4aefea393e11752c30ff10aab0f9b36236ebf16ed3d6db8aaca9d45c546ad505"
+    }
+  },
+  "patchSHA256": "ef2bd3453d0dde5ba853bcd2fe81f6fce0741e3988ffbfc54adf1f154d147478",
+  "profile": "tractanda.peer-tls-vendor.v1",
+  "repository": "https://github.com/apple/swift-nio-ssl.git",
+  "revision": "15e0b9e495786807272dd4891fa4bac76aa43034"
+}

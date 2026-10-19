@@ -114,6 +114,7 @@
   const byId = id => data.tasks.find(task => task.id === id);
   const $ = id => document.getElementById(id);
   let dirty = false, undoStack = [], changes = 0, toastTimer, dragID, draft, isNew, saveHandle;
+  let extraStepTextCache = null, extraStepIDCache = [];
   const initialViewID = data.viewItemID || data.projectID;
   let savedRevision = data.revision;
   function element(tag, attrs={}, children=[]) {
@@ -220,7 +221,8 @@
   function select(options,value,id) { const node=element('select',{id});for(const option of options){const item=element('option',{value:option.id||option,text:option.name||option});item.selected=(option.id||option)===value;node.append(item);}return node; }
   function openTask(id) {
     if(isLive && (isSaving || pendingWrite)){toast('Resolve the pending edit before starting another.',true);return;}
-    isNew=!id;const now=currentDate();
+    if(isLive)invalidateCapturePreview();
+    isNew=!id;extraStepTextCache=null;extraStepIDCache=[];const now=currentDate();
     draft=isNew?{id:crypto.randomUUID(),title:'',summary:'',categoryIDs:data.defaultCategoryID?[data.defaultCategoryID]:[],filterCategoryIDs:[],dependsOn:[],checklist:[],acceptance:[],notes:'',evidence:[],history:[],createdAt:now,updatedAt:now}:clone(byId(id));
     draft.originalCategoryIDs=[...draft.categoryIDs];draft.originalFilterCategoryIDs=[...draft.filterCategoryIDs];
     draft.axisCategoryIDs??={};draft.originalAxisCategoryIDs=clone(draft.axisCategoryIDs);
@@ -232,6 +234,16 @@
     const title=element('input',{id:'edit-title',type:'text',required:'required',maxlength:'180',placeholder:'A concrete outcome'});title.value=draft.title;
     const summary=element('textarea',{id:'edit-summary',rows:'3',maxlength:'3000'});summary.value=draft.summary;
     main.append(field('Title',title,'title'),field('Description',summary));
+    if(isLive){
+      const interpret=element('input',{id:'interpret-hashtags',type:'checkbox'});
+      const preview=element('button',{id:'preview-capture',type:'button',text:'Preview hashtag capture'});
+      const previewState=element('div',{id:'capture-preview',class:'capture-preview',role:'status','aria-live':'polite',hidden:'hidden',style:'margin:8px 0 14px;padding:8px 10px;border:1px solid #d3ddec;border-radius:7px;background:#f5f7fa;font-size:12px;line-height:1.55'});
+      main.append(element('label',{class:'check-row'},[interpret,'Interpret #categories']),preview,previewState);
+      interpret.addEventListener('change',()=>invalidateCapturePreview());
+      preview.addEventListener('click',previewLiveCapture);
+      summary.addEventListener('input',invalidateCapturePreview);
+      title.addEventListener('input',invalidateCapturePreview);
+    }
     if(draft.checklist.length){main.append(element('p',{class:'section-label',text:'Steps & verification'}));draft.checklist.forEach((step,index)=>{const check=element('input',{type:'checkbox','data-step-id':step.id});check.checked=step.done;check.addEventListener('change',()=>draft.checklist[index].done=check.checked);const caption=element('span',{},[step.title,step.source?element('small',{class:'source-note',text:step.source}):null]);main.append(element('label',{class:'check-row'},[check,caption]));});}
     const extra=element('textarea',{id:'edit-extra-steps',rows:'2',placeholder:'One new step per line',maxlength:'4000'});main.append(field('Add checklist steps',extra));
     if(draft.acceptance.length)main.append(element('p',{class:'section-label',text:'Done means'}),element('ul',{class:'acceptance'},draft.acceptance.map(t=>element('li',{text:t}))));
@@ -257,14 +269,27 @@
     $('task-form').querySelector('[type=submit]').disabled=false;
     if(!$('task-dialog').open)$('task-dialog').showModal();if(isLive)updateConnectionState();title.focus();
   }
-  $('task-form').addEventListener('submit',async event=>{
-    event.preventDefault();draft.title=$('edit-title').value.trim();if(!draft.title){$('dialog-error').textContent='A task needs a title.';return;}
-    draft.summary=$('edit-summary').value;draft.categoryIDs=Array.from(document.querySelectorAll('[data-column-choice]:checked'),n=>n.dataset.columnChoice);draft.filterCategoryIDs=Array.from(document.querySelectorAll('[data-filter-choice]:checked'),n=>n.dataset.filterChoice);draft.notes=$('edit-notes').value;
+  function readLiveDraftFromForm(){
+    draft.title=$('edit-title').value.trim();draft.summary=$('edit-summary').value;
+    draft.categoryIDs=Array.from(document.querySelectorAll('[data-column-choice]:checked'),n=>n.dataset.columnChoice);
+    draft.filterCategoryIDs=Array.from(document.querySelectorAll('[data-filter-choice]:checked'),n=>n.dataset.filterChoice);draft.notes=$('edit-notes').value;
     for(const group of document.querySelectorAll('[data-axis-root]'))draft.axisCategoryIDs[group.dataset.axisRoot]=Array.from(group.querySelectorAll('[data-axis-choice]:checked'),n=>n.dataset.axisChoice);
-    const additions=$('edit-extra-steps').value.split('\n').map(t=>t.trim()).filter(Boolean);
-    const candidate=clone(draft);additions.forEach(title=>candidate.checklist.push({id:crypto.randomUUID(),title,done:false}));
+    const extraText=$('edit-extra-steps').value;
+    if(extraText!==extraStepTextCache){extraStepTextCache=extraText;extraStepIDCache=extraText.split('\n').map(t=>t.trim()).filter(Boolean).map(()=>crypto.randomUUID());}
+    const additions=extraText.split('\n').map(t=>t.trim()).filter(Boolean);
+    const candidate=clone(draft);additions.forEach((title,index)=>candidate.checklist.push({id:extraStepIDCache[index],title,done:false}));
+    return candidate;
+  }
+  $('task-form').addEventListener('input',event=>{if(isLive&&!event.target.closest('#capture-preview'))invalidateCapturePreview();});
+  $('task-form').addEventListener('change',event=>{if(isLive&&event.target.id!=='interpret-hashtags')invalidateCapturePreview();});
+  $('task-form').addEventListener('submit',async event=>{
+    event.preventDefault();const candidate=readLiveDraftFromForm();if(!candidate.title){$('dialog-error').textContent='A task needs a title.';return;}
     const error=completionError(candidate);if(error){$('dialog-error').textContent=error;$('dialog-error').scrollIntoView({block:'nearest'});return;}
-    if(isLive){await saveLiveTask(candidate,editingBase);return;}
+    if(isLive){
+      const useCapture=$('interpret-hashtags')?.checked;
+      if(useCapture&&!captureCanCommit(capturePlan)){$('dialog-error').textContent='Prepare a valid hashtag capture preview before saving.';return;}
+      await saveLiveTask(candidate,editingBase,useCapture?capturePlan:null);return;
+    }
     candidate.updatedAt=currentDate();candidate.history.push({at:candidate.updatedAt,text:isNew?'Created in the HTML board.':'Edited task details and/or progress in the HTML board.'});
     const next=clone(data);if(isNew)next.tasks.push(candidate);else next.tasks[next.tasks.findIndex(t=>t.id===candidate.id)]=candidate;
     $('task-dialog').close();commit(next,candidate.id+(isNew?' added.':' updated.'));
@@ -289,7 +314,7 @@
 
   ['track-filter'].forEach(id=>$(id).addEventListener('change',render));$('search').addEventListener('input',render);
   $('board-tab').addEventListener('click',()=>showView('board'));$('roadmap-tab').addEventListener('click',()=>showView('roadmap'));$('sequence-button').addEventListener('click',()=>showView('roadmap'));
-  $('task-dialog').addEventListener('close',()=>{if(isLive)updateConnectionState();});
+  $('task-dialog').addEventListener('close',()=>{if(isLive){invalidateCapturePreview();updateConnectionState();}});
   $('new-task').addEventListener('click',()=>openTask());['close-dialog','cancel-dialog'].forEach(id=>$(id).addEventListener('click',()=>{if(!isSaving)$('task-dialog').close();}));
   ['help-button','footer-help'].forEach(id=>$(id).addEventListener('click',()=>$('help-dialog').showModal()));$('close-help').addEventListener('click',()=>$('help-dialog').close());
   $('save-html').addEventListener('click',saveHTML);$('export-json').addEventListener('click',()=>{download(projectFilename('json'),JSON.stringify(data,null,2),'application/json');toast('Board data exported. Use the connected client for live changes.');});

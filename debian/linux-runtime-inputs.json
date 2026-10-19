@@ -1,0 +1,14 @@
+{
+  "profile": "tractanda.linux-runtime-inputs.v1",
+  "runtimeRevision": "61a4b20d4ad01b10466e8fc94c50402a9f994430",
+  "architectures": {
+    "amd64": {
+      "embeddings": "7ce60199a57851c97651e45c2e31d05636c6b3bc40cb304cb64c52ae588356da",
+      "documents": "63261fb66b342413b103336a1faf53876429cee3e164e8fbe36054cb8de4418a"
+    },
+    "arm64": {
+      "embeddings": "8703e7221b89757c5e62ceeff2cb9f647718822aa443afdb838a7ce6c94a19cf",
+      "documents": "0cdf04a995ea15b20b65c0ab0f4fc65238a1bd6b61857bb90e9fe786ed848950"
+    }
+  }
+}

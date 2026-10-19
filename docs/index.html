@@ -20,7 +20,7 @@ table{border-collapse:collapse;width:100%}th,td{border-bottom:1px solid var(--li
 <header><h1>Tractanda</h1><p>A shared knowledge base for people and AI agents. Keep information once, categorize it in several ways, and choose views that fit the task.</p><p>User guide · proof of concept</p></header>
 <main>
 <nav aria-label="Contents">
-<a href="#start">Start</a><a href="#concepts">Items &amp; categories</a><a href="#web">Web board</a><a href="#views">Views &amp; order</a><a href="#tui">Terminal client</a><a href="#learning">Learning</a><a href="#search">Search</a><a href="#agents">AI agents</a><a href="#recovery">Data &amp; recovery</a><a href="#help">Troubleshooting</a><a href="#limits">Limits</a>
+<a href="#start">Start</a><a href="#concepts">Items &amp; categories</a><a href="#web">Web board</a><a href="#capture">Inline capture</a><a href="#views">Views &amp; order</a><a href="#tui">Terminal client</a><a href="#learning">Learning</a><a href="#search">Search</a><a href="#agents">AI agents</a><a href="#recovery">Data &amp; recovery</a><a href="#help">Troubleshooting</a><a href="#limits">Limits</a>
 </nav>
 <section id="start">
 <h2>Get started on a Mac</h2>
@@ -65,6 +65,14 @@ table{border-collapse:collapse;width:100%}th,td{border-bottom:1px solid var(--li
 <p>An open draft or unresolved save blocks project switching. If the server rejects a stale edit because someone else changed the item, review the newer revision before applying your changes. If the result of a save is uncertain, use the retained retry operation; do not recreate the item to guess whether the first save worked.</p>
 <p>A configured completion category checks the card’s checklist and dependencies before completion. The board’s labels, default category and completion category are data, not hardcoded status names.</p>
 <p><strong>Export HTML</strong> and <strong>Export JSON</strong> save snapshots. Editing an exported HTML file does not change the server. Keep it as a portable report or an independent snapshot, not as a synchronized database.</p>
+</section>
+<section id="capture">
+<h2>Capture categories and dates in plain text</h2>
+<p>Inline capture is optional authoring. Enable <strong>Interpret #hashtags</strong> in the terminal editor or <strong>Interpret #categories</strong> in the web editor and preview before saving. Ordinary saves and imported email/documents/code remain literal; the original body stays intact.</p>
+<p>Use <code>#Ready</code>, <code>#[Needs attention]</code>, <code>#[Deadlines/Tomorrow]</code> or <code>#[category-uuid]</code>. Names and editable aliases resolve only existing readable categories. Unknown names create no categories; duplicate names, exclusions and date conflicts require review. Escape a literal mention with a backslash (<code>\#literal</code>); code and URL/link destinations remain literal.</p>
+<p>A category's editable capture date property, calendar-day offset and named timezone determine date handling. A Tomorrow category can explicitly target <code>plannedDate</code> with offset1 and <code>Europe/Vienna</code>. Preview freezes local date-only <code>YYYY-MM-DD</code> text, including midnight/daylight-saving transitions. It schedules no alarm or implicit deadline, and ordinary time-window rules determine later Today/Tomorrow membership. The starter's deadline/event names can be ambiguous; use aliases such as <code>#deadline-tomorrow</code> or qualify the path.</p>
+<p>Unchanged mentions retain stable bindings after rename or midnight, without overriding later manual edits. Reused dates mean <strong>no change</strong>. Removing a tag leaves assignments/dates; reintroducing it requests fresh capture. After an uncertain save, retry the exact retained plan rather than create another item or preview again.</p>
+<p>This source feature awaits an explicit deployment; installed poc.14 remains on its existing build/corpusv6. Updated starter configuration applies to new installs; existing categories stay untouched and can be configured after deployment. <a href="https://github.com/cubiculum-ai/tractanda/blob/main/docs/inline-capture.md">The capture guide</a> explains behavior and links to the exact API contract.</p>
 </section>
 <section id="views">
 <h2>Define views and choose their order</h2>

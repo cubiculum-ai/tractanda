@@ -580,7 +580,7 @@ final class SemanticServiceTests: XCTestCase {
         try fixture { store, _ in
             let createdAt = Timestamp.parse("2026-09-16T10:00:00Z")!
             let clock = QueryLifetimeClock(createdAt)
-            let service = SemanticService(store: store, queryLifetimeClock: { clock.now() }) {
+            let service = SemanticService(store: store, queryLifetimeClock: { clock.now() }, pendingQueryLifetimeForTesting: 120) {
                 _, inputs, query in
                 if !query { throw TractandaError("semanticProvider", "injected") }
                 return inputs.map { _ in [1, 0] }
@@ -616,7 +616,7 @@ final class SemanticServiceTests: XCTestCase {
             XCTAssertEqual(partial["partialCoverage"] as? Bool, true)
             XCTAssertNil(partial["retryAfterMilliseconds"])
 
-            let failedService = SemanticService(store: store, queryLifetimeClock: { clock.now() }) {
+            let failedService = SemanticService(store: store, queryLifetimeClock: { clock.now() }, pendingQueryLifetimeForTesting: 120) {
                 _, _, query in
                 if query { throw TractandaError("semanticProvider", "injected") }
                 return []
@@ -644,11 +644,11 @@ final class SemanticServiceTests: XCTestCase {
         }
     }
 
-    func testQueryLifetimeUsesCreationClockAndPollingDoesNotExtendIt() throws {
+    func testExplicitShortPendingLifetimeUsesCreationClockAndPollingDoesNotExtendIt() throws {
         try fixture { store, _ in
             let createdAt = Timestamp.parse("2026-09-16T10:00:00Z")!
             let clock = QueryLifetimeClock(createdAt)
-            let service = SemanticService(store: store, queryLifetimeClock: { clock.now() })
+            let service = SemanticService(store: store, queryLifetimeClock: { clock.now() }, pendingQueryLifetimeForTesting: 120)
             try store.withAccess(forUID: store.ownerUID) {
                 _ = try service.configure(configuration(), expectedConfigurationID: nil)
             }
@@ -979,4 +979,83 @@ final class SemanticServiceTests: XCTestCase {
             XCTAssertEqual(performed, ["A", "B", "C"])
         }
     }
+    func testProviderBudgetIsCoherentAndDoesNotChangeStoredVectorProfile() throws {
+        var config = configuration()
+        let originalProfile = try SemanticSource.profileID(config)
+        XCTAssertEqual(config.pendingQueryLifetimeSeconds, 21600 * 65 + 120)
+        XCTAssertEqual(SemanticConfiguration.completedQueryRetentionSeconds, 120)
+        let oldData = try JSONEncoder().encode(config)
+        let oldDecoded = try JSONDecoder().decode(SemanticConfiguration.self, from: oldData)
+        XCTAssertNil(oldDecoded.providerTimeoutSeconds)
+        XCTAssertEqual(oldDecoded.effectiveProviderTimeoutSeconds, 21600)
+        let defaults = try SemanticEmbeddingProvider.sessionConfiguration(config)
+        XCTAssertEqual(defaults.timeoutIntervalForRequest, 21600)
+        XCTAssertEqual(defaults.timeoutIntervalForResource, 21600)
+        config.providerTimeoutSeconds = 86400
+        try config.validate()
+        XCTAssertEqual(try SemanticSource.profileID(config), originalProfile)
+        let settings = try SemanticEmbeddingProvider.sessionConfiguration(config)
+        XCTAssertEqual(settings.timeoutIntervalForRequest, 86400)
+        XCTAssertEqual(settings.timeoutIntervalForResource, 86400)
+        let request = try SemanticEmbeddingProvider.request(config, inputs: ["fixture"], query: true)
+        XCTAssertEqual(request.timeoutInterval, 86400)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: request.httpBody!) as? [String: Any])
+        XCTAssertEqual(Set(body.keys), ["model", "input"])
+        XCTAssertEqual(body["input"] as? [String], ["query: fixture"])
+        let decoded = try JSONDecoder().decode(SemanticConfiguration.self, from: JSONEncoder().encode(config))
+        XCTAssertEqual(decoded.providerTimeoutSeconds, 86400)
+        for invalid in [0.0, -1, .infinity, .nan, 1e99] {
+            config.providerTimeoutSeconds = invalid
+            XCTAssertThrowsError(try config.validate())
+        }
+    }
+
+    func testLateConsumedCompletionCannotReviveExpiredPendingQuery() {
+        let created = Timestamp.parse("2026-09-16T10:00:00Z")!
+        let clock = QueryLifetimeClock(created)
+        let pendingExpiry = created.addingTimeInterval(120)
+        clock.set(created.addingTimeInterval(119))
+        XCTAssertEqual(SemanticService.completedQueryExpiry(pendingExpiry: pendingExpiry, consumedAt: clock.now()),
+            clock.now().addingTimeInterval(120))
+        clock.set(pendingExpiry)
+        XCTAssertNil(SemanticService.completedQueryExpiry(pendingExpiry: pendingExpiry, consumedAt: clock.now()))
+        clock.set(pendingExpiry.addingTimeInterval(300))
+        XCTAssertNil(SemanticService.completedQueryExpiry(pendingExpiry: pendingExpiry, consumedAt: clock.now()),
+            "A completion queued before expiry but consumed later cannot revive a notFound query")
+    }
+
+    func testLongPendingQueryGetsShortRetentionOnlyAfterCompletion() throws {
+        try fixture { store, _ in
+            let created = Timestamp.parse("2026-09-16T10:00:00Z")!
+            let clock = QueryLifetimeClock(created)
+            let service = SemanticService(store: store, queryLifetimeClock: { clock.now() }) {
+                _, inputs, _ in inputs.map { _ in [1, 0] }
+            }
+            let config = configuration()
+            try store.withAccess(forUID: store.ownerUID) { _ = try service.configure(config, expectedConfigurationID: nil) }
+            let search = try store.withAccess(forUID: store.ownerUID) {
+                try service.search(text: "slow fixture", expression: nil, categoryPath: [],
+                    excludedCategoryIDs: [], viewID: nil, limit: 10)
+            }
+            let id = search["queryID"] as! String
+            assertQueryTiming(search, createdAt: created,
+                expiresAt: created.addingTimeInterval(config.pendingQueryLifetimeSeconds))
+            clock.set(created.addingTimeInterval(300)) // Exceeds the former execution TTL.
+            drain(service)
+            let completedExpiry = clock.now().addingTimeInterval(120)
+            let ready = try store.withAccess(forUID: store.ownerUID) { try service.results(queryID: id) }
+            XCTAssertEqual(ready["state"] as? String, "ready")
+            assertQueryTiming(ready, createdAt: created, expiresAt: completedExpiry)
+            clock.set(completedExpiry.addingTimeInterval(-1))
+            let polled = try store.withAccess(forUID: store.ownerUID) { try service.results(queryID: id) }
+            assertQueryTiming(polled, createdAt: created, expiresAt: completedExpiry)
+            clock.set(completedExpiry)
+            XCTAssertThrowsError(try store.withAccess(forUID: store.ownerUID) { try service.results(queryID: id) })
+            service.maintain() // Expired completions release their bounded admission slots.
+            XCTAssertNoThrow(try store.withAccess(forUID: store.ownerUID) {
+                try service.search(text: "next", expression: nil, categoryPath: [], excludedCategoryIDs: [], viewID: nil, limit: 1)
+            })
+        }
+    }
+
 }

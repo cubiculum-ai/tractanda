@@ -2,16 +2,24 @@ import Dispatch
 import Foundation
 
 /// Operator phase resources can change without invalidating immutable extraction identity.
-public struct DocumentJobResources: Sendable {
+public struct DocumentJobResources: Codable, Sendable {
+    // Operational limits are configurable for much slower CPU hardware. A silent
+    // prefill retains its absolute page limit rather than a counter watchdog.
+    public static let defaultInspectSeconds: Double = 1800
+    public static let defaultModelLoadSeconds: Double = 3600
+    public static let defaultPageSeconds: Double = 21600
+    public static let defaultNoProgressSeconds: Double = 1800
+    public static let defaultTerminationGraceSeconds: Double = 15
     public let inspectSeconds: Double
     public let modelLoadSeconds: Double
     public let pageSeconds: Double
     public let noProgressSeconds: Double
     public let terminationGraceSeconds: Double
     public init(
-        inspectSeconds: Double = 30, modelLoadSeconds: Double = 180,
-        pageSeconds: Double = 180, noProgressSeconds: Double = 60,
-        terminationGraceSeconds: Double = 2
+        inspectSeconds: Double = DocumentJobResources.defaultInspectSeconds, modelLoadSeconds: Double = DocumentJobResources.defaultModelLoadSeconds,
+        pageSeconds: Double = DocumentJobResources.defaultPageSeconds,
+        noProgressSeconds: Double = DocumentJobResources.defaultNoProgressSeconds,
+        terminationGraceSeconds: Double = DocumentJobResources.defaultTerminationGraceSeconds
     ) {
         self.inspectSeconds = inspectSeconds
         self.modelLoadSeconds = modelLoadSeconds
@@ -19,6 +27,7 @@ public struct DocumentJobResources: Sendable {
         self.noProgressSeconds = noProgressSeconds
         self.terminationGraceSeconds = terminationGraceSeconds
     }
+    public func validate() throws { _ = try budgets() }
     func budgets() throws -> DocumentWorkerBudgets {
         try DocumentWorkerBudgets(
             inspect: inspectSeconds, modelLoad: modelLoadSeconds,
@@ -54,18 +63,21 @@ final class DocumentJobProducer: @unchecked Sendable {
     let cancellation: DocumentConversionCancellation
     private let runtime: DocumentJobRuntime?
     private let budgets: DocumentWorkerBudgets
+    private let runtimeVerifier: DocumentRuntimeVerifier
     private var original: DocumentVerifiedOriginal?
     private var stage: DocumentPageStageWorker?
     private var session: DocumentNativeSession?
     private var inspectedPageCount: Int64?
     init(
         work: DocumentJobMaterialWork, runtime: DocumentJobRuntime?,
-        budgets: DocumentWorkerBudgets, cancellation: DocumentConversionCancellation
+        budgets: DocumentWorkerBudgets, cancellation: DocumentConversionCancellation,
+        runtimeVerifier: @escaping DocumentRuntimeVerifier = DocumentNativeSession.verifyRuntime
     ) {
         self.work = work
         self.runtime = runtime
         self.budgets = budgets
         self.cancellation = cancellation
+        self.runtimeVerifier = runtimeVerifier
     }
     func perform<T: Sendable>(_ body: @escaping @Sendable (DocumentJobProducer) throws -> T) async throws -> T
     {
@@ -102,7 +114,8 @@ final class DocumentJobProducer: @unchecked Sendable {
             intent: work.intent, original: original,
             configuration: runtime.configuration, executableSHA256: runtime.executableSHA256,
             budgets: budgets, cancellation: cancellation,
-            expectedPageCount: inspectedPageCount ?? work.checkpoint.pageCount)
+            expectedPageCount: inspectedPageCount ?? work.checkpoint.pageCount,
+            runtimeVerifier: runtimeVerifier)
     }
     func convert(_ number: Int64) throws -> DocumentStoredPage {
         try cancellation.check()

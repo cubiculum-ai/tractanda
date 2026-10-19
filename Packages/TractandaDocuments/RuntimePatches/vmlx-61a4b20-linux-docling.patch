@@ -1,0 +1,190 @@
+--- a/Libraries/MLXLMCommon/Cache/DiskCache.swift
++++ b/Libraries/MLXLMCommon/Cache/DiskCache.swift
+@@ -7,7 +7,11 @@
+ #endif
+ import Foundation
+ import MLX
++#if canImport(SQLite3)
+ import SQLite3
++#else
++import CSQLite3Linux
++#endif
+ #if canImport(os)
+     import os
+ #endif
+--- a/Libraries/MLXLMCommon/Cache/DiskCacheIndexSchema.swift
++++ b/Libraries/MLXLMCommon/Cache/DiskCacheIndexSchema.swift
+@@ -1,5 +1,9 @@
+ import Foundation
++#if canImport(SQLite3)
+ import SQLite3
++#else
++import CSQLite3Linux
++#endif
+ 
+ /// Schema versioning for the disk cache's SQLite index (`cache_index.db`).
+ ///
+--- a/Libraries/MLXLMCommon/Cache/DiskCacheVolumeSnapshot.swift
++++ b/Libraries/MLXLMCommon/Cache/DiskCacheVolumeSnapshot.swift
+@@ -1,5 +1,9 @@
+ import Foundation
++#if canImport(SQLite3)
+ import SQLite3
++#else
++import CSQLite3Linux
++#endif
+ 
+ /// Read-only measurements for cap resolution. No directory walk, cache
+ /// construction, migration or payload loading is performed to paint settings.
+--- /dev/null
++++ b/Libraries/MLXVLM/LinuxVLMModelFactory.swift
+@@ -0,0 +1,84 @@
++// Copyright © 2024 Apple Inc.
++// Adapted from the pinned local VLM factory; retained upstream license applies.
++// Linux-only, package-private pinned-profile adapter. Original Mac factory and
++// Idefics3 model arithmetic remain unchanged. No media preprocessing lives here.
++#if os(Linux)
++import Foundation
++import MLX
++import MLXLMCommon
++
++private struct NativeDocumentProcessorRequired: UserInputProcessor {
++    func prepare(input: UserInput) async throws -> LMInput {
++        throw ModelFactoryError.unsupportedModelType("Install NativeDocumentInput before preparing the pinned document page")
++    }
++}
++public final class VLMModelFactory: ModelFactory {
++    public static let shared = VLMModelFactory()
++    public let modelRegistry: AbstractModelRegistry = AbstractModelRegistry()
++    private init() {}
++
++    public func _load(
++        configuration: ResolvedModelConfiguration, tokenizerLoader: any TokenizerLoader
++    ) async throws -> sending ModelContext {
++        let directory = configuration.modelDirectory
++        guard directory.isFileURL,
++            configuration.tokenizerDirectory.standardizedFileURL == directory.standardizedFileURL
++        else { throw ModelFactoryError.unsupportedModelType("Pinned Docling requires its local tokenizer assets") }
++        // The converter verifies these exact 14 hashes before entering this
++        // factory. Reject loader-changing sidecars and additional weight shards.
++        let allowed: Set<String> = [
++            "README.md", "config.json", "preprocessor_config.json", "processor_config.json",
++            "chat_template.jinja", "generation_config.json", "tokenizer.json", "tokenizer_config.json",
++            "special_tokens_map.json", "added_tokens.json", "merges.txt", "vocab.json",
++            "model.safetensors.index.json", "model.safetensors",
++        ]
++        let files = try FileManager.default.contentsOfDirectory(atPath: directory.path)
++        guard Set(files) == allowed else {
++            throw ModelFactoryError.unsupportedModelType("Foreign or incomplete pinned document assets")
++        }
++        let configData = try Data(contentsOf: directory.appendingPathComponent("config.json"))
++        let dictionary = try JSONSerialization.jsonObject(with: configData) as? [String: Any]
++        guard dictionary?["model_type"] as? String == "idefics3",
++            dictionary?["quantization"] == nil, dictionary?["quantization_config"] == nil,
++            dictionary?["weight_format"] == nil, dictionary?["mtp"] == nil
++        else { throw ModelFactoryError.unsupportedModelType("Only the pinned unquantized Idefics3 document profile is supported") }
++        let base = try JSONDecoder.json5().decode(BaseConfiguration.self, from: configData)
++        let config = try JSONDecoder.json5().decode(Idefics3Configuration.self, from: configData)
++        guard config.visionConfig.imageSize == 512, config.visionConfig.patchSize == 16,
++            config.scaleFactor == 4, config.imageTokenIndex == 100270 else {
++            throw ModelFactoryError.unsupportedModelType("Pinned document model geometry differs")
++        }
++        let processorData = try Data(contentsOf: directory.appendingPathComponent("preprocessor_config.json"))
++        _ = try JSONDecoder.json5().decode(Idefics3ProcessorConfiguration.self, from: processorData)
++        let processor = try JSONSerialization.jsonObject(with: processorData) as? [String: Any]
++        guard processor?["processor_class"] as? String == "Idefics3Processor",
++            processor?["image_mean"] as? [Double] == [0.5, 0.5, 0.5],
++            processor?["image_std"] as? [Double] == [0.5, 0.5, 0.5],
++            (processor?["size"] as? [String: Int])?["longest_edge"] == 2048,
++            (processor?["max_image_size"] as? [String: Int])?["longest_edge"] == 512
++        else { throw ModelFactoryError.unsupportedModelType("Pinned document processor profile differs") }
++        let generation = try JSONDecoder.json5().decode(
++            GenerationConfigFile.self,
++            from: Data(contentsOf: directory.appendingPathComponent("generation_config.json")))
++        let eos = ModelTokenConfigurationResolver.resolvedEOSTokenIds(
++            baseConfig: base, configurationData: configData, generationConfig: generation)
++        guard eos == [100257] else {
++            throw ModelFactoryError.unsupportedModelType("Pinned document EOS differs")
++        }
++        let model = Idefics3(config)
++        // Same pinned common loader/sanitize route as the Mac factory, with no
++        // JANG, quantization, preserved MTP, remote resolver or tokenizer fallback.
++        try loadWeights(modelDirectory: directory, model: model)
++        let tokenizer = try await tokenizerLoader.load(from: directory)
++        let modelConfig = ModelConfiguration(
++            directory: directory, defaultPrompt: configuration.defaultPrompt,
++            extraEOSTokens: configuration.extraEOSTokens, eosTokenIds: eos,
++            toolCallFormat: configuration.toolCallFormat ?? ToolCallFormat.infer(from: base.modelType),
++            reasoningParserName: configuration.reasoningParserName ?? "none",
++            generationDefaults: generation,
++            mtpStatus: try? MTPBundleInspector.inspect(modelDirectory: directory, jangConfig: nil))
++        return ModelContext(configuration: modelConfig, model: model,
++            processor: NativeDocumentProcessorRequired(), tokenizer: tokenizer)
++    }
++}
++#endif
+--- a/Libraries/MLXVLM/Models/Idefics3.swift
++++ b/Libraries/MLXVLM/Models/Idefics3.swift
+@@ -7,7 +7,9 @@
+ 
+ // port of https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/models/idefics3
+ 
++#if canImport(CoreImage)
+ import CoreImage
++#endif
+ import Foundation
+ import MLX
+ import MLXLMCommon
+@@ -811,6 +813,8 @@
+ }
+ 
+ // MARK: - Processor
++
++#if canImport(CoreImage)
+ 
+ public struct Idefics3Processor: UserInputProcessor {
+     private let config: Idefics3ProcessorConfiguration
+@@ -908,3 +912,5 @@
+         }
+     }
+ }
++
++#endif
+--- a/Package.swift
++++ b/Package.swift
+@@ -286,6 +286,14 @@
+     ],
+     linkerSettings: linkerSettings
+ )
++
++#if os(Linux)
++let tractandaVLMDependencies: [Target.Dependency] = ["MLXLMCommon", "MLX", "MLXNN"]
++let tractandaVLMSources: [String]? = ["VLMModel.swift", "Models/Idefics3.swift", "LinuxVLMModelFactory.swift"]
++#else
++let tractandaVLMDependencies: [Target.Dependency] = ["MLXLMCommon", "MLXLLM", "MLX", "MLXNN", "MLXOptimizers"]
++let tractandaVLMSources: [String]? = nil
++#endif
+ 
+ let package = Package(
+     name: "mlx-swift",
+@@ -508,9 +516,9 @@
+         ),
+         .target(
+             name: "MLXVLM",
+-            dependencies: ["MLXLMCommon", "MLXLLM", "MLX", "MLXNN", "MLXOptimizers"],
++            dependencies: tractandaVLMDependencies,
+             path: "Libraries/MLXVLM",
+-            exclude: ["README.md"]
++            exclude: ["README.md"], sources: tractandaVLMSources
+         ),
+         .target(
+             name: "MLXEmbedders",
+@@ -1073,7 +1081,7 @@
+     }
+     if Context.environment["VMLX_LINUX_PROFILE"] != "0" {
+         let roots = [
+-            "MLXEmbedders", "MLXLLM", "MLXHuggingFace", "VMLXTokenizers", "MLXFFT", "MLXLinalg",
++            "MLXEmbedders", "MLXLLM", "MLXVLM", "MLXHuggingFace", "VMLXTokenizers", "MLXFFT", "MLXLinalg",
+             "CSQLite3Linux", "VMLXLinuxTests",
+         ]
+         let targetsByName = Dictionary(

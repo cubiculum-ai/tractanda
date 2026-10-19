@@ -39,6 +39,11 @@ struct CategoryPreviewPage: Sendable {
     let position: Int
     let total: Int
     let queryState: String
+    let consumedCount: Int
+    let unresolvedCount: Int
+    let unhydratedCount: Int
+    let incomplete: Bool
+    let conflictsAvailable: Bool
 
     static func load(
         using client: TractandaCore.ItemClient, path: [String], position: Int, sort: [ItemSort]
@@ -47,10 +52,15 @@ struct CategoryPreviewPage: Sendable {
             let ids: [String]
             let total: Int
             let queryState: String
+            let completeness: String?
+            let conflictsAvailable: Bool?
         }
         struct GetResult: Decodable {
             let list: [Revision]
             let notFound: [String]
+            let unresolved: [ItemUnresolvedState]?
+            let remainingIDs: [String]?
+            let oversizedIDs: [String]?
             let state: String
         }
         let sortValue = try JSONSerialization.jsonObject(with: JSON.encode(sort))
@@ -67,15 +77,28 @@ struct CategoryPreviewPage: Sendable {
         }
         guard !page.ids.isEmpty else {
             return CategoryPreviewPage(
-                rows: [], position: position, total: page.total, queryState: page.queryState)
+                rows: [], position: position, total: page.total, queryState: page.queryState,
+                consumedCount: 0, unresolvedCount: 0, unhydratedCount: 0,
+                incomplete: page.completeness == "unresolvedItems", conflictsAvailable: page.conflictsAvailable ?? false)
         }
         let got = try JSON.decode(
             GetResult.self, client.call("TractandaItem/get", arguments: ["ids": page.ids]))
         guard got.notFound.isEmpty, got.state == page.queryState else {
             throw TractandaError("stateChanged", "Refresh the changing board.")
         }
+        let unresolved = got.unresolved ?? []
+        let classifiedIDs = got.list.map(\.itemID) + unresolved.map(\.itemID)
+            + (got.remainingIDs ?? []) + (got.oversizedIDs ?? [])
+        guard Set(classifiedIDs).count == classifiedIDs.count, Set(classifiedIDs) == Set(page.ids) else {
+            throw TractandaError("protocolError", "Category preview omitted or repeated query IDs.")
+        }
         return CategoryPreviewPage(
-            rows: got.list, position: position, total: page.total, queryState: page.queryState)
+            rows: got.list, position: position, total: page.total, queryState: page.queryState,
+            consumedCount: page.ids.count, unresolvedCount: unresolved.count,
+            unhydratedCount: (got.remainingIDs ?? []).count + (got.oversizedIDs ?? []).count,
+            incomplete: page.completeness == "unresolvedItems" || !unresolved.isEmpty
+                || !(got.remainingIDs ?? []).isEmpty || !(got.oversizedIDs ?? []).isEmpty,
+            conflictsAvailable: page.conflictsAvailable ?? !unresolved.isEmpty)
     }
 }
 
@@ -163,7 +186,12 @@ struct CategoryPreviewLoader: Sendable {
                             result: .success(
                                 CategoryPreviewPage(
                                     rows: page.items, position: page.position, total: page.total,
-                                    queryState: page.state))))
+                                    queryState: page.state, consumedCount: page.consumedCount,
+                                    unresolvedCount: page.unresolved.count,
+                                    unhydratedCount: page.remainingIDs.count + page.oversizedIDs.count,
+                                    incomplete: page.completeness == .unresolvedItems
+                                        || !page.remainingIDs.isEmpty || !page.oversizedIDs.isEmpty,
+                                    conflictsAvailable: page.conflictsAvailable))))
                 } catch {
                     mailbox.publish(
                         Delivered(generation: request.generation, result: .failure(String(describing: error)))
@@ -189,6 +217,10 @@ struct CategoryPreviewState {
     var rows: [Revision] = []
     var position = 0
     var total = 0
+    var consumedCount = 0
+    var unresolvedCount = 0
+    var unhydratedCount = 0
+    var projectionNotice = false
     var generation = 0
     var status: Status = .idle
 
@@ -198,6 +230,10 @@ struct CategoryPreviewState {
         self.position = position
         rows = []  // Never render rows from an earlier category while loading the next one.
         total = 0
+        consumedCount = 0
+        unresolvedCount = 0
+        unhydratedCount = 0
+        projectionNotice = false
         status = .loading
         return self.generation
     }
@@ -207,6 +243,10 @@ struct CategoryPreviewState {
         rows = page.rows
         position = page.position
         total = page.total
+        consumedCount = page.consumedCount
+        unresolvedCount = page.unresolvedCount
+        unhydratedCount = page.unhydratedCount
+        projectionNotice = page.incomplete || page.conflictsAvailable
         status = .loaded
     }
 
@@ -225,10 +265,16 @@ struct CategoryInspectorDraft {
     var fields: [TextBuffer]
     var focus = 0
 
+    func isMultiline(_ field: Int) -> Bool { [1, 3, 4].contains(field) }
+
     init(base: Revision) throws {
-        let draft = try ItemDraft(base: base)
+        let draft = try ItemDraft(base: base, isCategory: true)
         self.base = base
-        fields = [draft.subject, draft.body, draft.className, draft.rule]
+        fields = [
+            draft.subject, draft.body, draft.className, draft.rule,
+            draft.captureAliases, draft.captureDateProperty, draft.captureDateOffset,
+            draft.captureDateTimeZone,
+        ]
     }
 
     var isDirty: Bool {
@@ -236,14 +282,182 @@ struct CategoryInspectorDraft {
             || fields[1].text != base.fields["body"]?.string ?? ""
             || fields[2].text != base.classID
             || fields[3].text != (base.fields["selection"]?.map?["expression"]?.string ?? "")
+            || fields[4].text
+                != (base.fields["captureAliases"]?.array ?? []).compactMap(\.string).joined(separator: "\n")
+            || fields[5].text != (base.fields["captureDate"]?.map?["property"]?.string ?? "")
+            || fields[6].text != String(base.fields["captureDate"]?.map?["dayOffset"]?.integerValue ?? 1)
+            || fields[7].text != (base.fields["captureDate"]?.map?["timeZone"]?.string ?? "UTC")
     }
 
     mutating func request() throws -> CommitRequest? {
-        var draft = try ItemDraft(base: base)
+        if !fields[5].text.isEmpty {
+            guard let offset = Int64(fields[6].text), (-1200...1200).contains(offset),
+                TimeZone(identifier: fields[7].text.isEmpty ? "UTC" : fields[7].text) != nil
+            else {
+                throw TractandaError(
+                    "invalidCapture",
+                    "Capture date configuration needs a day offset from -1200 to 1200 and a named IANA timezone."
+                )
+            }
+        }
+        var draft = try ItemDraft(base: base, isCategory: true)
         draft.subject = fields[0]
         draft.body = fields[1]
         draft.className = fields[2]
         draft.rule = fields[3]
+        draft.captureAliases = fields[4]
+        draft.captureDateProperty = fields[5]
+        draft.captureDateOffset = fields[6]
+        draft.captureDateTimeZone = fields[7]
         return draft.request()
+    }
+}
+
+/// Async bridge for the shared server capture interpreter. The terminal thread only consumes
+/// immutable results; it never parses hashtags or evaluates dates itself.
+struct CaptureActionLoader: Sendable {
+    struct Failure: Sendable {
+        let code: String
+        let message: String
+    }
+    enum Outcome: Sendable {
+        case prepared(TractandaCore.CapturePlan)
+        case committed(TractandaCore.CommitResult)
+        case failure(Failure)
+    }
+    private struct Delivery: Sendable {
+        let generation: Int
+        let outcome: Outcome
+    }
+    private struct State: Sendable {
+        var generation = 0
+        var delivery: Delivery?
+    }
+    private final class Mailbox: Sendable {
+        private let state = Mutex(State())
+        func begin() -> Int {
+            state.withLock {
+                $0.generation += 1
+                $0.delivery = nil
+                return $0.generation
+            }
+        }
+        func publish(_ delivery: Delivery, operation: Int) {
+            state.withLock { state in if operation == state.generation { state.delivery = delivery }
+            }
+        }
+        func take() -> Delivery? {
+            state.withLock { state in
+                defer { state.delivery = nil }
+                return state.delivery
+            }
+        }
+        func hasValue() -> Bool { state.withLock { $0.delivery != nil } }
+    }
+    private let mailbox = Mailbox()
+    private let client: TractandaClient.ItemClient
+    init(connection: ServerConnection) {
+        client = TractandaClient.ItemClient(transport: LocalItemTransport(connection: connection))
+    }
+    init(transport: any TractandaClient.ItemTransport) {
+        client = TractandaClient.ItemClient(transport: transport)
+    }
+    func prepare(_ request: TractandaCore.CommitRequest, generation: Int) {
+        let operation = mailbox.begin()
+        let client = client
+        let mailbox = mailbox
+        Task.detached(priority: .userInitiated) {
+            do {
+                mailbox.publish(
+                    Delivery(
+                        generation: generation,
+                        outcome: .prepared(
+                            try await client.prepareCapture(
+                                TractandaCore.CapturePreparation(request: request)))), operation: operation)
+            } catch {
+                mailbox.publish(
+                    Delivery(
+                        generation: generation,
+                        outcome: .failure(
+                            Failure(
+                                code: (error as? TractandaError)?.code ?? "transport",
+                                message: String(describing: error)))), operation: operation)
+            }
+        }
+    }
+    func commit(_ plan: TractandaCore.CapturePlan, generation: Int) {
+        let operation = mailbox.begin()
+        let client = client
+        let mailbox = mailbox
+        Task.detached(priority: .userInitiated) {
+            do {
+                mailbox.publish(
+                    Delivery(
+                        generation: generation,
+                        outcome: .committed(try await client.commitCapture(plan))), operation: operation)
+            } catch {
+                mailbox.publish(
+                    Delivery(
+                        generation: generation,
+                        outcome: .failure(
+                            Failure(
+                                code: (error as? TractandaError)?.code ?? "transport",
+                                message: String(describing: error)))), operation: operation)
+            }
+        }
+    }
+    func cancel() { _ = mailbox.begin() }
+    func take() -> (generation: Int, outcome: Outcome)? { mailbox.take().map { ($0.generation, $0.outcome) } }
+    func hasDelivery() -> Bool { mailbox.hasValue() }
+}
+
+struct CapturePreviewGate {
+    private(set) var generation = 0
+    private(set) var isPreparing = false
+
+    mutating func begin() -> Int {
+        generation += 1
+        isPreparing = true
+        return generation
+    }
+
+    mutating func invalidate() {
+        generation += 1
+        isPreparing = false
+    }
+
+    mutating func accept(_ resultGeneration: Int) -> Bool {
+        guard isPreparing, resultGeneration == generation else { return false }
+        isPreparing = false
+        return true
+    }
+}
+
+enum CaptureReviewPresentation {
+    static func text(for plan: TractandaCore.CapturePlan) -> String {
+        let mentions = plan.mentions.map { mention in
+            var line = "\(mention.token): "
+            if let id = mention.categoryID { line += "category \(id)" }
+            if !mention.candidates.isEmpty {
+                line += " candidates [\(mention.candidates.joined(separator: ", "))]"
+            }
+            if mention.reusedBinding {
+                line += " · prior capture (no change)"
+                if let property = mention.dateProperty, let value = mention.dateValue {
+                    line += " · historical \(property)=\(value), unchanged"
+                }
+            } else if let property = mention.dateProperty, let value = mention.dateValue {
+                line += " · proposed \(property)=\(value)"
+            }
+            return line
+        }
+        let issues = plan.issues.map { "\($0.token) [\($0.code)]: \($0.message)" }
+        let details = (issues.isEmpty ? mentions : issues + mentions).joined(separator: "\n")
+        let body =
+            plan.commitRequest.changes["body"]?.string ?? plan.request.changes["body"]?.string
+            ?? "(body unchanged)"
+        return (details.isEmpty ? "No hashtag assignments were resolved." : details)
+            + "\n\nLiteral body retained; assignments and configured dates are listed above. No categories are created.\n\n"
+            + body
     }
 }

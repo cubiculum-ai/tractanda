@@ -33,6 +33,15 @@ final class DocumentContentIntegrationTests: XCTestCase, @unchecked Sendable {
         return FileManager.default.temporaryDirectory.appendingPathComponent(
             "content-integration-" + Identifier.make())
     }
+    private func freshStore(_ root: URL) throws -> ItemStore {
+        _ = try ItemStore.initializeFresh(root: root)
+        let store = try ItemStore(
+            root: root,
+            attachmentUploadPolicy: .init(minimumFreeBytes: AttachmentFixtureCapacity.reserveBytes),
+            revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+        try store.setAttachmentReserveForTesting(AttachmentFixtureCapacity.reserveBytes)
+        return store
+    }
     private func original(_ store: ItemStore, base: Revision, operation: String = "original") throws -> (
         Revision, AttachmentDescriptor
     ) {
@@ -172,7 +181,7 @@ final class DocumentContentIntegrationTests: XCTestCase, @unchecked Sendable {
         let saved: Revision
         let originalDescriptor: AttachmentDescriptor
         do {
-            let store = try AttachmentFixtureCapacity.makeStore(root: root)
+            let store = try freshStore(root)
             let (attached, descriptor) = try original(store, base: create(store))
             originalDescriptor = descriptor
             saved = try save(store, root: root, attached: attached, descriptor: descriptor)
@@ -408,9 +417,7 @@ final class DocumentContentIntegrationTests: XCTestCase, @unchecked Sendable {
                 })
         ) { XCTAssertEqual(($0 as? TractandaError)?.code, "forbidden") }
         let payloads = try AttachmentPayloadStore(root: root, ownerUID: getuid())
-        XCTAssertFalse(
-            FileManager.default.fileExists(
-                atPath: try payloads.payloadURL(for: prepared.originals[0].attachmentID).path))
+        XCTAssertNil(try payloads.resolvedPayloadPath(prepared.originals[0].attachmentID))
         XCTAssertEqual(try store.get(saved.itemID).revisionID, saved.revisionID)
     }
 

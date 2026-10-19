@@ -695,6 +695,94 @@ final class TUITests: XCTestCase {
         XCTAssertEqual(category.className.text, "Item")
     }
 
+    func testCategoryCaptureConfigurationEditsPreserveUnknownExtensionsAndSelection() throws {
+        let directory = try root()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ItemStore(root: directory.appendingPathComponent("store"))
+        let category = try store.commit(
+            CommitRequest(
+                classID: "Item",
+                changes: [
+                    "subject": .text("When"),
+                    "selection": .object([
+                        "language": .text(SpotlightQuery.profile), "expression": .text("dueAt == *"),
+                        "timeZone": .text("Europe/Vienna"),
+                    ]),
+                    "captureAliases": .list([.text("Doe, John"), .text(" spaced "), .text("tomorrow")]),
+                    "captureDate": .object([
+                        "property": .text("deadline"), "dayOffset": .integer(1),
+                        "timeZone": .text("Europe/Vienna"), "futureOption": .text("keep"),
+                    ]),
+                ], operationID: "category-seed")
+        ).revision
+        let unchanged = try ItemDraft(base: category, isCategory: true)
+        XCTAssertNil(unchanged.request())
+        var draft = try ItemDraft(base: category, isCategory: true)
+        draft.captureAliases = TextBuffer("Doe, John\n spaced \ntomorrow\ntmw")
+        draft.captureDateProperty = TextBuffer("deadlineAt")
+        let request = try XCTUnwrap(draft.request())
+        XCTAssertEqual(request.changes["selection"], nil)
+        XCTAssertEqual(
+            request.changes["captureAliases"],
+            .list([.text("Doe, John"), .text(" spaced "), .text("tomorrow"), .text("tmw")]))
+        XCTAssertEqual(request.changes["captureDate"]?.map?["futureOption"], .text("keep"))
+        XCTAssertEqual(request.changes["captureDate"]?.map?["timeZone"], .text("Europe/Vienna"))
+    }
+
+    func testCaptureRecoveryRetainsExactPreparedPlan() throws {
+        let directory = try root()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let request = CommitRequest(
+            action: .create, classID: "Item", changes: ["body": .text("#tomorrow")],
+            operationID: "capture-operation")
+        let plan = CapturePlan(
+            request: request, evaluatedAt: "2026-10-13T00:00:00Z", commitRequest: request,
+            categoryRevisionIDs: ["category-id": "revision-id"],
+            mentions: [
+                CaptureMention(
+                    token: "#tomorrow", categoryID: "category-id", reusedBinding: true,
+                    dateProperty: "deadline", dateValue: "2026-10-14")
+            ], issues: [])
+        let journal = RecoveryJournal(
+            url: directory.appendingPathComponent("pending.json"), socket: "/fixture")
+        try journal.save(plan)
+        guard case .capture(let recovered)? = try journal.loadOperation() else {
+            return XCTFail("Expected a capture plan recovery record")
+        }
+        XCTAssertEqual(recovered, plan)
+    }
+
+    func testCapturePreviewGateRejectsLateResultAfterCancelAndNewEditor() {
+        var gate = CapturePreviewGate()
+        let first = gate.begin()
+        XCTAssertTrue(gate.accept(first))
+        let late = gate.begin()
+        gate.invalidate()
+        XCTAssertFalse(gate.accept(late))
+        let current = gate.begin()
+        XCTAssertFalse(gate.accept(late))
+        XCTAssertTrue(gate.accept(current))
+    }
+
+    func testCaptureReviewMarksReusedDateAsHistoricalAndUnchanged() {
+        let request = CommitRequest(
+            action: .revise, itemID: "item-id", expectedRevisionID: "revision-id",
+            changes: ["body": .text("#tomorrow"), "dueAt": .text("2026-10-20")], operationID: "review")
+        let plan = CapturePlan(
+            request: request, evaluatedAt: "2026-10-13T12:00:00Z", commitRequest: request,
+            categoryRevisionIDs: [:],
+            mentions: [
+                CaptureMention(
+                    token: "#tomorrow", categoryID: "category-id",
+                    reusedBinding: true, dateProperty: "dueAt", dateValue: "2026-10-14")
+            ], issues: [])
+        let text = CaptureReviewPresentation.text(for: plan)
+        XCTAssertTrue(text.contains("prior capture (no change)"))
+        XCTAssertTrue(text.contains("historical dueAt=2026-10-14, unchanged"))
+        XCTAssertFalse(text.contains("proposed dueAt"))
+        XCTAssertTrue(text.contains("Literal body retained"))
+    }
+
     func testResizingPreservesDraftFocusSelectionAndNativeWorkflow() throws {
         let directory = try root()
         defer { try? FileManager.default.removeItem(at: directory) }

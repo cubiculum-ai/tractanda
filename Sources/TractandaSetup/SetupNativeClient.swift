@@ -17,6 +17,13 @@ struct SetupNativeClient {
         return result
     }
 
+    func peerRuntimeStatus() throws -> PeerOperatorRuntimeStatus {
+        let result = try call(PeerOperatorStatus.nativeMethod)
+        let bytes = try JSONSerialization.data(withJSONObject: result)
+        guard bytes.count <= 16 * 1024 else { throw SetupError("Peer status exceeds its diagnostic bound.") }
+        return try JSONDecoder().decode(PeerOperatorStatus.self, from: bytes).runtime
+    }
+
     /// Optional template records and fresh sample items are created through the ordinary API.
     /// Every item receives the initial human owner's private permission policy.
     func seed(owner: String, instance: String, release: URL) throws -> [String: String] {

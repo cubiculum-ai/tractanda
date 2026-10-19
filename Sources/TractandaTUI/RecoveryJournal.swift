@@ -5,11 +5,17 @@ enum RecoveredOperation: Codable, Sendable {
     case single(CommitRequest)
     case batch(BatchOperation)
     case learning(LearningEdit)
-    private enum CodingKeys: String, CodingKey { case batch, learning }
+    case capture(CapturePlan)
+    private enum CodingKeys: String, CodingKey { case batch, learning, capture }
 
     init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        if container.contains(.learning) {
+        if container.contains(.capture) {
+            guard !container.contains(.batch), !container.contains(.learning) else {
+                throw TractandaError("invalidRecovery", "Ambiguous recovery operation.")
+            }
+            self = .capture(try container.decode(CapturePlan.self, forKey: .capture))
+        } else if container.contains(.learning) {
             guard !container.contains(.batch) else {
                 throw TractandaError("invalidRecovery", "Ambiguous recovery operation.")
             }
@@ -36,6 +42,9 @@ enum RecoveredOperation: Codable, Sendable {
         case .learning(let edit):
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encode(edit, forKey: .learning)
+        case .capture(let plan):
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(plan, forKey: .capture)
         }
     }
 }
@@ -65,6 +74,7 @@ final class RecoveryJournal {
         try edit.validate()
         try file.save(.learning(edit))
     }
+    func save(_ plan: CapturePlan) throws { try file.save(.capture(plan)) }
     func clear() throws { try file.clear() }
     func releaseLock() { file.releaseLock() }
 

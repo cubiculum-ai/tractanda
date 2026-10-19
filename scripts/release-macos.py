@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -25,6 +26,9 @@ from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
+_delivery_spec = importlib.util.spec_from_file_location('release_delivery', Path(__file__).with_name('release-delivery.py'))
+delivery = importlib.util.module_from_spec(_delivery_spec)
+_delivery_spec.loader.exec_module(delivery)
 RELEASE_STEPS = tuple(json.loads(Path(__file__).with_name('release-steps.json').read_text()))
 CONTROL = ROOT / 'work/release-pipeline'
 DEFAULT_CONFIG = CONTROL / 'config.json'
@@ -175,6 +179,20 @@ def is_verified_published(state):
         return False
     hashes = result.get('sha256')
     expected = {f'tractanda-{version}-macos-arm64.tar.gz', f'Tractanda-{version}-arm64.pkg', 'SHA256SUMS'}
+    if not isinstance(hashes, dict):
+        return False
+    if delivery.active(state):
+        try:
+            rows = state['delivery']['linuxAssets']
+            if (len(rows) != 2 or {r['arch'] for r in rows} != set(delivery.ARCHES)
+                    or any(hashes.get(r['name']) != r['sha256'] for r in rows)
+                    or state['delivery']['acceptance']['candidateID'] != delivery.digest(delivery.canonical(delivery.binding(state)))
+                    or state['delivery']['installAuthorization']['candidateID'] != state['delivery']['acceptance']['candidateID']
+                    or steps.get('install-authorization', {}).get('result') != state['delivery']['installAuthorization']
+                    or steps.get('cluster-acceptance', {}).get('result') != state['delivery']['acceptance']):
+                return False
+        except (KeyError, TypeError, RuntimeError):
+            return False
     return (isinstance(hashes, dict) and expected.issubset(hashes)
             and all(isinstance(name, str) and Path(name).name == name
                     and isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value)
@@ -334,7 +352,8 @@ def prepare(settings, notes):
     git('worktree', 'add', '--detach', str(source), commit)
     state = {'version': version, 'commit': commit, 'tree': git('rev-parse', 'HEAD^{tree}'),
              'status': 'ready', 'createdAt': now(), 'steps': {}, 'directory': str(destination),
-             'notes': notes, 'configuration': settings, 'plannedSteps': list(RELEASE_STEPS)}
+             'notes': notes, 'configuration': settings, 'delivery': delivery.fresh(),
+             'plannedSteps': delivery.release_plan(RELEASE_STEPS)}
     write(destination / 'state.json', state)
     write(current_path, state)
     return state
@@ -385,6 +404,7 @@ def require_unpublished_ci_repair(state):
     """Permit a same-version repair only after an installed, unpublished CI failure."""
     required = {'verify', 'release-build', 'bundle', 'package', 'notarization',
                 'artifacts', 'install', 'health', 'push'}
+    if delivery.active(state): required.update(('install-authorization', 'cluster-acceptance'))
     if (state.get('status') != 'failed' or state.get('activeStep') != 'ci'
             or set(state.get('steps', {})) != required):
         raise RuntimeError('Only a terminal unpublished CI failure can revise an installed candidate.')
@@ -464,7 +484,7 @@ def require_ready_ci_descendant_repair(state):
         raise RuntimeError('The installed ancestor source identity/proof does not match.')
     # Reuse the existing terminal-runner, exact live pin and fresh remote absence gates.
     installed = {**state, 'commit': ancestor['commit'], 'steps': ancestor['steps'],
-                 'status': 'failed', 'activeStep': 'ci'}
+                 'status': 'failed', 'activeStep': 'ci', 'delivery': ancestor.get('delivery')}
     proof = require_unpublished_ci_repair(installed)
     git('merge-base', '--is-ancestor', ancestor['commit'], state['commit'])
     executable = current.parent / 'bin/tractanda'
@@ -509,9 +529,11 @@ def revise(state, notes):
     notarization_history = archive_notarization_evidence(state, commit)
     state.setdefault('previousCandidates', []).append({
         'commit': state['commit'], 'steps': state['steps'], 'error': state.get('error'),
-        'notarizationEvidence': notarization_history, 'unpublishedCIRepair': repair_proof})
+        'notarizationEvidence': notarization_history, 'unpublishedCIRepair': repair_proof,
+        'delivery': state.get('delivery')})
+    state['previousCandidates'][-1]['deliveryEvidence'] = delivery.archive_for_revision(state)
     state.update(commit=commit, tree=git('rev-parse', 'HEAD^{tree}'), steps={}, status='ready',
-                 plannedSteps=list(RELEASE_STEPS), notes=notes)
+                 plannedSteps=delivery.release_plan(RELEASE_STEPS), notes=notes, delivery=delivery.fresh())
     state.pop('error', None)
     state.pop('pauseReason', None)
     state.pop('activeStep', None)
@@ -554,6 +576,43 @@ class Pipeline:
             result = action()
             self.state['steps'][name] = {'completedAt': now(), 'result': result}
             self.save()
+
+    def linux_context(self):
+        # Use the candidate's existing source capture/configuration algorithm.
+        if (git('rev-parse', 'HEAD', cwd=self.source) != self.state['commit']
+                or git('rev-parse', 'HEAD^{tree}', cwd=self.source) != self.state['tree']
+                or git('status', '--porcelain', cwd=self.source)):
+            raise RuntimeError('Linux receipts require the unchanged sealed candidate checkout.')
+        spec = importlib.util.spec_from_file_location('candidate_linux_producer', self.source / 'scripts/produce-linux-payload.py')
+        producer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(producer)
+        return {'files': producer.source_rows(),
+                'components': {arch: producer.require_admitted(arch) for arch in delivery.ARCHES},
+                'flags': {arch: producer.core_build_flags(arch) for arch in delivery.ARCHES}}
+
+    def install_gate(self):
+        self.state['activeStep'] = 'install-authorization'
+        accepted = delivery.verify_install(self.state)
+        if accepted is None:
+            self.state.update(status='paused', pauseReason='Verify Raven backup/restore and canonical cluster initialization, then use explicit allow-install and run.',
+                              installCandidateID=delivery.install_challenge(self.state)['candidateID'])
+            self.save()
+            return False
+        self.state['steps']['install-authorization'] = {'completedAt': now(), 'result': accepted}
+        self.save()
+        return True
+
+    def cluster_gate(self):
+        self.state['activeStep'] = 'cluster-acceptance'
+        accepted = delivery.verify_acceptance(self.state)
+        if accepted is None:
+            self.state.update(status='paused', pauseReason='Complete the ordered Raven/Stash checks, then use explicit accept-cluster and run.',
+                              clusterCandidateID=delivery.challenge(self.state)['candidateID'])
+            self.save()
+            return False
+        self.state['steps']['cluster-acceptance'] = {'completedAt': now(), 'result': accepted}
+        self.save()
+        return True
 
     def document_build_arguments(self):
         # Separate paths keep the patched native runtime out of the embedding/root graphs.
@@ -639,6 +698,8 @@ class Pipeline:
         self.run_command('archive', ['/usr/bin/tar', '--no-xattrs', '--no-acls', '--no-fflags', '--no-mac-metadata',
                                     '-czf', self.archive, '-C', self.directory, self.bundle.name])
         checksums = {p.name: sha(p) for p in (self.archive, self.package)}
+        if delivery.active(self.state):
+            checksums.update(delivery.verify_linux(self.state, self.linux_context()))
         (self.directory / 'SHA256SUMS').write_text(''.join(f'{digest}  {name}\n' for name, digest in checksums.items()))
         return checksums
 
@@ -653,11 +714,23 @@ class Pipeline:
         if sha(self.bundle / 'bundle-manifest.json') != self.state['steps']['bundle']['result']['manifestSHA256']:
             raise RuntimeError('The prepared bundle manifest changed.')
         for name, expected in self.state['steps']['artifacts']['result'].items():
+            if Path(name).name != name:
+                raise RuntimeError('Unsafe release artifact name.')
             if sha(self.directory / name) != expected:
                 raise RuntimeError('The prepared release artifact changed: ' + name)
+        if delivery.active(self.state):
+            linux = delivery.verify_linux(self.state, self.linux_context())
+            expected = self.state['steps']['artifacts']['result']
+            if any(expected.get(name) != value for name, value in linux.items()):
+                raise RuntimeError('Both bound Linux assets must be in the release inventory.')
+            sums = ''.join(f'{value}  {name}\n' for name, value in expected.items())
+            if (self.directory / 'SHA256SUMS').read_text() != sums:
+                raise RuntimeError('Release checksums changed.')
 
     def install(self):
         self.verify_notarization()
+        if delivery.active(self.state) and delivery.verify_install(self.state) is None:
+            raise RuntimeError('Explicit candidate-bound allow-install is required before managed installation.')
         # Root authorization does not bypass macOS privacy protection for Documents.
         # Give the administrator process a private, verified temporary payload and cwd.
         with tempfile.TemporaryDirectory(prefix='tractanda-release-', dir='/private/tmp') as staging:
@@ -682,6 +755,9 @@ class Pipeline:
         info = json.loads(command([client, 'info', socket], env=environment))
         manifest = read(self.bundle / 'bundle-manifest.json')
         expected = next(f['sha256'] for f in manifest['files'] if f['path'] == 'bin/tractanda')
+        expected_formats = manifest.get('canonicalFormats')
+        if expected_formats is None or info.get('canonicalFormats') != expected_formats:
+            raise RuntimeError('Runtime canonical reader/writer formats differ from the signed bundle.')
         if info.get('server', {}).get('executableSHA256') != expected:
             raise RuntimeError('The live native server does not match the prepared signed executable.')
         release = base / 'current'
@@ -737,6 +813,8 @@ class Pipeline:
     def publish(self):
         self.verify_artifacts()
         self.verify_notarization()
+        if delivery.active(self.state) and delivery.verify_acceptance(self.state) is None:
+            raise RuntimeError('Explicit candidate-bound cluster acceptance is required before publication.')
         repo, version = self.settings['repository'], self.state['version']
         tag = 'v' + version
         notes = self.directory / 'release-notes.md'
@@ -755,9 +833,17 @@ class Pipeline:
             raise RuntimeError('The draft/release targets a different source commit; refusing to modify it.')
         expected = {**self.state['steps']['artifacts']['result'], 'SHA256SUMS': sha(self.directory / 'SHA256SUMS')}
         existing = {asset['name']: asset for asset in assets['assets']}
+        if len(existing) != len(assets['assets']):
+            raise RuntimeError('Duplicate remote release asset names.')
+        if delivery.active(self.state) and set(existing) - set(expected):
+            raise RuntimeError('Unexpected remote asset outside the sealed release inventory.')
         # Keep pending uploads outside synced Documents: a sync client may rename an
         # artifact while an earlier large upload runs. Verify a private local snapshot.
         with tempfile.TemporaryDirectory(prefix='tractanda-upload-', dir='/private/tmp') as staging:
+            fs = os.statvfs(staging)
+            needed = sum((self.directory / name).stat().st_size for name in expected if name not in existing)
+            if fs.f_frsize <= 0 or fs.f_bavail * fs.f_frsize < needed + delivery.RESERVE:
+                raise RuntimeError('Private upload staging capacity/reserve rejected.')
             pending = []
             for name, digest in expected.items():
                 if name in existing:
@@ -775,7 +861,9 @@ class Pipeline:
                                           '--draft=false', '--prerelease', '--notes-file', notes], ROOT)
         remote = release_info(repo, tag)
         observed = {a['name']: a.get('digest') for a in remote['assets']}
-        if remote['draft'] or any(observed.get(name) != 'sha256:' + digest for name, digest in expected.items()):
+        if (len(observed) != len(remote['assets']) or remote['draft']
+                or delivery.active(self.state) and set(observed) != set(expected)
+                or any(observed.get(name) != 'sha256:' + digest for name, digest in expected.items())):
             raise RuntimeError('Published asset verification failed.')
         return {'url': remote['html_url'], 'sha256': expected}
 
@@ -798,11 +886,13 @@ class Pipeline:
     def run(self, ci_timeout=3600):
         if self.state['status'] == 'complete':
             return
+        if not delivery.active(self.state):
+            raise RuntimeError('Revise the pending legacy candidate explicitly to the current Linux/cluster delivery contract.')
         self.state.pop('error', None)
         self.state.pop('pauseReason', None)
         if git('rev-parse', 'HEAD', cwd=self.source) != self.state['commit'] or git('status', '--porcelain', cwd=self.source):
             raise RuntimeError('The sealed source checkout changed; refusing to release an unverified tree.')
-        self.state['plannedSteps'] = list(RELEASE_STEPS)
+        self.state['plannedSteps'] = delivery.release_plan(RELEASE_STEPS)
         self.save()
         self.step('verify', lambda: self.run_command('verify', ['sh', 'scripts/test.sh']))
         self.step('release-build', self.build)
@@ -811,16 +901,20 @@ class Pipeline:
         self.step('notarization', self.notarize_package)
         self.step('artifacts', self.package_artifacts)
         self.verify_artifacts()
+        if not self.install_gate():
+            return
         self.step('install', self.install)
         # Recheck after an interruption; a completed step alone cannot prove today's live pin.
         self.state['steps']['health'] = {'completedAt': now(), 'result': self.health()}
         self.save()
+        if not self.cluster_gate():
+            return
         self.step('push', self.push)
         if 'ci' not in self.state['steps']:
             self.wait_for_ci(ci_timeout)
         self.step('publish', self.publish)
         self.step('cleanup', self.cleanup)
-        if set(self.state['steps']) != set(RELEASE_STEPS):
+        if set(self.state['steps']) != set(self.state['plannedSteps']):
             raise RuntimeError('Completed stages do not match the declared release plan.')
         self.state['status'] = 'complete'
         self.state.pop('activeStep', None)
@@ -876,9 +970,13 @@ def start_runner(ci_timeout):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['prepare', 'revise', 'release', 'run', 'status', 'dashboard', 'prune'])
+    parser.add_argument('action', choices=['prepare', 'revise', 'release', 'run', 'status', 'dashboard', 'prune',
+                                         'attach-linux', 'install-template', 'allow-install', 'cluster-template', 'accept-cluster'])
     parser.add_argument('--config', type=Path, default=DEFAULT_CONFIG)
     parser.add_argument('--notes', help='Concise description of this completed changeset')
+    parser.add_argument('--linux-assets', type=Path, help='Both real Linux packages and existing build receipts (attach-linux only)')
+    parser.add_argument('--evidence', type=Path, help='Completed nonsecret operator evidence (allow-install/accept-cluster)')
+    parser.add_argument('--candidate', help='Explicit exact candidate ID from the corresponding operator template')
     parser.add_argument('--background', action='store_true', help='Run in a detached local process; no agent or scheduler is used')
     parser.add_argument('--ci-timeout', type=int, default=3600, help='Maximum CI wait in seconds (default: 3600)')
     parser.add_argument('--json', action='store_true', help='Filtered live JSON status (status only)')
@@ -887,6 +985,10 @@ def main():
     args = parser.parse_args()
     if args.ci_timeout <= 0:
         parser.error('--ci-timeout must be positive')
+    if args.linux_assets is not None and args.action != 'attach-linux':
+        parser.error('--linux-assets applies only to attach-linux')
+    if (args.evidence is not None or args.candidate is not None) and args.action not in ('allow-install', 'accept-cluster'):
+        parser.error('--evidence/--candidate apply only to allow-install or accept-cluster')
     if args.background and args.action not in ('run', 'release'):
         parser.error('--background applies to run or release')
     if (args.json or args.watch) and args.action != 'status':
@@ -908,6 +1010,22 @@ def main():
         if args.action == 'prune':
             print(json.dumps(prune_releases(), indent=2))
             return
+        if args.action in ('attach-linux', 'install-template', 'allow-install', 'cluster-template', 'accept-cluster'):
+            pipeline = Pipeline(read(CONTROL / 'current.json'))
+            if args.action == 'attach-linux':
+                if args.linux_assets is None: parser.error('attach-linux requires --linux-assets')
+                delivery.attach(pipeline.state, args.linux_assets, pipeline.linux_context())
+                pipeline.save()
+            else:
+                pipeline.verify_artifacts()
+                if args.action in ('install-template', 'cluster-template'):
+                    template = delivery.install_challenge if args.action == 'install-template' else delivery.challenge
+                    print(json.dumps(template(pipeline.state), indent=2)); return
+                if args.evidence is None or args.candidate is None: parser.error(args.action + ' requires --evidence and --candidate')
+                action = delivery.allow_install if args.action == 'allow-install' else delivery.accept
+                action(pipeline.state, args.evidence, args.candidate)
+                pipeline.save()
+            state = pipeline.state
         if args.action in ('prepare', 'revise', 'release'):
             if not args.notes:
                 parser.error('prepare/revise/release requires --notes')

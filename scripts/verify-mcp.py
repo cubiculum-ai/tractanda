@@ -201,8 +201,9 @@ def exercise(binary, adapter, root, checks):
             client.initialize()
             catalog = client.request("tools/list")["tools"]
             catalog_names = {tool["name"] for tool in catalog}
-            assert len(catalog) == 36 and len(catalog_names) == 36
+            assert len(catalog) == 38 and len(catalog_names) == 38
             assert {
+                "tractanda_capture_preview", "tractanda_capture_commit",
                 "tractanda_semantic_status", "tractanda_semantic_search", "tractanda_semantic_results",
                 "tractanda_semantic_configure", "tractanda_semantic_rebuild", "tractanda_semantic_reset",
                 "tractanda_extracted_text_unit", "tractanda_attachments", "tractanda_attachment_content",
@@ -244,6 +245,9 @@ def exercise(binary, adapter, root, checks):
             properties = client.tool("tractanda_describe", {"topic": "properties"})
             assert any(entry["classID"] == "Item" for entry in types["types"]), types
             assert any(entry["name"] == "requestIdentity" for entry in properties["properties"]), properties
+            assert {"captureAliases", "captureDate", "inlineCaptureBindings"} <= {
+                entry["name"] for entry in properties["properties"]}
+            assert "Inline authoring is explicit" in client.resource("tractanda://reference/items")["text"]
             client.tool("tractanda_info", {"actor": "administrator"}, error="invalidArguments")
             client.tool("tractanda_query", {"limit": 65}, error="invalidArguments")
             client.tool("tractanda_query", {"limit": True}, error="invalidArguments")

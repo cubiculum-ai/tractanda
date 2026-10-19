@@ -21,6 +21,13 @@ final class CanonicalCatalogueReader {
         let rows: [Row]
         let nextRowID: Int64?
     }
+    struct RetainedRow {
+        let revisionID: String
+        let path: String
+        let size: UInt64
+        let digest: String
+    }
+    private var authorityWatermark: Int64 = 0
 
     enum ReaderError: Error {
         case open
@@ -42,7 +49,7 @@ final class CanonicalCatalogueReader {
 
     init(
         path: String, identity: String, watermark: Int64,
-        maxSeenBytes: Int = 16 * 1024 * 1024
+        maxSeenBytes: Int = 16 * 1024 * 1024, authorityEnforced: Bool = false
     ) throws {
         guard maxSeenBytes > 0 else { throw ReaderError.tempCap }
         self.maxSeenBytes = maxSeenBytes
@@ -65,6 +72,10 @@ final class CanonicalCatalogueReader {
             }
             tempPageLimit = pages
             try execute("CREATE TEMP TABLE verifier_seen(path TEXT PRIMARY KEY) WITHOUT ROWID")
+            if authorityEnforced {
+                authorityWatermark = try scalarInt(
+                    "SELECT COALESCE(MAX(rowid),0) FROM main.authority_objects")
+            }
         } catch {
             close()
             throw error
@@ -90,6 +101,52 @@ final class CanonicalCatalogueReader {
         if status == SQLITE_DONE { return nil }
         guard status == SQLITE_ROW, let row = decode(statement) else { throw ReaderError.sqlite(status) }
         return row
+    }
+    func retainedRow(path: String) throws -> RetainedRow? {
+        guard authorityWatermark > 0 else { return nil }
+        let statement = try prepare(
+            "SELECT id,path,length,sha256 FROM main.authority_objects WHERE path=? AND kind='item' AND rowid<=?"
+        )
+        defer { sqlite3_finalize(statement) }
+        try bind(path, at: 1, to: statement)
+        sqlite3_bind_int64(statement, 2, authorityWatermark)
+        let status = sqlite3_step(statement)
+        if status == SQLITE_DONE { return nil }
+        guard status == SQLITE_ROW else { throw ReaderError.sqlite(status) }
+        return try retainedRow(statement)
+    }
+    func unseenRetainedPage(after: String? = nil, limit: Int = 128) throws -> [RetainedRow] {
+        guard authorityWatermark > 0 else { return [] }
+        let statement = try prepare(
+            "SELECT o.id,o.path,o.length,o.sha256 FROM main.authority_objects o WHERE o.kind='item' AND o.rowid<=? AND o.id>? AND NOT EXISTS(SELECT 1 FROM temp.verifier_seen s WHERE s.path=o.path) AND NOT EXISTS(SELECT 1 FROM main.revision_catalog r WHERE r.path=o.path AND r.rowid<=?) ORDER BY o.id LIMIT ?"
+        )
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, authorityWatermark)
+        try bind(after ?? "", at: 2, to: statement)
+        sqlite3_bind_int64(statement, 3, watermark)
+        sqlite3_bind_int(statement, 4, Int32(min(max(1, limit), 128)))
+        var rows: [RetainedRow] = []
+        var status = sqlite3_step(statement)
+        while status == SQLITE_ROW {
+            rows.append(try retainedRow(statement))
+            status = sqlite3_step(statement)
+        }
+        guard status == SQLITE_DONE else { throw ReaderError.sqlite(status) }
+        return rows
+    }
+    private func retainedRow(_ statement: OpaquePointer) throws -> RetainedRow {
+        func text(_ column: Int32, maximum: Int) throws -> String {
+            let count = Int(sqlite3_column_bytes(statement, column))
+            guard count <= maximum, let raw = sqlite3_column_text(statement, column) else {
+                throw ReaderError.schema
+            }
+            return String(decoding: UnsafeBufferPointer(start: raw, count: count), as: UTF8.self)
+        }
+        let size = sqlite3_column_int64(statement, 2)
+        guard size > 0, size <= 8 * 1024 * 1024 else { throw ReaderError.schema }
+        return try .init(
+            revisionID: text(0, maximum: 36), path: text(1, maximum: 4096), size: UInt64(size),
+            digest: text(3, maximum: 64))
     }
 
     func markSeen(_ path: String) throws {
@@ -142,7 +199,8 @@ final class CanonicalCatalogueReader {
     private func validate(identity: String) throws {
         let database = try requireDatabase()
         for (key, expected) in [
-            ("identity", identity), ("schema", "11"), ("engine", "tractanda-sqlite-catalogue-v11"),
+            ("identity", identity), ("schema", ItemIndex.catalogueSchemaVersion),
+            ("engine", ItemIndex.catalogueEngine),
             ("itemTextProfile", ItemTextContent.profile),
         ] {
             let statement = try prepare("SELECT value FROM main.checkpoint_meta WHERE key=?")
@@ -155,7 +213,8 @@ final class CanonicalCatalogueReader {
         }
         let columns = try prepare(
             "SELECT revision,item,path,parent,actor,operation,size,inode,uid,mode,mtime_seconds,"
-                + "mtime_nanoseconds,digest,created_at FROM main.revision_catalog LIMIT 0")
+                + "mtime_nanoseconds,digest,created_at,modified_at,provenance,modified_ticks FROM main.revision_catalog LIMIT 0"
+        )
         defer { sqlite3_finalize(columns) }
         guard sqlite3_step(columns) == SQLITE_DONE else { throw ReaderError.schema }
         _ = database

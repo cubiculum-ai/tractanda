@@ -67,7 +67,7 @@ def verify(binary, child):
             query = client.call("TractandaItem/query", {"text": "garden supplies", "limit": 16})
             assert query["ids"] == [item_id]
             diagnostic = json.loads(subprocess.check_output([binary, "extracted-text", str(socket), *query["ids"]]))
-            assert diagnostic["extractionProfile"] == "tractanda.item-text.v6"
+            assert diagnostic["extractionProfile"] == "tractanda.item-text.v8"
             row = diagnostic["list"][0]
             assert row["sourceText"].count(text) == 1
             assert descriptor["sha256"] not in row["sourceText"]
@@ -102,7 +102,7 @@ def verify(binary, child):
                 environment = dict(os.environ, TRACTANDA_FIXTURE_MANIFEST=str(manifest_path),
                     TRACTANDA_FIXTURE_SOCKET=str(socket), TRACTANDA_FIXTURE_BINARY=binary)
                 subprocess.run(child, env=environment, check=True, timeout=180)
-            return {"passed": True, "extractionProfile": "tractanda.item-text.v6", "originalBytes": len(original),
+            return {"passed": True, "extractionProfile": "tractanda.item-text.v8", "originalBytes": len(original),
                 "sourceByteStart": 3, "currentLocatorMatchesDeliveredRevision": True,
                 "currentLocatorDiffersFromInputProvenance": True, "fixtureBytes": capacity(root), "fixtureCapBytes": CAP,
                 "testReserveBytes": RESERVE, "runtimeReserveBytes": 1024**3,

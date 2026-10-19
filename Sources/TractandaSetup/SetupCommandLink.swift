@@ -21,6 +21,7 @@ extension SetupEngine {
     }
 
     func publishTUICommand() throws {
+        if roots.platform == .linux { return } // /usr/bin entrypoints are dpkg payload.
         if exists(tuiCommand) {
             if !ownsTUICommand() {
                 FileHandle.standardError.write(
@@ -53,6 +54,7 @@ extension SetupEngine {
     }
 
     func removeTUICommandIfUnused() throws {
+        if roots.platform == .linux { return }
         if !exists(clientLink), ownsTUICommand() { try FileManager.default.removeItem(at: tuiCommand) }
     }
 }

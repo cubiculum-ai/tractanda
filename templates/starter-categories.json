@@ -917,6 +917,32 @@
         "categoryOrder": {
           "type": "integer",
           "value": 20
+        },
+        "captureDate": {
+          "type": "object",
+          "value": {
+            "property": {
+              "type": "text",
+              "value": "dueAt"
+            },
+            "dayOffset": {
+              "type": "integer",
+              "value": 0
+            },
+            "timeZone": {
+              "type": "text",
+              "value": "UTC"
+            }
+          }
+        },
+        "captureAliases": {
+          "type": "list",
+          "value": [
+            {
+              "type": "text",
+              "value": "deadline-today"
+            }
+          ]
         }
       }
     },
@@ -968,6 +994,32 @@
         "categoryOrder": {
           "type": "integer",
           "value": 21
+        },
+        "captureDate": {
+          "type": "object",
+          "value": {
+            "property": {
+              "type": "text",
+              "value": "dueAt"
+            },
+            "dayOffset": {
+              "type": "integer",
+              "value": 1
+            },
+            "timeZone": {
+              "type": "text",
+              "value": "UTC"
+            }
+          }
+        },
+        "captureAliases": {
+          "type": "list",
+          "value": [
+            {
+              "type": "text",
+              "value": "deadline-tomorrow"
+            }
+          ]
         }
       }
     },
@@ -1380,6 +1432,32 @@
         "categoryOrder": {
           "type": "integer",
           "value": 29
+        },
+        "captureDate": {
+          "type": "object",
+          "value": {
+            "property": {
+              "type": "text",
+              "value": "startsAt"
+            },
+            "dayOffset": {
+              "type": "integer",
+              "value": 0
+            },
+            "timeZone": {
+              "type": "text",
+              "value": "UTC"
+            }
+          }
+        },
+        "captureAliases": {
+          "type": "list",
+          "value": [
+            {
+              "type": "text",
+              "value": "event-today"
+            }
+          ]
         }
       }
     },
@@ -1435,6 +1513,32 @@
         "categoryOrder": {
           "type": "integer",
           "value": 30
+        },
+        "captureDate": {
+          "type": "object",
+          "value": {
+            "property": {
+              "type": "text",
+              "value": "startsAt"
+            },
+            "dayOffset": {
+              "type": "integer",
+              "value": 1
+            },
+            "timeZone": {
+              "type": "text",
+              "value": "UTC"
+            }
+          }
+        },
+        "captureAliases": {
+          "type": "list",
+          "value": [
+            {
+              "type": "text",
+              "value": "event-tomorrow"
+            }
+          ]
         }
       }
     },

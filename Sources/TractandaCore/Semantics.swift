@@ -66,6 +66,7 @@ public enum ItemSemantics {
             try AttachmentDocumentValidator.validate(representation)
         }
         _ = try RoleSemantics.holdings(revision)
+        try InlineCapture.validate(revision.fields)
         _ = try CategoryHierarchy.parents(of: revision)
         _ = try ItemReferenceLabel.labels(in: revision)
         _ = try CategoryHierarchy.excludedCategories(

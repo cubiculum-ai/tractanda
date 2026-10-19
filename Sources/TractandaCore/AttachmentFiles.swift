@@ -11,6 +11,69 @@ import Foundation
 public enum AttachmentFiles {
     public static let chunkBytes = 262_144
     public static let maximumFileBytes: Int64 = .max
+    /// Explicit retained transfer. A pinned revision and original connection are required on every retry.
+    public static func exportResumable(
+        connection: ServerConnection, itemID: String, attachmentID: String,
+        destination: URL, revisionID: String, resumeDirectory: URL,
+        policy: AttachmentDownloadPolicy = AttachmentDownloadPolicy()
+    ) throws -> AttachmentDescriptor {
+        try connection.validate()
+        return try exportResumable(
+            client: ItemClient(connection: connection), connection: connection,
+            itemID: itemID, attachmentID: attachmentID, destination: destination,
+            revisionID: revisionID, resumeDirectory: resumeDirectory, policy: policy)
+    }
+    private struct DownloadIdentity: Codable {
+        let connection: ServerConnection
+        let principalUID: UInt32
+        let serverUID: UInt32
+        let itemID: String
+        let revisionID: String
+        let descriptor: AttachmentDescriptor
+    }
+    static func exportResumable(
+        client: ItemClient, connection: ServerConnection, itemID: String, attachmentID: String,
+        destination: URL, revisionID: String, resumeDirectory: URL,
+        policy: AttachmentDownloadPolicy = AttachmentDownloadPolicy(),
+        hooks: ResumableByteDownload.Hooks = ResumableByteDownload.Hooks()
+    ) throws -> AttachmentDescriptor {
+        let list = try client.listAttachments(itemID: itemID, revisionID: revisionID)
+        guard let storeID = list.storeID, UUID(uuidString: storeID)?.version1Components != nil,
+            list.itemID == itemID, list.revisionID == revisionID,
+            let descriptor = list.attachments.first(where: { $0.attachmentID == attachmentID })
+        else {
+            throw TractandaError(
+                "downloadBinding", "Resumable download requires an identified store and pinned original.")
+        }
+        let identity = DownloadIdentity(
+            connection: connection, principalUID: getuid(),
+            serverUID: try connection.serverUser.map { try SystemAccountDirectory().user(named: $0).uid }
+                ?? getuid(),
+            itemID: itemID, revisionID: revisionID, descriptor: descriptor)
+        let binding = DownloadBinding(
+            storeID: storeID, objectIdentity: try JSON.encode(identity), byteCount: descriptor.byteCount,
+            sha256: descriptor.sha256, destination: destination.standardizedFileURL.path)
+        try ResumableByteDownload.run(
+            binding: binding, stage: resumeDirectory, destination: destination, policy: policy, hooks: hooks,
+            authorize: {
+                let current = try client.listAttachments(itemID: itemID, revisionID: revisionID)
+                guard current.storeID == storeID, current.itemID == itemID, current.revisionID == revisionID,
+                    current.attachments.first(where: { $0.attachmentID == attachmentID }) == descriptor
+                else { throw TractandaError("downloadBinding", "Authorized download source changed.") }
+            },
+            read: { offset, limit in
+                let part = try client.attachmentContent(
+                    itemID: itemID, revisionID: revisionID, attachmentID: attachmentID,
+                    offset: offset, limit: limit)
+                guard part.storeID == storeID, part.attachment == descriptor, part.offset == offset,
+                    part.data.count <= limit, part.nextOffset == offset + Int64(part.data.count),
+                    part.nextOffset <= descriptor.byteCount,
+                    part.isComplete == (part.nextOffset == descriptor.byteCount)
+                else { throw TractandaError("downloadIntegrity", "Pinned original continuation changed.") }
+                return ResumableByteDownload.Part(storeID: storeID, offset: offset, data: part.data)
+            })
+        return descriptor
+    }
     private static func openSource(_ url: URL) throws -> (FileHandle, stat) {
         let fd = open(url.path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else {

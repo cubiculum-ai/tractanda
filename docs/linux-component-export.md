@@ -1,0 +1,11 @@
+# Offline Linux ML component export
+
+`python3 scripts/export-linux-ml-component.py --arch amd64 --component documents --manifest debian/components/amd64/documents.json --component-root <verified-artifact-root> --output <fresh-export-root>` exports an already built and behavior-verified component. Use the corresponding architecture/component for embeddings. It does not compile, relocate, execute, download, copy models, install or update the approval registry.
+
+The existing fixed `debian/linux-runtime-inputs.json` must approve the normalized wrapper digest first. Export verifies the entire input inventory, copies unchanged artifact bytes/modes, adds the six exact tracked outer Docling license/model/patch files, and reruns the existing D4 component validator. An interrupted export remains an unapproved partial directory. Each output has an 8 GiB allocation cap and preserves the existing genuine 10 GiB free reserve.
+
+The wrapper's `recipe` commits this projection recipe. `sourceInputsSHA256` and the component's existing provenance retain the actual compiler/source/patch/ABI/model commitments that built its bytes. A later tracked build-script timeout fix does not retroactively become the recipe of an older artifact. New builds still need exact new artifact and behavior approval; this exporter provides no broad admission.
+
+The finite current identities correspond to the verified AMD64/ARM64 descriptor bytes. Historical reader identities remain a separate finite list, with no historical runtime execution selection. Setup accepts only the current finite identity for the declared platform/architecture and the exact native closure inventory entry; converter/Core checks still verify private file bytes at runtime. OS provider hashes remain build/test evidence, not deployed OS security-update pins.
+
+Current staged wrappers and source changes require independent review/application. Null registry entries deliberately prevent export/delivery. Full Core/Vec1, complete Debian packages and actual lifecycle acceptance remain separate required checks. CPU Docling model work took roughly five to six minutes per tiny page on the observed machines; slower hardware can take longer. The generous configurable document/semantic/build budgets do not change model or immutable result identities.

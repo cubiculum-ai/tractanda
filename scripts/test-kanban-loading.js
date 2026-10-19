@@ -7,25 +7,27 @@ const refs=ids=>({type:'list',value:ids.map(ref)});
 function category(id,parents=[],extras={}) {return {fields:{itemID:text(id),revisionID:text(id+'-revision'),subject:text(id),selection:text('TRUEPREDICATE'),categoryParents:refs(parents),requestIdentity:text('large replay receipt'),...extras}};}
 const categories=[category('projects'),category('project',['projects'],{filterCategories:refs(['filter'])}),category('status'),category('ready',['status']),category('done',['status']),category('filter')];
 const task={fields:{itemID:text('task'),revisionID:text('task-revision'),subject:text('Task'),modifiedAt:{type:'date',value:'2026-09-26T00:00:00Z'},body:text('Complete body'),workingNotes:text('Keep these notes'),requestIdentity:text('large replay receipt'),foreign:{type:'integer',value:42},categoryOverrides:{type:'object',value:{unrelated:text('exclude')}}}};
+const taskB={fields:{...structuredClone(task.fields),itemID:text('taskB'),revisionID:text('taskB-revision'),subject:text('Task B')}};
 const records=new Map([...categories,task].map(r=>[r.fields.itemID.value,r]));
-function fixture() {
+function fixture(options={}) {
+ if(options.multipleTasks)records.set('taskB',taskB);
  let state='one';const calls=[],batches=[];
  const nativeCall=async(method,args={})=>{
   calls.push({method,args});
   if(method==='TractandaStore/info')return {state};
   if(method==='TractandaItem/query') {
-   const ids=args.expression?categories.map(c=>c.fields.itemID.value):args.categoryPath.at(-1)==='done'?[]:['task'];
-   return {ids:ids.slice(args.position,args.position+args.limit),position:args.position,total:ids.length,queryState:state};
+   const ids=args.expression?categories.map(c=>c.fields.itemID.value):args.categoryPath.at(-1)==='done'?[]:options.conflictsAvailable?[]:options.multipleTasks?['task','taskB']:['task'];
+   return {ids:ids.slice(args.position,args.position+args.limit),position:args.position,total:ids.length,queryState:state,conflictsAvailable:!!options.conflictsAvailable};
   }
   assert.equal(method,'TractandaItem/get');
-  const list=args.ids.map(id=>{
+  const list=args.ids.filter(id=>!(options.unresolvedTask&&id==='task')&&!(options.remaining||[]).includes(id)&&!(options.oversized||[]).includes(id)).map(id=>{
    const original=records.get(id);assert.ok(original);
    const r=structuredClone(original);
    if(args.properties)r.fields=Object.fromEntries(Object.entries(r.fields).filter(([k])=>args.properties.includes(k)||['itemID','revisionID','classID','schemaVersion','createdAt','modifiedAt'].includes(k)));
    if(args.projection==='content')delete r.fields.requestIdentity;
    return r;
   });
-  return {list,notFound:[],state};
+  return {list,notFound:[],unresolved:options.unresolvedTask&&args.ids.includes('task')?[{itemID:'task',status:'conflicted',stateToken:'token'}]:[],remainingIDs:(options.remaining||[]).filter(id=>args.ids.includes(id)),oversizedIDs:(options.oversized||[]).filter(id=>args.ids.includes(id)),state};
  };
  const context=vm.createContext({projectBoard:{projectRootID:'projects',statusRootID:'status'},selectedViewID:'project',currentDate:()=> '2026-09-26T12:00:00Z',selectionIsCurrent:()=>true,fieldText:(f,k)=>f[k]?.type==='text'?f[k].value:'',apiError:(code,message)=>Object.assign(new Error(message),{code}),nativeCall,nativeCalls:async entries=>{
   assert.ok(entries.length<=8);
@@ -41,7 +43,7 @@ function fixture() {
  vm.runInContext(live.slice(live.indexOf('  function plain('),live.indexOf('  async function refreshProjectViews(')),context);
  return {context,calls,batches,changeState:()=>{state='two';}};
 }
-function savedFixture() {
+function savedFixture(options={}) {
  const calls=[],batches=[],view={fields:{itemID:text('view'),revisionID:text('view-revision'),subject:text('Saved board'),
   viewDefinition:{type:'object',value:{presentation:{type:'object',value:{sections:refs(['ready','done'])}}}},
   filterCategories:refs(['filter'])}};
@@ -54,7 +56,7 @@ function savedFixture() {
    return {ids:ids.slice(args.position,args.position+args.limit),position:args.position,total:ids.length,queryState:'one'};
   }
   assert.equal(method,'TractandaItem/get');
-  return {list:args.ids.map(id=>structuredClone(records.get(id))),notFound:[],state:'one'};
+  return {list:args.ids.filter(id=>!(options.unresolved||[]).includes(id)&&!(options.remaining||[]).includes(id)&&!(options.oversized||[]).includes(id)&&!(options.missing||[]).includes(id)).map(id=>structuredClone(records.get(id))),notFound:(options.missing||[]).filter(id=>args.ids.includes(id)),unresolved:(options.unresolved||[]).filter(id=>args.ids.includes(id)).map(itemID=>({itemID,status:'conflicted',stateToken:'token'})),remainingIDs:(options.remaining||[]).filter(id=>args.ids.includes(id)),oversizedIDs:(options.oversized||[]).filter(id=>args.ids.includes(id)),state:'one'};
  };
  const context=vm.createContext({projectBoard:null,selectedViewID:'view',currentDate:()=> '2026-09-26T12:00:00Z',selectionIsCurrent:()=>true,fieldText:(f,k)=>f[k]?.type==='text'?f[k].value:'',apiError:(code,message)=>Object.assign(new Error(message),{code}),nativeCall,nativeCalls:async entries=>{
   batches.push(entries.length);
@@ -97,7 +99,7 @@ function savedFixture() {
  const paged=vm.createContext({nativeCalls:async entries=>{
   const limit=entries[0][1].limit;pageLimits.push(limit);
   if(limit>32)throw Object.assign(new Error('large'),{code:'responseTooLarge'});
- return [{ids:['item'],total:1,queryState:'one'},{list:[task],notFound:[],state:'one'}];
+ return [{ids:['item'],position:0,total:1,queryState:'one'},{list:[task],notFound:[],state:'one'}];
  }});
 vm.runInContext(live.slice(live.indexOf('  async function queryPageWithRevisions('),live.indexOf('  async function queryRevisions(')),paged);
 await paged.queryPageWithRevisions({viewID:'view'},0,{projection:'content'});
@@ -129,7 +131,7 @@ const safeContinuation=vm.createContext({
 });
 vm.runInContext(live.slice(live.indexOf('  async function queryRevisions('),live.indexOf('  async function projectGraph(')),safeContinuation);
 const safelyLoaded=await safeContinuation.queryRevisions({expression:'classID == "Item"'},'same-state',null);
-assert.equal(safelyLoaded.length,2);
+assert.equal(safelyLoaded.revisions.length,2);
 assert.deepEqual(continuationCalls,[
  {position:0,cursor:null},{position:1,cursor:'next'},{position:1,cursor:null}
 ],'An invalid cursor retries at the same absolute position and still uses the caller state guard.');
@@ -150,6 +152,32 @@ const f=fixture(),snapshot={};
  assert.equal(gets.length,2,'Fetch categories and card content once; membership lookups need IDs only.');
  assert.ok(gets[0].args.properties.includes('viewDefinition'));
  assert.equal(gets[1].args.projection,'content');
+ const partial=fixture({unresolvedTask:true}),partialSnapshot={};
+ await partial.context.discoverProjectViews('project',0,partialSnapshot);
+ const partialBoard=await partial.context.readLiveBoard('project',partialSnapshot);
+ assert.equal(partialBoard.data.tasks.length,0);
+ assert.equal(partialBoard.projectionNotice,true,'An unresolved card is surfaced as incomplete projection state.');
+ const mixed=fixture({multipleTasks:true,unresolvedTask:true}),mixedSnapshot={};
+ await mixed.context.discoverProjectViews('project',0,mixedSnapshot);
+ const mixedBoard=await mixed.context.readLiveBoard('project',mixedSnapshot);
+ assert.deepEqual(Array.from(mixedBoard.data.tasks,t=>t.id),['taskB'],'Readable rows survive beside an unresolved ID.');
+ assert.equal(mixedBoard.projectionNotice,true);
+ const conflictedEmpty=fixture({conflictsAvailable:true}),conflictedSnapshot={};
+ await conflictedEmpty.context.discoverProjectViews('project',0,conflictedSnapshot);
+ const conflictedBoard=await conflictedEmpty.context.readLiveBoard('project',conflictedSnapshot);
+ assert.equal(conflictedBoard.data.tasks.length,0);
+ assert.equal(conflictedBoard.projectionNotice,true,'Global conflict availability remains visible for an empty page.');
+ const unhydrated=fixture({multipleTasks:true,remaining:['taskB']}),unhydratedSnapshot={};
+ await unhydrated.context.discoverProjectViews('project',0,unhydratedSnapshot);
+ const unhydratedBoard=await unhydrated.context.readLiveBoard('project',unhydratedSnapshot);
+ assert.deepEqual(Array.from(unhydratedBoard.data.tasks,t=>t.id),['task']);
+ assert.deepEqual(Array.from(unhydratedBoard.unhydratedIDs),['taskB']);
+ assert.equal(unhydratedBoard.projectionNotice,true);
+ const oversized=fixture({multipleTasks:true,oversized:['taskB']}),oversizedSnapshot={};
+ await oversized.context.discoverProjectViews('project',0,oversizedSnapshot);
+ const oversizedBoard=await oversized.context.readLiveBoard('project',oversizedSnapshot);
+ assert.deepEqual(Array.from(oversizedBoard.unhydratedIDs),['taskB']);
+ assert.equal(oversizedBoard.projectionNotice,true);
  const changed=fixture(),oldSnapshot={};
  await changed.context.discoverProjectViews('project',0,oldSnapshot);
  changed.changeState();
@@ -163,6 +191,20 @@ const f=fixture(),snapshot={};
  assert.equal(savedBoard.data.tasks.length,1);
  assert.deepEqual(Array.from(savedBoard.data.tasks[0].categoryIDs),['ready']);
  assert.deepEqual(saved.batches,[2,3],'Saved view query/get and section/filter membership calls are batched.');
+ for(const [options,code] of [[{unresolved:['done']},'itemUnresolved'],[{remaining:['done']},'categoryUnavailable'],[{oversized:['done']},'categoryUnavailable'],[{missing:['done']},'categoryUnavailable']]) {
+  const invalid=savedFixture(options);
+  await assert.rejects(invalid.context.readLiveBoard('view'),error=>error.code===code,'A two-section board must validate both categories before retaining rows.');
+  const nodes=new Map(['board-load-error','project-counts','filter-count','connection-message','learning-dialog','search','track-filter'].map(id=>[id,{hidden:true,value:'',open:false,textContent:''}]));
+  Object.assign(invalid.context,{isRefreshing:false,refreshGeneration:0,viewGeneration:0,pendingWrite:null,isSaving:false,isConnected:true,
+   data:{tasks:[{id:'stale'}],columns:[{id:'ready'},{id:'done'}]},revisionsByID:new Map([['stale',{}]]),undoStack:[],changes:0,
+   $:id=>nodes.get(id),updateConnectionState:()=>{},render:()=>{},renderProjectViews:()=>{},showWorkspace:()=>{},resumeEditorAfterSignIn:false});
+  vm.runInContext(live.slice(live.indexOf('  function clearViewData('),live.indexOf('  function restorePendingWrite(')),invalid.context);
+  vm.runInContext(live.slice(live.indexOf('  async function refreshLiveBoard('),live.indexOf('  async function selectProjectView(')),invalid.context);
+  assert.equal(await invalid.context.refreshLiveBoard(),false);
+  assert.equal(invalid.context.data.tasks.length,0);
+  assert.equal(invalid.context.revisionsByID.size,0,'No stale editable record survives an unvalidated saved-view category.');
+  assert.equal(nodes.get('board-load-error').hidden,false);
+ }
  const failed=fixture(),controls=new Map(['board-load-error','project-counts','filter-count','connection-message','learning-dialog','search','track-filter'].map(id=>[id,{hidden:true,value:'',open:false,textContent:''}]));
  const validRead=failed.context.readLiveBoard;
  Object.assign(failed.context,{isRefreshing:false,refreshGeneration:0,viewGeneration:0,pendingWrite:null,
@@ -182,11 +224,32 @@ const f=fixture(),snapshot={};
  assert.equal(controls.get('project-counts').hidden,true,'A failed read must not claim zero items or columns.');
  assert.equal(controls.get('filter-count').textContent,'Board unavailable');
  assert.equal(failed.context.isConnected,false);
+ failed.context.readLiveBoard=async()=>({data:{tasks:[],columns:[]},revisions:new Map(),projectionNotice:true,unresolved:[{itemID:'oldA',status:'conflicted'}]});
+ failed.context.isConnected=true;failed.context.data={tasks:[{id:'oldA'},{id:'oldB'}],columns:[{id:'existing'}]};
+ assert.equal(await failed.context.refreshLiveBoard(),true);
+ assert.deepEqual(failed.context.data.tasks,[],'An unresolved current A must not retain old A or unrelated old B.');
+ assert.match(controls.get('connection-message').textContent,/item-state\/conflicts/);
+ failed.context.readLiveBoard=async()=>({data:{tasks:[],columns:[]},revisions:new Map(),projectionNotice:true});
+ assert.equal(await failed.context.refreshLiveBoard(),true);
+ assert.equal(failed.context.data.tasks.length,0,'An empty current result replaces old rows while retaining the notice.');
+ failed.context.data={tasks:[{id:'old-category-board'}],columns:[]};
+ failed.context.readLiveBoard=async()=>{throw Object.assign(new Error('category unresolved'),{code:'itemUnresolved'});};
+ assert.equal(await failed.context.refreshLiveBoard(),false);
+ assert.equal(failed.context.data.tasks.length,0,'An unresolved category clears an unvalidated old board.');
+ assert.equal(controls.get('board-load-error').hidden,false);
+ failed.context.data={tasks:[{id:'selected-project-old'}],columns:[]};
+ const validSelection=failed.context.selectionIsCurrent;
+ failed.context.selectionIsCurrent=()=>false;
+ failed.context.readLiveBoard=async()=>({data:{tasks:[{id:'late-project-row'}],columns:[]},revisions:new Map()});
+ assert.equal(await failed.context.refreshLiveBoard(),false);
+ assert.equal(failed.context.data.tasks[0].id,'selected-project-old','A stale project generation cannot replace the selected board.');
+ failed.context.selectionIsCurrent=validSelection;
  failed.context.readLiveBoard=validRead;
  assert.equal(await failed.context.refreshLiveBoard(),true);
  assert.equal(failed.context.data.tasks.length,1);
  assert.equal(controls.get('board-load-error').hidden,true);
  assert.equal(controls.get('project-counts').hidden,false);
  console.log('Board failure: resourceLimit clears stale content, hides unconfirmed counts, and successful retry restores the board.');
+ console.log('Projection state: mixed/empty results, global conflict flags, and unhydrated IDs remain explicit; stale rows are replaced.');
  console.log('Board loading: content preserved, ID-only memberships, one scoped graph, and generation invalidation passed.');
 })().catch(error=>{console.error(error);process.exitCode=1;});

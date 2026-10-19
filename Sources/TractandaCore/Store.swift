@@ -104,9 +104,42 @@ public final class ItemStore {
     /// configuration always remain below `root`.
     public let indexDirectory: URL
     public let ownerUID: UInt32
+    /// Explicit source/test gate. Foreign intake is a separate, unavailable capability.
+    public let revisionProjectionEnabled: Bool
+    /// Internal source/test gate. Public intake and listeners remain unavailable until 2C2B.
+    public let authorityIntakeEnabled: Bool
+    private var peerIntake: PeerIntakeCoordinator?
+    var peerClockHealth: PeerClockHealth?
+    var peerExportBoundaryForTesting: ((PeerExportPlan.Boundary) throws -> Void)?
+    private var authorityExistingHistoryAdmitted = false
+    var authorityAfterAcceptanceSealForTesting: (() throws -> Void)?
+    var authorityControlInspectedForTesting: ((String) -> Void)?
+    private var authorityBootstrapPending = false
+    // Only the exact fresh operation may keep its not-yet-admitted founding policy out of
+    // serving projections. Converted pre-existing policy retains ordinary maintenance semantics.
+    private var pendingFoundingPolicy: InitialAuthorityBootstrap.Original?
+    private var authorityCatchupActive = false
+    var peerIntakeBoundaryForTesting: ((PeerIntakeJournal.Boundary) throws -> Void)? {
+        didSet { peerIntake?.journal.afterBoundaryForTesting = peerIntakeBoundaryForTesting }
+    }
+    var peerIntakeOriginalPublicationForTesting: (() throws -> Void)? {
+        didSet {
+            peerIntake?.journal.afterOriginalPublicationForTesting = peerIntakeOriginalPublicationForTesting
+        }
+    }
+    var revisionProjectionLimits = RevisionProjection.Limits()
+    var publicationClockForTesting: () -> String = { Timestamp.now() }
+    var canonicalRecordByteLimitForTesting = 8 * 1024 * 1024
+    var beforeProjectionCommitAuthorityForTesting: (() throws -> Void)?
+    var beforeCombinationIndexUpdateForTesting: (() throws -> Void)?
+    var beforeCanonicalReaderRequirementForTesting: (() throws -> Void)?
+    private var combinationPublicationAwaitingIndex = false
     private var generation = Identifier.make()
     private var accessContext: StoreAccessContext?
     private var accessConfiguration: AccessConfiguration?
+    private var currentAccessConfigurations: [AccessConfiguration] = []
+    private var accessConfigurationProofUnavailable = false
+    private var accessConfigurationAmbiguous: Bool { currentAccessConfigurations.count > 1 }
     private let accounts: any AccountDirectory
     private struct VisibleStateEntry {
         var token: String
@@ -129,7 +162,9 @@ public final class ItemStore {
     private var hasLivePersonalStateMemo: Bool?
     private var clockDependentCategories = false
     private(set) var aclSwiftReadCheckCount = 0
-    public var isMultiUser: Bool { accessConfiguration != nil }
+    public var isMultiUser: Bool {
+        accessConfiguration != nil || accessConfigurationAmbiguous || accessConfigurationProofUnavailable
+    }
     var cursorActorUID: UInt32 { accessContext?.uid ?? UInt32.max }
     var cursorStoreIdentity: String {
         get throws {
@@ -235,15 +270,38 @@ public final class ItemStore {
     }
 
     func preparePooledGet(_ ids: [String]) throws
-        -> (rows: [ItemIndex.CatalogueRow], notFound: [String])
+        -> (
+            rows: [ItemIndex.CatalogueRow], notFound: [String],
+            unresolved: [ItemUnresolvedState], stateTokens: [String: String]
+        )
     {
         guard isCanonicalReady, let index else {
             throw TractandaError("recoveryRequired", "The current catalogue is unavailable.")
         }
         var rows: [ItemIndex.CatalogueRow] = []
         var notFound: [String] = []
+        var unresolved: [ItemUnresolvedState] = []
+        var tokens: [String: String] = [:]
         for id in ids {
             try Identifier.validate(id)
+            if revisionProjectionEnabled {
+                do {
+                    let state = try itemState(id)
+                    tokens[id] = state.stateToken
+                    if state.status != .ready {
+                        unresolved.append(
+                            ItemUnresolvedState(
+                                itemID: id, status: state.status,
+                                stateToken: state.stateToken, resource: state.resource))
+                        continue
+                    }
+                } catch let error as TractandaError
+                    where error.code == "notFound" || error.code == "forbidden"
+                {
+                    notFound.append(id)
+                    continue
+                }
+            }
             guard let head = try currentHead(id), canRead(head) else {
                 notFound.append(id)
                 continue
@@ -253,13 +311,19 @@ public final class ItemStore {
             }
             rows.append(row)
         }
-        return (rows, notFound)
+        return (rows, notFound, unresolved, tokens)
     }
 
-    func verifyPooledGet(_ records: [PooledCanonicalRecord], rows: [ItemIndex.CatalogueRow]) throws
+    func verifyPooledGet(
+        _ records: [PooledCanonicalRecord], rows: [ItemIndex.CatalogueRow],
+        stateTokens: [String: String]
+    ) throws
         -> Bool
     {
         guard isCanonicalReady, let index, records.count == rows.count else { return false }
+        for (id, token) in stateTokens {
+            guard let current = try? itemState(id), current.stateToken == token else { return false }
+        }
         for (record, row) in zip(records, rows) {
             guard let head = try currentHead(row.itemID), head.revisionID == row.revisionID,
                 canRead(head), try index.revision(row.revisionID) == row,
@@ -275,25 +339,25 @@ public final class ItemStore {
             throw TractandaError("recoveryRequired", "The current catalogue is unavailable.")
         }
         try Identifier.validate(id)
+        if revisionProjectionEnabled { return try itemState(id).stateToken }
         guard let head = try currentHead(id) else {
             throw TractandaError("notFound", "Item or revision is unavailable.")
         }
         guard canRead(head) else { throw TractandaError("forbidden", "Item access is denied.") }
-        return head.revisionID
+        return try index?.currentProjection(itemID: id)?.state.stateToken ?? head.revisionID
     }
 
-    func verifyPooledHistory(_ result: PooledHistoryResult, itemID: String, headRevisionID: String)
+    func verifyPooledHistory(_ result: PooledHistoryResult, itemID: String, stateToken: String)
         throws -> Bool
     {
-        guard isCanonicalReady, let index, result.records.count == result.rows.count,
-            let head = try currentHead(itemID), head.revisionID == headRevisionID,
-            canRead(head)
-        else { return false }
+        guard isCanonicalReady, let index, result.records.count == result.rows.count else { return false }
+        guard try preparePooledHistory(itemID) == stateToken else { return false }
         for (record, row) in zip(result.records, result.rows) {
             guard row.itemID == itemID, record.revision.itemID == itemID,
                 let current = try index.revision(row.revisionID),
                 current.path == row.path, current.digest == row.digest,
                 current.parentID == row.parentID, current.createdAt == row.createdAt,
+                current.modifiedAt == row.modifiedAt, current.provenance == row.provenance,
                 let metadata = try? FileMetadata.read(at: root.appendingPathComponent(row.path)),
                 metadata == record.metadata
             else { return false }
@@ -423,6 +487,11 @@ public final class ItemStore {
         }
     }
     public private(set) var recoveryWarnings: [String] = []
+    /// Local, nonsecret replica identity. Legacy read-only opens need not allocate one.
+    public private(set) var replicaID: String?
+    var beforeRevisionGraphValidationForTesting: ((ItemIndex) throws -> Void)?
+    var recoveryCatalogueForTesting: ((ItemIndex) throws -> Void)?
+    var revisionGraphProgressForTesting: (() throws -> Void)?
     public private(set) var startupRecovery: [String: String] = ["mode": "pending"]
     private var writer: Int32 = -1
     private var indexWriter: Int32 = -1
@@ -441,11 +510,14 @@ public final class ItemStore {
         let digest: Data
         let createdAt: String
         let feedbackRevisionIDs: [String]
+        let modifiedAt: String
+        let provenance: RevisionProvenance?
 
         init(
             itemID: String, relativePath: String, actor: String, operationID: String,
             parentID: String?, metadata: FileMetadata, digest: Data,
-            createdAt: String = "", feedbackRevisionIDs: [String] = []
+            createdAt: String = "", feedbackRevisionIDs: [String] = [],
+            modifiedAt: String = "", provenance: RevisionProvenance? = nil
         ) {
             self.itemID = itemID
             self.relativePath = relativePath
@@ -456,6 +528,8 @@ public final class ItemStore {
             self.digest = digest
             self.createdAt = createdAt
             self.feedbackRevisionIDs = feedbackRevisionIDs
+            self.modifiedAt = modifiedAt
+            self.provenance = provenance
         }
 
         func url(root: URL) -> URL { root.appendingPathComponent(relativePath) }
@@ -473,6 +547,8 @@ public final class ItemStore {
             digest = row.digest
             createdAt = row.createdAt
             feedbackRevisionIDs = row.feedbackRevisionIDs
+            modifiedAt = row.modifiedAt
+            provenance = row.provenance
         }
 
         func catalogueRow(revisionID: String) -> ItemIndex.CatalogueRow {
@@ -483,7 +559,8 @@ public final class ItemStore {
                 inode: metadata.inode, uid: metadata.uid,
                 mode: metadata.mode, modificationSeconds: metadata.modificationSeconds,
                 modificationNanoseconds: metadata.modificationNanoseconds, digest: digest,
-                createdAt: createdAt, feedbackRevisionIDs: feedbackRevisionIDs)
+                createdAt: createdAt, feedbackRevisionIDs: feedbackRevisionIDs,
+                modifiedAt: modifiedAt, provenance: provenance)
         }
     }
     /// A current head is either a complete value or a typed summary whose omitted payload
@@ -632,6 +709,18 @@ public final class ItemStore {
     }
 
     private func currentHead(_ itemID: String) throws -> ResidentHead? {
+        if revisionProjectionEnabled {
+            guard let projection = try index?.currentProjection(itemID: itemID),
+                projection.state.status == .ready,
+                let representative = projection.state.representativeRevisionID
+            else { return nil }
+            if heads[itemID]?.revisionID != representative {
+                if let removed = heads.removeValue(forKey: itemID) {
+                    headCacheBytes -= try residentByteCount(removed)
+                    headCacheOrder.removeAll { $0 == itemID }
+                }
+            }
+        }
         if let cached = heads[itemID] {
             headCacheOrder.removeAll { $0 == itemID }
             headCacheOrder.append(itemID)
@@ -750,6 +839,27 @@ public final class ItemStore {
         return RebuildAdministratorPolicy(ownerUID: ownerUID, configuration: accessConfiguration)
     }
     private var isCanonicalReady = false
+    private var targetProvisioningScope: PeerEnrollmentActivation.Scope?
+    private var targetEnrollmentPageLimitForTesting: Int?
+    private var targetEnrollmentControlActive = false
+    private var targetProvisioningPending = false
+    private var targetProvisioningProgress: ((String) throws -> Void)?
+    private enum TargetEnrollmentValidation { case committedControls, fullReplay }
+    private final class TargetEnrollmentReadMetrics {
+        private let lock = NSLock()
+        private var count = 0
+        private var lastOriginalID: String?
+        func record(_ id: String) { lock.lock(); defer { lock.unlock() }; count += 1; lastOriginalID = id }
+        var snapshot: (count: Int, lastOriginalID: String?) {
+            lock.lock(); defer { lock.unlock() }; return (count, lastOriginalID)
+        }
+    }
+    private let targetEnrollmentReadMetrics = TargetEnrollmentReadMetrics()
+    /// Actual non-administration item hydrations in this validator's full baseline traversal.
+    /// This does not count bounded policy proof or other subsystems' startup replay reads.
+    var targetEnrollmentBaselineTraversalReadsForTesting: (count: Int, lastOriginalID: String?) {
+        targetEnrollmentReadMetrics.snapshot
+    }
     private struct VerificationAccumulation {
         let generation: String
         var observedFindings = 0
@@ -787,6 +897,7 @@ public final class ItemStore {
         set { index?.afterCorpusReadCommitForTesting = newValue }
     }
     private var attachmentPayloads: AttachmentPayloadStore!
+    var payloadPlacementRecoveryScansForTesting: Int { attachmentPayloads.placementRecoveryScansForTesting }
     private var documentContents: DocumentContentStore!
     private var documentJobRecords: DocumentJobRecords!
     private var documentJobs: [String: DocumentJobRecord] = [:]
@@ -804,15 +915,55 @@ public final class ItemStore {
     func setAttachmentReserveForTesting(_ bytes: Int64) throws {
         attachmentPayloads = try AttachmentPayloadStore(
             root: root, ownerUID: ownerUID, reserveBytes: bytes, availableBytes: attachmentCapacityProvider,
-            stagingQuota: stagingByteQuota)
+            stagingQuota: stagingByteQuota, indexDirectory: indexDirectory)
         documentContents = DocumentContentStore(
             root: root, ownerUID: ownerUID, minimumFreeBytes: bytes,
-            availableBytes: attachmentCapacityProvider, stagingQuota: stagingByteQuota)
+            availableBytes: attachmentCapacityProvider, stagingQuota: stagingByteQuota,
+            indexDirectory: indexDirectory)
         documentJobRecords = DocumentJobRecords(
             root: root,
             files: DocumentContentFiles(
                 root: root, ownerUID: ownerUID, minimumFreeBytes: bytes,
                 availableBytes: attachmentCapacityProvider, stagingQuota: stagingByteQuota))
+        try configurePeerOriginals(reserveBytes: bytes)
+    }
+    private func configurePeerOriginals(reserveBytes: Int64) throws {
+        guard let peerIntake else { return }
+        let bridge = try PeerOriginalTransfer(
+            root: root, ownerUID: ownerUID, payloads: attachmentPayloads,
+            quota: stagingByteQuota, reserveBytes: reserveBytes, availableBytes: attachmentCapacityProvider)
+        try bridge.cleanupOldVerificationWork()
+        peerIntake.journal.originals = bridge
+        peerIntake.journal.documents = PeerDocumentTransfer(
+            root: root, ownerUID: ownerUID, contents: documentContents, originals: bridge,
+            quota: stagingByteQuota, reserveBytes: reserveBytes, availableBytes: attachmentCapacityProvider)
+        peerIntake.documentVerification = try PeerDocumentVerification(
+            contents: documentContents, originals: bridge)
+        peerIntake.documentVerification?.corpusBoundary = { [weak self] batch in
+            guard let self else {
+                throw TractandaError("serviceClosed", "Store closed during peer corpus work.")
+            }
+            if batch.phase == .before {
+                try self.requireIndexFilesystemCapacity(additionalBytes: batch.estimatedAdditionalBytes)
+                try self.stagingByteQuota.reserveDerived(
+                    workID: batch.workID,
+                    estimatedAdditionalBytes: batch.estimatedAdditionalBytes)
+            } else if batch.phase == .afterCommit {
+                try self.stagingByteQuota.observeDerived(
+                    workID: batch.workID,
+                    retainedEncodedBytes: batch.retainedEncodedBytes)
+            }
+        }
+        peerIntake.journal.beforeSealForProfile = { [weak self] profile in
+            guard let self else { throw TractandaError("serviceClosed", "Store closed before sealing.") }
+            if profile == PeerPackage.profile {
+                try CanonicalReaderRequirement.beforePeerDocumentPublication(
+                    root: self.root, ownerUID: self.ownerUID)
+            } else if profile == PeerPackage.retainedOriginalProfile {
+                try CanonicalReaderRequirement.beforePeerOriginalPublication(
+                    root: self.root, ownerUID: self.ownerUID)
+            }
+        }
     }
     let attachmentUploadPolicy: AttachmentUploadPolicy
     var attachmentClockForTesting: () -> Date = { Date() }
@@ -826,19 +977,58 @@ public final class ItemStore {
     private static let managed: Set<String> = [
         "itemID", "revisionID", "classID", "schemaVersion",
         "createdAt", "modifiedAt", "supersedes", "actor", "operationID", "requestIdentity",
+        "revisionAncestry",
     ]
 
-    public init(
+    public convenience init(
+        root: URL, indexDirectory: URL? = nil,
+        accounts: any AccountDirectory = SystemAccountDirectory(),
+        attachmentUploadPolicy: AttachmentUploadPolicy = AttachmentUploadPolicy(),
+        attachmentAvailableBytes: (@Sendable () throws -> UInt64)? = nil,
+        revisionProjectionEnabled: Bool = false, authorityIntakeEnabled: Bool = false
+    ) throws {
+        try self.init(
+            root: root, indexDirectory: indexDirectory, accounts: accounts,
+            attachmentUploadPolicy: attachmentUploadPolicy, attachmentAvailableBytes: attachmentAvailableBytes,
+            revisionProjectionEnabled: revisionProjectionEnabled, authorityIntakeEnabled: authorityIntakeEnabled,
+            firstSourceOperation: nil)
+    }
+
+    // Internal opening capability is bound to the immutable first-source operation receipt.
+    init(
         root: URL, indexDirectory requestedIndexDirectory: URL? = nil,
         accounts: any AccountDirectory = SystemAccountDirectory(),
         attachmentUploadPolicy: AttachmentUploadPolicy = AttachmentUploadPolicy(),
-        attachmentAvailableBytes: (@Sendable () throws -> UInt64)? = nil
+        attachmentAvailableBytes: (@Sendable () throws -> UInt64)? = nil,
+        revisionProjectionEnabled: Bool = false, authorityIntakeEnabled: Bool = false,
+        firstSourceOperation: InitialAuthorityBootstrap.Request?,
+        requireInitializedStore: Bool = false,
+        firstSourceProgress: ((String) throws -> Void)? = nil,
+        targetProvisioning: PeerEnrollmentActivation.Opening? = nil,
+        targetProvisioningProgress: ((String) throws -> Void)? = nil,
+        targetProvisioningControl: (() throws -> Void)? = nil
     ) throws {
+        guard targetProvisioning != nil || targetProvisioningControl == nil else {
+            throw TractandaError("invalidTargetProtocol", "Only a finite target owner installs opening control.")
+        }
+        try targetProvisioningControl?()
         try attachmentUploadPolicy.validate()
+        if targetProvisioning != nil {
+            let supplied = try FileMetadata.read(at: root.standardizedFileURL)
+            guard supplied.type == .directory, supplied.uid == tractanda_uid(), supplied.mode & 0o077 == 0 else {
+                throw PeerEnrollmentActivation.failure("Target provisioning requires its existing private lexical root.")
+            }
+        }
         self.attachmentUploadPolicy = attachmentUploadPolicy
         self.attachmentCapacityProvider = attachmentAvailableBytes
         self.root = root.standardizedFileURL.resolvingSymlinksInPath()
         self.accounts = accounts
+        self.revisionProjectionEnabled = revisionProjectionEnabled
+        self.authorityIntakeEnabled = authorityIntakeEnabled
+        guard !authorityIntakeEnabled || revisionProjectionEnabled else {
+            throw TractandaError(
+                "authorityModeRequired", "Authority intake requires current projection enforcement.")
+        }
         ownerUID = tractanda_uid()
         guard self.root.path != "/" else {
             throw TractandaError("invalidStore", "Choose a dedicated store directory.")
@@ -884,24 +1074,108 @@ public final class ItemStore {
         guard writer >= 0 else {
             throw TractandaError("storeBusy", "Cannot lock store; another writer may be running.")
         }
+        var openingProgress: (() throws -> Void)?
         do {
+            defer { if targetProvisioningControl != nil { peerIntake?.progress = openingProgress } }
+            try targetProvisioningControl?() // The lifetime writer is owned before this cancellable boundary.
+            if requireInitializedStore { try Self.requireInitializedRoot(self.root) }
+            if let targetProvisioning {
+                guard firstSourceOperation == nil, authorityIntakeEnabled, revisionProjectionEnabled else {
+                    throw PeerEnrollmentActivation.failure("Target provisioning cannot run first-source initialization.")
+                }
+                targetProvisioningScope = try PeerEnrollmentActivation.prepareUnderLock(root: self.root,
+                    suppliedRoot: root, ownerUID: ownerUID, writer: writer, opening: targetProvisioning)
+                try targetProvisioningControl?()
+                targetProvisioningPending = try PeerEnrollmentActivation.loadReceipt(targetProvisioningScope!.files) == nil
+                self.targetProvisioningProgress = targetProvisioningProgress
+                if !targetProvisioningPending { try PeerEnrollmentActivation.requireActivated(root: self.root, ownerUID: ownerUID) }
+            } else {
+                try PeerEnrollment.requireOrdinaryOpeningAllowed(root: self.root, ownerUID: ownerUID)
+            }
+            try InitialAuthorityBootstrap.requireOpeningAllowed(
+                root: self.root, ownerUID: ownerUID, request: firstSourceOperation, accounts: accounts)
+            if let scope = targetProvisioningScope {
+                let prep = try scope.record.preparation
+                let files = scope.files
+                let expected = CanonicalStoreIdentity(formatVersion: 1, storeID: prep.commonStoreID)
+                let storeName = Self.canonicalIdentityName
+                let retainedStoreID: String?
+                do {
+                    _ = try FileMetadata.read(at: self.root.appendingPathComponent(storeName))
+                    retainedStoreID = try CanonicalReaderRequirement.storeIdentity(root: self.root, ownerUID: ownerUID)
+                } catch FileMetadataError.posix(let code) where code == ENOENT { retainedStoreID = nil }
+                if let retainedStoreID {
+                    guard retainedStoreID == prep.commonStoreID else {
+                        throw PeerEnrollmentActivation.failure("Target common identity differs.")
+                    }
+                } else {
+                    guard (try? FileMetadata.read(at: self.root.appendingPathComponent("items"))) == nil,
+                        (try? FileMetadata.read(at: self.root.appendingPathComponent(ReplicaIdentity.name))) == nil else {
+                        throw PeerEnrollmentActivation.failure("Target lost its previously committed common identity.")
+                    }
+                    try PrivateConfiguration.write(JSON.encode(expected), to: self.root.appendingPathComponent(storeName))
+                }
+                if let identity = try ReplicaIdentity.load(root: self.root, storeID: prep.commonStoreID, ownerUID: ownerUID) {
+                    guard identity.replicaID == prep.targetReplicaID else { throw PeerEnrollmentActivation.failure("Target replica identity differs.") }
+                } else {
+                    guard (try? FileMetadata.read(at: self.root.appendingPathComponent("items"))) == nil else {
+                        throw PeerEnrollmentActivation.failure("Target lost its reserved replica identity after initialization.")
+                    }
+                    try files.writeImmutable(JSON.encode(ReplicaIdentity.Record(formatVersion: 1,
+                        storeID: prep.commonStoreID, replicaID: prep.targetReplicaID)), path: [ReplicaIdentity.name], maximumBytes: 4096)
+                }
+                try ensureDirectory(self.root.appendingPathComponent("items"))
+                try CanonicalReaderRequirement.beforeTargetEnrollmentPublication(root: self.root, ownerUID: ownerUID)
+                try targetProvisioningProgress?("identitiesCommitted")
+            }
             try ensureDirectory(self.root.appendingPathComponent("items"))
+            try rejectIndexInsideCanonicalSubtrees()
+            try ensureDirectory(indexDirectory)
+            try rejectIndexInsideCanonicalSubtrees()
+            if let required = try CanonicalReaderRequirement.load(root: self.root, ownerUID: ownerUID) {
+                try CanonicalFormatSupport.current.require(required)
+                if required.capabilities.contains(AuthorityStore.capability) {
+                    guard authorityIntakeEnabled else {
+                        throw TractandaError(
+                            "authorityModeRequired",
+                            "This store requires authority-aware eligibility enforcement; linear fallback is forbidden."
+                        )
+                    }
+                }
+            }
+            if let planned = firstSourceOperation?.freshStoreID {
+                _ = try canonicalStoreIdentity(creatingIfMissing: true, allocate: { UUID(uuidString: planned)! })
+            }
+            if usesExternalIndexDirectory {
+                try bindExternalIndexDirectory()
+            } else {
+                _ = try canonicalStoreIdentity(creatingIfMissing: true)
+            }
+            try targetProvisioningControl?()
             // Recover bounded upload intents/cleanup first, then rebuild shared accounting.
             let recoveryPayloads = try AttachmentPayloadStore(
                 root: self.root, ownerUID: ownerUID,
                 reserveBytes: attachmentUploadPolicy.minimumFreeBytes,
-                availableBytes: attachmentAvailableBytes)
+                availableBytes: attachmentAvailableBytes, indexDirectory: indexDirectory)
+            try recoveryPayloads.preparePlacement()
+            let recoveryDocuments = DocumentContentStore(
+                root: self.root, ownerUID: ownerUID,
+                minimumFreeBytes: attachmentUploadPolicy.minimumFreeBytes,
+                availableBytes: attachmentAvailableBytes, indexDirectory: indexDirectory)
+            try recoveryDocuments.preparePlacement()
             attachmentUploads = try recoveryPayloads.loadUploads()
             stagingByteQuota = try StagingByteQuota(
                 root: self.root, ownerUID: ownerUID, maximumBytes: attachmentUploadPolicy.maximumStagedBytes,
-                pendingUploads: attachmentUploads)
+                pendingUploads: attachmentUploads, payloads: recoveryPayloads, documents: recoveryDocuments)
             attachmentPayloads = try AttachmentPayloadStore(
                 root: self.root, ownerUID: ownerUID, reserveBytes: attachmentUploadPolicy.minimumFreeBytes,
-                availableBytes: attachmentAvailableBytes, stagingQuota: stagingByteQuota)
+                availableBytes: attachmentAvailableBytes, stagingQuota: stagingByteQuota,
+                indexDirectory: indexDirectory)
             documentContents = DocumentContentStore(
                 root: self.root, ownerUID: ownerUID,
                 minimumFreeBytes: attachmentUploadPolicy.minimumFreeBytes,
-                availableBytes: attachmentAvailableBytes, stagingQuota: stagingByteQuota)
+                availableBytes: attachmentAvailableBytes, stagingQuota: stagingByteQuota,
+                indexDirectory: indexDirectory)
             documentJobRecords = DocumentJobRecords(
                 root: self.root,
                 files: DocumentContentFiles(
@@ -909,14 +1183,51 @@ public final class ItemStore {
                     minimumFreeBytes: attachmentUploadPolicy.minimumFreeBytes,
                     availableBytes: attachmentAvailableBytes, stagingQuota: stagingByteQuota))
             documentJobs = try documentJobRecords.load()
-            try rejectIndexInsideCanonicalSubtrees()
-            try ensureDirectory(indexDirectory)
-            try rejectIndexInsideCanonicalSubtrees()
-            if usesExternalIndexDirectory {
-                try bindExternalIndexDirectory()
-            } else {
-                _ = try canonicalStoreIdentity(creatingIfMissing: true)
+            if authorityIntakeEnabled {
+                peerIntake = PeerIntakeCoordinator(
+                    root: self.root, ownerUID: ownerUID,
+                    storeID: try canonicalStoreIdentity(creatingIfMissing: false),
+                    stagingQuota: stagingByteQuota)
+                peerIntake?.provisioningScope = targetProvisioningScope
+                try configurePeerOriginals(reserveBytes: attachmentUploadPolicy.minimumFreeBytes)
+                peerIntake?.progress = { [weak self] in try self?.rebuildControl?.graphProgress() }
+                openingProgress = peerIntake?.progress
+                if let targetProvisioningControl {
+                    let previous = openingProgress
+                    peerIntake?.progress = { try targetProvisioningControl(); try previous?() }
+                }
+                try peerIntake?.recoverLifecycleOperations()
+                if let request = firstSourceOperation {
+                    try InitialAuthorityBootstrap.stageFoundingPolicy(root: self.root, ownerUID: ownerUID,
+                        request: request, accounts: accounts, progress: firstSourceProgress)
+                }
+                let initial = try AuthorityStore.initialState(
+                    root: self.root, storeID: canonicalStoreIdentity(creatingIfMissing: false),
+                    ownerUID: ownerUID, files: peerIntake!.journal.files, allocateReplica: {
+                        if let planned = firstSourceOperation?.freshReplicaID { return UUID(uuidString: planned)! }
+                        return try UUID.makeVersion1()
+                    })
+                if firstSourceOperation?.foundingPolicy != nil { try firstSourceProgress?("afterInitialCapture") }
+                authorityBootstrapPending =
+                    try initial.mode == .requiresBootstrap
+                    && peerIntake!.configuration()?.bootstrap == nil
+                if authorityBootstrapPending {
+                    pendingFoundingPolicy = firstSourceOperation?.foundingPolicy?.original
+                }
+                authorityExistingHistoryAdmitted = !authorityBootstrapPending
+            } else if FileManager.default.fileExists(
+                atPath: self.root.appendingPathComponent("authority").path)
+            {
+                throw TractandaError(
+                    "authorityModeRequired", "Retained authority controls cannot be ignored by disabled mode."
+                )
             }
+            // Replay must know THIS replica before reconstructing covered negative effects.
+            // This validates existing private identity only; it never creates/invents one.
+            replicaID = try ReplicaIdentity.load(
+                root: self.root,
+                storeID: canonicalStoreIdentity(creatingIfMissing: false), ownerUID: ownerUID)?.replicaID
+            try targetProvisioningControl?()
             if StoreCheckpoint.isDirty(root: self.root) {
                 startupRecovery = ["mode": "fullRecovery", "reason": "dirtyMarker"]
                 try rebuildIndex()
@@ -931,8 +1242,40 @@ public final class ItemStore {
                 ]
                 try rebuildIndex()
             }
+            try targetProvisioningControl?()
             try restoreCorpusRecoveryCharges()
             try reclaimStartupCorpusReaders()
+            if replicaID == nil, try index?.hasModernRevisionOrigins() == true {
+                throw TractandaError(
+                    "missingReplicaIdentity", "Modern history requires the retained private replica identity."
+                )
+            }
+            if let peerIntake, let index {
+                try index.initializeAuthoritySchema()
+                try index.initializeAuthorityControlSchema()
+                try index.initializeAuthorityReviewSchema()
+                try peerIntake.loadPeerRetirements(index: index)
+                try peerIntake.validatePeerRetirementCuts(index: index)
+                try validateActivatedRetirements(coordinator: peerIntake, index: index)
+                try validateForeignReviewSeals(coordinator: peerIntake, index: index)
+                try validateSourceEnrollmentApprovals(coordinator: peerIntake, index: index)
+                try peerIntake.withOperation(recovery: true) {
+                    try index.withCatalogueScanBudget(reusingActiveBudget: true) {
+                        _ = try activateOriginAdmissions(coordinator: peerIntake, index: index)
+                        try validateOriginAdmissions(coordinator: peerIntake, index: index)
+                        try validateTargetEnrollment(coordinator: peerIntake, index: index)
+                        try validateSourceRegistrations(coordinator: peerIntake)
+                        try reconsiderOriginObservations(coordinator: peerIntake, index: index)
+                    }
+                }
+                try peerIntake.withOperation(recovery: true) {
+                    try finishAuthorityDispositionEffects(coordinator: peerIntake, index: index)
+                }
+                try ensureInitialAuthorityVisibility(coordinator: peerIntake, index: index)
+                try resumePendingPeerIntakes(using: peerIntake, index: index)
+                try drainAuthorityVisibility(coordinator: peerIntake, index: index)
+                try peerIntake.journal.originals?.cleanupApplied()
+            }
         } catch {
             if indexWriter >= 0 { tractanda_unlock(indexWriter) }
             tractanda_unlock(writer)
@@ -1087,7 +1430,8 @@ public final class ItemStore {
 
     /// This identity belongs to canonical storage, never to a disposable index. The root writer
     /// lock is held before this method can run, so creation cannot race another store process.
-    private func canonicalStoreIdentity(creatingIfMissing: Bool) throws -> String {
+    private func canonicalStoreIdentity(creatingIfMissing: Bool,
+                                        allocate: () throws -> UUID = UUID.makeVersion1) throws -> String {
         let identityURL = root.appendingPathComponent(Self.canonicalIdentityName)
         do {
             _ = try FileMetadata.read(at: identityURL)
@@ -1109,8 +1453,24 @@ public final class ItemStore {
                 "indexBindingMismatch",
                 "Canonical store identity is missing; rebuild the derived index directory.")
         }
+        // Missing canonical identity is not permission to reinterpret retained originals as a
+        // new store. This also protects the initialization path before payload lookup is opened.
+        for name in ["attachments/payloads", "documents", "canonical-reader.json", "authority"] {
+            if (try? FileMetadata.read(at: root.appendingPathComponent(name))) != nil {
+                throw TractandaError(
+                    "invalidStoreIdentity", "Retained canonical data requires its original StoreID.")
+            }
+        }
+        var populated = false
+        try POSIXDirectory.withEntries(at: root.appendingPathComponent("items")) { _ in
+            populated = true
+            return false
+        }
+        guard !populated else {
+            throw TractandaError("invalidStoreIdentity", "Retained items require their original StoreID.")
+        }
         let identity = CanonicalStoreIdentity(
-            formatVersion: 1, storeID: try UUID.makeVersion1().uuidString.lowercased())
+            formatVersion: 1, storeID: try allocate().uuidString.lowercased())
         try PrivateConfiguration.write(try JSON.encode(identity), to: identityURL)
         return identity.storeID
     }
@@ -1134,6 +1494,32 @@ public final class ItemStore {
     /// No suspension is permitted inside this scope; ItemService runs on the store's serial executor.
     public func withAccess<T>(forUID uid: UInt32, _ body: () throws -> T) throws -> T {
         let resolver = PrincipalResolver(directory: accounts, configuration: accessConfiguration)
+        if revisionProjectionEnabled && (accessConfigurationAmbiguous || accessConfigurationProofUnavailable)
+        {
+            let account = try? accounts.user(forUID: uid)
+            let administrator: Bool
+            if accessConfigurationProofUnavailable {
+                // Deliberate host-root maintenance route; uncertainty never falls back to owner admission.
+                administrator = uid == 0
+            } else {
+                administrator = try currentAccessConfigurations.allSatisfy { configuration in
+                    if configuration.administration == .serviceOwner { return uid == ownerUID }
+                    if uid == 0 { return true }
+                    let group = try accounts.groupID(
+                        named: configuration.administratorGroup
+                            ?? AccessConfiguration.defaultAdministratorGroup)
+                    return account?.groupIDs.contains(group) == true
+                }
+            }
+            guard administrator else {
+                throw TractandaError("forbidden", "Current store authority requires administrator repair.")
+            }
+            let previous = accessContext
+            accessContext = StoreAccessContext(
+                uid: uid, account: account, resolver: resolver, isAdministrator: true)
+            defer { accessContext = previous }
+            return try body()
+        }
         let account: AccountIdentity?
         let administrator: Bool
         if let configuration = accessConfiguration {
@@ -1171,6 +1557,11 @@ public final class ItemStore {
             account = nil
             administrator = true
         }
+        guard !authorityBootstrapPending || administrator else {
+            throw TractandaError(
+                "authorityBootstrapRequired",
+                "Existing history requires an explicit administrator bootstrap pin.")
+        }
         let previous = accessContext
         accessContext = StoreAccessContext(
             uid: uid, account: account, resolver: resolver, isAdministrator: administrator)
@@ -1193,6 +1584,7 @@ public final class ItemStore {
     }
 
     private func canRead(_ head: Revision) -> Bool {
+        if revisionProjectionEnabled { return canReadProjection(head.itemID) }
         if isAdministrator { return true }
         aclSwiftReadCheckCount += 1
         guard head.classID != AccessConfiguration.classID,
@@ -1203,6 +1595,7 @@ public final class ItemStore {
     }
 
     private func canRead(_ head: ResidentHead) -> Bool {
+        if revisionProjectionEnabled { return canReadProjection(head.itemID) }
         if !isAdministrator { aclSwiftReadCheckCount += 1 }
         return head.canRead(accessContext, administrator: isAdministrator)
     }
@@ -1212,6 +1605,10 @@ public final class ItemStore {
     }
 
     private func requireEdit(_ head: Revision, changesPermissions: Bool = false) throws {
+        if revisionProjectionEnabled {
+            try requireProjectionEdit(head.itemID, changesPermissions: changesPermissions)
+            return
+        }
         if isAdministrator { return }
         guard head.classID != AccessConfiguration.classID,
             let context = accessContext, let account = context.account,
@@ -1226,38 +1623,1004 @@ public final class ItemStore {
         }
     }
 
-    private func priorOperation(_ id: String, uid: UInt32) throws -> Revision? {
-        guard let index, let receipts = try index.receipts(named: id) else {
+    private func refreshCurrentAccessConfigurations(using index: ItemIndex) throws {
+        var configurations: [AccessConfiguration] = []
+        var unavailable = false
+        var cursor: String?
+        var inspected = 0
+        let digest = try ItemIndex.graphValueDigest(.text(AccessConfiguration.classID))
+        try index.withCatalogueScanBudget(reusingActiveBudget: true) {
+            while true {
+                let condition = cursor == nil ? "" : " AND r.item>?"
+                let statement = try index.corpusPrepare(
+                    "SELECT r.item FROM revision_catalog r WHERE EXISTS(SELECT 1 FROM revision_field_values v WHERE v.revision=r.revision AND v.field='classID' AND v.digest=?)\(condition) ORDER BY r.item LIMIT 1",
+                    [digest] + (cursor.map { [$0] } ?? []))
+                let status = index.catalogueStep(statement)
+                if status == SQLITE_DONE {
+                    sqlite3_finalize(statement)
+                    break
+                }
+                guard status == SQLITE_ROW, let raw = sqlite3_column_text(statement, 0) else {
+                    sqlite3_finalize(statement)
+                    throw TractandaError("indexError", "Current access policy catalogue is unavailable.")
+                }
+                let id = String(cString: raw)
+                sqlite3_finalize(statement)
+                cursor = id
+                inspected += 1
+                guard inspected <= 64 else {
+                    throw TractandaError(
+                        "resourceLimit", "Current access configuration set exceeds its window.")
+                }
+                guard let projection = try index.currentProjection(itemID: id), projection.policiesComplete
+                else {
+                    unavailable = true
+                    continue
+                }
+                for witness in try index.currentPolicyWitnesses(itemID: id) {
+                    guard witness.classID == AccessConfiguration.classID,
+                        let row = try index.revision(witness.revisionID)
+                    else {
+                        unavailable = true
+                        continue
+                    }
+                    let record = try PooledCanonicalRecord.read(row: row, root: root, ownerUID: ownerUID)
+                        .revision
+                    guard let value = record.fields["accessConfiguration"] else {
+                        unavailable = true
+                        continue
+                    }
+                    let candidate = try AccessConfiguration(value)
+                    let same = configurations.contains { existing in
+                        Set(existing.users) == Set(candidate.users)
+                            && Set(existing.groups) == Set(candidate.groups)
+                            && existing.userAliases == candidate.userAliases
+                            && existing.groupAliases == candidate.groupAliases
+                            && existing.administration == candidate.administration
+                            && existing.administratorGroup == candidate.administratorGroup
+                            && existing.legacyUsers == candidate.legacyUsers
+                    }
+                    if !same { configurations.append(candidate) }
+                }
+            }
+        }
+        currentAccessConfigurations = configurations
+        accessConfigurationProofUnavailable = unavailable
+        // A single effective configuration is safe; divergence never selects one for ordinary serving.
+        if configurations.count == 1 {
+            accessConfiguration = configurations[0]
+        } else if configurations.isEmpty {
+            accessConfiguration = nil
+        }
+    }
+
+    private func nextProjectionStateToken() -> String {
+        Data(SHA256.hash(data: Data(Identifier.make().utf8))).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func readyProjectionState(_ revision: Revision) -> ItemState {
+        ItemState(
+            itemID: revision.itemID, stateToken: nextProjectionStateToken(), status: .ready,
+            representativeRevisionID: revision.revisionID, frontier: [revision.revisionID],
+            conflictingFields: [], protectedFields: [], detailsComplete: true)
+    }
+
+    private func projectionState(
+        for snapshot: RevisionProjection.Snapshot,
+        representativeID: String? = nil, status: ItemState.Status? = nil,
+        resource: ItemStateResource? = nil
+    ) throws -> ItemState {
+        let selected = status ?? (snapshot.analysis.isResolved ? .ready : .conflicted)
+        let token = nextProjectionStateToken()
+        let result = ItemState(
+            itemID: snapshot.itemID, stateToken: token, status: selected,
+            representativeRevisionID: representativeID ?? snapshot.representative?.revisionID,
+            frontier: snapshot.analysis.frontier,
+            conflictingFields: snapshot.analysis.conflicts.keys.sorted(),
+            protectedFields: snapshot.analysis.protectedFields.sorted(), detailsComplete: true,
+            resource: resource)
+        if try JSON.encode(result).count <= 384 * 1024 { return result }
+        return ItemState(
+            itemID: snapshot.itemID, stateToken: token, status: selected,
+            representativeRevisionID: result.representativeRevisionID,
+            detailsComplete: false,
+            resource: resource
+                ?? ItemStateResource(
+                    code: "resourceLimit",
+                    phase: .analysis, message: "Current state details exceed the response window.",
+                    maximumBytes: 384 * 1024))
+    }
+
+    private func publishAutomaticProjection(
+        _ plan: RevisionProjection.Plan,
+        snapshot: RevisionProjection.Snapshot, policies: [RevisionProjection.PolicyWitness],
+        using index: ItemIndex
+    ) throws -> Revision {
+        combinationPublicationAwaitingIndex = false
+        guard writer >= 0, isAdministrator, tractanda_path_read_only(root.path) == 0 else {
+            throw TractandaError("forbidden", "Canonical maintenance needs writable store authority.")
+        }
+        let draft = try RevisionProjection.draft(
+            plan, itemID: snapshot.itemID,
+            allocate: { try self.makePersistentUUID() },
+            isAvailable: {
+                try index.revision($0) == nil && index.revisionCount(itemID: $0) == 0
+            })
+        let identity = try ReplicaIdentity.initialize(
+            root: root,
+            storeID: canonicalStoreIdentity(creatingIfMissing: false), ownerUID: ownerUID,
+            hasModernOrigins: index.hasModernRevisionOrigins())
+        replicaID = identity.replicaID
+        guard let parent = try index.revision(draft.parents[0]) else {
+            throw TractandaError("invalidRevisionGraph", "Materialization parent is unavailable.")
+        }
+        let provenance = try RevisionProvenance(
+            kind: .automaticMerge, originReplicaID: identity.replicaID,
+            parents: draft.parents, writtenFields: [], unsetFields: [], frontier: draft.frontier,
+            mergeProfile: draft.profile)
+        var fields = draft.fields
+        fields["itemID"] = .text(draft.itemID)
+        fields["revisionID"] = .text(draft.revisionID)
+        fields["createdAt"] = .date(parent.createdAt)
+        fields["modifiedAt"] = .date(draft.modifiedAt)
+        fields["actor"] = .text("replica:" + identity.replicaID)
+        fields["operationID"] = .text(draft.revisionID)
+        fields["requestIdentity"] = .text(try JSON.encode(provenance.itemValue).base64EncodedString())
+        fields["revisionAncestry"] = provenance.itemValue
+        let revision = try Revision(fields: fields, formatVersion: 2)
+        try ItemSemantics.validate(revision)
+        return try publishVerifiedCombination(revision, snapshot: snapshot, policies: policies, using: index)
+    }
+
+    private func publishVerifiedCombination(
+        _ revision: Revision, snapshot: RevisionProjection.Snapshot,
+        policies: [RevisionProjection.PolicyWitness], using index: ItemIndex,
+        authorityControls: [AuthorityRecord] = []
+    ) throws -> Revision {
+        try requireActivePublishingOrigin()
+        combinationPublicationAwaitingIndex = false
+        guard try index.acceptedGraphProofIsCurrent() else {
+            throw TractandaError(
+                "projectionRequired", "Accepted graph proof must be rebuilt before publication.")
+        }
+        let fields = revision.fields
+        let data = try RecordCodec.encode(revision)
+        guard data.count <= min(8 * 1024 * 1024, canonicalRecordByteLimitForTesting),
+            try JSON.encode(fields.filter { ItemIndex.headSummaryFieldNames.contains($0.key) }).count <= 2
+                * 1024 * 1024
+        else {
+            throw TractandaError("resourceLimit", "Complete materialization record exceeds its byte window.")
+        }
+        let utc = try RevisionTimestamp(Timestamp.now()).formatted()
+        let stamp = Array(utc.utf8)
+        func part(_ range: Range<Int>) -> String { String(decoding: stamp[range], as: UTF8.self) }
+        let folder = root.appendingPathComponent(
+            "items/" + part(0..<4) + "/" + part(5..<7) + "/"
+                + part(8..<10) + "/" + part(11..<13) + "/" + part(14..<16) + "/" + revision.itemID)
+        try ensureDirectory(folder)
+        let file = folder.appendingPathComponent(revision.revisionID + ".tractanda")
+        let localAuthorityPackage = try sealLocalAuthority(
+            revision, data: data, path: file.path, index: index, additionalControls: authorityControls,
+            onSealed: { self.combinationPublicationAwaitingIndex = true })
+        try CanonicalReaderRequirement.beforePublication(
+            root: root, ownerUID: ownerUID, format: revision.formatVersion,
+            beforePersist: beforeCanonicalReaderRequirementForTesting)
+        try StoreCheckpoint.markDirty(root: root)
+        let published = data.withUnsafeBytes { tractanda_publish(file.path, $0.baseAddress, $0.count) }
+        guard published >= 0 else {
+            throw TractandaError("writeFailed", "Materialization publication failed.")
+        }
+        combinationPublicationAwaitingIndex = true
+        var completed = false
+        defer { if !completed { quarantineCheckpoint() } }
+        var directory = folder
+        while directory.path.hasPrefix(root.path + "/") || directory == root {
+            let descriptor = open(directory.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+            guard descriptor >= 0 else {
+                throw TractandaError("writeFailed", "Cannot synchronize materialization directories.")
+            }
+            let synchronized = fsync(descriptor)
+            close(descriptor)
+            guard synchronized == 0 else {
+                throw TractandaError("writeFailed", "Cannot synchronize materialization directories.")
+            }
+            directory.deleteLastPathComponent()
+        }
+        let metadata = try FileMetadata.read(at: file)
+        let row = ItemIndex.CatalogueRow(
+            revisionID: revision.revisionID, itemID: revision.itemID,
+            path: String(file.path.dropFirst(root.path.count + 1)), parentID: nil,
+            actor: fields["actor"]!.string!, operationID: fields["operationID"]!.string!, size: metadata.size,
+            inode: metadata.inode, uid: metadata.uid, mode: metadata.mode,
+            modificationSeconds: metadata.modificationSeconds,
+            modificationNanoseconds: metadata.modificationNanoseconds,
+            digest: Data(SHA256.hash(data: data)), createdAt: revision.fields["createdAt"]!.dateString!,
+            feedbackRevisionIDs: fields["learningFeedback"]?.map?.values.compactMap {
+                try? LearningFeedback($0).revisionID
+            } ?? [], modifiedAt: revision.modifiedAt, provenance: try revision.provenance)
+        let state =
+            try revision.provenance?.kind == .resolution
+            ? readyProjectionState(revision)
+            : projectionState(for: snapshot, representativeID: revision.revisionID, status: .ready)
+        try beforeCombinationIndexUpdateForTesting?()
+        try finishLocalAuthority(localAuthorityPackage, index: index)
+        let input = try PageCorpusInput(
+            storeID: canonicalStoreIdentity(creatingIfMissing: false), revision: revision)
+        let provider = StoredPageCorpusProvider(contents: documentContents, incoming: nil)
+        try index.installCorpusForRebuild(
+            input: input, provider: provider,
+            boundary: {
+                try self.rebuildControl?.graphProgress()
+                try self.requireIndexFilesystemCapacity(additionalBytes: 0)
+            })
+        try index.appendValidatedLocal(
+            row: row, revision: revision, parent: nil,
+            expectedRepresentativeID: snapshot.representative?.revisionID, state: state,
+            policies: policies, corpus: nil, snapshot: snapshot)
+        completed = true
+        combinationPublicationAwaitingIndex = false
+        generation = Identifier.make()
+        return revision
+    }
+
+    private var projectionPolicyByteWindow: UInt64 {
+        min(64 * 1024 * 1024, max(1, revisionProjectionLimits.maximumHydratedBytes / 8))
+    }
+
+    private func prepareRecoveredProjection(
+        _ itemID: String, using index: ItemIndex,
+        deferCategory: Bool = false, verifiedSnapshot: RevisionProjection.Snapshot? = nil,
+        deferMaterialization: Bool = false
+    ) throws -> (revision: Revision?, categoryParents: Set<String>?, activeCategory: Bool) {
+        let snapshot: RevisionProjection.Snapshot
+        do {
+            if let verifiedSnapshot {
+                guard verifiedSnapshot.itemID == itemID else {
+                    throw TractandaError(
+                        "invalidRevisionGraph", "Verified projection belongs to another item.")
+                }
+                snapshot = verifiedSnapshot
+            } else {
+                var limits = revisionProjectionLimits
+                limits.maximumHydratedBytes = max(
+                    1,
+                    limits.maximumHydratedBytes
+                        - min(limits.maximumHydratedBytes, projectionPolicyByteWindow * 2)
+                )
+                snapshot = try analyzeCurrentProjection(
+                    itemID, using: index, limits: limits,
+                    progress: { try self.rebuildControl?.graphProgress() })
+            }
+        } catch let error as TractandaError where error.code == "resourceLimit" {
+            let state = ItemState(
+                itemID: itemID, stateToken: nextProjectionStateToken(), status: .unmaterializable,
+                detailsComplete: false,
+                resource: .init(
+                    code: "resourceLimit", phase: .analysis,
+                    message: "Current projection exceeds its resource window."))
+            try index.replaceCurrentProjection(
+                snapshot: nil, state: state, policies: [], policiesComplete: false)
+            return (nil, nil, false)
+        }
+        let policies: [RevisionProjection.PolicyWitness]
+        do { policies = try projectionPolicies(snapshot, using: index) } catch let error as TractandaError
+            where error.code == "resourceLimit"
+        {
+            let state = try projectionState(
+                for: snapshot, status: .unmaterializable,
+                resource: .init(
+                    code: "resourceLimit", phase: .analysis,
+                    message: "Current policy proof exceeds its resource window."))
+            try index.replaceCurrentProjection(
+                snapshot: snapshot, state: state, policies: [], policiesComplete: false)
+            return (nil, nil, false)
+        }
+        var parents: Set<String> = []
+        var category = false
+        var active = false
+        var categoryBytes: UInt64 = 0
+        for id in snapshot.analysis.frontier {
+            guard let row = try index.revision(id) else {
+                throw TractandaError("invalidRevisionGraph", "Current frontier is missing.")
+            }
+            guard row.size <= projectionPolicyByteWindow - categoryBytes else {
+                throw TractandaError("resourceLimit", "Category witness hydration exceeds its window.")
+            }
+            categoryBytes += row.size
+            let value = try PooledCanonicalRecord.read(row: row, root: root, ownerUID: ownerUID).revision
+            if value.fields["selection"] != nil || value.fields["categoryParents"] != nil {
+                category = true
+                if !value.isDeleted, value.fields["selection"] != nil {
+                    active = true
+                    parents.formUnion(try CategoryHierarchy.parents(of: value))
+                }
+            }
+        }
+        if deferCategory && category {
+            let status: ItemState.Status = snapshot.analysis.isResolved ? .unmaterializable : .conflicted
+            let state = try projectionState(
+                for: snapshot, status: status,
+                resource: snapshot.analysis.isResolved
+                    ? .init(
+                        code: "projectionPending", phase: .analysis,
+                        message: "Current category invariants are being checked.") : nil)
+            try index.replaceCurrentProjection(
+                snapshot: snapshot, state: state, policies: policies, policiesComplete: true)
+            return (nil, parents, active)
+        }
+        let plan = try RevisionProjection.plan(
+            snapshot, maximumPayloadBytes: canonicalRecordByteLimitForTesting,
+            now: publicationClockForTesting)
+        let revision: Revision?
+        switch plan {
+        case .conflicted:
+            let state = try projectionState(for: snapshot, status: .conflicted)
+            try index.replaceCurrentProjection(
+                snapshot: snapshot, state: state, policies: policies, policiesComplete: true)
+            return (nil, category ? parents : nil, active)
+        case .blocked:
+            let state = try projectionState(
+                for: snapshot, status: .unmaterializable,
+                resource: .init(
+                    code: "resourceLimit", phase: .publication,
+                    message: "Current merge cannot fit the canonical publication window.",
+                    maximumBytes: canonicalRecordByteLimitForTesting))
+            try index.replaceCurrentProjection(
+                snapshot: snapshot, state: state, policies: policies, policiesComplete: true)
+            return (nil, category ? parents : nil, active)
+        case .ready(let plan):
+            if deferMaterialization {
+                let state = try projectionState(
+                    for: snapshot, status: .reviewRequired,
+                    resource: .init(
+                        code: "authorityCatchupPending", phase: .analysis,
+                        message: "Current authority effects are being reconciled."))
+                try index.replaceCurrentProjection(
+                    snapshot: snapshot, state: state, policies: policies, policiesComplete: true)
+                return (nil, category ? parents : nil, active)
+            }
+            do {
+                revision = try publishAutomaticProjection(
+                    plan, snapshot: snapshot, policies: policies, using: index)
+            } catch let error as TractandaError
+                where error.code == "resourceLimit" && !combinationPublicationAwaitingIndex
+            {
+                let state = try projectionState(
+                    for: snapshot, status: .unmaterializable,
+                    resource: .init(
+                        code: "resourceLimit", phase: .publication,
+                        message: "Complete merge record exceeds its publication window.",
+                        maximumBytes: canonicalRecordByteLimitForTesting))
+                try index.replaceCurrentProjection(
+                    snapshot: snapshot, state: state, policies: policies, policiesComplete: true)
+                return (nil, category ? parents : nil, active)
+            }
+        case .unchanged:
+            guard let id = snapshot.representative?.revisionID, let row = try index.revision(id) else {
+                throw TractandaError("invalidRevisionGraph", "Resolved current representative is missing.")
+            }
+            revision = try PooledCanonicalRecord.read(row: row, root: root, ownerUID: ownerUID).revision
+            let state = try projectionState(for: snapshot)
+            try index.replaceCurrentProjection(
+                snapshot: snapshot, state: state, policies: policies, policiesComplete: true)
+        }
+        return (revision, category ? parents : nil, active)
+    }
+
+    private func analyzeCurrentProjection(
+        _ itemID: String, using index: ItemIndex,
+        limits: RevisionProjection.Limits, progress: (() throws -> Void)? = nil
+    ) throws -> RevisionProjection.Snapshot {
+        try index.withCatalogueScanBudget(progress: progress, reusingActiveBudget: true) {
+            try index.withAuthorityPeerWorkAllowance(maximum: limits.maximumVMInstructions) {
+                try index.analyzeRevisionProjection(
+                    itemID: itemID,
+                    loadVerified: { row in
+                        try PooledCanonicalRecord.read(row: row, root: self.root, ownerUID: self.ownerUID)
+                    }, limits: limits, progress: progress, reusingActiveBudget: true)
+            }
+        }
+    }
+
+    private func projectionPolicies(_ snapshot: RevisionProjection.Snapshot, using index: ItemIndex) throws
+        -> [RevisionProjection.PolicyWitness]
+    {
+        var bytes: UInt64 = 0
+        var encoded = 0
+        var output: [RevisionProjection.PolicyWitness] = []
+        for id in snapshot.analysis.frontier {
+            guard let row = try index.revision(itemID: snapshot.itemID, revisionID: id),
+                row.size <= projectionPolicyByteWindow - bytes
+            else {
+                throw TractandaError("resourceLimit", "Policy witness hydration exceeds its window.")
+            }
+            bytes += row.size
+            let record = try PooledCanonicalRecord.read(row: row, root: root, ownerUID: ownerUID)
+            let value = record.revision.fields["permissions"]
+            if let value { _ = try ItemPermissions(value) }
+            let count = try value.map { try JSON.encode($0).count } ?? 0
+            guard count + 256 <= 8 * 1024 * 1024 - encoded else {
+                throw TractandaError("resourceLimit", "Policy summaries exceed their window.")
+            }
+            encoded += count + 256
+            output.append(.init(revisionID: id, classID: record.revision.classID, permissions: value))
+        }
+        return output
+    }
+
+    private func canReadProjection(_ itemID: String) -> Bool {
+        if isAdministrator { return true }
+        guard let index, let projection = try? index.currentProjection(itemID: itemID),
+            projection.policiesComplete, let context = accessContext, let account = context.account,
+            let policies = try? index.currentPolicyWitnesses(itemID: itemID), !policies.isEmpty
+        else { return false }
+        return policies.allSatisfy { policy in
+            guard policy.classID != AccessConfiguration.classID, let value = policy.permissions else {
+                return false
+            }
+            return (try? ItemPermissions(value).allows(4, for: account, using: context.resolver)) == true
+        }
+    }
+
+    private func requireProjectionEdit(_ itemID: String, changesPermissions: Bool) throws {
+        guard let index, let projection = try index.currentProjection(itemID: itemID),
+            projection.state.status == .ready
+        else { throw TractandaError("itemUnresolved", "Current item projection is unresolved.") }
+        try requireProjectionAuthority(itemID, changesPermissions: changesPermissions)
+    }
+
+    private func requireProjectionAuthority(_ itemID: String, changesPermissions: Bool) throws {
+        if isAdministrator { return }
+        guard let index, let projection = try index.currentProjection(itemID: itemID),
+            projection.policiesComplete, let context = accessContext, let account = context.account
+        else {
+            throw TractandaError("forbidden", "Item editing is denied.")
+        }
+        let policies = try index.currentPolicyWitnesses(itemID: itemID)
+        guard !policies.isEmpty else { throw TractandaError("forbidden", "Item policy is unavailable.") }
+        for policy in policies {
+            guard policy.classID != AccessConfiguration.classID, let value = policy.permissions else {
+                throw TractandaError("forbidden", "Item editing is denied.")
+            }
+            let permission = try ItemPermissions(value)
+            guard try permission.allows(6, for: account, using: context.resolver),
+                try !changesPermissions || context.resolver.userID(permission.owner) == account.uid
+            else {
+                throw TractandaError("forbidden", "All current policies must authorize this edit.")
+            }
+        }
+    }
+
+    func queryProjectionCompleteness() throws -> (completeness: String, conflictsAvailable: Bool) {
+        guard revisionProjectionEnabled else { return ("complete", false) }
+        guard let index, isCanonicalReady else {
+            throw TractandaError("recoveryRequired", "Current projection is unavailable.")
+        }
+        let present: Bool
+        if isAdministrator {
+            present = try !index.unresolvedProjectionPage(limit: 1).isEmpty
+        } else if let authority = try pooledReadAuthority() {
+            try index.setRequestPrincipals(
+                actorUID: authority.principals.actorUID,
+                users: authority.principals.users,
+                groups: authority.principals.groups.mapValues { (id: $0.gid, member: $0.member) })
+            defer { try? index.clearRequestPrincipals() }
+            present = try index.hasReadableUnresolvedProjection(aclUserID: authority.principals.actorUID)
+        } else {
+            // A bounded exact fallback cannot silently omit readable conflict status.
+            present = try !readableUnresolvedStates(limit: 1).isEmpty
+        }
+        return (present ? "unresolvedItems" : "complete", present)
+    }
+
+    func readableUnresolvedStates(after: String? = nil, limit: Int = 128) throws -> [ItemState] {
+        guard revisionProjectionEnabled, isCanonicalReady, let index,
+            (1...256).contains(limit)
+        else {
+            throw TractandaError("unsupportedFeature", "Revision projection is not enabled.")
+        }
+        if let after { try Identifier.validate(after) }
+        var cursor = after
+        var output: [ItemState] = []
+        var inspected = 0
+        var bytes = 0
+        while output.count < limit {
+            let page = try index.unresolvedProjectionPage(after: cursor, limit: min(128, limit))
+            guard !page.isEmpty else { break }
+            for projection in page {
+                inspected += 1
+                guard inspected <= 10_000 else {
+                    throw TractandaError("resourceLimit", "Readable conflict scan exceeds its window.")
+                }
+                cursor = projection.state.itemID
+                if canReadProjection(projection.state.itemID) {
+                    let count = try JSON.encode(projection.state).count
+                    guard count <= pooledRecordByteLimit - bytes else {
+                        throw TractandaError("resourceLimit", "Conflict summaries exceed their byte window.")
+                    }
+                    bytes += count
+                    output.append(projection.state)
+                    if output.count == limit { break }
+                }
+            }
+        }
+        return output
+    }
+
+    private func knownCategoryConstraintConflicts(replacing replacement: Revision? = nil) throws -> Set<
+        String
+    > {
+        guard let index else {
+            throw TractandaError("indexUnavailable", "Category constraint catalogue is unavailable.")
+        }
+        var edges: [String: Set<String>] = [:]
+        var active: Set<String> = []
+        var cursor: String?
+        var bytes: UInt64 = 0
+        try index.withCatalogueScanBudget(reusingActiveBudget: true) {
+            while true {
+                let condition = cursor == nil ? "" : " AND r.item>?"
+                let statement = try index.corpusPrepare(
+                    "SELECT r.item FROM revision_catalog r WHERE EXISTS(SELECT 1 FROM revision_field_values v WHERE v.revision=r.revision AND v.field IN('selection','categoryParents'))\(condition) ORDER BY r.item LIMIT 1",
+                    cursor.map { [$0] } ?? [])
+                let status = index.catalogueStep(statement)
+                if status == SQLITE_DONE {
+                    sqlite3_finalize(statement)
+                    break
+                }
+                guard status == SQLITE_ROW, let raw = sqlite3_column_text(statement, 0) else {
+                    sqlite3_finalize(statement)
+                    throw TractandaError("indexError", "Category constraint lookup failed.")
+                }
+                let id = String(cString: raw)
+                sqlite3_finalize(statement)
+                cursor = id
+                if id == replacement?.itemID { continue }
+                guard edges.count < Self.categoryWorkingSetLimit,
+                    let projection = try index.currentProjection(itemID: id), projection.policiesComplete
+                else {
+                    throw TractandaError("resourceLimit", "Known category constraints are incomplete.")
+                }
+                var parents: Set<String> = []
+                for witness in try index.currentPolicyWitnesses(itemID: id) {
+                    guard let row = try index.revision(witness.revisionID),
+                        row.size <= projectionPolicyByteWindow - bytes
+                    else {
+                        throw TractandaError(
+                            "resourceLimit", "Category constraint witnesses exceed their window.")
+                    }
+                    bytes += row.size
+                    let record = try PooledCanonicalRecord.read(row: row, root: root, ownerUID: ownerUID)
+                        .revision
+                    if !record.isDeleted, record.fields["selection"] != nil {
+                        active.insert(id)
+                        parents.formUnion(try CategoryHierarchy.parents(of: record))
+                    }
+                }
+                edges[id] = parents
+            }
+        }
+        if let replacement {
+            edges[replacement.itemID] = Set(try CategoryHierarchy.parents(of: replacement))
+            if !replacement.isDeleted, replacement.fields["selection"] != nil {
+                active.insert(replacement.itemID)
+            }
+        }
+        var remaining = active
+        var depths: [String: Int] = [:]
+        var invalid: Set<String> = []
+        while !remaining.isEmpty {
+            let ready = remaining.filter {
+                (edges[$0] ?? []).intersection(active).isDisjoint(with: remaining)
+            }
+            if ready.isEmpty {
+                invalid.formUnion(remaining)
+                break
+            }
+            for id in ready {
+                let parents = (edges[id] ?? []).intersection(active)
+                let depth = 1 + (parents.compactMap { depths[$0] }.max() ?? 0)
+                depths[id] = depth
+                if depth > 32 || !parents.isDisjoint(with: invalid) { invalid.insert(id) }
+                remaining.remove(id)
+            }
+        }
+        return invalid
+    }
+
+    public func resolveConflict(_ request: ResolveConflictRequest, actorUID: UInt32? = nil) throws
+        -> CommitResult
+    {
+        if accessContext == nil {
+            return try withAccess(forUID: actorUID ?? ownerUID) {
+                try resolveConflict(request, actorUID: actorUID)
+            }
+        }
+        guard revisionProjectionEnabled, isCanonicalReady, let index, let context = accessContext else {
+            throw TractandaError("unsupportedFeature", "Revision projection is not enabled.")
+        }
+        let uid = actorUID ?? context.uid
+        guard uid == context.uid, !request.operationID.isEmpty, request.operationID.utf8.count <= 200,
+            !request.operationID.contains("\0")
+        else {
+            throw TractandaError("invalidArguments", "Invalid authenticated resolution operation.")
+        }
+        let identity = try JSON.encode(request).base64EncodedString()
+        if let prior = try priorOperation(request.operationID, uid: uid, kind: .resolution) {
+            guard prior.fields["requestIdentity"]?.string == identity else {
+                throw TractandaError(
+                    "operationMismatch", "This resolution operation already has another intent.")
+            }
+            return CommitResult(
+                revision: prior, wasReplayed: true, isIndexReady: true, warnings: [],
+                itemState: try itemState(request.itemID))
+        }
+        let state = try itemState(request.itemID)
+        guard state.stateToken == request.expectedStateToken else {
+            throw TractandaError("stateConflict", "Reviewed current state changed.")
+        }
+        guard state.status == .conflicted || state.status == .invariantConflict else {
+            throw TractandaError(
+                "itemUnresolved", "This state cannot be resolved by ordinary conflict resolution.")
+        }
+        let forbidden = RevisionMerge.managedFields
+        guard Set(request.changes.keys).isDisjoint(with: request.unset),
+            Set(request.changes.keys).union(request.unset).isDisjoint(with: forbidden),
+            !request.reviewedFrontier.isEmpty,
+            request.reviewedFrontier == Array(Set(request.reviewedFrontier)).sorted()
+        else {
+            throw TractandaError(
+                "invalidArguments", "Supply exact frontier and explicit ordinary/protected choices.")
+        }
+        try requireProjectionAuthority(
+            request.itemID,
+            changesPermissions: request.changes["permissions"] != nil || request.unset.contains("permissions")
+        )
+        let snapshot = try index.analyzeRevisionProjection(
+            itemID: request.itemID,
+            loadVerified: {
+                try PooledCanonicalRecord.read(row: $0, root: self.root, ownerUID: self.ownerUID)
+            },
+            limits: revisionProjectionLimits)
+        let required = Set(snapshot.analysis.conflicts.keys).union(snapshot.analysis.protectedFields)
+            .union(state.status == .invariantConflict ? ["categoryParents"] : [])
+        guard request.reviewedFrontier == snapshot.analysis.frontier,
+            required.isSubset(of: Set(request.changes.keys).union(request.unset))
+        else {
+            throw TractandaError(
+                "stateConflict", "Resolution must consume every reviewed conflict and protected choice.")
+        }
+        let parents = Array(Set(snapshot.physicalHeads + [snapshot.clockFloor.revisionID])).sorted()
+        guard let source = try index.revision(parents[0]) else {
+            throw TractandaError("invalidRevisionGraph", "Resolution parent is unavailable.")
+        }
+        var fields = snapshot.analysis.fields
+        for (key, value) in request.changes { fields[key] = value }
+        for key in request.unset { fields.removeValue(forKey: key) }
+        let currentPolicies = try index.currentPolicyWitnesses(itemID: request.itemID)
+        if currentPolicies.contains(where: { $0.classID == AccessConfiguration.classID }) {
+            guard fields["classID"]?.string == AccessConfiguration.classID else {
+                throw TractandaError("invalidAccessConfiguration", "Access configuration cannot be retyped.")
+            }
+        }
+        if fields["classID"]?.string == AccessConfiguration.classID {
+            try requireAdministrator()
+            guard currentPolicies.contains(where: { $0.classID == AccessConfiguration.classID }) else {
+                throw TractandaError(
+                    "invalidAccessConfiguration",
+                    "Conflict resolution cannot retype another item into an access configuration.")
+            }
+        }
+        let local = try ReplicaIdentity.initialize(
+            root: root,
+            storeID: canonicalStoreIdentity(creatingIfMissing: false), ownerUID: ownerUID,
+            hasModernOrigins: index.hasModernRevisionOrigins())
+        replicaID = local.replicaID
+        let id = try makePersistentUUID().uuidString.lowercased()
+        guard try index.revision(id) == nil, try index.revisionCount(itemID: id) == 0, id != request.itemID
+        else {
+            throw TractandaError("identifierCollision", "Resolution allocation repeated an identity.")
+        }
+        let provenance = try RevisionProvenance(
+            kind: .resolution, originReplicaID: local.replicaID,
+            parents: parents, writtenFields: request.changes.keys.sorted(),
+            unsetFields: request.unset.sorted(),
+            frontier: request.reviewedFrontier)
+        fields["itemID"] = .text(request.itemID)
+        fields["revisionID"] = .text(id)
+        fields["createdAt"] = .date(source.createdAt)
+        fields["modifiedAt"] = .date(
+            try RevisionPublicationClock.after(
+                [snapshot.clockFloor.modifiedAt], now: publicationClockForTesting))
+        fields["actor"] = .text(context.account.map { "user:" + $0.name } ?? "uid:" + String(uid))
+        fields["operationID"] = .text(request.operationID)
+        fields["requestIdentity"] = .text(identity)
+        fields["revisionAncestry"] = provenance.itemValue
+        let revision = try Revision(fields: fields, formatVersion: 2)
+        try ItemSemantics.validate(revision)
+        if revision.fields["selection"] != nil || revision.fields["categoryParents"] != nil
+            || state.status == .invariantConflict
+        {
+            guard try !knownCategoryConstraintConflicts(replacing: revision).contains(revision.itemID) else {
+                throw TractandaError(
+                    "categoryCycle", "Resolution must repair this item's category constraints.")
+            }
+        }
+        try beforeProjectionCommitAuthorityForTesting?()
+        try withAccess(forUID: uid) {
+            guard try itemState(request.itemID).stateToken == request.expectedStateToken,
+                accessContext?.account?.name == context.account?.name
+            else {
+                throw TractandaError(
+                    "stateConflict", "Current reviewed authority/state changed before publication.")
+            }
+            try requireProjectionAuthority(
+                request.itemID,
+                changesPermissions: request.changes["permissions"] != nil
+                    || request.unset.contains("permissions"))
+            if revision.classID == AccessConfiguration.classID {
+                try requireAdministrator()
+                let configuration = try AccessConfiguration(revision.fields["accessConfiguration"]!)
+                try configuration.validate(
+                    using: PrincipalResolver(directory: accounts, configuration: configuration))
+            }
+            if let value = revision.fields["permissions"], let fresh = accessContext {
+                let permission = try ItemPermissions(value)
+                try permission.validate(using: fresh.resolver)
+                if !isAdministrator, let account = fresh.account {
+                    guard try permission.allows(4, for: account, using: fresh.resolver) else {
+                        throw TractandaError(
+                            "invalidPermissions", "Resolution must remain readable to its editor.")
+                    }
+                }
+            }
+            for holding in try RoleSemantics.holdings(revision) {
+                let holder = try get(holding.holder.itemID, revisionID: holding.holder.revisionID)
+                guard ItemTypes.ancestry(holder.classID).contains("PersonItem"), holder.classID != "RoleItem",
+                    !holder.isDeleted
+                else {
+                    throw TractandaError("invalidHolder", "Resolution holder is not an available person.")
+                }
+            }
+            try validateResolutionReferences(revision, snapshot: snapshot, using: index)
+        }
+        let policies: [RevisionProjection.PolicyWitness] = [
+            .init(
+                revisionID: id, classID: revision.classID,
+                permissions: revision.fields["permissions"])
+        ]
+        _ = try publishVerifiedCombination(revision, snapshot: snapshot, policies: policies, using: index)
+        try rememberHead(Self.residentHead(revision))
+        if revision.fields["selection"] != nil || state.status == .invariantConflict {
+            try refreshRepairedCategoryProjections(using: index)
+        }
+        if revision.classID == AccessConfiguration.classID {
+            try refreshCurrentAccessConfigurations(using: index)
+        }
+        accessPolicyEpoch &+= 1
+        visibleStates.removeAll()
+        visibleStateOrder.removeAll()
+        hasLivePersonalStateMemo = nil
+        clearSavedViewPages()
+        generation = Identifier.make()
+        return CommitResult(
+            revision: revision, wasReplayed: false, isIndexReady: true, warnings: [],
+            itemState: try itemState(request.itemID))
+    }
+
+    private func refreshRepairedCategoryProjections(using index: ItemIndex) throws {
+        let invalid = try knownCategoryConstraintConflicts()
+        var cursor: String?
+        var repaired = 0
+        while true {
+            let page = try index.unresolvedProjectionPage(after: cursor, limit: 128)
+            guard !page.isEmpty else { break }
+            for current in page {
+                cursor = current.state.itemID
+                guard current.state.status == .invariantConflict,
+                    !invalid.contains(current.state.itemID)
+                else { continue }
+                repaired += 1
+                guard repaired <= Self.categoryWorkingSetLimit else {
+                    throw TractandaError("resourceLimit", "Category reconciliation exceeds its working set.")
+                }
+                if let value = try prepareRecoveredProjection(current.state.itemID, using: index).revision {
+                    try index.put(value)
+                    try rememberHead(Self.residentHead(value))
+                }
+            }
+        }
+    }
+
+    /// Resolution may select an intact retained attachment state; lifecycle/extraction APIs remain
+    /// the only routes for creating new attachment identities or generated document representations.
+    private func validateResolutionReferences(
+        _ revision: Revision, snapshot: RevisionProjection.Snapshot, using index: ItemIndex
+    ) throws {
+        let chosenParents = try CategoryHierarchy.parents(of: revision)
+        if !chosenParents.isEmpty {
+            var retainedParents: Set<String> = []
+            var bytes: UInt64 = 0
+            for id in snapshot.analysis.frontier {
+                guard let row = try index.revision(id), row.size <= projectionPolicyByteWindow - bytes else {
+                    throw TractandaError(
+                        "resourceLimit", "Resolution category witnesses exceed their window.")
+                }
+                bytes += row.size
+                let parent = try PooledCanonicalRecord.read(row: row, root: root, ownerUID: ownerUID).revision
+                retainedParents.formUnion(try CategoryHierarchy.parents(of: parent))
+            }
+            for id in chosenParents where !retainedParents.contains(id) { _ = try Categories.rule(get(id)) }
+        }
+        let attachmentFields = ["attachments", "attachmentText", "attachmentDocument"]
+        if attachmentFields.contains(where: { revision.fields[$0] != nil }) {
+            var bytes: UInt64 = 0
+            var retained = false
+            for id in snapshot.analysis.frontier {
+                guard let row = try index.revision(id), row.size <= projectionPolicyByteWindow - bytes else {
+                    throw TractandaError(
+                        "resourceLimit", "Resolution attachment witnesses exceed their window.")
+                }
+                bytes += row.size
+                let parent = try PooledCanonicalRecord.read(row: row, root: root, ownerUID: ownerUID).revision
+                if attachmentFields.allSatisfy({ parent.fields[$0] == revision.fields[$0] }) {
+                    retained = true
+                    break
+                }
+            }
+            guard retained else {
+                throw TractandaError(
+                    "invalidAttachment",
+                    "Select one intact retained attachment state before using lifecycle operations.")
+            }
+            for descriptor in try AttachmentDescriptor.descriptors(in: revision.fields) {
+                try attachmentPayloads.validate(descriptor: descriptor)
+            }
+        }
+        if revision.classID == "PersonalStateItem", let target = revision.fields["target"]?.link,
+            let owner = revision.fields["permissions"]?.map?["owner"]?.string, let context = accessContext
+        {
+            _ = try get(target.itemID, revisionID: target.revisionID)
+            let uid = try context.resolver.userID(owner)
+            try forEachCurrentHead(classID: "PersonalStateItem") { other in
+                if other.itemID != revision.itemID, !other.isDeleted,
+                    other.fields["target"]?.link?.itemID == target.itemID,
+                    let otherOwner = other.fields["permissions"]?.map?["owner"]?.string,
+                    try context.resolver.userID(otherOwner) == uid
+                {
+                    throw TractandaError(
+                        "invalidPersonalState", "This owner already has an overlay for that item.")
+                }
+            }
+        }
+        for value in revision.fields["learningFeedback"]?.map?.values ?? [:].values {
+            let target = try LearningFeedback(value).revisionID
+            var earlier = false
+            for parent in snapshot.physicalHeads {
+                if target == parent {
+                    earlier = true
+                    break
+                }
+                let ancestor = try index.withCatalogueScanBudget {
+                    try index.graphHasProperAncestor(source: parent, target: target, progress: nil)
+                }
+                if ancestor {
+                    earlier = true
+                    break
+                }
+            }
+            guard earlier else {
+                throw TractandaError(
+                    "invalidLearningFeedback", "Feedback must name a causal input of the resolution.")
+            }
+        }
+        for field in ["categoryOverrides", "personalOverrides"] {
+            for id in revision.fields[field]?.map?.keys ?? [:].keys { if isMultiUser { _ = try get(id) } }
+        }
+    }
+
+    public func itemState(_ itemID: String) throws -> ItemState {
+        try Identifier.validate(itemID)
+        guard revisionProjectionEnabled, isCanonicalReady, let index else {
+            throw TractandaError("unsupportedFeature", "Revision projection is not enabled for this store.")
+        }
+        guard let projection = try index.currentProjection(itemID: itemID) else {
+            throw TractandaError("notFound", "Item is unavailable.")
+        }
+        guard canReadProjection(itemID) else { throw TractandaError("forbidden", "Item access is denied.") }
+        return projection.state
+    }
+
+    private func requireLocalLegacyReceipt(_ row: ItemIndex.CatalogueRow) throws {
+        guard let coordinator = peerIntake else { return }
+        let identity = try canonicalStoreIdentity(creatingIfMissing: false)
+        guard let replica = try ReplicaIdentity.load(root: root, storeID: identity, ownerUID: ownerUID),
+            try AuthorityStore.isLocalLegacyReceipt(
+                row, root: root, storeID: identity,
+                replicaID: replica.replicaID, files: coordinator.journal.files)
+        else {
+            throw TractandaError(
+                "operationOriginRequired", "An imported legacy receipt cannot replay a local operation.")
+        }
+    }
+    private func priorOperation(
+        _ id: String, uid: UInt32,
+        kind: RevisionProvenance.Kind = .authored
+    ) throws -> Revision? {
+        guard let index else {
             throw TractandaError(
                 "indexUnavailable",
                 "Operation receipt candidates exceed the safe bound or index is unavailable.")
         }
-        let matches = receipts.compactMap { row -> String? in
+        func matchesCaller(_ row: ItemIndex.CatalogueRow) -> Bool {
             let actor = row.actor
-            if actor == "uid:\(uid)", uid == ownerUID { return row.revisionID }
+            if actor == "uid:\(uid)", uid == ownerUID { return true }
             if actor.hasPrefix("uid:"), let legacyUID = UInt32(actor.dropFirst(4)),
                 let legacyUser = accessConfiguration?.legacyUsers[legacyUID], let context = accessContext
             {
                 // Preserve receipt bytes and old actor identity, but only replay after an
                 // explicit canonical mapping resolves to this caller on this request.
-                return (try? context.resolver.userID(legacyUser)) == uid ? row.revisionID : nil
+                return (try? context.resolver.userID(legacyUser)) == uid
             }
-            guard actor.hasPrefix("user:"), let context = accessContext else { return nil }
-            return (try? context.resolver.userID(String(actor.dropFirst(5)))) == uid ? row.revisionID : nil
+            guard actor.hasPrefix("user:"), let context = accessContext else { return false }
+            return (try? context.resolver.userID(String(actor.dropFirst(5)))) == uid
         }
+        func candidates(_ origin: String?) throws -> [ItemIndex.CatalogueRow] {
+            guard let rows = try index.receipts(named: id, localReplicaID: origin, kind: kind) else {
+                throw TractandaError(
+                    "indexUnavailable", "Operation receipt candidates exceed this scope's safe bound.")
+            }
+            let matches = rows.filter(matchesCaller)
+            if origin == nil { for row in matches { try requireLocalLegacyReceipt(row) } }
+            return matches
+        }
+        let local = try replicaID.map { try candidates($0) } ?? []
+        if local.isEmpty, kind == .authored, let origin = replicaID, let coordinator = peerIntake {
+            var bytes: UInt64 = 0
+            for raw in try index.authorityHeldReceipts(operationID: id, originID: origin) {
+                guard UInt64(raw.descriptor.length) <= 64 * 1024 * 1024 - min(bytes, 64 * 1024 * 1024) else {
+                    throw TractandaError("resourceLimit", "Held receipt candidates exceed their byte window.")
+                }
+                bytes += UInt64(raw.descriptor.length)
+                let node = try AuthorityRevision(originalBytes: coordinator.bytes(raw))
+                let row = try authorityCatalogueRow(raw, node: node)
+                if matchesCaller(row) {
+                    guard canReadProjection(row.itemID) else {
+                        throw TractandaError("forbidden", "Current item access is denied.")
+                    }
+                    throw TractandaError(
+                        "operationReviewRequired",
+                        "This exact local operation is held for authority review; it cannot replay as success."
+                    )
+                }
+            }
+        }
+        let matches = try local.isEmpty && kind == .authored ? candidates(nil) : local
         guard matches.count <= 1 else {
             throw TractandaError("operationMismatch", "Aliases merge conflicting operation receipts.")
         }
-        guard let revisionID = matches.first else { return nil }
-        guard let location = try index.revision(revisionID), let current = try currentHead(location.itemID)
-        else {
+        guard let revisionID = matches.first?.revisionID else { return nil }
+        guard let location = try index.revision(revisionID) else {
             throw TractandaError("recoveryError", "Operation receipt points to an unavailable revision.")
         }
-        guard canRead(current) else { throw TractandaError("forbidden", "Item access is denied.") }
+        if revisionProjectionEnabled {
+            guard canReadProjection(location.itemID) else {
+                throw TractandaError("forbidden", "Item access is denied.")
+            }
+        } else {
+            guard let current = try currentHead(location.itemID), canRead(current) else {
+                throw TractandaError("forbidden", "Item access is denied.")
+            }
+        }
         return try loadRevision(revisionID)
     }
 
     public func configureAccess(_ value: ItemValue, operationID: String) throws -> CommitResult {
+        if revisionProjectionEnabled && (accessConfigurationAmbiguous || accessConfigurationProofUnavailable)
+        {
+            throw TractandaError(
+                "configurationConflict", "Use explicit resolution for current access divergence.")
+        }
         try requireAdministrator()
         let configurationSummary = try index?.currentHeadSummary(classID: AccessConfiguration.classID)
         let previous = try configurationSummary.flatMap { try currentRevision($0.itemID) }
@@ -1393,7 +2756,7 @@ public final class ItemStore {
         let candidate: ItemIndex
         do { candidate = try ItemIndex(path: database.path, create: false) } catch { return false }
         guard let identity = try? canonicalStoreIdentity(creatingIfMissing: false),
-            (try? candidate.validatedCatalogue(identity: identity)) != nil
+            let validated = try? candidate.validatedCatalogue(identity: identity)
         else {
             candidate.close()
             return false
@@ -1406,7 +2769,34 @@ public final class ItemStore {
             heads.removeAll(keepingCapacity: false)
             headCacheOrder.removeAll(keepingCapacity: false)
             headCacheBytes = 0
-            guard try candidate.currentHeadCount(classID: AccessConfiguration.classID) <= 1 else {
+            guard try candidate.hasCompleteCurrentProjectionCheckpoint() else {
+                candidate.close()
+                index = nil
+                return false
+            }
+            guard
+                try candidate.resumeAcceptedGraphProofFromCheckpoint(
+                    validated: validated, requireLinearProjection: !revisionProjectionEnabled)
+            else {
+                candidate.close()
+                index = nil
+                return false
+            }
+            if !revisionProjectionEnabled {
+                let combined = try candidate.corpusPrepare(
+                    "SELECT 1 FROM scoped_operation_receipts WHERE kind!='authored' LIMIT 1")
+                let found = candidate.catalogueStep(combined) == SQLITE_ROW
+                sqlite3_finalize(combined)
+                if found {
+                    candidate.close()
+                    index = nil
+                    return false
+                }
+            }
+            guard
+                try revisionProjectionEnabled
+                    || candidate.currentHeadCount(classID: AccessConfiguration.classID) <= 1
+            else {
                 candidate.close()
                 index = nil
                 return false
@@ -1441,6 +2831,7 @@ public final class ItemStore {
             } else {
                 accessConfiguration = nil
             }
+            if revisionProjectionEnabled { try refreshCurrentAccessConfigurations(using: candidate) }
             clockDependentCategories = try candidate.hasClockDependentCategories()
             isCanonicalReady = true
             installIndexFailureHandler(candidate)
@@ -1456,14 +2847,7 @@ public final class ItemStore {
     }
 
     private static func validCanonicalRecordPath(_ path: String, itemID: String, revisionID: String) -> Bool {
-        let components = path.split(separator: "/")
-        guard components.count == 8, components[0] == "items",
-            components[1].count == 4, components[2].count == 2, components[3].count == 2,
-            components[4].count == 2, components[5].count == 2,
-            components[1...5].allSatisfy({ $0.allSatisfy { $0.isASCII && $0.isNumber } }),
-            String(components[6]) == itemID, String(components[7]) == revisionID + ".tractanda"
-        else { return false }
-        return true
+        CanonicalRecordPath.validate(path, itemID: itemID, revisionID: revisionID)
     }
 
     /// Snapshot the compact immutable-file inventory for a bounded background verifier.
@@ -1489,7 +2873,7 @@ public final class ItemStore {
             rootPath: root.path, ownerUID: ownerUID,
             indexPath: indexDirectory.appendingPathComponent("items.sqlite").path,
             storeIdentity: identity, generation: generation,
-            catalogueWatermark: try index.catalogueWatermark())
+            catalogueWatermark: try index.catalogueWatermark(), authorityEnforced: authorityIntakeEnabled)
     }
 
     func beginVerificationScan(generation: String) throws {
@@ -1543,6 +2927,16 @@ public final class ItemStore {
         var confirmed: [CanonicalVerifier.Finding] = []
         var metadataIndicators = 0
         for finding in findings {
+            if let coordinator = peerIntake, currentRow(for: finding.path) == nil, let index {
+                let name = URL(fileURLWithPath: finding.path).deletingPathExtension().lastPathComponent
+                if let retained = try index.retainedAuthorityObject(id: name), retained.path == finding.path,
+                    retained.descriptor.kind == .item
+                {
+                    if (try? coordinator.bytes(retained)) != nil { continue }
+                    confirmed.append(finding)
+                    continue
+                }
+            }
             if let row = currentRow(for: finding.path) {
                 let url = root.appendingPathComponent(row.path)
                 if finding.kind == .missing {
@@ -1675,6 +3069,37 @@ public final class ItemStore {
     private func recover(
         staging: ItemIndex, statements: ItemIndex.RebuildStatements, measurePhases: Bool = false
     ) throws -> RecoveryPhaseMetrics? {
+        if let peerIntake {
+            try peerIntake.withOperation(recovery: true) {
+                try staging.withCatalogueScanBudget(reusingActiveBudget: true) {
+                    try peerIntake.recoverInventory(index: staging, validateClosure: false)
+                    try staging.initializeAuthorityControlSchema()
+                    try staging.initializeAuthorityReviewSchema()
+                    try validateForeignReviewSeals(coordinator: peerIntake, index: staging)
+                    if let pin = try peerIntake.configuration()?.bootstrap {
+                        try staging.retainLocalBootstrapAcceptance(pin)
+                    }
+                    try validateAuthorityControls(
+                        packageID: nil, coordinator: peerIntake, index: staging, recovering: true)
+                    // Actual sealed LOCAL protected-review units now restore their exact
+                    // provisional B/C through the existing engine before closure is checked.
+                    // Recovery remains quarantined; this check precedes all graph serving.
+                    try staging.validateRestoredAuthorityClosure()
+                    try peerIntake.validatePeerRetirementCuts(index: staging)
+                    try validateActivatedRetirements(coordinator: peerIntake, index: staging)
+                    try validateSourceEnrollmentApprovals(coordinator: peerIntake, index: staging)
+                    _ = try activateOriginAdmissions(coordinator: peerIntake, index: staging)
+                    try validateOriginAdmissions(coordinator: peerIntake, index: staging)
+                    try validateTargetEnrollment(coordinator: peerIntake, index: staging, validation: .fullReplay)
+                    try validateSourceRegistrations(coordinator: peerIntake)
+                    try reduceRetainedAuthorityInventory(coordinator: peerIntake, index: staging)
+                    _ = try reducePeerRetirements(coordinator: peerIntake, index: staging)
+                }
+            }
+        }
+        let authorityEnforced =
+            try peerIntake != nil
+            && (CanonicalReaderRequirement.load(root: root, ownerUID: ownerUID)?.minimumReaderLevel ?? 1) >= 3
         attachmentRecoveryValidationsForTesting = 0
         try staging.execute(
             "CREATE TEMP TABLE attachment_owners (id TEXT PRIMARY KEY, item TEXT NOT NULL, descriptor TEXT NOT NULL)"
@@ -1739,6 +3164,44 @@ public final class ItemStore {
                 recordReadSeconds += ProcessInfo.processInfo.systemUptime - start
                 let decodeStart = ProcessInfo.processInfo.systemUptime
                 let revision = try RecordCodec.decode(bytes)
+                if authorityEnforced, authorityBootstrapPending, let pending = pendingFoundingPolicy,
+                    revision.revisionID == pending.revisionID {
+                    guard revision.itemID == pending.itemID,
+                        String(url.path.dropFirst(root.path.count + 1)) == pending.path,
+                        bytes.count == pending.length, AuthorityRecordCodec.sha256(bytes) == pending.sha256,
+                        metadata.mode == pending.mode, metadata.uid == pending.uid else {
+                        throw InitialAuthorityBootstrap.failure("Pending founding policy differs from its exact reserved original.")
+                    }
+                    // Retention/capture still supplies the real original to bootstrap admission.
+                    // Until its pin is durable it neither grants admission nor removes creator rights.
+                    return true
+                }
+                if authorityEnforced {
+                    if let retained = try staging.retainedAuthorityObject(id: revision.revisionID) {
+                        guard retained.descriptor.sha256 == AuthorityRecordCodec.sha256(bytes),
+                            retained.path == String(url.path.dropFirst(root.path.count + 1))
+                        else {
+                            throw TractandaError(
+                                "invalidAuthority",
+                                "Sealed receiver locator/digest differs from canonical file.")
+                        }
+                        if try staging.authorityDisposition(id: revision.revisionID)?.disposition != .eligible
+                        {
+                            return true
+                        }
+                        guard try staging.authorityParentsAreEligible(revisionID: revision.revisionID) else {
+                            throw TractandaError(
+                                "invalidAuthority", "Eligible history is not ancestor closed.")
+                        }
+                    } else if !authorityBootstrapPending {
+                        throw TractandaError(
+                            "unsealedAuthorityObject",
+                            "A canonical item has no sealed publication or pinned baseline: \(revision.revisionID)"
+                        )
+                    }
+                    // Before the initial pin, old canonical history is loaded solely for
+                    // administrator maintenance. It cannot authorize ordinary requests/publication.
+                }
                 recordDecodeSeconds += ProcessInfo.processInfo.systemUptime - decodeStart
                 let hashStart = ProcessInfo.processInfo.systemUptime
                 let digest = Data(SHA256.hash(data: bytes))
@@ -1799,10 +3262,11 @@ public final class ItemStore {
                     actor: actor, operationID: operation, size: metadata.size, inode: metadata.inode,
                     uid: metadata.uid, mode: metadata.mode, modificationSeconds: metadata.modificationSeconds,
                     modificationNanoseconds: metadata.modificationNanoseconds, digest: digest,
-                    createdAt: createdAt, feedbackRevisionIDs: feedbackIDs)
-                do { try staging.insertRecoveryRow(row) } catch {
-                    throw TractandaError(
-                        "recoveryError", "Duplicate canonical revision, path or receipt: \(error)")
+                    createdAt: createdAt, feedbackRevisionIDs: feedbackIDs,
+                    modifiedAt: revision.modifiedAt, provenance: try revision.provenance)
+                do { try staging.insertRecoveryRow(row, graphFields: revision.fields) } catch {
+                    throw Self.classifyRecoveryFailure(
+                        error, message: "Duplicate canonical revision, path or receipt")
                 }
                 try rebuildControl?.pulse(records: 1)
                 try afterRecoveryRecordForTesting?(url)
@@ -1810,17 +3274,26 @@ public final class ItemStore {
             }
         }
         do { try scan(root.appendingPathComponent("items"), depth: 0) } catch {
-            if let failure = error as? TractandaError,
-                ["cancelled", "rebuildNoProgress"].contains(failure.code)
-            {
-                throw failure
-            }
-            throw TractandaError("recoveryError", "Cannot enumerate or validate canonical records: \(error)")
+            throw Self.classifyRecoveryFailure(
+                error, message: "Cannot enumerate or validate canonical records")
         }
         let enumerationEnd = ProcessInfo.processInfo.systemUptime
         try rebuildControl?.pulse(phase: "validatingRevisionGraph")
-        do { try staging.validateRecoveryGraph() } catch {
-            throw TractandaError("recoveryError", "Canonical revision graph is invalid: \(error)")
+        do {
+            try beforeRevisionGraphValidationForTesting?(staging)
+            try staging.validateRecoveryGraph(
+                requireLinearProjection: !revisionProjectionEnabled,
+                progress: {
+                    try self.revisionGraphProgressForTesting?()
+                    try self.rebuildControl?.graphProgress()
+                })
+        } catch {
+            throw Self.classifyRecoveryFailure(error, message: "Canonical revision graph is invalid")
+        }
+        if let peerIntake {
+            try finishRecoveryAuthorityReviews(coordinator: peerIntake, index: staging)
+            try reduceRetainedAuthorityInventory(coordinator: peerIntake, index: staging)
+            _ = try reducePeerRetirements(coordinator: peerIntake, index: staging)
         }
         let chainEnd = ProcessInfo.processInfo.systemUptime
         heads.removeAll(keepingCapacity: false)
@@ -1828,14 +3301,48 @@ public final class ItemStore {
         headCacheBytes = 0
         var categoryHeads: [Revision] = []
         var categoryBytes = 0
+        var categoryEdges: [String: Set<String>] = [:]
+        var activeCategories: Set<String> = []
+        var deferredCategories: [String] = []
         var recoveredConfiguration: AccessConfiguration?
         var clockDependent = false
         var cursor: String?
         try rebuildControl?.pulse(phase: "projectingCurrentItems")
-        while let head = try staging.recoveryHead(after: cursor) {
+        while true {
+            let linearHead = revisionProjectionEnabled ? nil : try staging.recoveryHead(after: cursor)
+            let nextItem =
+                revisionProjectionEnabled ? try staging.recoveryItem(after: cursor) : linearHead?.itemID
+            guard let itemID = nextItem else { break }
             try rebuildControl?.pulse(items: 1)
-            guard let row = try staging.revision(itemID: head.itemID, revisionID: head.revisionID) else {
-                throw TractandaError("recoveryError", "Current revision catalogue row is missing.")
+            let row: ItemIndex.CatalogueRow
+            if revisionProjectionEnabled {
+                let projected = try prepareRecoveredProjection(
+                    itemID, using: staging, deferCategory: true)
+                if let parents = projected.categoryParents {
+                    guard deferredCategories.count < Self.categoryWorkingSetLimit,
+                        parents.count <= Self.categoryWorkingSetLimit
+                    else {
+                        throw TractandaError(
+                            "resourceLimit", "Known category constraints exceed their working set.")
+                    }
+                    deferredCategories.append(itemID)
+                    categoryEdges[itemID] = parents
+                    if projected.activeCategory { activeCategories.insert(itemID) }
+                }
+                guard let revision = projected.revision,
+                    let located = try staging.revision(revision.revisionID)
+                else {
+                    cursor = itemID
+                    continue
+                }
+                row = located
+            } else {
+                guard let linearHead,
+                    let located = try staging.revision(itemID: itemID, revisionID: linearHead.revisionID)
+                else {
+                    throw TractandaError("recoveryError", "Current revision catalogue row is missing.")
+                }
+                row = located
             }
             let url = root.appendingPathComponent(row.path)
             let metadata = try FileMetadata.read(at: url)
@@ -1856,8 +3363,10 @@ public final class ItemStore {
             }
             let revision = try RecordCodec.decode(bytes)
             try ItemSemantics.validate(revision)
-            guard revision.itemID == head.itemID, revision.revisionID == head.revisionID,
-                revision.supersedes == row.parentID, revision.fields["createdAt"]?.dateString == row.createdAt
+            guard revision.itemID == itemID, revision.revisionID == row.revisionID,
+                revision.supersedes == row.parentID,
+                revision.fields["createdAt"]?.dateString == row.createdAt,
+                revision.modifiedAt == row.modifiedAt, try revision.provenance == row.provenance
             else {
                 throw TractandaError(
                     "recoveryError", "Current revision body or indexed text is inconsistent.")
@@ -1865,16 +3374,33 @@ public final class ItemStore {
             let input = try PageCorpusInput(
                 storeID: canonicalStoreIdentity(creatingIfMissing: false), revision: revision)
             let provider = StoredPageCorpusProvider(contents: documentContents, incoming: nil)
-            try staging.putForRebuild(
-                revision, using: statements, corpusInput: input,
-                pageProvider: provider,
-                corpusBoundary: {
-                    try self.rebuildControl?.check()
-                    try self.rebuildControl?.pulse(phase: "indexingAuthenticatedPages")
-                    try self.requireIndexFilesystemCapacity(additionalBytes: 0)
-                })
+            // A newly published automatic record was already indexed atomically by append.
+            // Cold retained records still use the prepared insertion path exactly once.
+            if try staging.currentHeadSummary(revision.itemID)?.revisionID != revision.revisionID {
+                try staging.putForRebuild(
+                    revision, using: statements, corpusInput: input,
+                    pageProvider: provider,
+                    corpusBoundary: {
+                        try self.rebuildControl?.check()
+                        try self.rebuildControl?.pulse(phase: "indexingAuthenticatedPages")
+                        try self.requireIndexFilesystemCapacity(additionalBytes: 0)
+                    })
+            }
             guard try staging.textMatches(revision) else {
                 throw TractandaError("recoveryError", "Current revision indexing failed during rebuild.")
+            }
+            if !revisionProjectionEnabled {
+                let linear = try staging.verifiedLinearProjectionSnapshot(
+                    row: row, revision: revision,
+                    progress: { try self.rebuildControl?.graphProgress() })
+                let ready = try projectionState(for: linear)
+                try staging.replaceCurrentProjection(
+                    snapshot: linear, state: ready,
+                    policies: [
+                        .init(
+                            revisionID: revision.revisionID, classID: revision.classID,
+                            permissions: revision.fields["permissions"])
+                    ], policiesComplete: true)
             }
             try rememberHead(Self.residentHead(revision))
             if revision.fields["selection"] != nil || revision.fields["categoryParents"] != nil {
@@ -1888,13 +3414,99 @@ public final class ItemStore {
                 categoryHeads.append(revision)
             }
             if revision.classID == AccessConfiguration.classID {
-                guard recoveredConfiguration == nil else {
+                guard revisionProjectionEnabled || recoveredConfiguration == nil else {
                     throw TractandaError("recoveryError", "Multiple access configuration heads exist.")
                 }
                 recoveredConfiguration = try AccessConfiguration(revision.fields["accessConfiguration"]!)
             }
             clockDependent = clockDependent || Self.categoryUsesClock(revision)
-            cursor = head.itemID
+            cursor = itemID
+        }
+        if revisionProjectionEnabled {
+            var remaining = activeCategories
+            var depth: [String: Int] = [:]
+            var invalid: Set<String> = []
+            while !remaining.isEmpty {
+                let ready = remaining.filter {
+                    (categoryEdges[$0] ?? []).intersection(activeCategories).isDisjoint(with: remaining)
+                }
+                if ready.isEmpty {
+                    invalid.formUnion(remaining)
+                    break
+                }
+                for id in ready {
+                    let parents = (categoryEdges[id] ?? []).intersection(activeCategories)
+                    let level = 1 + (parents.compactMap { depth[$0] }.max() ?? 0)
+                    depth[id] = level
+                    if level > 32 || !parents.isDisjoint(with: invalid) { invalid.insert(id) }
+                    remaining.remove(id)
+                }
+            }
+            for id in deferredCategories {
+                if invalid.contains(id) {
+                    let snapshot = try staging.analyzeRevisionProjection(
+                        itemID: id,
+                        loadVerified: {
+                            try PooledCanonicalRecord.read(row: $0, root: self.root, ownerUID: self.ownerUID)
+                        },
+                        limits: revisionProjectionLimits,
+                        progress: { try self.rebuildControl?.graphProgress() })
+                    let policies = try projectionPolicies(snapshot, using: staging)
+                    let state = try projectionState(
+                        for: snapshot, status: .invariantConflict,
+                        resource: .init(
+                            code: "categoryCycle", phase: .analysis,
+                            message: "Known category-parent constraints require explicit resolution."))
+                    try staging.replaceCurrentProjection(
+                        snapshot: snapshot, state: state,
+                        policies: policies, policiesComplete: true)
+                    continue
+                }
+                let projected = try prepareRecoveredProjection(id, using: staging)
+                guard let revision = projected.revision else { continue }
+                let input = try PageCorpusInput(
+                    storeID: canonicalStoreIdentity(creatingIfMissing: false), revision: revision)
+                if try staging.currentHeadSummary(revision.itemID)?.revisionID != revision.revisionID {
+                    try staging.putForRebuild(
+                        revision, using: statements, corpusInput: input,
+                        pageProvider: StoredPageCorpusProvider(contents: documentContents, incoming: nil),
+                        corpusBoundary: { try self.rebuildControl?.graphProgress() })
+                }
+                guard try staging.textMatches(revision) else {
+                    throw TractandaError(
+                        "recoveryError", "Recovered category content does not match its canonical revision.")
+                }
+                try rememberHead(Self.residentHead(revision))
+                let size = try JSON.encode(revision).count
+                guard categoryHeads.count < Self.categoryWorkingSetLimit,
+                    size <= Self.categoryWorkingSetByteLimit - categoryBytes
+                else {
+                    throw TractandaError("resourceLimit", "Recovered category graph exceeds its working set.")
+                }
+                categoryBytes += size
+                categoryHeads.append(revision)
+                clockDependent = clockDependent || Self.categoryUsesClock(revision)
+            }
+        }
+        if peerIntake != nil {
+            var after: String?
+            while true {
+                let ids = try staging.authorityRetiredItemPage(after: after, limit: 128)
+                if ids.isEmpty { break }
+                for id in ids {
+                    after = id
+                    try staging.replaceCurrentProjection(
+                        snapshot: nil,
+                        state: ItemState(
+                            itemID: id, stateToken: nextProjectionStateToken(), status: .reviewRequired,
+                            detailsComplete: false,
+                            resource: .init(
+                                code: "authorityReviewRequired", phase: .analysis,
+                                message:
+                                    "No eligible current policy remains; administrator review is required.")),
+                        policies: [], policiesComplete: false)
+                }
+            }
         }
         historicalCache.removeAll(keepingCapacity: true)
         historicalOrder.removeAll(keepingCapacity: true)
@@ -1906,6 +3518,7 @@ public final class ItemStore {
         operations.removeAll(keepingCapacity: false)
         operationIDs.removeAll(keepingCapacity: false)
         accessConfiguration = recoveredConfiguration
+        if revisionProjectionEnabled { try refreshCurrentAccessConfigurations(using: staging) }
         let finalizationEnd = ProcessInfo.processInfo.systemUptime
         guard measurePhases else { return nil }
         return RecoveryPhaseMetrics(
@@ -1919,6 +3532,18 @@ public final class ItemStore {
     private static func categoryUsesClock(_ item: Revision) -> Bool {
         categoryUsesClock(item.fields, isDeleted: item.isDeleted)
     }
+    private static func classifyRecoveryFailure(_ error: Error, message: String) -> Error {
+        if error is CancellationError {
+            return TractandaError("cancelled", "Canonical recovery was cancelled.")
+        }
+        if let failure = error as? TractandaError,
+            ["resourceLimit", "cancelled", "rebuildNoProgress", "revisionProjectionRequired"].contains(
+                failure.code)
+        {
+            return failure
+        }
+        return TractandaError("recoveryError", "\(message): \(error)")
+    }
     private static func categoryUsesClock(_ fields: [String: ItemValue], isDeleted: Bool) -> Bool {
         guard !isDeleted, let selection = fields["selection"]?.map else { return false }
         return selection["timeWindow"] != nil
@@ -1927,7 +3552,10 @@ public final class ItemStore {
     private func loadRevision(_ revisionID: String) throws -> Revision? {
         do { return try loadRevisionUnchecked(revisionID) } catch {
             let code = (error as? TractandaError)?.code
-            if code != "indexTransient" && code != "indexResource", isCanonicalReady {
+            if ![
+                "indexTransient", "indexResource", "resourceLimit", "cancelled", "rebuildNoProgress",
+                "revisionProjectionRequired", "projectionRequired",
+            ].contains(code ?? ""), isCanonicalReady {
                 quarantineCheckpoint()
             }
             throw error
@@ -1970,7 +3598,8 @@ public final class ItemStore {
             revision.revisionID == revisionID, revision.itemID == location.itemID,
             revision.supersedes == location.parentID,
             revision.fields["actor"]?.string == location.actor,
-            revision.fields["operationID"]?.string == location.operationID
+            revision.fields["operationID"]?.string == location.operationID,
+            revision.modifiedAt == location.modifiedAt, try revision.provenance == location.provenance
         else {
             throw TractandaError("recoveryError", "Historical record identity changed: \(url.path)")
         }
@@ -2084,22 +3713,76 @@ public final class ItemStore {
         savedViewPageIDs = savedViewPages.values.reduce(0) { $0 + $1.count }
     }
 
+    private func retainedHistoricalRow(_ itemID: String, revisionID: String, index: ItemIndex) throws
+        -> ItemIndex.CatalogueRow?
+    {
+        if let row = try index.revision(itemID: itemID, revisionID: revisionID) { return row }
+        guard authorityIntakeEnabled, try index.authorityHasLocalHistoryAdmission(revisionID: revisionID),
+            let coordinator = peerIntake, let raw = try index.retainedAuthorityObject(id: revisionID),
+            raw.descriptor.kind == .item
+        else { return nil }
+        let node = try AuthorityRevision(originalBytes: coordinator.bytes(raw))
+        guard node.revision.itemID == itemID else { return nil }
+        return try authorityCatalogueRow(raw, node: node)
+    }
+    private func physicalHistoryCount(_ itemID: String, index: ItemIndex) throws -> Int {
+        if authorityIntakeEnabled && !authorityBootstrapPending {
+            return try index.authorityHistoricalCount(itemID: itemID)
+        }
+        return try index.revisionCount(itemID: itemID)
+    }
+    func historicalDispositions(for revisions: [Revision]) throws -> [String: HistoricalDisposition] {
+        guard authorityIntakeEnabled else { return [:] }
+        if accessContext == nil {
+            return try withAccess(forUID: ownerUID) { try historicalDispositions(for: revisions) }
+        }
+        guard revisions.count <= 512, isCanonicalReady, let index else {
+            throw TractandaError("resourceLimit", "Historical disposition envelope exceeds its window.")
+        }
+        var result: [String: HistoricalDisposition] = [:]
+        for revision in revisions {
+            if try index.currentProjection(itemID: revision.itemID)?.policiesComplete != true {
+                try requireAdministrator()
+            } else {
+                let policies = try index.currentPolicyWitnesses(itemID: revision.itemID)
+                if policies.isEmpty {
+                    try requireAdministrator()
+                } else if !canReadProjection(revision.itemID) {
+                    throw TractandaError("forbidden", "Current item access is denied.")
+                }
+            }
+            if try index.authorityHasLocalHistoryAdmission(revisionID: revision.revisionID),
+                try index.authorityDisposition(id: revision.revisionID)?.disposition != .eligible
+            {
+                result[revision.revisionID] = .demoted
+            }
+        }
+        return result
+    }
     public func get(_ itemID: String, revisionID: String? = nil) throws -> Revision {
         guard isCanonicalReady else {
             throw TractandaError(
                 "recoveryRequired", "Resolve canonical recovery errors before reading or writing.")
         }
         try Identifier.validate(itemID)
-        guard let head = try currentHead(itemID) else {
-            throw TractandaError("notFound", "Item or revision is unavailable.")
-        }
-        guard canRead(head) else { throw TractandaError("forbidden", "Item access is denied.") }
-        let revision: Revision?
-        if let revisionID {
-            guard let index, try index.revision(itemID: itemID, revisionID: revisionID) != nil else {
+        if revisionProjectionEnabled {
+            let projection = try itemState(itemID)
+            if revisionID == nil, projection.status != .ready {
+                throw TractandaError("itemUnresolved", "Current item projection is unresolved.")
+            }
+        } else {
+            guard let head = try currentHead(itemID) else {
                 throw TractandaError("notFound", "Item or revision is unavailable.")
             }
-            revision = try loadRevision(revisionID)
+            guard canRead(head) else { throw TractandaError("forbidden", "Item access is denied.") }
+        }
+        let revision: Revision?
+        if let revisionID {
+            guard let index, let row = try retainedHistoricalRow(itemID, revisionID: revisionID, index: index)
+            else {
+                throw TractandaError("notFound", "Item or revision is unavailable.")
+            }
+            revision = try PooledCanonicalRecord.read(row: row, root: root, ownerUID: ownerUID).revision
         } else {
             revision = try currentRevision(itemID)
         }
@@ -2113,23 +3796,72 @@ public final class ItemStore {
         guard let index else { throw TractandaError("indexUnavailable", "The text index is unavailable.") }
         return try index.textRow(id: itemID)
     }
-    public func history(_ itemID: String) throws -> [Revision] {
-        var current = try get(itemID)
-        var result = [current]
-        var seen: Set<String> = [current.revisionID]
-        while let previous = current.supersedes {
-            guard let index, try index.revision(itemID: itemID, revisionID: previous) != nil,
-                seen.insert(previous).inserted
-            else {
-                throw TractandaError("recoveryError", "Historical chain is incomplete or cyclic.")
+    private func walkPhysicalHistory(
+        _ itemID: String, using index: ItemIndex,
+        _ consume: (ItemIndex.CatalogueRow) throws -> Bool
+    ) throws {
+        if authorityIntakeEnabled && !authorityBootstrapPending {
+            var after: String?
+            while true {
+                let rows = try index.authorityHistoricalPage(
+                    itemID: itemID, afterRevisionID: after, limit: 128)
+                if rows.isEmpty { return }
+                for raw in rows {
+                    after = raw.descriptor.id
+                    guard
+                        let row = try retainedHistoricalRow(
+                            itemID, revisionID: raw.descriptor.id, index: index)
+                    else {
+                        throw TractandaError(
+                            "invalidAuthority", "Previously visible history original is missing.")
+                    }
+                    if try !consume(row) { return }
+                }
             }
-            guard let prior = try loadRevision(previous), prior.itemID == itemID else {
-                throw TractandaError("recoveryError", "Historical chain is incomplete.")
-            }
-            current = prior
-            result.append(current)
         }
-        return result
+        var cursor: (Int64, String)?
+        while true {
+            let condition = cursor == nil ? "" : " AND (modified_ticks,revision)<(CAST(? AS INTEGER),?)"
+            let bindings = [itemID] + (cursor.map { [String($0.0), $0.1] } ?? [])
+            let rows = try index.graphCatalogueRows(
+                where: "WHERE item=?\(condition) ORDER BY modified_ticks DESC,revision DESC",
+                bindings: bindings, limit: 128)
+            guard !rows.isEmpty else { return }
+            for row in rows {
+                guard try consume(row) else { return }
+                cursor = (try RevisionTimestamp(row.modifiedAt).ticks, row.revisionID)
+            }
+        }
+    }
+
+    public func history(_ itemID: String) throws -> [Revision] {
+        _ = try preparePooledHistory(itemID)
+        guard let index else { throw TractandaError("indexUnavailable", "History catalogue is unavailable.") }
+        let maximumBytes = 64 * 1024 * 1024
+        guard try physicalHistoryCount(itemID, index: index) <= 4096 else {
+            throw TractandaError("resourceLimit", "Use bounded history pages for this item.")
+        }
+        var output: [Revision] = []
+        var bytes = 0
+        try index.withCatalogueScanBudget {
+            try walkPhysicalHistory(itemID, using: index) { row in
+                guard row.size <= UInt64(maximumBytes - bytes),
+                    case let revision = try PooledCanonicalRecord.read(
+                        row: row, root: root, ownerUID: ownerUID
+                    ).revision, revision.itemID == itemID
+                else {
+                    throw TractandaError("resourceLimit", "Use bounded history pages for this item.")
+                }
+                let size = try JSON.encode(revision).count
+                guard size <= maximumBytes - bytes else {
+                    throw TractandaError("resourceLimit", "Use bounded history pages for this item.")
+                }
+                bytes += size
+                output.append(revision)
+                return true
+            }
+        }
+        return output
     }
     func historyPageBounded(_ itemID: String, position: Int, limit: Int) throws
         -> (list: [Revision], total: Int)
@@ -2137,53 +3869,37 @@ public final class ItemStore {
         guard position >= 0, (1...256).contains(limit) else {
             throw TractandaError("invalidArguments", "Invalid history page.")
         }
-        let headID = try preparePooledHistory(itemID)
+        _ = try preparePooledHistory(itemID)
         guard let index else { throw TractandaError("indexUnavailable", "History catalogue is unavailable.") }
-        func parent(of revisionID: String?) throws -> String? {
-            guard let revisionID else { return nil }
-            guard let row = try index.revision(itemID: itemID, revisionID: revisionID) else {
-                throw TractandaError("recoveryError", "Historical parent is unavailable.")
-            }
-            return row.parentID
-        }
-        var current: String? = headID
-        var slow: String? = headID
-        var fast: String? = headID
-        var list: [Revision] = []
-        var retainedBytes = 0
-        var total = 0
-        while let revisionID = current {
-            if total >= position && list.count < limit {
-                guard let row = try index.revision(itemID: itemID, revisionID: revisionID) else {
-                    throw TractandaError("recoveryError", "Historical page row is unavailable.")
-                }
-                guard row.size <= UInt64(pooledRecordByteLimit - retainedBytes) else {
+        let total = try physicalHistoryCount(itemID, index: index)
+        if position >= total { return ([], total) }
+        var inspected = 0
+        var output: [Revision] = []
+        var bytes = 0
+        try index.withCatalogueScanBudget {
+            try walkPhysicalHistory(itemID, using: index) { row in
+                defer { inspected += 1 }
+                if inspected < position { return true }
+                guard output.count < limit else { return false }
+                guard row.size <= UInt64(pooledRecordByteLimit - bytes),
+                    case let revision = try PooledCanonicalRecord.read(
+                        row: row, root: root, ownerUID: ownerUID
+                    ).revision, revision.itemID == itemID
+                else {
                     throw TractandaError("resourceLimit", "History page exceeds its byte window.")
-                }
-                guard let revision = try loadRevision(revisionID), revision.itemID == itemID else {
-                    throw TractandaError("recoveryError", "Historical page record is unavailable.")
                 }
                 let size = try JSON.encode(revision).count
-                guard size <= pooledRecordByteLimit - retainedBytes else {
+                guard size <= pooledRecordByteLimit - bytes else {
                     throw TractandaError("resourceLimit", "History page exceeds its byte window.")
                 }
-                retainedBytes += size
-                list.append(revision)
-            }
-            guard total < Int.max else { throw TractandaError("resourceLimit", "History count overflowed.") }
-            total += 1
-            current = try parent(of: revisionID)
-            slow = try parent(of: slow)
-            fast = try parent(of: try parent(of: fast))
-            if let slow, slow == fast {
-                throw TractandaError("recoveryError", "Historical chain contains a cycle.")
+                bytes += size
+                output.append(revision)
+                return output.count < limit
             }
         }
-        guard try index.revisionCount(itemID: itemID) == total else {
-            throw TractandaError("recoveryError", "Historical catalogue has disconnected rows.")
-        }
-        return (list, total)
+        return (output, total)
     }
+
     public func candidates(text: String? = nil, includeDeleted: Bool = false) throws -> [Revision] {
         try candidates(text: text, includeDeleted: includeDeleted, restrictedTo: nil, candidatePlan: .all)
     }
@@ -2688,6 +4404,7 @@ public final class ItemStore {
         try stagingByteQuota.require(additionalBytes: additionalBytes)
     }
     func prepareAttachmentIntegrity(uploadID: String) throws -> AttachmentIntegrityWork? {
+        try requireActivePublishingOrigin()
         let upload = try attachmentUpload(uploadID)
         if let code = upload.failureCode {
             throw TractandaError(code, "Upload integrity verification failed; abort and begin again.")
@@ -2821,6 +4538,7 @@ public final class ItemStore {
                 uploadID: nil, attachment: descriptor, offset: descriptor.byteCount,
                 chunkBytes: 262_144, expiresAt: nil, committed: AttachmentCommitResult(replay))
         }
+        try requireActivePublishingOrigin()
         try requireEdit(current, changesPermissions: false)
         guard current.revisionID == request.expectedRevisionID else {
             throw TractandaError("revisionConflict", "The item changed; reconcile before beginning upload.")
@@ -2880,6 +4598,7 @@ public final class ItemStore {
             expiresAt: Timestamp.format(expiration), committed: nil)
     }
     public func appendAttachment(uploadID: String, offset: Int64, data: Data) throws -> Int64 {
+        try requireActivePublishingOrigin()
         if accessContext == nil {
             return try withAccess(forUID: ownerUID) {
                 try appendAttachment(uploadID: uploadID, offset: offset, data: data)
@@ -2908,6 +4627,15 @@ public final class ItemStore {
             }
         }
         let upload = try attachmentUpload(uploadID)
+        if let prior = try priorOperation(upload.request.operationID, uid: accessContext!.uid) {
+            let request = try attachmentCommitRequest(upload.request, descriptor: upload.descriptor)
+            guard prior.fields["requestIdentity"]?.string == (try JSON.encode(request).base64EncodedString())
+            else {
+                throw TractandaError("operationMismatch", "Committed upload differs from exact retry.")
+            }
+            return try commitInternal(request)
+        }
+        try requireActivePublishingOrigin()
         if let code = upload.failureCode {
             throw TractandaError(code, "Upload integrity verification failed; abort and begin again.")
         }
@@ -2938,7 +4666,8 @@ public final class ItemStore {
         let revision = try get(itemID, revisionID: revisionID)
         return AttachmentListResult(
             itemID: itemID, revisionID: revision.revisionID,
-            attachments: try AttachmentDescriptor.descriptors(in: revision.fields))
+            attachments: try AttachmentDescriptor.descriptors(in: revision.fields),
+            storeID: try canonicalStoreIdentity(creatingIfMissing: false))
     }
     public func attachmentContent(
         itemID: String, revisionID: String? = nil, attachmentID: String, offset: Int64 = 0,
@@ -2956,7 +4685,8 @@ public final class ItemStore {
         let next = offset + Int64(bytes.count)
         return AttachmentContentResult(
             attachment: descriptor, offset: offset, nextOffset: next,
-            isComplete: next == descriptor.byteCount, data: bytes)
+            isComplete: next == descriptor.byteCount, data: bytes,
+            storeID: try canonicalStoreIdentity(creatingIfMissing: false))
     }
     public func detachAttachment(
         itemID: String, expectedRevisionID: String, attachmentID: String, operationID: String
@@ -3459,9 +5189,88 @@ public final class ItemStore {
         return result
     }
 
+    public func prepareCapture(_ preparation: CapturePreparation, actorUID: UInt32? = nil) throws
+        -> CapturePlan
+    {
+        if accessContext == nil {
+            return try withAccess(forUID: actorUID ?? ownerUID) {
+                try prepareCapture(preparation, actorUID: actorUID)
+            }
+        }
+        let request = preparation.request
+        let base: Revision?
+        if request.action == .create {
+            guard request.itemID == nil, request.expectedRevisionID == nil, request.classID != nil else {
+                throw TractandaError("invalidArguments", "Create needs classID and server-allocated IDs.")
+            }
+            base = nil
+        } else {
+            guard let id = request.itemID, let expected = request.expectedRevisionID else {
+                throw TractandaError(
+                    "invalidArguments", "Capture edits require itemID and expectedRevisionID.")
+            }
+            let current = try get(id)
+            try requireEdit(
+                current,
+                changesPermissions: request.changes["permissions"] != nil
+                    || request.unset.contains("permissions"))
+            guard current.revisionID == expected else {
+                throw TractandaError("revisionConflict", "The item changed; reconcile the capture edit.")
+            }
+            base = current
+        }
+        let at = preparation.at ?? Timestamp.now()
+        let categories = try readableCategoryHeads()
+        let decisions = try categoryOverrideIndex(categoryIDs: Set(categories.map(\.itemID)))
+        return try InlineCapture.prepare(
+            request, base: base, categories: categories, at: at,
+            isExcluded: { id in
+                guard let base else { return false }
+                return try decisions.decision(for: base, categoryID: id)?.decision == "exclude"
+            })
+    }
+
+    public func commitCapture(_ plan: CapturePlan, actorUID: UInt32? = nil) throws -> CommitResult {
+        guard try JSON.encode(plan).count <= InlineCapture.maximumPlanBytes else {
+            throw TractandaError("captureLimit", "Capture plan exceeds its transport budget.")
+        }
+        if accessContext == nil {
+            return try withAccess(forUID: actorUID ?? ownerUID) {
+                try commitCapture(plan, actorUID: actorUID)
+            }
+        }
+        let uid = actorUID ?? accessContext!.uid
+        guard uid == accessContext!.uid else {
+            throw TractandaError("forbidden", "Capture actor must match the authenticated request.")
+        }
+        // Canonical receipt is checked before source/category guards: retries never reanchor.
+        if try priorOperation(plan.commitRequest.operationID, uid: uid) != nil {
+            return try commit(plan.commitRequest, actorUID: uid)
+        }
+        guard plan.canCommit else {
+            throw TractandaError("captureReviewRequired", "Resolve every capture issue before committing.")
+        }
+        for (id, revisionID) in plan.categoryRevisionIDs {
+            let category = try get(id)
+            guard !category.isDeleted, category.fields["selection"] != nil,
+                category.revisionID == revisionID
+            else {
+                throw TractandaError("captureChanged", "A captured category changed; prepare again.")
+            }
+        }
+        let current = try prepareCapture(
+            CapturePreparation(request: plan.request, at: plan.evaluatedAt), actorUID: uid)
+        guard current == plan else {
+            throw TractandaError(
+                "captureChanged", "Capture resolution or permissions changed; prepare again.")
+        }
+        return try commit(plan.commitRequest, actorUID: uid)
+    }
+
     public func commit(
         _ request: CommitRequest, actorUID: UInt32? = nil, allowBlockingAttachmentCopy: Bool = true
     ) throws -> CommitResult {
+        guard !targetProvisioningPending else { throw PeerEnrollmentActivation.failure("Pending target cannot author ordinary content.") }
         guard request.changes["attachments"] == nil, !request.unset.contains("attachments") else {
             throw TractandaError(
                 "invalidAttachment", "Use attachment lifecycle operations to change originals.")
@@ -3513,16 +5322,24 @@ public final class ItemStore {
         // Canonical request bytes are retained rather than relying on a disposable receipt table.
         let identity = try JSON.encode(request).base64EncodedString()
         if let previous = try priorOperation(request.operationID, uid: uid) {
-            guard let previousHead = try currentHead(previous.itemID), canRead(previousHead) else {
-                throw TractandaError("forbidden", "Item access is denied.")
+            if revisionProjectionEnabled {
+                guard canReadProjection(previous.itemID) else {
+                    throw TractandaError("forbidden", "Item access is denied.")
+                }
+            } else {
+                guard let previousHead = try currentHead(previous.itemID), canRead(previousHead) else {
+                    throw TractandaError("forbidden", "Item access is denied.")
+                }
             }
             guard previous.fields["requestIdentity"]?.string == identity else {
                 throw TractandaError(
                     "operationMismatch", "This operationID already committed a different edit.")
             }
             return CommitResult(
-                revision: previous, wasReplayed: true, isIndexReady: index != nil, warnings: [])
+                revision: previous, wasReplayed: true, isIndexReady: index != nil, warnings: [],
+                itemState: revisionProjectionEnabled ? (try? itemState(previous.itemID)) : nil)
         }
+        try requireActivePublishingOrigin()
         guard Set(request.unset).count == request.unset.count,
             Set(request.changes.keys).isDisjoint(with: request.unset),
             Self.managed.isDisjoint(with: request.changes.keys), Self.managed.isDisjoint(with: request.unset)
@@ -3627,14 +5444,27 @@ public final class ItemStore {
                 fields["attachmentDocument"] = .list(try remappedDocuments.map { try $0.itemValue })
             }
         }
-        let now = Timestamp.now()
+        let now = publicationClockForTesting()
+        let modifiedAt: String
+        if let base, !isNew {
+            let knownFloor = try index?.graphCatalogueRows(
+                where: "WHERE item=? ORDER BY modified_ticks DESC,revision DESC",
+                bindings: [base.itemID], limit: 1
+            ).first?.modifiedAt
+            modifiedAt = try RevisionPublicationClock.after(
+                [base.modifiedAt] + (knownFloor.map { [$0] } ?? []), now: { now })
+        } else {
+            modifiedAt = now
+        }
         let itemID = isNew ? try makePersistentUUID().uuidString.lowercased() : base!.itemID
         let revisionID = try makePersistentUUID().uuidString.lowercased()
         let existingItem = try currentHead(itemID)
+        let existingItemCount = try index?.revisionCount(itemID: itemID) ?? 0
+        let revisionItemCount = try index?.revisionCount(itemID: revisionID) ?? 0
         let existingRevision = try currentHead(revisionID)
         let existingRevisionLocation = try index?.revision(revisionID)
-        guard !isNew || existingItem == nil, existingRevisionLocation == nil,
-            existingRevision == nil, itemID != revisionID
+        guard !isNew || (existingItem == nil && existingItemCount == 0), existingRevisionLocation == nil,
+            existingRevision == nil, revisionItemCount == 0, itemID != revisionID
         else {
             throw TractandaError(
                 "identifierCollision",
@@ -3646,14 +5476,25 @@ public final class ItemStore {
         fields["schemaVersion"] =
             request.action == .retype ? .integer(1) : base?.fields["schemaVersion"] ?? .integer(1)
         fields["createdAt"] = isNew ? .date(now) : base!.fields["createdAt"]!
-        fields["modifiedAt"] = .date(now)
+        fields["modifiedAt"] = .date(modifiedAt)
         fields["actor"] = .text(actor)
         fields["operationID"] = .text(request.operationID)
         fields["requestIdentity"] = .text(identity)
+        fields.removeValue(forKey: "revisionAncestry")
         if !isNew { fields["supersedes"] = .text(base!.revisionID) }
         for (name, value) in request.changes { fields[name] = value }
         for name in request.unset { fields.removeValue(forKey: name) }
         let isConfiguration = fields["classID"]?.string == AccessConfiguration.classID
+        if revisionProjectionEnabled && accessConfigurationProofUnavailable {
+            throw TractandaError(
+                "configurationConflict", "Establish current store authority before publishing edits.")
+        }
+        if revisionProjectionEnabled && accessConfigurationAmbiguous && !isConfiguration
+            && (isNew || request.changes["permissions"] != nil || request.unset.contains("permissions"))
+        {
+            throw TractandaError(
+                "configurationConflict", "Resolve access divergence before creating or changing sharing.")
+        }
         if isConfiguration || base?.classID == AccessConfiguration.classID {
             try requireAdministrator()
             guard request.action != .copy, request.action != .retype else {
@@ -3681,7 +5522,7 @@ public final class ItemStore {
                 }
             }
         }
-        let revision = try Revision(fields: fields)
+        var revision = try Revision(fields: fields)
         try ItemSemantics.validate(revision)
         let previousParents = try base.map(CategoryHierarchy.parents) ?? []
         for id in try CategoryHierarchy.parents(of: revision) where !previousParents.contains(id) {
@@ -3744,6 +5585,20 @@ public final class ItemStore {
                 throw TractandaError(
                     "invalidLearningFeedback", "Feedback must refer to an earlier revision of this item.")
             }
+            if revisionProjectionEnabled, let base {
+                guard
+                    try feedback.revisionID == base.revisionID
+                        || (try index?.withCatalogueScanBudget {
+                            try index!.graphHasProperAncestor(
+                                source: base.revisionID,
+                                target: feedback.revisionID, progress: nil)
+                        }) == true
+                else {
+                    throw TractandaError(
+                        "invalidLearningFeedback",
+                        "Feedback must refer to a causally earlier revision of this item.")
+                }
+            }
         }
         // Type and reference validity is checked at commit, but later missing targets remain errors.
         let previousHolders = try base.map { try RoleSemantics.holdings($0).map(\.holder) } ?? []
@@ -3756,9 +5611,27 @@ public final class ItemStore {
                     "invalidHolder", "A holder must reference an available, concrete non-role person.")
             }
         }
+        let localIdentity = try ReplicaIdentity.initialize(
+            root: root, storeID: canonicalStoreIdentity(creatingIfMissing: false), ownerUID: ownerUID,
+            hasModernOrigins: index?.hasModernRevisionOrigins() ?? false)
+        replicaID = localIdentity.replicaID
+        let semantic = RevisionMerge.semanticFields(revision)
+        let oldSemantic = isNew ? [:] : base.map(RevisionMerge.semanticFields) ?? [:]
+        let addressed = Set(request.changes.keys).union(request.unset)
+        let changed = Set(semantic.keys).union(oldSemantic.keys).filter { semantic[$0] != oldSemantic[$0] }
+        let normalized = isNew ? Set(semantic.keys) : Set(changed).union(addressed)
+        let ancestry = try RevisionProvenance(
+            kind: .authored, originReplicaID: localIdentity.replicaID,
+            parents: isNew ? [] : [base!.revisionID],
+            writtenFields: normalized.filter { semantic[$0] != nil }.sorted(),
+            unsetFields: normalized.filter { semantic[$0] == nil }.sorted(), frontier: [])
+        var emittedFields = revision.fields
+        emittedFields["revisionAncestry"] = ancestry.itemValue
+        revision = try Revision(fields: emittedFields, formatVersion: 2)
         let data = try RecordCodec.encode(revision)
-        guard data.count <= 8 * 1024 * 1024 else {
-            throw TractandaError("limit", "Record exceeds 8 MiB, including metadata and retry intent.")
+        guard data.count <= min(8 * 1024 * 1024, canonicalRecordByteLimitForTesting) else {
+            throw TractandaError(
+                "resourceLimit", "Record exceeds its byte window, including metadata and retry intent.")
         }
         let summaryBytes = try JSON.encode(
             revision.fields.filter {
@@ -3778,7 +5651,58 @@ public final class ItemStore {
                 revision.itemID))
         try ensureDirectory(folder)
         let path = folder.appendingPathComponent(revision.revisionID + ".tractanda").path
+        if revisionProjectionEnabled {
+            try beforeProjectionCommitAuthorityForTesting?()
+            try withAccess(forUID: uid) {
+                guard accessContext?.account?.name == context.account?.name else {
+                    throw TractandaError(
+                        "principalChanged", "Authenticated principal changed before publication.")
+                }
+                if let base {
+                    let current = try get(base.itemID)
+                    guard current.revisionID == request.expectedRevisionID else {
+                        throw TractandaError(
+                            "revisionConflict", "Current projection changed before publication.")
+                    }
+                    if request.action != .copy {
+                        try requireEdit(
+                            current,
+                            changesPermissions: request.changes["permissions"] != nil
+                                || request.unset.contains("permissions"))
+                    }
+                }
+                if isConfiguration { try requireAdministrator() }
+                if let value = revision.fields["permissions"], let fresh = accessContext {
+                    let permissions = try ItemPermissions(value)
+                    try permissions.validate(using: fresh.resolver)
+                    if !isAdministrator, let account = fresh.account {
+                        guard try permissions.allows(4, for: account, using: fresh.resolver),
+                            try !isNew || fresh.resolver.userID(permissions.owner) == account.uid
+                        else {
+                            throw TractandaError(
+                                "forbidden", "Current authority does not allow this publication.")
+                        }
+                    }
+                }
+                if isCategoryRecord {
+                    guard try !knownCategoryConstraintConflicts(replacing: revision).contains(revision.itemID)
+                    else {
+                        throw TractandaError(
+                            "categoryCycle", "Publication conflicts with known category constraints.")
+                    }
+                }
+            }
+        }
+        guard let publicationIndex = index, try publicationIndex.acceptedGraphProofIsCurrent() else {
+            throw TractandaError(
+                "projectionRequired", "Accepted graph proof must be rebuilt before publication.")
+        }
         let markerPreviouslyDirty = StoreCheckpoint.isDirty(root: root)
+        let localAuthorityPackage = try sealLocalAuthority(
+            revision, data: data, path: path, index: publicationIndex)
+        try CanonicalReaderRequirement.beforePublication(
+            root: root, ownerUID: ownerUID, format: revision.formatVersion,
+            beforePersist: beforeCanonicalReaderRequirementForTesting)
         try StoreCheckpoint.markDirty(root: root)
         let actualPublish = data.withUnsafeBytes { tractanda_publish(path, $0.baseAddress, $0.count) }
         let published = publishResultOverrideForTesting ?? actualPublish
@@ -3796,7 +5720,7 @@ public final class ItemStore {
             createdAt: revision.fields["createdAt"]?.dateString ?? "",
             feedbackRevisionIDs: (revision.fields["learningFeedback"]?.map?.values.compactMap {
                 try? LearningFeedback($0).revisionID
-            } ?? []))
+            } ?? []), modifiedAt: revision.modifiedAt, provenance: ancestry)
         let previousResident = try currentHead(revision.itemID)
         let nextResident = Self.residentHead(revision)
         if isConfiguration {
@@ -3832,7 +5756,7 @@ public final class ItemStore {
             || base?.classID == "PersonalStateItem"
         let committedFields = changedFields.union([
             "revisionID", "modifiedAt", "actor", "operationID", "requestIdentity", "supersedes",
-            "schemaVersion",
+            "schemaVersion", "revisionAncestry",
         ])
         invalidateSavedViewPages(
             changedFields: Set(committedFields.map { "field:" + metadataKey($0) }),
@@ -3858,9 +5782,21 @@ public final class ItemStore {
             guard let index else { throw TractandaError("indexUnavailable", "Index requires rebuilding.") }
             try index.execute("BEGIN IMMEDIATE")
             do {
-                try index.put(revision, corpus: indexedCorpus)
-                try index.upsertCatalogue(newLocation.catalogueRow(revisionID: revision.revisionID))
+                try finishLocalAuthority(localAuthorityPackage, index: index)
+                try index.appendValidatedLocal(
+                    row: newLocation.catalogueRow(revisionID: revision.revisionID), revision: revision,
+                    parent: isNew ? nil : base,
+                    expectedRepresentativeID: isNew ? nil : base?.revisionID,
+                    state: readyProjectionState(revision),
+                    policies: [
+                        .init(
+                            revisionID: revision.revisionID, classID: revision.classID,
+                            permissions: revision.fields["permissions"])
+                    ], corpus: indexedCorpus)
                 try index.execute("COMMIT")
+                if isConfiguration, revisionProjectionEnabled {
+                    try refreshCurrentAccessConfigurations(using: index)
+                }
                 if Self.categoryUsesClock(revision) || base.map(Self.categoryUsesClock) == true {
                     clockDependentCategories = try index.hasClockDependentCategories()
                 }
@@ -3893,7 +5829,8 @@ public final class ItemStore {
         }
         return CommitResult(
             revision: revision, wasReplayed: false, isIndexReady: index != nil && isCanonicalReady,
-            warnings: warnings)
+            warnings: warnings, itemState: revisionProjectionEnabled ? (try? itemState(revision.itemID)) : nil
+        )
     }
 
     public func rebuildIndex() throws { try rebuildIndex(control: nil) }
@@ -3924,6 +5861,8 @@ public final class ItemStore {
         // replacement catalogue is durable, the previous clean catalogue must not be reused.
         try StoreCheckpoint.markDirty(root: root)
         isCanonicalReady = false
+        try attachmentPayloads.preparePlacement()
+        try documentContents.preparePlacement()
         try control?.pulse(phase: "verifyingCanonicalClosure")
         if let index { try index.closeChecked() }
         index = nil
@@ -3935,9 +5874,12 @@ public final class ItemStore {
         let destination = indexDirectory.appendingPathComponent("items.sqlite")
         var temporaryIsClosed = false
         defer {
-            if temporaryIsClosed { try? FileManager.default.removeItem(at: temporary) }
+            if temporaryIsClosed, FileManager.default.fileExists(atPath: temporary.path) {
+                try? FileManager.default.removeItem(at: temporary)
+            }
         }
         let fresh = try ItemIndex(path: temporary.path, create: true)
+        try recoveryCatalogueForTesting?(fresh)
         try fresh.execute("BEGIN IMMEDIATE")
         let statements = try fresh.makeRebuildStatements()
         defer { statements.close() }
@@ -3978,8 +5920,28 @@ public final class ItemStore {
             throw TractandaError("indexError", "Cannot replace disposable index.")
         }
         index = try ItemIndex(path: destination.path, create: false)
-        if let index { installIndexFailureHandler(index) }
+        guard let installed = index, let validated = try installed.validatedCatalogue(identity: identity)
+        else {
+            throw TractandaError("projectionRequired", "Rebuilt catalogue checkpoint cannot be admitted.")
+        }
+        guard try installed.hasCompleteCurrentProjectionCheckpoint() else {
+            throw TractandaError("projectionRequired", "Rebuilt current projection cache is incomplete.")
+        }
+        guard
+            try installed.resumeAcceptedGraphProofFromCheckpoint(
+                validated: validated, requireLinearProjection: !revisionProjectionEnabled)
+        else {
+            throw TractandaError("projectionRequired", "Rebuilt accepted graph proof cannot be resumed.")
+        }
+        installIndexFailureHandler(installed)
         try StoreCheckpoint.syncDirectory(indexDirectory)
+        if let coordinator = peerIntake, replicaID != nil {
+            try coordinator.withOperation(recovery: true) {
+                try finishAuthorityDispositionEffects(coordinator: coordinator, index: installed)
+                try ensureInitialAuthorityVisibility(coordinator: coordinator, index: installed)
+                try drainAuthorityVisibility(coordinator: coordinator, index: installed)
+            }
+        }
         if StoreCheckpoint.isDirty(root: root) {
             try control?.authorizePublication()
             try beforeCheckpointClear?()
@@ -4096,6 +6058,2805 @@ public final class ItemStore {
     }
 }
 
+// Metadata-only trusted peer intake. These methods are internal and have no Service route.
+extension ItemStore {
+    private func sealLocalAuthority(
+        _ revision: Revision, data: Data, path: String, index: ItemIndex,
+        additionalControls: [AuthorityRecord] = [], onSealed: (() -> Void)? = nil
+    ) throws
+        -> String?
+    {
+        try requireActivePublishingOrigin()
+        guard let coordinator = peerIntake else { return nil }
+        _ = try AuthorityRevision(originalBytes: data)
+        guard !authorityCatchupActive else {
+            throw TractandaError(
+                "authorityReconciliationRequired",
+                "Finish affected authority catch-up before freezing a new source cut.")
+        }
+        guard authorityExistingHistoryAdmitted else {
+            throw TractandaError(
+                "authorityBootstrapRequired",
+                "Explicitly pin the existing history before authority-aware local publication.")
+        }
+        try CanonicalReaderRequirement.beforeAuthorityPublication(root: root, ownerUID: ownerUID)
+        let provenance = try revision.provenance!
+        func binding(_ id: String) throws -> ItemValue {
+            guard let row = try index.revision(id) else {
+                throw TractandaError("missingDependencies", "Local authority parent is missing.")
+            }
+            return .object([
+                "itemID": .text(row.itemID), "revisionID": .text(id),
+                "sha256": .text(row.digest.map { String(format: "%02x", $0) }.joined()),
+            ])
+        }
+        try index.initializeAuthorityControlSchema()
+        let controlActor = accessContext?.account?.name ?? "uid:\(accessContext?.uid ?? ownerUID)"
+        let cutDraft = try coordinator.prepareSourceCut(
+            index: index, origin: provenance.originReplicaID, actor: controlActor)
+        let evidence: AuthorityRecord?
+        if provenance.kind == .automaticMerge {
+            evidence = nil
+        } else {
+            let context = accessContext
+            let account = context?.account ?? (try? accounts.user(forUID: context?.uid ?? ownerUID))
+            let principal = account?.name ?? "uid:\(context?.uid ?? ownerUID)"
+            var groups: [String: ItemValue] = [:]
+            var names = Set(currentAccessConfigurations.flatMap(\.groups))
+            names.insert(AccessConfiguration.defaultAdministratorGroup)
+            names.formUnion(currentAccessConfigurations.compactMap(\.administratorGroup))
+            if let account { names.insert(account.primaryGroupName) }
+            if let value = revision.fields["permissions"] {
+                let permissions = try ItemPermissions(value)
+                names.insert(permissions.group)
+                names.formUnion(permissions.groups.keys)
+            }
+            for name in names {
+                let actual = accessConfiguration?.groupAliases[name] ?? name
+                if let group = try? accounts.groupID(named: actual), account?.groupIDs.contains(group) == true
+                {
+                    groups[actual] = .integer(Int64(group))
+                }
+            }
+            if let account {
+                var administrationGroups = Set(currentAccessConfigurations.compactMap(\.administratorGroup))
+                administrationGroups.insert(AccessConfiguration.defaultAdministratorGroup)
+                for name in administrationGroups {
+                    if let gid = try? accounts.groupID(named: name), account.groupIDs.contains(gid) {
+                        groups[name] = .integer(Int64(gid))
+                    }
+                }
+            }
+            var aliases: [String: ItemValue] = [:]
+            for configuration in currentAccessConfigurations {
+                for (name, target) in configuration.userAliases.merging(
+                    configuration.groupAliases, uniquingKeysWith: { left, right in left == right ? left : "" }
+                ) {
+                    guard !target.isEmpty else {
+                        throw TractandaError(
+                            "resourceLimit", "Source alias namespaces need a separate authority profile.")
+                    }
+                    aliases[name] = .text(target)
+                }
+            }
+            var admissions: [ItemValue] = []
+            if let summary = try index.currentHeadSummary(classID: AccessConfiguration.classID) {
+                admissions = [try binding(summary.revisionID)]
+            }
+            let frontier = try index.currentProjection(itemID: revision.itemID)?.state.frontier ?? []
+            evidence = try AuthorityRecord(
+                recordID: makePersistentUUID().uuidString.lowercased(),
+                storeID: coordinator.storeID, originReplicaID: provenance.originReplicaID,
+                kind: .authoredEvidence, parentAuthorityIDs: cutDraft.cut.map { [$0.recordID] } ?? [],
+                actorPrincipal: principal, createdAt: Timestamp.now(),
+                payload: [
+                    "target": .object([
+                        "itemID": .text(revision.itemID), "revisionID": .text(revision.revisionID),
+                        "sha256": .text(AuthorityRecordCodec.sha256(data)),
+                    ]),
+                    "parents": .list(provenance.parents.map(ItemValue.text)),
+                    "frontier": .list(frontier.map(ItemValue.text)),
+                    "itemPolicies": .list(try provenance.parents.map(binding)),
+                    "admissionPolicies": .list(admissions), "principal": .text(principal),
+                    "sourceUID": .integer(Int64(context?.uid ?? ownerUID)), "groups": .object(groups),
+                    "sourceAdministration": try sourceAdministration().itemValue,
+                    "aliases": .object(aliases),
+                    "rights": .list(
+                        (context?.isAdministrator == true
+                            ? ["administrator", "read", "write"] : ["read", "write"]).map(ItemValue.text)),
+                    "evaluated": .boolean(true),
+                    "intent": .object([
+                        "writtenFields": .list(provenance.writtenFields.map(ItemValue.text)),
+                        "unsetFields": .list(provenance.unsetFields.map(ItemValue.text)),
+                    ]),
+                    "acceptedAuthority": .list([]),
+                    "sourceControl": .list(cutDraft.cut.map { [$0.itemValue] } ?? []),
+                ])
+        }
+        let relative = String(path.dropFirst(root.path.count + 1)).split(separator: "/").map(String.init)
+        guard relative.count == 8, relative[0] == "items" else {
+            throw TractandaError("invalidAuthority", "Local publication path differs.")
+        }
+        var sealed = false
+        do {
+            return try coordinator.stageLocal(
+                revision: revision, bytes: data, evidence: evidence,
+                contextToken: peerIntakeContextToken(), arrivalMinute: relative[1...5].joined(separator: "/"),
+                localItemPath: relative.joined(separator: "/"),
+                controls: additionalControls
+                    + coordinator.localControlRecords(
+                        revision: revision, bytes: data, evidence: evidence,
+                        draft: cutDraft, origin: provenance.originReplicaID, actor: controlActor,
+                        causeKey: additionalControls.first(where: { $0.kind == .reconciliationWitness }).map {
+                            try index.authorityReconciliationCauseKey(
+                                itemID: revision.itemID, frontier: provenance.frontier,
+                                causes: AuthorityStore.VerifiedReconciliationPlan(
+                                    witness: AuthorityRecordCodec.decode(AuthorityRecordCodec.encode($0))
+                                ).causes)
+                        }),
+                afterSeal: {
+                    sealed = true
+                    onSealed?()
+                })
+        } catch {
+            if sealed { quarantineCheckpoint() }
+            throw error
+        }
+    }
+    private func finishLocalAuthority(_ packageID: String?, index: ItemIndex) throws {
+        guard let packageID, let coordinator = peerIntake else { return }
+        try index.initializeAuthoritySchema()
+        try coordinator.retainSealed(packageID, index: index)
+        try validateAuthorityControls(
+            packageID: packageID, coordinator: coordinator, index: index, localUnit: true)
+        try coordinator.journal.applied(packageID)
+    }
+    private func requirePeerIntake() throws -> PeerIntakeCoordinator {
+        guard authorityIntakeEnabled, let peerIntake else {
+            throw TractandaError(
+                "peerIntakeDisabled", "Metadata intake is disabled; no listener or public import exists.")
+        }
+        return peerIntake
+    }
+    /// Actual private runtime readiness; reading this never enables clustering.
+    private func peerClockRuntimeContext() throws -> String? {
+        guard authorityIntakeEnabled, isCanonicalReady, let peerIntake,
+            let configuration = try peerIntake.configuration(), !configuration.peers.isEmpty
+        else { return nil }
+        return AuthorityRecordCodec.sha256(try JSON.encode(configuration))
+    }
+    func preparePeerClockSample(
+        monotonicNow: Double, interval: Double, configuration: PeerClockHealth.Configuration
+    ) throws -> (String, PeerClockHealth.Configuration)? {
+        guard let context = try peerClockRuntimeContext() else { return nil }
+        if peerClockHealth == nil { peerClockHealth = try PeerClockHealth(configuration: configuration) }
+        guard peerClockHealth?.schedule(monotonicNow: monotonicNow, isIdle: true, interval: interval) == .due,
+            let health = peerClockHealth
+        else { return nil }
+        return (context, health.configuration)
+    }
+    func finishPeerClockSample(
+        context: String, sample: PeerClockHealth.Sample?, monotonicNow: Double, nextInterval: Double
+    ) throws {
+        guard context == (try peerClockRuntimeContext()) else { return }
+        if let sample {
+            _ = peerClockHealth?.recordSample(
+                monotonicNow: monotonicNow, offset: sample.offset, uncertainty: sample.uncertainty,
+                nextInterval: nextInterval)
+        } else {
+            _ = peerClockHealth?.recordUnavailable(monotonicNow: monotonicNow, nextInterval: nextInterval)
+        }
+    }
+    func peerIntakeContext(peerID: String) throws -> PeerPackage.Context {
+        try requirePeerIntake().context(peerID: peerID)
+    }
+    func peerIntakeContextToken() throws -> String {
+        let coordinator = try requirePeerIntake()
+        let configuration = try coordinator.configuration()
+        let configurationDigest = try configuration.map { AuthorityRecordCodec.sha256(try JSON.encode($0)) }
+        return AuthorityRecordCodec.sha256(
+            try JSON.encode(
+                ItemValue.object([
+                    "generation": .text(generation), "policyEpoch": .text(String(accessPolicyEpoch)),
+                    "configuration": .text(configurationDigest ?? "unconfigured"),
+                    "admissions": .text(try coordinator.originAdmissionFrontier()),
+                ])))
+    }
+    var peerLifecycleBoundaryForTesting: ((PeerLifecycle.Boundary) throws -> Void)? {
+        get { peerIntake?.lifecycleBoundaryForTesting }
+        set { peerIntake?.lifecycleBoundaryForTesting = newValue }
+    }
+    func configurePeerIntake(peers: [PeerPackage.Context]) throws {
+        if accessContext == nil {
+            return try withAccess(forUID: ownerUID) { try configurePeerIntake(peers: peers) }
+        }
+        try requireAdministrator()
+        let coordinator = try requirePeerIntake()
+        guard peers.allSatisfy({ $0.peerID != "local" && $0.storeID == coordinator.storeID }) else {
+            throw TractandaError("invalidPeerConfiguration", "Reserved peer name or foreign StoreID.")
+        }
+        let old = try coordinator.configuration()
+        guard (old?.peers ?? []).allSatisfy({ peers.contains($0) }) else {
+            throw TractandaError(
+                "managedPeerLifecycleRequired",
+                "Use managed credential rotation or explicit peer/origin retirement.")
+        }
+        guard
+            !peers.contains(where: { candidate in
+                (old?.lifecycle?.historicalContexts ?? []).contains(where: {
+                    $0.peerID == candidate.peerID && $0.configurationDigest == candidate.configurationDigest
+                })
+            })
+        else {
+            throw TractandaError(
+                "managedPeerLifecycleRequired", "A retired credential generation cannot be reused.")
+        }
+        try AuthorityStore.writeConfiguration(
+            .init(
+                profile: "tractanda.peer-configuration.v1", peers: peers, bootstrap: old?.bootstrap,
+                lifecycle: old?.lifecycle, credentialBindings: old?.credentialBindings),
+            root: root, files: coordinator.journal.files)
+        generation = Identifier.make()
+    }
+    func requirePeerCredentialAdministrator() throws { try requireAdministrator() }
+    func nativeCredentialRegistrationContext() throws -> String {
+        guard accessContext != nil else { throw TractandaError("forbidden", "An authenticated administrator is required.") }
+        try requireAdministrator()
+        guard !targetProvisioningPending, isCanonicalReady else {
+            throw TractandaError("recoveryRequired", "Credential registration needs an activated, ready store.")
+        }
+        return try peerIntakeContextToken()
+    }
+    func registerNativePeerCredential(_ credential: PeerCredential, permittedOrigins: [String],
+        expectedContextToken: String, operationID: String) throws {
+        _ = try nativeCredentialRegistrationContext()
+        let binding = credential.binding
+        let context = try PeerPackage.Context(peerID: binding.peerID, storeID: binding.storeID,
+            configurationDigest: binding.configurationDigest, permittedOrigins: permittedOrigins)
+        let previous = try requirePeerIntake().configuration()?.peers.first { $0.peerID == context.peerID }
+        guard previous == nil || previous == context else {
+            throw TractandaError("managedPeerLifecycleRequired", "Use the separate reviewed lifecycle operation for rotation.")
+        }
+        try registerPeerCredential(credential, context: context,
+            expectedContextToken: expectedContextToken, operationID: operationID)
+    }
+    // Trusted host-only registration. The caller supplies current authority context, never a wire key.
+    var peerCredentialStagedForTesting: (() throws -> Void)? {
+        get { peerIntake?.credentialStagedForTesting }
+        set { peerIntake?.credentialStagedForTesting = newValue }
+    }
+    func registerPeerCredential(
+        _ credential: PeerCredential, context: PeerPackage.Context,
+        expectedContextToken: String, operationID: String
+    ) throws {
+        if accessContext == nil {
+            return try withAccess(forUID: ownerUID) {
+                try registerPeerCredential(credential, context: context,
+                    expectedContextToken: expectedContextToken, operationID: operationID)
+            }
+        }
+        try requireAdministrator()
+        let coordinator = try requirePeerIntake()
+        guard expectedContextToken == (try peerIntakeContextToken()) else {
+            throw TractandaError("operationReviewRequired", "Peer registration context changed.")
+        }
+        _ = try AuthorityRecord.persistentID(.text(operationID))
+        let binding = credential.binding
+        let old = try coordinator.configuration()
+        guard isCanonicalReady, authorityExistingHistoryAdmitted, !authorityCatchupActive,
+            let index, binding.storeID == coordinator.storeID, binding.localReplicaID == replicaID,
+            context.storeID == binding.storeID, context.peerID == binding.peerID,
+            context.configurationDigest == binding.configurationDigest,
+            context.permittedOrigins.contains(binding.remoteReplicaID),
+            !(old?.lifecycle?.historicalContexts ?? []).contains(where: {
+                $0.peerID == context.peerID && $0.configurationDigest == context.configurationDigest
+            })
+        else { throw TractandaError("invalidPeerCredential", "Private peer credential binding is not current.") }
+        try requireActivePublishingOrigin()
+        try requirePeerExchangeMembership(binding, index: index)
+        // Reject conflicting rotations before writing any private material.
+        let previous = old?.peers.first { $0.peerID == context.peerID }
+        if let previous, previous != context {
+            guard previous.storeID == context.storeID,
+                previous.permittedOrigins == context.permittedOrigins,
+                previous.configurationDigest != context.configurationDigest
+            else { throw TractandaError("invalidPeerCredential", "Private peer rotation binding differs.") }
+        }
+        let commitment = try credential.commitment
+        if previous == context, let committed = old?.credentialBindings?[context.peerID],
+            committed != commitment {
+            throw TractandaError("invalidPeerCredential", "Committed private pairing metadata differs.")
+        }
+        try PeerCredentialStore(files: coordinator.journal.files).stage(credential)
+        try coordinator.credentialStagedForTesting?()
+        if let previous, previous != context {
+            try managePeerLifecycle(peerID: context.peerID, replacement: context,
+                retiredOriginIDs: [], operationID: operationID, credentialCommitment: commitment)
+        } else if old?.credentialBindings?[context.peerID] != commitment {
+            var bindings = old?.credentialBindings ?? [:]
+            bindings[context.peerID] = commitment
+            try AuthorityStore.writeConfiguration(
+                .init(profile: "tractanda.peer-configuration.v1",
+                    peers: previous == nil ? (old?.peers ?? []) + [context] : old!.peers,
+                    bootstrap: old?.bootstrap, lifecycle: old?.lifecycle, credentialBindings: bindings),
+                root: root, files: coordinator.journal.files)
+            generation = Identifier.make()
+        }
+        // Read back through the same current-generation/membership gate used after restart.
+        _ = try loadPeerCredential(peerID: context.peerID)
+    }
+    func loadPeerCredential(peerID: String, progress: @escaping () throws -> Void = {}) throws -> PeerCredential {
+        try progress()
+        let coordinator = try requirePeerIntake()
+        let context = try coordinator.context(peerID: peerID)
+        let credential = try PeerCredentialStore(files: coordinator.journal.files).load(
+            peerID: peerID, configurationDigest: context.configurationDigest)
+        guard try coordinator.configuration()?.credentialBindings?[peerID] == credential.commitment else {
+            throw TractandaError("invalidPeerCredential", "Current private pairing metadata differs.")
+        }
+        return try withPeerExchange(binding: credential.binding, progress: progress) { _, _ in credential }
+    }
+    /// Explicit caller scope is mandatory; diagnostics never load or repair private credentials.
+    func peerOperatorCanonicalStatus() throws -> PeerCanonicalStatus {
+        guard accessContext != nil else { throw TractandaError("forbidden", "Peer status requires an authenticated administrator.") }
+        try requireAdministrator()
+        let storeID = try canonicalStoreIdentity(creatingIfMissing: false)
+        let readiness: PeerCanonicalStatus.Readiness = targetProvisioningPending ? .pendingActivation
+            : !authorityIntakeEnabled ? .authorityUnavailable : isCanonicalReady ? .ready : .recoveryRequired
+        let disposed: Bool?
+        if !targetProvisioningPending, authorityIntakeEnabled, isCanonicalReady, let index, let replicaID {
+            disposed = try index.withCatalogueScanBudget { try index.peerOriginRetired(replicaID) }
+        } else { disposed = nil }
+        var configured: Int?, committed: Int?
+        if authorityIntakeEnabled, let peerIntake {
+            let configuration = try peerIntake.withOperation(maximumReadBytes: 1024 * 1024) {
+                try peerIntake.configuration(readBudget: peerIntake.admissionReadBudget())
+            }
+            try configuration?.validateCredentialBindings()
+            configured = configuration?.peers.count ?? 0
+            committed = configuration?.credentialBindings?.count ?? 0
+            guard configured! <= 256, committed! <= 256 else {
+                throw TractandaError("resourceLimit", "Peer status pairing count exceeds its bound.")
+            }
+        }
+        return .init(storeID: storeID, replicaID: replicaID, readiness: readiness,
+            localDisposed: disposed, configuredPairingCount: configured, committedPairingCount: committed)
+    }
+
+    /// Serialized unattended reads consume existing committed authority; they never register keys.
+    func peerRuntimeMaterial(progress: @escaping () throws -> Void = {}) throws -> PeerRuntimeSnapshot.Material {
+        try progress()
+        guard !targetProvisioningPending else {
+            throw PeerEnrollmentActivation.failure("Pending target cannot load peer runtime credentials.")
+        }
+        guard isCanonicalReady, let index, let replicaID else {
+            throw TractandaError("recoveryRequired", "Peer runtime requires verified canonical state.")
+        }
+        let coordinator = try requirePeerIntake()
+        let configuration = try coordinator.configuration()
+        try configuration?.validateCredentialBindings()
+        let bindings = configuration?.credentialBindings ?? [:]
+        guard bindings.count <= 256 else {
+            throw TractandaError("resourceLimit", "Peer runtime credential limit exceeded.")
+        }
+        let peerIDs = bindings.keys.sorted()
+        try index.withCatalogueScanBudget(progress: progress) {
+            guard try !index.peerOriginRetired(replicaID) else {
+                throw TractandaError("localReplicaRetired", "Local replica is retired from peer exchange.")
+            }
+        }
+        var credentials: [PeerCredential] = []
+        for peerID in peerIDs {
+            try progress()
+            do { credentials.append(try loadPeerCredential(peerID: peerID, progress: progress)) }
+            catch let error as TractandaError where error.code == "peerRetired" {
+                // Only canonical retirement may omit a still-configured pairing. Missing or
+                // malformed keys remain errors, never a fallback to an earlier snapshot.
+            }
+        }
+        let security = try index.withCatalogueScanBudget(progress: progress) {
+            try peerExchangeSecurityBinding(coordinator: coordinator, index: index)
+        }
+        try progress()
+        return try .init(credentials: credentials, securityToken: security,
+            storeID: coordinator.storeID, replicaID: replicaID)
+    }
+    func validatePeerRuntimeMaterial(
+        _ expected: PeerRuntimeSnapshot.Material, progress: @escaping () throws -> Void
+    ) throws {
+        try expected.requireCurrent(peerRuntimeMaterial(progress: progress))
+    }
+    func beginPeerIntake(context: PeerPackage.Context, manifestBytes: Data) throws -> PeerPackage.Status {
+        let coordinator = try requirePeerIntake()
+        try coordinator.requireIntakeCurrent(context, packageID: nil)
+        // Reject retired/foreign wire framing before initial ReplicaID or reader-floor writes.
+        let manifest = try PeerPackage.decode(PeerPackage.Manifest.self, manifestBytes)
+        try manifest.validate()
+        if let scope = coordinator.provisioningScope {
+            guard [scope.record.baseline, scope.record.proof.manifest].contains(manifest) else {
+                throw PeerEnrollmentActivation.failure("Provisioning manifest differs from its two exact approved packages.")
+            }
+        }
+        try coordinator.requireIntakeCurrent(context, packageID: manifest.packageID)
+        if try coordinator.journal.files.readIfPresent(path: ["authority", "intake", manifest.packageID, "begin.json"],
+            maximumBytes: PeerPackage.maximumPageBytes) != nil {
+            _ = try coordinator.journal.intakeState(context: context, packageID: manifest.packageID)
+        }
+        guard manifest.storeID == context.storeID else {
+            throw TractandaError("invalidPeerPackage", "Store binding differs.")
+        }
+        let identity = try ReplicaIdentity.initialize(
+            root: root, storeID: coordinator.storeID,
+            ownerUID: ownerUID, hasModernOrigins: index?.hasModernRevisionOrigins() ?? false)
+        replicaID = identity.replicaID
+        try CanonicalReaderRequirement.beforeAuthorityPublication(root: root, ownerUID: ownerUID)
+        return try coordinator.journal.begin(context: context, manifestBytes: manifestBytes)
+    }
+    func appendPeerObject(
+        context: PeerPackage.Context, packageID: String, object: PeerPackage.Object,
+        offset: Int, bytes: Data
+    ) throws -> PeerPackage.Status {
+        let coordinator = try requirePeerIntake()
+        try coordinator.requireIntakeCurrent(context, packageID: packageID)
+        try coordinator.journal.requireCurrentProfile(packageID)
+        _ = try coordinator.journal.intakeState(context: context, packageID: packageID)
+        return try coordinator.journal.append(
+            context: context, packageID: packageID, object: object, offset: offset, bytes: bytes)
+    }
+    func inspectPeerIntake(context: PeerPackage.Context, packageID: String) throws
+        -> PeerPackage.IntakeState
+    {
+        let coordinator = try requirePeerIntake()
+        try coordinator.requireIntakeCurrent(context, packageID: packageID)
+        let state = try coordinator.journal.intakeState(
+            context: context, packageID: packageID, recoveryRequired: !isCanonicalReady)
+        if state.phase == .applied {
+            _ = try coordinator.journal.status(packageID)
+            if let index { try coordinator.completeDocumentCorpus(packageID: packageID, index: index) }
+        }
+        return state
+    }
+    func resumePeerIntake(
+        context: PeerPackage.Context, packageID: String, cursor: PeerPackage.ResumeCursor? = nil,
+        limit: Int = 128, progress: (() throws -> Void)? = nil
+    ) throws -> PeerPackage.ResumePage {
+        let coordinator = try requirePeerIntake()
+        guard let index else {
+            throw TractandaError("indexUnavailable", "Resume requires the retained inventory.")
+        }
+        return try index.withCatalogueScanBudget(reusingActiveBudget: true) {
+            try coordinator.resume(
+                context: context, packageID: packageID, index: index, cursor: cursor, limit: limit,
+                recoveryRequired: !isCanonicalReady,
+                progress: {
+                    try index.checkCatalogueScanProgress()
+                    try progress?()
+                })
+        }
+    }
+    func capturePeerInventory(
+        context: PeerPackage.Context, after checkpoint: PeerInventory.CompletionCheckpoint? = nil
+    ) throws -> PeerInventory.Boundary {
+        let coordinator = try requirePeerIntake()
+        try coordinator.requireCurrent(context)
+        guard let index else {
+            throw TractandaError("indexUnavailable", "Inventory requires retained metadata.")
+        }
+        return try index.withCatalogueScanBudget(reusingActiveBudget: true) {
+            try PeerInventory.capture(
+                context: context, after: checkpoint, coordinator: coordinator, index: index)
+        }
+    }
+    func peerInventoryPage(
+        context: PeerPackage.Context, boundary: PeerInventory.Boundary,
+        cursor: PeerInventory.Cursor? = nil, limit: Int = 128,
+        limits: PeerInventory.Limits = .init(), progress: (() throws -> Void)? = nil
+    ) throws -> PeerInventory.Page {
+        let coordinator = try requirePeerIntake()
+        try coordinator.requireCurrent(context)
+        guard let index else {
+            throw TractandaError("indexUnavailable", "Inventory requires retained metadata.")
+        }
+        return try index.withCatalogueScanBudget(reusingActiveBudget: true) {
+            try PeerInventory.page(
+                context: context, boundary: boundary, cursor: cursor, limit: limit,
+                coordinator: coordinator, index: index, evaluationsAvailable: isCanonicalReady,
+                limits: limits, progress: progress)
+        }
+    }
+    func withPeerLogicalVerification<T>(_ owner: String?, _ body: () throws -> T) throws -> T {
+        guard let originals = try requirePeerIntake().journal.originals else { return try body() }
+        return try originals.withLogicalVerificationOwner(owner, body)
+    }
+    func observePeerOriginalReadsForTesting<T>(_ observer: @escaping (PeerPackage.Object, Int) -> Void,
+        body: () throws -> T) throws -> T {
+        let originals = try requirePeerIntake().journal.originals
+        let previous = originals?.didReadForTesting
+        originals?.didReadForTesting = observer
+        defer { originals?.didReadForTesting = previous }
+        return try body()
+    }
+    /// A finite target owner scopes cancellation across real synchronous work, never a network task.
+    func withTargetEnrollmentControl<T>(_ check: @escaping () throws -> Void, body: () throws -> T) throws -> T {
+        guard targetProvisioningScope != nil, !targetEnrollmentControlActive else {
+            throw TractandaError("invalidTargetProtocol", "Target control owner is already active or absent.")
+        }
+        let coordinator = try requirePeerIntake(), previous = try requirePeerIntake().progress
+        targetEnrollmentControlActive = true
+        coordinator.progress = { try check(); try previous?() }
+        defer { coordinator.progress = previous; targetEnrollmentControlActive = false }
+        try check()
+        return try body()
+    }
+    /// Synchronous downward-only probe; never retained by verification work or wire state.
+    func withPeerReadBudgetForTesting<T>(_ maximumBytes: UInt64, pageLimit: Int? = nil, consumed: (UInt64) -> Void,
+        body: () throws -> T) throws -> T {
+        let coordinator = try requirePeerIntake()
+        guard maximumBytes > 0, maximumBytes <= coordinator.journal.limits.maximumReadBytes,
+            pageLimit.map({ (1...128).contains($0) }) ?? true else {
+            throw TractandaError("invalidArguments", "Testing read allowance must narrow the existing operation bound.")
+        }
+        let previousPageLimit = targetEnrollmentPageLimitForTesting
+        if let pageLimit { targetEnrollmentPageLimitForTesting = pageLimit }
+        defer { targetEnrollmentPageLimitForTesting = previousPageLimit }
+        return try coordinator.withOperation(maximumReadBytes: maximumBytes) {
+            defer { consumed(coordinator.operationReadBytesForTesting) }
+            return try body()
+        }
+    }
+    func releasePeerLogicalVerification(_ owner: String) {
+        peerIntake?.journal.originals?.releaseLogicalVerification(owner)
+        peerIntake?.documentVerification?.releaseLogicalVerification(owner)
+    }
+    func peerSyncWork(binding: PeerExchangeBinding, security: String,
+        replacement: PeerSyncWork? = nil) throws -> PeerSyncWork {
+        let files = try requirePeerIntake().journal.files
+        let work = PeerSyncWorkStore(files: files)
+        if let replacement { return try work.save(replacement, binding: binding, security: security) }
+        return try work.load(binding: binding, security: security)
+    }
+    func peerNeedsTransfer(context: PeerPackage.Context, objects: [PeerPackage.Object], after: Int = 0,
+        limits: PeerNeedsTransfer.Limits = .init(), progress: @escaping () throws -> Void) throws -> PeerNeedsTransfer.Page {
+        let coordinator = try requirePeerIntake()
+        guard isCanonicalReady, let index else {
+            throw TractandaError("recoveryRequired", "Comparison requires verified canonical state.")
+        }
+        return try coordinator.withOperation(maximumReadBytes: limits.maximumReadBytes) {
+            try coordinator.requireCurrent(context, readBudget: coordinator.admissionReadBudget())
+            return try index.withCatalogueScanBudget(progress: progress, reusingActiveBudget: true) {
+                try PeerNeedsTransfer.compare(objects, coordinator: coordinator, index: index,
+                    after: after, limits: limits, progress: progress)
+            }
+        }
+    }
+    /// Private synchronous metadata export. A trusted future gateway must use this Store owner.
+    func withPeerExchange<T>(
+        binding: PeerExchangeBinding, expectedSecurity: String? = nil,
+        progress: @escaping () throws -> Void,
+        _ body: (PeerPackage.Context, String) throws -> T
+    ) throws -> T {
+        try progress()
+        guard !targetProvisioningPending else { throw PeerEnrollmentActivation.failure("Pending target cannot exchange ordinary peer traffic.") }
+        let coordinator = try requirePeerIntake()
+        let context = try coordinator.context(peerID: binding.peerID)
+        let committedCredential = try coordinator.configuration()?.credentialBindings?[binding.peerID]
+        guard try committedCredential == nil || committedCredential == PeerCredential.commitment(for: binding),
+            context.storeID == binding.storeID,
+            context.configurationDigest == binding.configurationDigest,
+            replicaID == binding.localReplicaID,
+            context.permittedOrigins.contains(binding.remoteReplicaID)
+        else {
+            throw TractandaError("peerConfigurationChanged", "Authenticated pairing is not current.")
+        }
+        guard isCanonicalReady, let index else {
+            throw TractandaError("recoveryRequired", "Peer exchange requires verified canonical state.")
+        }
+        return try index.withCatalogueScanBudget(progress: progress) {
+            try requirePeerExchangeMembership(binding, index: index)
+            let security = try peerExchangeSecurityBinding(coordinator: coordinator, index: index)
+            guard expectedSecurity == nil || expectedSecurity == security else {
+                throw TractandaError(
+                    "peerConfigurationChanged", "Peer exchange policy/configuration changed.")
+            }
+            let response = try body(context, security)
+            // This very intake may activate a removal. Durable work remains committed, but
+            // normal data must not leave through the now-retired connection afterward.
+            try requirePeerExchangeMembership(binding, index: index)
+            try progress()
+            return response
+        }
+    }
+    private func requirePeerExchangeMembership(_ binding: PeerExchangeBinding, index: ItemIndex) throws {
+        guard try !index.peerOriginRetired(binding.localReplicaID) else {
+            throw TractandaError("localReplicaRetired", "Local replica is retired from peer exchange.")
+        }
+        guard try !index.peerOriginRetired(binding.remoteReplicaID) else {
+            throw TractandaError("peerRetired", "Authenticated remote replica is retired.")
+        }
+    }
+    private func peerExchangeSecurityBinding(coordinator: PeerIntakeCoordinator, index: ItemIndex,
+                                             excludingAdmission: AuthorityBinding? = nil, configurationOverride: Data? = nil) throws
+        -> String
+    {
+        let configuration = try configurationOverride ?? coordinator.configuration().map { try JSON.encode($0) } ?? Data()
+        var retirements: [AuthorityBinding] = []
+        try coordinator.foreignRetirements { retirements.append($0.root) }
+        retirements.sort { $0.recordID < $1.recordID }
+        return AuthorityRecordCodec.sha256(
+            try JSON.encode(
+                ItemValue.object([
+                    "configuration": .text(AuthorityRecordCodec.sha256(configuration)),
+                    "policies": .list(try index.peerExportPolicyBinding().map(ItemValue.text)),
+                    "retirements": .list(retirements.map(\.itemValue)),
+                    "admissions": .text(try coordinator.originAdmissionFrontier(excluding: excludingAdmission)),
+                ])))
+    }
+    private func withPeerExport<T>(
+        context: PeerPackage.Context, progress: (() throws -> Void)? = nil,
+        _ body: (PeerExportPlan) throws -> T
+    ) throws -> T {
+        let coordinator = try requirePeerIntake()
+        try coordinator.requireCurrent(context)
+        guard isCanonicalReady, let index else {
+            throw TractandaError("recoveryRequired", "Export requires current verified canonical state.")
+        }
+        return try index.withCatalogueScanBudget(reusingActiveBudget: true) {
+            let binding = try peerExchangeSecurityBinding(coordinator: coordinator, index: index)
+            return try coordinator.withOperation {
+                let plan = PeerExportPlan(
+                    coordinator: coordinator, index: index, context: context,
+                    securityBinding: binding, progress: progress)
+                plan.afterBoundaryForTesting = peerExportBoundaryForTesting
+                return try body(plan)
+            }
+        }
+    }
+    func beginPeerExport(
+        context: PeerPackage.Context, planID: String, packageID: String,
+        boundary: PeerInventory.Boundary, limits: PeerExportPlan.Limits = .init()
+    ) throws -> PeerExportPlan.Handle {
+        try withPeerExport(context: context) {
+            try $0.begin(planID: planID, packageID: packageID, boundary: boundary, limits: limits)
+        }
+    }
+    func peerExportExists(context: PeerPackage.Context, planID: String, packageID: String) throws -> Bool {
+        try withPeerExport(context: context) { try $0.exists(planID: planID, packageID: packageID) }
+    }
+    func peerPendingIntakes(context: PeerPackage.Context, after: String?) throws
+        -> (packages: [String], after: String?, complete: Bool) {
+        let coordinator = try requirePeerIntake()
+        try coordinator.requireCurrent(context)
+        guard isCanonicalReady, let index else { throw TractandaError("recoveryRequired", "Pending inventory is not ready.") }
+        let page = try index.authorityPendingPackagePage(after: after, limit: 16)
+        var packages: [String] = []
+        for package in page {
+            guard let publication = try coordinator.journal.publication(package) else {
+                throw TractandaError("peerRepairRequired", "An admitted pending receipt lost its publication proof.")
+            }
+            if publication.context == context { packages.append(package) }
+        }
+        return (packages, page.last, page.count < 16)
+    }
+    func peerSyncEpoch() throws -> String {
+        guard isCanonicalReady, let index else { throw TractandaError("recoveryRequired", "Inventory is not ready.") }
+        let state = try index.capturePeerInventory()
+        return AuthorityRecordCodec.sha256(try JSON.encode(ItemValue.object([
+            "epoch": .text(state.epoch), "sequence": .integer(state.maximumSequence)])))
+    }
+    func reopenPeerExport(context: PeerPackage.Context, planID: String, packageID: String) throws
+        -> PeerExportPlan.Handle
+    {
+        try withPeerExport(context: context) { try $0.reopen(planID: planID, packageID: packageID) }
+    }
+    func selectPeerExport(
+        context: PeerPackage.Context, handle: PeerExportPlan.Handle,
+        entries: [PeerInventory.Entry], finish: Bool = false
+    ) throws -> PeerExportPlan.Status {
+        try withPeerExport(context: context) { try $0.select(handle, entries: entries, finish: finish) }
+    }
+    func stepPeerExport(
+        context: PeerPackage.Context, handle: PeerExportPlan.Handle,
+        window: PeerExportPlan.Window = .init(), progress: (() throws -> Void)? = nil
+    ) throws -> PeerExportPlan.Status {
+        try withPeerExport(context: context, progress: progress) { try $0.step(handle, window: window) }
+    }
+    func inspectPeerExport(context: PeerPackage.Context, handle: PeerExportPlan.Handle) throws
+        -> PeerExportPlan.Status
+    {
+        try withPeerExport(context: context) { try $0.status(handle) }
+    }
+    func peerExportObjectPage(
+        context: PeerPackage.Context, handle: PeerExportPlan.Handle,
+        afterID: String = "", limit: Int = 128
+    ) throws -> PeerExportPlan.ObjectPage {
+        try withPeerExport(context: context) { try $0.objects(handle, afterID: afterID, limit: limit) }
+    }
+    func peerExportManifest(context: PeerPackage.Context, handle: PeerExportPlan.Handle) throws -> PeerPackage
+        .Manifest?
+    {
+        try withPeerExport(context: context) { try $0.manifest(handle) }
+    }
+    func readPeerExport(
+        context: PeerPackage.Context, handle: PeerExportPlan.Handle,
+        object: PeerPackage.Object, offset: Int, maximumBytes: Int = PeerPackage.maximumChunkBytes,
+        receiverKnown: PeerPackage.Object? = nil
+    ) throws -> PeerExportPlan.Chunk {
+        try withPeerExport(context: context) {
+            try $0.read(
+                handle, object: object, offset: offset,
+                maximumBytes: maximumBytes, receiverKnown: receiverKnown)
+        }
+    }
+    /// Bounded exact-original export for the later trusted transport adapter; no user endpoint.
+    func peerMetadataObjects(revisionID: String) throws -> [(PeerPackage.Object, Data)] {
+        let coordinator = try requirePeerIntake()
+        guard let index, let item = try index.retainedAuthorityObject(id: revisionID),
+            item.descriptor.kind == .item,
+            try index.authorityDisposition(id: revisionID)?.disposition == .eligible
+                || index.authorityHasLocalHistoryAdmission(revisionID: revisionID)
+        else {
+            throw TractandaError("notFound", "Accepted original is unavailable.")
+        }
+        return try coordinator.withOperation {
+            try coordinator.exportControlClosure(revisionID: revisionID, index: index)
+        }
+    }
+    private func authorityCurrentPolicies(_ itemID: String, index: ItemIndex) throws -> [Revision] {
+        // A prior validated acceptance/control in this same intake may dirty the disposable
+        // projection. Rebuild policy proof from accepted heads before evaluating its child.
+        // Private validation must not publish a merge or a LOCAL visibility/exposure fact.
+        if try index.currentProjection(itemID: itemID) == nil {
+            // Evidence eligibility precedes catalogue promotion. A child must wait for
+            // accepted per-item history rather than analyze an empty current-policy graph.
+            guard try index.revisionCount(itemID: itemID) > 0 else {
+                throw TractandaError("missingDependencies", "Current policy awaits accepted item history.")
+            }
+            _ = try prepareRecoveredProjection(itemID, using: index, deferMaterialization: true)
+        }
+        return try index.currentPolicyWitnesses(itemID: itemID).map { witness in
+            guard let revision = try loadRevisionUnchecked(witness.revisionID) else {
+                throw TractandaError("invalidAuthority", "Current authority witness is missing.")
+            }
+            return revision
+        }
+    }
+    private func authorityOriginalsVerified(
+        _ revision: Revision, coordinator: PeerIntakeCoordinator, index: ItemIndex
+    ) throws -> Bool {
+        try authorityStorageVerified(revision.fields, coordinator: coordinator, index: index)
+    }
+    private func authorityStorageVerified(
+        _ fields: [String: ItemValue], coordinator: PeerIntakeCoordinator, index: ItemIndex,
+        corpusScope: String? = nil
+    ) throws -> Bool {
+        func verified(_ descriptor: AttachmentDescriptor) throws -> Bool {
+            try attachmentPayloads.isVerified(descriptor) || coordinator.verifiedCanonicalOriginal(descriptor)
+        }
+        for descriptor in try AttachmentDescriptor.descriptors(in: fields) {
+            if try !verified(descriptor) { return false }
+        }
+        for text in try AttachmentTextRepresentation.representations(in: fields) {
+            try AttachmentTextDecoder.validate(text)
+            guard let row = try index.retainedAuthorityObject(id: text.source.revisionID),
+                row.descriptor.kind == .item
+            else { return false }
+            let source = try AuthorityRevision(originalBytes: coordinator.bytes(row)).revision
+            guard source.itemID == text.source.itemID, source.revisionID == text.source.revisionID,
+                let descriptor = try AttachmentDescriptor.descriptors(in: source.fields).first(where: {
+                    $0.attachmentID == text.source.attachmentID
+                }),
+                descriptor.byteCount == text.source.byteCount, descriptor.sha256 == text.source.sha256,
+                descriptor.mediaType == text.source.mediaType, try verified(descriptor)
+            else { return false }
+        }
+        for document in try AttachmentDocumentRepresentation.representations(in: fields) {
+            try AttachmentDocumentValidator.validate(document)
+            guard let row = try index.retainedAuthorityObject(id: document.source.revisionID),
+                row.descriptor.kind == .item
+            else { return false }
+            let source = try AuthorityRevision(originalBytes: coordinator.bytes(row)).revision
+            guard source.itemID == document.source.itemID,
+                let descriptor = try AttachmentDescriptor.descriptors(in: source.fields).first(where: {
+                    $0.attachmentID == document.source.attachmentID
+                }), descriptor.byteCount == document.source.byteCount,
+                descriptor.sha256 == document.source.sha256,
+                descriptor.mediaType == document.source.mediaType,
+                try verified(descriptor),
+                try coordinator.verifiedCanonicalDocument(document, index: index, corpusScope: corpusScope)
+            else { return false }
+        }
+        return true
+    }
+    private func evaluateIncomingAuthority(
+        _ node: AuthorityRevision, evidence: AuthorityRecord,
+        coordinator: PeerIntakeCoordinator, index: ItemIndex,
+        revalidatingAcceptedOriginal: Bool = false
+    ) throws -> AuthorityStore.Evaluation {
+        if try coordinator.retirementBlocks(node, index: index) {
+            return .init(
+                disposition: .held,
+                reason:
+                    "Retired-origin RevisionID is at or after the removal cutoff; exact administrator review required."
+            )
+        }
+        if try node.revision.provenance?.kind == .resolution,
+            try index.peerRetirementRecheckContains(node.revision.revisionID),
+            try index.authorityHasLocalHistoryAdmission(revisionID: node.revision.revisionID),
+            let binding = try index.authorityAppliedReviewControl(
+                resolutionID: node.revision.revisionID, digest: node.sha256),
+            let raw = try index.retainedAuthorityObject(id: binding.recordID),
+            let plan = try authorityReviewPlan(
+                for: .init(control: AuthorityRecordCodec.decode(coordinator.bytes(raw))),
+                coordinator: coordinator, index: index),
+            plan.resolution.sha256 == node.sha256,
+            plan.evidence.record == evidence,
+            try index.peerAuthorityIssuerPermits(plan.event.binding.recordID)
+        {
+            try validateHistoricalReviewAuthority(plan, coordinator: coordinator, index: index)
+            let outcome = try coordinator.invalidationOutcome(node, evidence: evidence, index: index)
+            return .init(
+                disposition: outcome.denied ? .held : .eligible,
+                reason: outcome.denied
+                    ? "Current validated authority denies historical resolution restoration."
+                    : "Exact previously admitted review history remains valid after timestamp authority recomputation."
+            )
+        }
+        if let provenance = try node.revision.provenance, provenance.kind != .authored {
+            return .init(
+                disposition: .held,
+                reason: "Foreign materialization/resolution requires the next intake profile.")
+        }
+        guard node.parents.count <= 1 else {
+            throw TractandaError("invalidAuthority", "Ordinary authored intake needs one actual parent.")
+        }
+        if node.parents.isEmpty, try index.revisionCount(itemID: node.revision.itemID) > 0 {
+            let exact = try index.revision(node.revision.revisionID)
+            guard revalidatingAcceptedOriginal, exact?.itemID == node.revision.itemID,
+                exact?.digest == Data(SHA256.hash(data: node.originalBytes))
+            else {
+                return .init(
+                    disposition: .held, reason: "Another accepted root already exists for this item.")
+            }
+        }
+        if let provenance = try node.revision.provenance,
+            let operation = node.revision.fields["operationID"]?.string,
+            let matches = try index.receipts(named: operation, localReplicaID: provenance.originReplicaID),
+            matches.contains(where: {
+                $0.actor == node.revision.fields["actor"]?.string && $0.revisionID != node.revision.revisionID
+            })
+        {
+            return .init(
+                disposition: .rejected,
+                reason: "Origin/actor operation receipt collides with another original.")
+        }
+        if let parentID = node.parents.first {
+            guard let parentRow = try index.retainedAuthorityObject(id: parentID) else {
+                return .init(disposition: .missingDependencies, reason: "Actual parent is missing.")
+            }
+            let parent = try AuthorityRevision(originalBytes: coordinator.bytes(parentRow)).revision
+            guard parent.itemID == node.revision.itemID,
+                parent.fields["createdAt"] == node.revision.fields["createdAt"],
+                try RevisionTimestamp(node.revision.modifiedAt) > RevisionTimestamp(parent.modifiedAt)
+            else {
+                throw TractandaError(
+                    "invalidRevisionGraph", "Incoming authored parent identity/time differs.")
+            }
+            let old = RevisionMerge.semanticFields(parent)
+            let new = RevisionMerge.semanticFields(node.revision)
+            let addressed = Set(
+                try node.revision.provenance!.writtenFields + node.revision.provenance!.unsetFields)
+            guard Set(old.keys).union(new.keys).filter({ old[$0] != new[$0] }).allSatisfy(addressed.contains)
+            else {
+                throw TractandaError(
+                    "invalidRevisionGraph", "Authored provenance omitted an actual snapshot change.")
+            }
+            let sourcePolicies = try AuthorityRecord.list(evidence.payload["itemPolicies"])
+            let expectedFrontier =
+                try parent.provenance?.kind == .automaticMerge ? parent.provenance!.frontier : [parentID]
+            guard try AuthorityRecord.ids(evidence.payload["frontier"], maximum: 1024) == expectedFrontier
+            else {
+                throw TractandaError(
+                    "invalidAuthority", "Source frontier differs from its actual accepted parent.")
+            }
+            // This initial profile accepts an exact parent policy, not an unrelated historical grant.
+            guard sourcePolicies.count == 1,
+                try AuthorityRecord.binding(sourcePolicies.first).revisionID == parentID
+            else {
+                return .init(
+                    disposition: .held, reason: "Source policy context requires full frontier review.")
+            }
+        }
+        try coordinator.validatePolicyCut(evidence, index: index)
+        let cut = try coordinator.sourceControl(evidence)!
+        let outcome = try coordinator.invalidationOutcome(node, evidence: evidence, index: index)
+        if outcome.denied {
+            return .init(
+                disposition: .held,
+                reason:
+                    "A validated revocation did not accept this original in its PRE cut; later grants cannot approve it."
+            )
+        }
+        let currentPolicies: [Revision]
+        if node.parents.isEmpty, node.revision.classID == "Item",
+            try index.peerItemRootHasNoLocalPolicyHistory(itemID: node.revision.itemID)
+        {
+            currentPolicies = []
+        } else {
+            currentPolicies = try authorityCurrentPolicies(node.revision.itemID, index: index)
+        }
+        let evaluator = RuntimeAuthorityEvaluator(
+            accounts: accounts,
+            currentConfigurations: currentAccessConfigurations.isEmpty
+                ? accessConfiguration.map { [$0] } ?? [] : currentAccessConfigurations,
+            currentItemPolicies: currentPolicies,
+            ownerUID: ownerUID,
+            loadBinding: { try coordinator.bindingAtCut($0, cut: cut, index: index) })
+        return try evaluator.evaluate(
+            node, evidence: evidence,
+            allowPolicy: node.revision.classID == AccessConfiguration.classID,
+            historicalPreserved: outcome.preserved,
+            originalsVerified: authorityOriginalsVerified(
+                node.revision, coordinator: coordinator, index: index))
+    }
+    private func evaluateAuthorityMaterialization(
+        _ node: AuthorityRevision,
+        coordinator: PeerIntakeCoordinator, index: ItemIndex,
+        requireAcceptanceCut: Bool = true
+    ) throws -> AuthorityStore.Evaluation {
+        guard try node.revision.provenance?.kind == .automaticMerge,
+            node.parents.allSatisfy({ (try? index.revision($0)) != nil })
+        else {
+            return .init(
+                disposition: .missingDependencies,
+                reason: "Reconciliation needs its actual eligible parents and controls.")
+        }
+        if requireAcceptanceCut,
+            try index.authorityAcceptanceControl(revisionID: node.revision.revisionID) == nil
+        {
+            return .init(
+                disposition: .missingDependencies,
+                reason:
+                    "Materialization needs its validated source acceptance control before local visibility.")
+        }
+        guard let raw = try index.retainedAuthorityObject(id: node.revision.revisionID) else {
+            return .init(disposition: .missingDependencies, reason: "Reconciliation original is missing.")
+        }
+        do {
+            try index.validatePeerMaterialization(
+                row: authorityCatalogueRow(raw, node: node), revision: node,
+                loadVerified: { row in
+                    try PooledCanonicalRecord.read(row: row, root: self.root, ownerUID: self.ownerUID)
+                },
+                limits: revisionProjectionLimits, progress: coordinator.progress)
+        } catch let error as TractandaError
+            where ["invalidAuthority", "invalidRevisionGraph", "invalidMergeTimestamp"].contains(error.code)
+        {
+            return .init(disposition: .held, reason: "Reconciliation context/payload proof requires review.")
+        }
+        return .init(
+            disposition: .eligible,
+            reason: "Validated zero-write reconciliation in its own eligible parent context.")
+    }
+    private func evaluateAuthoritySource(
+        _ node: AuthorityRevision, evidence: AuthorityRecord,
+        coordinator: PeerIntakeCoordinator, index: ItemIndex
+    ) throws -> AuthorityStore.Evaluation {
+        try coordinator.validatePolicyCut(evidence, index: index)
+        let cut = try coordinator.sourceControl(evidence)!
+        return try RuntimeAuthorityEvaluator(
+            accounts: accounts, currentConfigurations: [], currentItemPolicies: [],
+            ownerUID: ownerUID, loadBinding: { try coordinator.bindingAtCut($0, cut: cut, index: index) }
+        )
+        .evaluate(
+            node, evidence: evidence, sourceOnly: true,
+            allowPolicy: node.revision.classID == AccessConfiguration.classID,
+            originalsVerified: authorityOriginalsVerified(
+                node.revision, coordinator: coordinator, index: index))
+    }
+    private func authoritySourceWitness(
+        _ node: AuthorityRevision, coordinator: PeerIntakeCoordinator,
+        index: ItemIndex
+    ) throws -> AuthorityRecord? {
+        if let selected = try index.authorityEvidence(revisionID: node.revision.revisionID) {
+            return try AuthorityRecordCodec.decode(coordinator.bytes(selected)).record
+        }
+        let admitted = try index.authorityDisposition(id: node.revision.revisionID)?.disposition == .eligible
+        let elected = try coordinator.electEvidence(node, index: index) { node, evidence in
+            if admitted {
+                if try coordinator.sourceControl(evidence) != nil {
+                    try coordinator.validatePolicyCut(evidence, index: index)
+                }
+                return .init(
+                    disposition: .eligible,
+                    reason: "Exact original was already admitted by sealed publication or pinned baseline.")
+            }
+            return try self.evaluateAuthoritySource(
+                node, evidence: evidence, coordinator: coordinator, index: index)
+        }
+        guard elected.disposition == .eligible, let id = elected.evidenceID,
+            let row = try index.retainedAuthorityObject(id: id)
+        else { return nil }
+        return try AuthorityRecordCodec.decode(coordinator.bytes(row)).record
+    }
+    private func validateAuthorityControls(
+        packageID: String?, coordinator: PeerIntakeCoordinator,
+        index: ItemIndex, recovering: Bool = false, localUnit: Bool = false
+    ) throws {
+        try index.initializeAuthorityControlSchema()
+        var witnessPackages = Set(packageID.map { [$0] } ?? [])
+        for _ in 0..<2 {
+            var changed = true
+            var work = 0
+            while changed {
+                changed = false
+                var after: String?
+                while true {
+                    let rows = try index.authorityReadyControlPage(
+                        packageID: localUnit ? packageID : nil, after: after, limit: 128)
+                    if rows.isEmpty { break }
+                    for row in rows {
+                        after = row.descriptor.id
+                        authorityControlInspectedForTesting?(row.descriptor.id)
+                        work += 1
+                        try coordinator.progress?()
+                        guard work <= coordinator.journal.limits.maximumWork else {
+                            throw TractandaError("resourceLimit", "Control validation work exhausted.")
+                        }
+                        let verified = try AuthorityRecordCodec.decode(coordinator.bytes(row))
+                        let plan = try AuthorityStore.VerifiedControlPlan(control: verified)
+                        let isLocal = try coordinator.hasLocalPublicationReceipt(
+                            objectID: row.descriptor.id,
+                            origin: verified.record.originReplicaID, index: index)
+                        guard
+                            try isLocal
+                                || coordinator.freshReceipt(
+                                    row.descriptor.id,
+                                    origin: verified.record.originReplicaID, index: index) != nil
+                        else { continue }
+                        var valid = true
+                        let reviewPlan: AuthorityStore.VerifiedReviewPlan?
+                        do {
+                            reviewPlan = try authorityReviewPlan(
+                                for: plan, coordinator: coordinator, index: index)
+                        } catch let error as TractandaError
+                            where !isLocal
+                            && ["missingDependencies", "invalidAuthority"].contains(error.code)
+                        { continue }
+                        if let baseline = plan.bootstrap {
+                            if let prior = plan.localParent {
+                                let old = try AuthorityStore.VerifiedControlPlan(
+                                    control: coordinator.control(prior, index: index))
+                                guard old.bootstrap == baseline else {
+                                    throw TractandaError(
+                                        "invalidAuthority",
+                                        "A control chain cannot replace its initial baseline.")
+                                }
+                            } else if !isLocal {
+                                guard let retained = try index.retainedAuthorityObject(id: baseline.recordID),
+                                    retained.descriptor.kind == .authority,
+                                    retained.descriptor.sha256 == baseline.sha256
+                                else { continue }
+                                let original = try coordinator.control(baseline, index: index)
+                                guard
+                                    try coordinator.freshReceipt(
+                                        baseline.recordID, origin: original.record.originReplicaID,
+                                        index: index) != nil
+                                else { continue }
+                                try index.execute("SAVEPOINT source_baseline")
+                                do {
+                                    try coordinator.seedBootstrap(
+                                        .init(
+                                            recordID: baseline.recordID, sha256: baseline.sha256,
+                                            actor: original.record.actorPrincipal), index: index,
+                                        existingOnly: true)
+                                    try index.execute("RELEASE source_baseline")
+                                } catch let error as TractandaError where error.code == "missingDependencies"
+                                {
+                                    try? index.execute("ROLLBACK TO source_baseline")
+                                    try? index.execute("RELEASE source_baseline")
+                                    continue
+                                } catch {
+                                    try? index.execute("ROLLBACK TO source_baseline")
+                                    try? index.execute("RELEASE source_baseline")
+                                    throw error
+                                }
+                            }
+                        }
+                        var activateReview: (AuthorityStore.VerifiedReviewPlan, String)?
+                        if let review = reviewPlan {
+                            if !isLocal {
+                                let historicalActivation = try coordinator.foreignReviewActivation(
+                                    review.event.binding)
+                                guard
+                                    try (recovering && historicalActivation != nil)
+                                        || index.peerAuthorityIssuerPermits(review.event.binding.recordID)
+                                else { continue }
+                                guard
+                                    try AttachmentDescriptor.descriptors(
+                                        in: review.resolution.revision.fields
+                                    ).isEmpty,
+                                    try AttachmentDocumentRepresentation.representations(
+                                        in: review.resolution.revision.fields
+                                    ).isEmpty
+                                else { continue }
+                                do {
+                                    try validateHistoricalReviewAuthority(
+                                        review, coordinator: coordinator, index: index)
+                                    guard
+                                        let decisionReceipt = try coordinator.freshReceipt(
+                                            review.event.binding.recordID,
+                                            origin: review.event.record.record.originReplicaID, index: index),
+                                        let evidenceReceipt = try coordinator.freshReceipt(
+                                            review.evidence.record.recordID,
+                                            origin: review.evidence.record.originReplicaID, index: index),
+                                        decisionReceipt.permittedOrigin, evidenceReceipt.permittedOrigin
+                                    else { continue }
+                                    let saved = try coordinator.foreignReviewActivation(review.event.binding)
+                                    if let saved {
+                                        guard saved.control == plan.binding,
+                                            let receipt = try index.authorityReceipt(
+                                                objectID: review.event.binding.recordID,
+                                                packageID: saved.packageID),
+                                            try coordinator.receiptContextPermits(
+                                                receipt, origin: review.event.record.record.originReplicaID,
+                                                index: index)
+                                        else {
+                                            throw TractandaError(
+                                                "invalidAuthority",
+                                                "Foreign review activation lost its exact control/receipt.")
+                                        }
+                                    } else {
+                                        if recovering { continue }
+                                        let raw = try index.retainedAuthorityObject(
+                                            id: review.event.resolution.revisionID)!
+                                        try withSharedReviewValidation(
+                                            review, coordinator: coordinator, index: index
+                                        ) {
+                                            let policies = try authorityCurrentPolicies(
+                                                review.resolution.revision.itemID, index: index)
+                                            _ = try index.previewAuthorityReview(
+                                                plan: review,
+                                                resolutionRow: authorityCatalogueRow(
+                                                    raw, node: review.resolution),
+                                                loadVerified: {
+                                                    try PooledCanonicalRecord.read(
+                                                        row: $0, root: self.root, ownerUID: self.ownerUID)
+                                                },
+                                                limits: revisionProjectionLimits,
+                                                progress: coordinator.progress,
+                                                validate: { context in
+                                                    try self.validateAuthorityReviewResolution(
+                                                        review.resolution.revision, context: context,
+                                                        policies: policies, using: index)
+                                                },
+                                                allowConcurrentCurrent: true)
+                                        }
+                                        activateReview = (review, decisionReceipt.packageID)
+                                    }
+                                    if recovering {
+                                        if try !index.authorityReviewControlAllows(
+                                            control: plan.binding,
+                                            revisionID: review.event.resolution.revisionID),
+                                            try !index.authorityReviewIsProvisional(
+                                                revisionID: review.event.resolution.revisionID)
+                                        {
+                                            try index.retainRecoveryAuthorityReview(plan: review)
+                                        }
+                                    } else if try !index.authorityReviewControlAllows(
+                                        control: plan.binding, revisionID: review.event.resolution.revisionID)
+                                    {
+                                        let raw = try index.retainedAuthorityObject(
+                                            id: review.event.resolution.revisionID)!
+                                        _ = try index.applyValidatedReview(
+                                            plan: review,
+                                            resolutionRow: authorityCatalogueRow(
+                                                raw, node: review.resolution),
+                                            loadVerified: {
+                                                try PooledCanonicalRecord.read(
+                                                    row: $0, root: self.root, ownerUID: self.ownerUID)
+                                            },
+                                            limits: revisionProjectionLimits, progress: coordinator.progress,
+                                            allowConcurrentCurrent: true)
+
+                                    }
+                                } catch let error as TractandaError
+                                    where [
+                                        "missingDependencies", "forbidden", "unresolvedPrincipal",
+                                        "untrustedPeer",
+                                        "revisionConflict", "invalidAuthority",
+                                        "invalidRevisionGraph",
+                                        "invalidMergeTimestamp",
+                                    ].contains(error.code)
+                                {
+                                    if try coordinator.foreignReviewActivation(review.event.binding) != nil {
+                                        throw error
+                                    }
+                                    continue
+                                }
+                            }
+                            if recovering,
+                                try !index.authorityReviewControlAllows(
+                                    control: plan.binding, revisionID: review.event.resolution.revisionID)
+                            {
+                                if isLocal,
+                                    try !index.authorityReviewIsProvisional(
+                                        revisionID: review.event.resolution.revisionID)
+                                {
+                                    try index.retainRecoveryAuthorityReview(plan: review)
+                                }
+                                continue
+                            }
+                            try validateHistoricalReviewAuthority(
+                                review, coordinator: coordinator, index: index)
+                            guard
+                                try index.authorityReviewControlAllows(
+                                    control: plan.binding, revisionID: review.event.resolution.revisionID)
+                            else { continue }
+                        }
+                        if !isLocal && reviewPlan == nil {
+                            for delta in plan.deltas {
+                                guard
+                                    let target = try index.retainedAuthorityObject(
+                                        id: delta.target.revisionID),
+                                    target.descriptor.sha256 == delta.target.sha256
+                                else {
+                                    valid = false
+                                    break
+                                }
+                                let node = try AuthorityRevision(originalBytes: coordinator.bytes(target))
+                                guard node.revision.itemID == delta.target.itemID,
+                                    delta.actor == node.revision.fields["actor"]?.string
+                                        || "user:" + delta.actor == node.revision.fields["actor"]?.string
+                                else {
+                                    throw TractandaError(
+                                        "invalidAuthority",
+                                        "Control transition target/actor differs from exact original.")
+                                }
+                                // Exact already admitted originals include the administrator-pinned baseline.
+                                // New targets need independent source authority; a raw control claim cannot grant them.
+                                let known =
+                                    try index.authorityDisposition(id: delta.target.revisionID)?.disposition
+                                    == .eligible
+                                if delta.eligible, let previous = plan.localParent,
+                                    try index.eligibilityAtCut(
+                                        revisionID: delta.target.revisionID, cut: previous)
+                                        == .held
+                                {
+                                    valid = false
+                                    break  // B does not implement protected/manual reapproval.
+                                }
+                                guard
+                                    try delta.causes.allSatisfy({ try index.hasValidatedAuthorityControl($0) }
+                                    )
+                                else {
+                                    throw TractandaError(
+                                        "invalidAuthority", "Control override cause is not validated.")
+                                }
+                                // This first causal profile only demotes already admitted records;
+                                // a denial is not required to manufacture positive source testimony.
+                                if !delta.eligible {
+                                    let localHistory = try index.authorityHasLocalHistoryAdmission(
+                                        revisionID: delta.target.revisionID)
+                                    let prior =
+                                        try plan.localParent.map {
+                                            try index.eligibilityAtCut(
+                                                revisionID: delta.target.revisionID,
+                                                cut: $0)
+                                        } ?? .unknown
+                                    if !known && !localHistory && prior == .unknown {
+                                        valid = false
+                                        break
+                                    }
+                                    continue
+                                }
+                                let exactEvidence: AuthorityRecord?
+                                if let binding = delta.evidence {
+                                    guard let provenance = try node.revision.provenance,
+                                        let raw = try index.retainedAuthorityObject(id: binding.recordID),
+                                        raw.descriptor.sha256 == binding.sha256,
+                                        let receipt = try coordinator.freshReceipt(
+                                            binding.recordID,
+                                            origin: provenance.originReplicaID,
+                                            index: index), receipt.permittedOrigin
+                                    else {
+                                        valid = false
+                                        break
+                                    }
+                                    let value = try AuthorityRecordCodec.decode(coordinator.bytes(raw)).record
+                                    guard try coordinator.matchesIdentity(node, value) else {
+                                        throw TractandaError(
+                                            "invalidAuthority",
+                                            "Control selected testimony differs from original.")
+                                    }
+                                    exactEvidence = value
+                                } else {
+                                    guard try node.revision.provenance?.kind != .authored else {
+                                        throw TractandaError(
+                                            "invalidAuthority", "Authored acceptance requires exact evidence."
+                                        )
+                                    }
+                                    exactEvidence = nil
+                                }
+                                if let evidence = exactEvidence {
+                                    let expected = try
+                                        (AuthorityRecord.list(evidence.payload["admissionPolicies"])
+                                        + AuthorityRecord.list(evidence.payload["itemPolicies"]))
+                                        .map { try AuthorityRecord.binding($0).revisionID }
+                                    guard delta.policyIDs == Array(Set(expected)).sorted() else {
+                                        throw TractandaError(
+                                            "invalidAuthority",
+                                            "Control reverse dependencies differ from original source policies."
+                                        )
+                                    }
+                                }
+
+                                if known, delta.eligible,
+                                    let evidence = exactEvidence,
+                                    try coordinator.invalidationOutcome(
+                                        node, evidence: evidence, contextHeads: plan.parents, index: index
+                                    ).denied
+                                {
+                                    valid = false
+                                    break
+                                }
+                                if !known,
+                                    try node.revision.provenance?.kind == .automaticMerge
+                                {
+                                    if try evaluateAuthorityMaterialization(
+                                        node, coordinator: coordinator, index: index,
+                                        requireAcceptanceCut: false
+                                    ).disposition != .eligible {
+                                        valid = false
+                                        break
+                                    }
+                                } else if !known, let evidence = exactEvidence {
+                                    let result: AuthorityStore.Evaluation
+                                    do {
+                                        result = try evaluateAuthoritySource(
+                                            node, evidence: evidence, coordinator: coordinator, index: index)
+                                    } catch let error as TractandaError
+                                        where error.code == "missingDependencies"
+                                    {
+                                        valid = false
+                                        break
+                                    }
+                                    let effect = try coordinator.invalidationOutcome(
+                                        node, evidence: evidence, contextHeads: plan.parents, index: index)
+                                    if result.disposition != .eligible || effect.denied {
+                                        valid = false
+                                        break
+                                    }
+                                }
+                            }
+                        }
+                        if !valid { continue }
+                        try index.retainValidatedControl(plan)
+                        if let review = reviewPlan {
+                            try retainReviewPolicyInvalidations(
+                                review, coordinator: coordinator, index: index)
+                            if !isLocal {
+                                try index.retainAppliedReviewHistory(review)
+                                for delta in plan.deltas where delta.eligible {
+                                    try coordinator.restoreControlAcceptance(delta, index: index)
+                                }
+                                if let (review, package) = activateReview {
+                                    try coordinator.activateForeignReview(review, packageID: package)
+                                }
+                                if !recovering {
+                                    let projected = try prepareRecoveredProjection(
+                                        review.event.target.itemID, using: index,
+                                        deferMaterialization: authorityCatchupActive)
+                                    if let current = projected.revision {
+                                        try index.put(current)
+                                        try rememberHead(Self.residentHead(current))
+                                    } else {
+                                        if let old = heads.removeValue(forKey: review.event.target.itemID) {
+                                            headCacheBytes -= try residentByteCount(old)
+                                        }
+                                        headCacheOrder.removeAll { $0 == review.event.target.itemID }
+                                    }
+                                }
+                            }
+                        }
+                        witnessPackages.insert(row.packageID)
+                        if isLocal {
+                            for delta in plan.deltas where delta.eligible {
+                                try coordinator.restoreControlAcceptance(delta, index: index)
+                            }
+                            for delta in plan.deltas where !delta.eligible {
+                                try holdAuthorityDescendants(
+                                    delta.target.revisionID,
+                                    reason: "Sealed local authority decision requires explicit review.",
+                                    causes: delta.causes, coordinator: coordinator, index: index)
+                            }
+                            try index.retainLocalAuthorityAcceptance(plan)
+                            if recovering {
+                                try restoreRecoveredLocalAuthored(
+                                    plan, coordinator: coordinator, index: index)
+                            }
+                            try consumeRestoredAuthorityEffects(
+                                plan, review: reviewPlan, coordinator: coordinator, index: index)
+                            // Review D is a typed decision cause, not a pending ordinary
+                            // control effect; it must not pass through the control-only queue.
+                            if reviewPlan == nil {
+                                try index.clearAuthorityDispositionEffects(
+                                    coveredBy: plan.binding, originID: verified.record.originReplicaID)
+                            }
+                        }
+                        changed = true
+                        for delta in plan.deltas where delta.eligible {
+                            guard let target = try index.retainedAuthorityObject(id: delta.target.revisionID)
+                            else { continue }
+                            let node = try AuthorityRevision(originalBytes: coordinator.bytes(target))
+                            if let parent = node.revision.supersedes,
+                                let prior = try index.retainedAuthorityObject(id: parent),
+                                let witness = try authoritySourceWitness(
+                                    node, coordinator: coordinator, index: index)
+                            {
+                                if let source = try coordinator.sourceControl(witness),
+                                    plan.localParent == source,
+                                    try node.revision.provenance?.originReplicaID
+                                        == verified.record.originReplicaID
+                                {
+                                    let old = try AuthorityRevision(originalBytes: coordinator.bytes(prior))
+                                        .revision
+                                    if old.fields["accessConfiguration"]
+                                        != node.revision.fields["accessConfiguration"]
+                                        || old.fields["permissions"] != node.revision.fields["permissions"]
+                                    {
+                                        try index.retainValidatedInvalidation(
+                                            .init(
+                                                control: plan.binding, sourceCut: source,
+                                                policy: node, previousPolicyID: parent))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Visibility is canonical acceptance, not a read event; restoring it does not emit a control.
+            for phase in 0..<3 {
+                let scopes: [String?] = recovering ? [nil] : witnessPackages.sorted().map { Optional($0) }
+                for scope in scopes {
+                    var after: String?
+                    while true {
+                        let rows: [AuthorityStore.RetainedObject]
+                        if let scope {
+                            rows = try index.authorityPackagePage(packageID: scope, after: after, limit: 128)
+                        } else {
+                            rows = try index.retainedAuthorityPage(after: after, limit: 128)
+                        }
+                        if rows.isEmpty { break }
+                        for row in rows {
+                            after = row.descriptor.id
+                            guard row.descriptor.kind == .authority else { continue }
+                            let verified = try AuthorityRecordCodec.decode(coordinator.bytes(row))
+                            let isVisibility = verified.record.kind == .visibilityWitness
+                            let hasCause =
+                                try isVisibility
+                                && !AuthorityRecord.list(verified.record.payload["causeKey"]).isEmpty
+                            guard
+                                (phase == 0 && isVisibility && !hasCause)
+                                    || (phase == 1 && verified.record.kind == .reconciliationWitness)
+                                    || (phase == 2 && isVisibility && hasCause)
+                            else { continue }
+                            guard
+                                try row.peerID == "local"
+                                    || coordinator.freshReceipt(
+                                        row.descriptor.id,
+                                        origin: verified.record.originReplicaID, index: index) != nil
+                            else { continue }
+                            if verified.record.kind == .visibilityWitness {
+                                let plan = try AuthorityStore.VerifiedExposurePlan(witness: verified)
+                                guard try index.hasValidatedAuthorityControl(plan.cut),
+                                    let original = try index.retainedAuthorityObject(
+                                        id: plan.target.revisionID)
+                                else { continue }
+                                try index.retainValidatedExposure(
+                                    plan,
+                                    revision: AuthorityRevision(originalBytes: coordinator.bytes(original)),
+                                    locallyVisible: coordinator.hasLocalPublicationReceipt(
+                                        objectID: row.descriptor.id,
+                                        origin: verified.record.originReplicaID, index: index))
+                            } else if verified.record.kind == .reconciliationWitness {
+                                let plan = try AuthorityStore.VerifiedReconciliationPlan(witness: verified)
+                                let historical =
+                                    try coordinator.hasLocalPublicationReceipt(
+                                        objectID: row.descriptor.id, origin: verified.record.originReplicaID,
+                                        index: index)
+                                    || exactHistoricalReconciliation(
+                                        plan, coordinator: coordinator, index: index)
+                                guard
+                                    try plan.causes.allSatisfy({ cause in
+                                        try index.hasValidatedAuthorityControl(cause)
+                                            || index.peerRetirementIsActive(cause)
+                                            || (historical && index.peerRetirementHasValidatedProof(cause))
+                                    })
+                                else {
+                                    continue
+                                }
+                                if recovering {
+                                    let parents = try plan.parents.map { id -> AuthorityRevision in
+                                        guard let row = try index.retainedAuthorityObject(id: id) else {
+                                            throw TractandaError(
+                                                "missingDependencies",
+                                                "Recovery reconciliation parent is absent."
+                                            )
+                                        }
+                                        return try AuthorityRevision(originalBytes: coordinator.bytes(row))
+                                    }
+                                    try index.retainRecoveryReconciliation(plan, parents: parents)
+                                } else if try coordinator.hasLocalPublicationReceipt(
+                                    objectID: row.descriptor.id,
+                                    origin: verified.record.originReplicaID, index: index)
+                                {
+                                    _ = try index.reserveReconciliation(plan)
+                                } else {
+                                    do { try index.retainValidatedReconciliation(plan) } catch let error
+                                        as TractandaError
+                                        where ["missingDependencies", "invalidAuthority"].contains(error.code)
+                                    { continue }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    private func authorityCatalogueRow(_ retained: AuthorityStore.RetainedObject, node: AuthorityRevision)
+        throws -> ItemIndex.CatalogueRow
+    {
+        let revision = node.revision
+        let metadata = try FileMetadata.read(at: root.appendingPathComponent(retained.path))
+        guard metadata.size == UInt64(node.originalBytes.count), metadata.type == .regular,
+            metadata.uid == ownerUID, metadata.mode & 0o777 == 0o400,
+            CanonicalRecordPath.validate(
+                retained.path, itemID: revision.itemID, revisionID: revision.revisionID)
+        else {
+            throw TractandaError("invalidAuthority", "Receiver original locator/ownership differs.")
+        }
+        return ItemIndex.CatalogueRow(
+            revisionID: revision.revisionID, itemID: revision.itemID, path: retained.path,
+            parentID: revision.supersedes, actor: revision.fields["actor"]!.string!,
+            operationID: revision.fields["operationID"]!.string!, size: metadata.size, inode: metadata.inode,
+            uid: metadata.uid, mode: metadata.mode, modificationSeconds: metadata.modificationSeconds,
+            modificationNanoseconds: metadata.modificationNanoseconds,
+            digest: Data(SHA256.hash(data: node.originalBytes)),
+            createdAt: revision.fields["createdAt"]!.dateString!,
+            feedbackRevisionIDs: revision.fields["learningFeedback"]?.map?.values.compactMap {
+                try? LearningFeedback($0).revisionID
+            } ?? [],
+            modifiedAt: revision.modifiedAt, provenance: try revision.provenance)
+    }
+    private func promoteEligiblePeerPackage(
+        _ packageID: String, coordinator: PeerIntakeCoordinator, index: ItemIndex
+    ) throws {
+        let token = "promote:" + packageID
+        try index.authorityBeginWalk(token: token)
+        defer { try? index.authorityEndWalk(token: token) }
+        var changed = true
+        var work = 0
+        while changed {
+            changed = false
+            var cursor: String?
+            while true {
+                let rows = try index.authorityPackagePage(packageID: packageID, after: cursor, limit: 128)
+                if rows.isEmpty { break }
+                for row in rows {
+                    cursor = row.descriptor.id
+                    guard row.descriptor.kind == .item,
+                        try index.authorityDisposition(id: row.descriptor.id)?.disposition == .eligible,
+                        try index.revision(row.descriptor.id) == nil
+                    else { continue }
+                    work += 1
+                    guard work <= coordinator.journal.limits.maximumWork else {
+                        throw TractandaError("resourceLimit", "Promotion work exhausted.")
+                    }
+                    let node = try AuthorityRevision(originalBytes: coordinator.bytes(row))
+                    if node.parents.contains(where: { (try? index.revision($0)) == nil }) { continue }
+                    let parent = try node.parents.first.flatMap { id -> AuthorityRevision? in
+                        guard let retained = try index.retainedAuthorityObject(id: id) else { return nil }
+                        return try AuthorityRevision(originalBytes: coordinator.bytes(retained))
+                    }
+                    let peerSnapshot: RevisionProjection.Snapshot?
+                    if try index.peerRetirementRecheckContains(row.descriptor.id),
+                        try index.authorityHasLocalHistoryAdmission(revisionID: row.descriptor.id)
+                    {
+                        try index.restoreRetirementHeldHistory(
+                            original: node,
+                            row: authorityCatalogueRow(row, node: node),
+                            loadVerified: {
+                                try PooledCanonicalRecord.read(
+                                    row: $0, root: self.root, ownerUID: self.ownerUID)
+                            })
+                        peerSnapshot = nil
+                    } else if try node.revision.provenance?.kind == .automaticMerge {
+                        peerSnapshot = try index.appendValidatedPeerMaterialization(
+                            row: authorityCatalogueRow(row, node: node), revision: node,
+                            loadVerified: { row in
+                                try PooledCanonicalRecord.read(
+                                    row: row, root: self.root, ownerUID: self.ownerUID)
+                            },
+                            limits: revisionProjectionLimits, progress: coordinator.progress)
+                    } else {
+                        try index.appendValidatedPeer(
+                            row: authorityCatalogueRow(row, node: node), revision: node, parent: parent,
+                            control: node.revision.classID == AccessConfiguration.classID
+                                ? index.authorityAcceptanceControl(revisionID: node.revision.revisionID)
+                                : nil,
+                            originalsVerified: authorityOriginalsVerified(
+                                node.revision, coordinator: coordinator, index: index)
+                        )
+                        peerSnapshot = nil
+                    }
+                    _ = try index.authorityVisitOnce(token: token, id: node.revision.itemID)
+                    // Resolve only the affected item through the existing disk projection engine.
+                    let exact = try authorityCatalogueRow(row, node: node)
+                    let leaf: RevisionProjection.Snapshot?
+                    do {
+                        leaf =
+                            try peerSnapshot
+                            ?? index.verifiedLinearProjectionSnapshot(row: exact, revision: node.revision)
+                    } catch let error as TractandaError where error.code == "projectionRequired" {
+                        leaf = nil
+                    }
+                    let prepared = try prepareRecoveredProjection(
+                        node.revision.itemID, using: index, verifiedSnapshot: leaf,
+                        deferMaterialization: authorityCatchupActive)
+                    if let current = prepared.revision {
+                        if try index.currentHeadSummary(current.itemID)?.revisionID != current.revisionID {
+                            try index.put(current)
+                        }
+                        guard try index.textMatches(current) else {
+                            throw TractandaError("indexError", "Promoted current body failed verification.")
+                        }
+                        try rememberHead(Self.residentHead(current))
+                    } else {
+                        if let removed = heads.removeValue(forKey: node.revision.itemID) {
+                            headCacheBytes -= try residentByteCount(removed)
+                        }
+                        headCacheOrder.removeAll { $0 == node.revision.itemID }
+                    }
+                    changed = true
+                }
+            }
+        }
+    }
+    private func sealAuthorityAcceptance(
+        _ node: AuthorityRevision, evaluation: AuthorityStore.Evaluation,
+        coordinator: PeerIntakeCoordinator, index: ItemIndex
+    ) throws {
+        // Zero-write materializations are validated from their own accepted parents.
+        // Receiving an equivalent representation must not mint a shared acknowledgement.
+        if try node.revision.provenance?.kind == .automaticMerge { return }
+        guard let origin = replicaID else {
+            throw TractandaError("missingReplicaIdentity", "Acceptance needs local identity.")
+        }
+        if try index.peerOriginRetired(origin) { return }
+        if try index.authorityLocallyAccepted(revisionID: node.revision.revisionID, originID: origin) {
+            return
+        }
+        let evidence: AuthorityRecord?
+        let binding: AuthorityBinding?
+        if let id = evaluation.evidenceID, let digest = evaluation.evidenceDigest,
+            let package = evaluation.evidencePackageID,
+            let receipt = try index.authorityReceipt(objectID: id, packageID: package),
+            receipt.permittedOrigin, receipt.descriptor.sha256 == digest
+        {
+            let value = try AuthorityRecordCodec.decode(coordinator.bytes(receipt)).record
+            guard try coordinator.matchesIdentity(node, value) else {
+                throw TractandaError("invalidAuthority", "Acceptance selection differs from original.")
+            }
+            evidence = value
+            binding = try .init(recordID: id, sha256: digest)
+        } else {
+            guard try node.revision.provenance?.kind != .authored else {
+                throw TractandaError("invalidAuthority", "Authored acceptance requires selected testimony.")
+            }
+            evidence = nil
+            binding = nil
+        }
+        let policies =
+            try evidence.map {
+                try
+                    (AuthorityRecord.list($0.payload["admissionPolicies"])
+                    + AuthorityRecord.list($0.payload["itemPolicies"]))
+                    .map { try AuthorityRecord.binding($0).revisionID }
+            } ?? []
+        let actor = "replica:" + origin
+        let draft = try coordinator.prepareSourceCut(index: index, origin: origin, actor: actor)
+        let pin = try coordinator.configuration()?.bootstrap.map {
+            try AuthorityBinding(recordID: $0.recordID, sha256: $0.sha256)
+        }
+        let commit = try coordinator.makeControl(
+            origin: origin, actor: actor, localParent: draft.cut,
+            parents: draft.cut.map { [$0] } ?? [],
+            deltas: [
+                .init(
+                    target: try .init(
+                        itemID: node.revision.itemID,
+                        revisionID: node.revision.revisionID, sha256: node.sha256),
+                    eligible: true, actor: node.revision.fields["actor"]!.string!,
+                    policyIDs: Array(Set(policies)).sorted(), evidence: binding)
+            ], bootstrap: pin)
+        let package = try coordinator.stageControlUnit(
+            draft.records + [commit], contextToken: peerIntakeContextToken())
+        // The acceptance fact and exact evidence are durable before the private assessment.
+        try authorityAfterAcceptanceSealForTesting?()
+        try coordinator.retainSealed(package, index: index)
+        try validateAuthorityControls(
+            packageID: package, coordinator: coordinator, index: index, localUnit: true)
+        try coordinator.journal.applied(package)
+    }
+    private func persistAuthorityAcceptanceEffects(
+        packageID: String, coordinator: PeerIntakeCoordinator,
+        index: ItemIndex
+    ) throws {
+        var cursor: String?
+        while true {
+            let rows = try index.authorityPackagePage(packageID: packageID, after: cursor, limit: 128)
+            if rows.isEmpty { break }
+            for row in rows {
+                cursor = row.descriptor.id
+                guard row.descriptor.kind == .item,
+                    try index.authorityDisposition(id: row.descriptor.id)?.disposition == .eligible,
+                    let current = try index.currentProjection(
+                        itemID:
+                            AuthorityRevision(originalBytes: coordinator.bytes(row)).revision.itemID),
+                    current.state.status == .ready,
+                    current.state.representativeRevisionID == row.descriptor.id
+                else { continue }
+                try persistAuthorityVisibility(
+                    revisionID: row.descriptor.id,
+                    coordinator: coordinator, index: index)
+            }
+        }
+    }
+    private func persistAuthorityVisibility(
+        revisionID: String, coordinator: PeerIntakeCoordinator, index: ItemIndex
+    ) throws {
+        if let origin = replicaID, try index.peerOriginRetired(origin) { return }
+        guard try !index.authorityLocallyExposed(revisionID: revisionID), let origin = replicaID,
+            let row = try index.retainedAuthorityObject(id: revisionID)
+        else { return }
+        let original = try AuthorityRevision(originalBytes: coordinator.bytes(row))
+        let localCut = try index.authorityControlHead(originID: origin)
+        let localEligibility =
+            try localCut.map {
+                try index.eligibilityAtCut(revisionID: revisionID, cut: $0)
+            } ?? .unknown
+        let cut: AuthorityBinding
+        if let localCut, localEligibility == .eligible {
+            cut = localCut
+        } else if let reviewed = try index.locallyAppliedReviewControl(
+            revisionID: revisionID, digest: original.sha256),
+            try index.authorityHasLocalHistoryAdmission(revisionID: revisionID),
+            try index.eligibilityAtCut(revisionID: revisionID, cut: reviewed) == .eligible
+        {
+            cut = reviewed
+        } else if try original.revision.provenance?.kind == .automaticMerge,
+            let source = try index.authorityAcceptanceControl(revisionID: revisionID),
+            try index.eligibilityAtCut(revisionID: revisionID, cut: source) == .eligible
+        {
+            cut = source
+        } else {
+            throw TractandaError(
+                "invalidAuthority",
+                "Local visibility lacks a validated acceptance cut for \(revisionID); local=\(localCut?.recordID ?? "none") state=\(localEligibility.rawValue)."
+            )
+        }
+        let causeKey: String?
+        if let binding = try original.revision.provenance?.authorityWitness {
+            let witness = try AuthorityStore.VerifiedReconciliationPlan(
+                witness: coordinator.control(binding, index: index))
+            causeKey = try index.authorityReconciliationCauseKey(
+                itemID: witness.itemID, frontier: witness.frontier, causes: witness.causes)
+        } else {
+            causeKey = nil
+        }
+        let record = try AuthorityRecord(
+            recordID: makePersistentUUID().uuidString.lowercased(), storeID: coordinator.storeID,
+            originReplicaID: origin, kind: .visibilityWitness, parentAuthorityIDs: [cut.recordID],
+            actorPrincipal: "replica:" + origin, createdAt: Timestamp.now(),
+            payload: [
+                "target": AuthorityStore.Target(
+                    itemID: original.revision.itemID,
+                    revisionID: revisionID, sha256: original.sha256
+                ).itemValue,
+                "cut": cut.itemValue, "modifiedAt": .date(original.revision.modifiedAt),
+                "causeKey": .list(causeKey.map { [.text($0)] } ?? []),
+            ])
+        let package = try coordinator.stageControlUnit([record], contextToken: peerIntakeContextToken())
+        try coordinator.retainSealed(package, index: index)
+        try validateAuthorityControls(
+            packageID: package, coordinator: coordinator, index: index, localUnit: true)
+        try coordinator.journal.applied(package)
+    }
+    private struct InitialAuthorityVisibility: Codable, Equatable {
+        let profile: String
+        let storeID: String
+        let replicaID: String
+        let pinID: String
+        let pinDigest: String
+    }
+    private func drainAuthorityVisibility(coordinator: PeerIntakeCoordinator, index: ItemIndex) throws {
+        guard replicaID != nil else { return }
+        var work = 0
+        while true {
+            let page = try index.authorityLocalVisibilityWorkPage(limit: 128)
+            if page.isEmpty { return }
+            for entry in page {
+                work += 1
+                try coordinator.progress?()
+                guard work <= coordinator.journal.limits.maximumWork else {
+                    throw TractandaError("resourceLimit", "Local visibility recovery work exhausted.")
+                }
+                if let current = try index.currentProjection(itemID: entry.itemID),
+                    current.state.status == .ready, let id = current.state.representativeRevisionID
+                {
+                    try persistAuthorityVisibility(revisionID: id, coordinator: coordinator, index: index)
+                }
+                try index.clearAuthorityLocalVisibilityWork(itemID: entry.itemID, token: entry.token)
+            }
+        }
+    }
+    /// Rebuild rederives unfinished disposition effects from the admitted controls. In
+    /// particular, a sealed revocation plus an unsealed reconciliation must never expose
+    /// an older representative without completing the required changed-view publication.
+    private func finishAuthorityDispositionEffects(coordinator: PeerIntakeCoordinator, index: ItemIndex)
+        throws
+    {
+        guard let origin = replicaID else { return }
+        var work = 0
+        while true {
+            let page = try index.authorityDispositionEffectPage(limit: 128)
+            if page.isEmpty { return }
+            work += page.count
+            guard work <= coordinator.journal.limits.maximumWork else {
+                throw TractandaError("resourceLimit", "Authority effect recovery work exhausted.")
+            }
+            var items: [String: Set<AuthorityBinding>] = [:]
+            for delta in page { items[delta.target.itemID, default: []].formUnion(delta.causes) }
+            for (item, causes) in items.sorted(by: { $0.key < $1.key }) {
+                try reconcileAuthorityProjection(
+                    item,
+                    causes: causes.sorted { $0.recordID < $1.recordID }, coordinator: coordinator,
+                    index: index)
+            }
+            if try !index.authorityDispositionEffectPage(limit: 1).isEmpty {
+                let draft = try coordinator.prepareSourceCut(
+                    index: index, origin: origin, actor: "replica:" + origin)
+                guard !draft.records.isEmpty else {
+                    throw TractandaError(
+                        "invalidAuthority", "Unfinished disposition effects lack a publication plan.")
+                }
+                let package = try coordinator.stageControlUnit(
+                    draft.records, contextToken: peerIntakeContextToken())
+                try coordinator.retainSealed(package, index: index)
+                try validateAuthorityControls(
+                    packageID: package, coordinator: coordinator, index: index, localUnit: true)
+                try coordinator.journal.applied(package)
+            }
+        }
+    }
+    /// One-time, resumable baseline work: acceptance covers the reviewed history, while
+    /// clock exposure records only READY representatives actually admitted on this node.
+    private func ensureInitialAuthorityVisibility(
+        coordinator: PeerIntakeCoordinator, index: ItemIndex
+    ) throws {
+        guard authorityExistingHistoryAdmitted,
+            let pin = try coordinator.configuration()?.bootstrap, let origin = replicaID
+        else { return }
+        let expected = InitialAuthorityVisibility(
+            profile: "tractanda.initial-visibility.v1",
+            storeID: coordinator.storeID, replicaID: origin, pinID: pin.recordID, pinDigest: pin.sha256)
+        let path = [".authority-initial-visibility", pin.recordID]
+        if let bytes = try coordinator.journal.files.readIfPresent(path: path, maximumBytes: 4096) {
+            guard try PeerPackage.decode(InitialAuthorityVisibility.self, bytes, maximum: 4096) == expected
+            else {
+                throw TractandaError(
+                    "invalidAuthority", "Initial local visibility belongs to another cut/node.")
+            }
+            return
+        }
+        let wasDirty = StoreCheckpoint.isDirty(root: root)
+        try StoreCheckpoint.markDirty(root: root)
+        do {
+            try coordinator.withOperation(recovery: true) {
+                try index.withCatalogueScanBudget(progress: coordinator.progress, reusingActiveBudget: true) {
+                    try index.retainLocalBootstrapAcceptance(pin)
+                    if try index.authorityControlHead(originID: origin) == nil {
+                        let draft = try coordinator.prepareSourceCut(
+                            index: index, origin: origin,
+                            actor: "replica:" + origin)
+                        guard !draft.records.isEmpty else {
+                            throw TractandaError(
+                                "invalidAuthority", "Reviewed initial cut lacks a causal root.")
+                        }
+                        let package = try coordinator.stageControlUnit(
+                            draft.records,
+                            contextToken: peerIntakeContextToken())
+                        try coordinator.retainSealed(package, index: index)
+                        try validateAuthorityControls(
+                            packageID: package, coordinator: coordinator, index: index, localUnit: true)
+                        try coordinator.journal.applied(package)
+                    }
+                    try drainAuthorityVisibility(coordinator: coordinator, index: index)
+                }
+            }
+            try coordinator.journal.files.writeImmutable(
+                try JSON.encode(expected), path: path, maximumBytes: 4096)
+            if !wasDirty { try StoreCheckpoint.clear(root: root) }
+        } catch {
+            quarantineCheckpoint()
+            throw error
+        }
+    }
+    private func holdAuthorityDescendants(
+        _ revisionID: String, reason: String, causes: [AuthorityBinding] = [],
+        coordinator: PeerIntakeCoordinator, index: ItemIndex, retirement: Bool = false
+    ) throws {
+        let token = "hold:" + Identifier.make()
+        try index.authorityBeginWalk(token: token)
+        defer { try? index.authorityEndWalk(token: token) }
+        var pending = [revisionID]
+        var work = 0
+        while let id = pending.popLast() {
+            try coordinator.progress?()
+            work += 1
+            guard work <= coordinator.journal.limits.maximumWork,
+                UInt64(pending.count) * 128 < coordinator.journal.limits.maximumStagedBytes
+            else {
+                throw TractandaError("resourceLimit", "Authority descendant work exhausted.")
+            }
+            guard try index.authorityVisitOnce(token: token, id: id) else { continue }
+            if !causes.isEmpty, let row = try index.retainedAuthorityObject(id: id) {
+                let alreadyCovered: Bool
+                if let origin = replicaID, let cut = try index.authorityControlHead(originID: origin) {
+                    alreadyCovered = try index.eligibilityAtCut(revisionID: id, cut: cut) == .held
+                } else {
+                    alreadyCovered = false
+                }
+                if !alreadyCovered {
+                    let node = try AuthorityRevision(originalBytes: coordinator.bytes(row))
+                    let evidence = try authoritySourceWitness(node, coordinator: coordinator, index: index)
+                    let policyIDs =
+                        try evidence.map {
+                            try
+                                (AuthorityRecord.list($0.payload["admissionPolicies"])
+                                + AuthorityRecord.list($0.payload["itemPolicies"]))
+                                .map { try AuthorityRecord.binding($0).revisionID }
+                        } ?? []
+                    try index.noteAuthorityDispositionEffect(
+                        .init(
+                            target: try .init(
+                                itemID: node.revision.itemID,
+                                revisionID: id, sha256: node.sha256), eligible: false,
+                            actor: node.revision.fields["actor"]!.string!,
+                            policyIDs: Array(Set(policyIDs)).sorted(), causes: causes))
+                }
+            }
+            if retirement, let state = try index.authorityDisposition(id: id)?.disposition,
+                [.eligible, .pending, .missingDependencies].contains(state)
+            {
+                try index.notePeerRetirementEffect(id)
+            }
+            try index.setAuthorityDisposition(id: id, evaluation: .init(disposition: .held, reason: reason))
+            var after: String?
+            while true {
+                let children = try index.authorityChildPage(parentID: id, after: after, limit: 128)
+                if children.isEmpty { break }
+                for child in children {
+                    after = child.descriptor.id
+                    pending.append(child.descriptor.id)
+                }
+            }
+        }
+    }
+    private func reduceRetainedAuthorityInventory(coordinator: PeerIntakeCoordinator, index: ItemIndex) throws
+    {
+        // Existing user-revocation recovery pass; peer retirement uses its separate origin/time index.
+        var cursor: String?
+        while true {
+            let page = try index.retainedAuthorityPage(after: cursor, limit: 128)
+            if page.isEmpty { break }
+            for row in page {
+                cursor = row.descriptor.id
+                guard row.descriptor.kind == .item,
+                    try index.authorityDisposition(id: row.descriptor.id)?.disposition == .eligible
+                else { continue }
+                let node = try AuthorityRevision(originalBytes: coordinator.bytes(row))
+                guard try node.revision.provenance?.kind != .automaticMerge,
+                    try !index.authorityReviewIsProvisional(revisionID: node.revision.revisionID),
+                    let evidence = try authoritySourceWitness(node, coordinator: coordinator, index: index)
+                else { continue }
+                let outcome = try coordinator.invalidationOutcome(node, evidence: evidence, index: index)
+                if outcome.denied {
+                    try holdAuthorityDescendants(
+                        node.revision.revisionID,
+                        reason: "Rebuilt validated revocation requires review of this exact original.",
+                        causes: outcome.causes, coordinator: coordinator, index: index)
+                }
+            }
+        }
+    }
+    private func reducePeerRetirements(coordinator: PeerIntakeCoordinator, index: ItemIndex) throws
+        -> [String: [AuthorityBinding]]
+    {
+        var affected: [String: [AuthorityBinding]] = [:]
+        var reviewedOriginals: [String: [AuthorityBinding]] = [:]
+        var afterOrigin: String?
+        var work = 0
+        while true {
+            let origins = try index.peerRetirementOriginPage(after: afterOrigin)
+            if origins.isEmpty { break }
+            for (origin, cutoff) in origins {
+                afterOrigin = origin
+                var reviewCursor: (Int64, String)?
+                while true {
+                    let reviews = try index.peerRetiredReviewPage(
+                        origin: origin, cutoff: cutoff, after: reviewCursor)
+                    if reviews.isEmpty { break }
+                    for review in reviews {
+                        reviewCursor = (review.issued, review.decision)
+                        work += 1
+                        try coordinator.progress?()
+                        guard work <= coordinator.journal.limits.maximumWork else {
+                            throw TractandaError(
+                                "resourceLimit", "Retired review dependency window exhausted.")
+                        }
+                        guard let raw = try index.retainedAuthorityObject(id: review.resolution) else {
+                            throw TractandaError(
+                                "missingDependencies", "Applied review resolution is absent.")
+                        }
+                        let resolution = try AuthorityRevision(originalBytes: coordinator.bytes(raw))
+                        let causes = try index.peerRetirementCauses(
+                            revisionID: review.resolution,
+                            origin: resolution.revision.provenance!.originReplicaID)
+                        if try !index.peerLifecycleHasFreshReview(review.resolution, causes: causes) {
+                            try holdAuthorityDescendants(
+                                review.resolution,
+                                reason: "The exact review issuer was removed before its decision.",
+                                coordinator: coordinator, index: index, retirement: true)
+                            affected[review.item] = Array(Set((affected[review.item] ?? []) + causes))
+                                .sorted { $0.recordID < $1.recordID }
+                        }
+                        reviewedOriginals[review.target] = Array(
+                            Set((reviewedOriginals[review.target] ?? []) + causes)
+                        )
+                        .sorted { $0.recordID < $1.recordID }
+                    }
+                }
+                var after: (Int64, String)?
+                while true {
+                    let rows = try index.authorityRetirementTargetPage(
+                        origin: origin, cutoff: cutoff, after: after)
+                    if rows.isEmpty { break }
+                    for row in rows {
+                        after = (try PeerLifecycle.revisionTicks(row.descriptor.id), row.descriptor.id)
+                        work += 1
+                        try coordinator.progress?()
+                        guard work <= coordinator.journal.limits.maximumWork,
+                            UInt64(affected.count) * 4096 < coordinator.journal.limits.maximumStagedBytes
+                        else {
+                            throw TractandaError(
+                                "resourceLimit", "Timestamp retirement affected-target window exhausted.")
+                        }
+                        if try index.authorityReviewIsProvisional(revisionID: row.descriptor.id) { continue }
+                        let node = try AuthorityRevision(originalBytes: coordinator.bytes(row))
+                        guard try coordinator.retirementBlocks(node, index: index) else { continue }
+                        let causes = try index.peerRetirementCauses(
+                            revisionID: row.descriptor.id, origin: origin)
+                        try holdAuthorityDescendants(
+                            row.descriptor.id,
+                            reason: "Validated timestamp retirement requires exact administrator review.",
+                            coordinator: coordinator, index: index, retirement: true)
+                        affected[node.revision.itemID] = Array(
+                            Set((affected[node.revision.itemID] ?? []) + causes)
+                        ).sorted { $0.recordID < $1.recordID }
+                    }
+                }
+            }
+        }
+        if try index.acceptedGraphProofIsCurrent() {
+            // First remove EVERY invalid C/policy before assessing B. No current ACL or
+            // admission decision may use a stale just-retired C from the projection cache.
+            for item in affected.keys.sorted() {
+                try refreshRetirementCurrent(item, coordinator: coordinator, index: index)
+            }
+            if !affected.isEmpty || !reviewedOriginals.isEmpty {
+                try refreshCurrentAccessConfigurations(using: index)
+            }
+            for (id, causes) in reviewedOriginals.sorted(by: { $0.key < $1.key }) {
+                guard try index.authorityDisposition(id: id)?.disposition == .eligible,
+                    let heldRaw = try index.retainedAuthorityObject(id: id)
+                else { continue }
+                let held = try AuthorityRevision(originalBytes: coordinator.bytes(heldRaw))
+                let ownCauses = try index.peerRetirementCauses(
+                    revisionID: id, origin: held.revision.provenance!.originReplicaID)
+                let approved = try index.authorityReviewDisposition(revisionID: id) == .approved
+                if approved, try ownCauses.isEmpty || index.peerLifecycleHasFreshReview(id, causes: ownCauses)
+                {
+                    continue
+                }
+                var independentlyEligible = false
+                if let evidence = try authoritySourceWitness(held, coordinator: coordinator, index: index) {
+                    independentlyEligible =
+                        try evaluateIncomingAuthority(
+                            held, evidence: evidence, coordinator: coordinator, index: index,
+                            revalidatingAcceptedOriginal: true
+                        ).disposition == .eligible
+                }
+                if !independentlyEligible {
+                    try holdAuthorityDescendants(
+                        id,
+                        reason: "Original has no independent current authority after review issuer removal.",
+                        coordinator: coordinator, index: index, retirement: true)
+                    affected[held.revision.itemID] = Array(
+                        Set((affected[held.revision.itemID] ?? []) + causes)
+                    )
+                    .sorted { $0.recordID < $1.recordID }
+                    try refreshRetirementCurrent(held.revision.itemID, coordinator: coordinator, index: index)
+                    if held.revision.classID == AccessConfiguration.classID {
+                        try refreshCurrentAccessConfigurations(using: index)
+                    }
+                }
+            }
+        }
+        return affected
+    }
+    private func refreshRetirementCurrent(
+        _ item: String, coordinator: PeerIntakeCoordinator, index: ItemIndex
+    ) throws {
+        try index.reconcileAuthorityAcceptedItem(itemID: item)
+        if let old = heads.removeValue(forKey: item) { headCacheBytes -= try residentByteCount(old) }
+        headCacheOrder.removeAll { $0 == item }
+        if try index.revisionCount(itemID: item) == 0 {
+            try index.replaceCurrentProjection(
+                snapshot: nil,
+                state: ItemState(
+                    itemID: item, stateToken: nextProjectionStateToken(), status: .reviewRequired,
+                    detailsComplete: false,
+                    resource: .init(
+                        code: "authorityReviewRequired", phase: .analysis,
+                        message: "Timestamp retirement held all current contributions.")),
+                policies: [], policiesComplete: false)
+        } else {
+            _ = try prepareRecoveredProjection(item, using: index, deferMaterialization: true)
+        }
+    }
+    private func reduceAuthorityItem(
+        _ itemID: String, coordinator: PeerIntakeCoordinator,
+        index: ItemIndex
+    ) throws -> [AuthorityBinding] {
+        var cursor: (Int64, String)?
+        var causes: Set<AuthorityBinding> = []
+        var changed = false
+        while true {
+            let condition = cursor == nil ? "" : " AND (modified_ticks,revision)>(CAST(? AS INTEGER),?)"
+            let page = try index.graphCatalogueRows(
+                where: "WHERE item=?\(condition) ORDER BY modified_ticks,revision",
+                bindings: [itemID] + (cursor.map { [String($0.0), $0.1] } ?? []), limit: 128)
+            if page.isEmpty { break }
+            for row in page {
+                cursor = (try RevisionTimestamp(row.modifiedAt).ticks, row.revisionID)
+                guard try index.authorityDisposition(id: row.revisionID)?.disposition == .eligible,
+                    let raw = try index.retainedAuthorityObject(id: row.revisionID)
+                else { continue }
+                let node = try AuthorityRevision(originalBytes: coordinator.bytes(raw))
+                guard try node.revision.provenance?.kind != .automaticMerge,
+                    try !index.authorityReviewIsProvisional(revisionID: node.revision.revisionID),
+                    let evidence = try authoritySourceWitness(node, coordinator: coordinator, index: index)
+                else { continue }
+                let outcome = try coordinator.invalidationOutcome(node, evidence: evidence, index: index)
+                if outcome.denied {
+                    causes.formUnion(outcome.causes)
+                    try holdAuthorityDescendants(
+                        row.revisionID,
+                        reason:
+                            "Validated canonical revocation requires review; descendants retain exact originals.",
+                        causes: outcome.causes,
+                        coordinator: coordinator, index: index)
+                    changed = true
+                }
+            }
+        }
+        guard changed else { return [] }
+        try index.reconcileAuthorityAcceptedItem(itemID: itemID)
+        if let old = heads.removeValue(forKey: itemID) { headCacheBytes -= try residentByteCount(old) }
+        headCacheOrder.removeAll { $0 == itemID }
+        if try index.revisionCount(itemID: itemID) == 0 {
+            let state = ItemState(
+                itemID: itemID, stateToken: nextProjectionStateToken(), status: .reviewRequired,
+                detailsComplete: false,
+                resource: .init(
+                    code: "authorityReviewRequired", phase: .analysis,
+                    message: "No eligible current policy remains; administrator review is required."))
+            try index.replaceCurrentProjection(
+                snapshot: nil, state: state, policies: [], policiesComplete: false)
+        } else {
+            let snapshot = try analyzeCurrentProjection(
+                itemID, using: index,
+                limits: revisionProjectionLimits, progress: coordinator.progress)
+            let state = try projectionState(
+                for: snapshot, status: .reviewRequired,
+                resource: .init(
+                    code: "authorityReconciliationPending", phase: .publication,
+                    message: "Validated authority transition is reconciling this item."))
+            try index.replaceCurrentProjection(
+                snapshot: snapshot, state: state,
+                policies: projectionPolicies(snapshot, using: index), policiesComplete: true)
+        }
+        return causes.sorted { $0.recordID < $1.recordID }
+    }
+    private func applyAuthorityPolicyEffects(
+        packageID: String, coordinator: PeerIntakeCoordinator,
+        index: ItemIndex
+    ) throws -> [String: [AuthorityBinding]] {
+        var affected: [String: [AuthorityBinding]] = [:]
+        var cursor: String?
+        while true {
+            let rows = try index.authorityPackagePage(packageID: packageID, after: cursor, limit: 128)
+            if rows.isEmpty { break }
+            for row in rows {
+                cursor = row.descriptor.id
+                guard row.descriptor.kind == .item,
+                    try index.authorityDisposition(id: row.descriptor.id)?.disposition == .eligible
+                else { continue }
+                let node = try AuthorityRevision(originalBytes: coordinator.bytes(row))
+                guard let previous = node.revision.supersedes,
+                    let prior = try index.retainedAuthorityObject(id: previous)
+                else { continue }
+                let old = try AuthorityRevision(originalBytes: coordinator.bytes(prior)).revision
+                guard
+                    node.revision.classID == AccessConfiguration.classID
+                        || old.fields["permissions"] != node.revision.fields["permissions"]
+                else { continue }
+                var after: String?
+                while true {
+                    let items = try index.affectedAuthorityItemPage(
+                        kind: "policy", value: previous, after: after, limit: 128)
+                    if items.isEmpty { break }
+                    for item in items {
+                        after = item
+                        let causes = try reduceAuthorityItem(item, coordinator: coordinator, index: index)
+                        if !causes.isEmpty {
+                            affected[item] = Array(Set((affected[item] ?? []) + causes)).sorted {
+                                $0.recordID < $1.recordID
+                            }
+                        }
+                        guard UInt64(affected.count) * 4096 <= coordinator.journal.limits.maximumStagedBytes
+                        else {
+                            throw TractandaError(
+                                "resourceLimit", "Affected-item metadata exceeds operation allowance.")
+                        }
+                    }
+                }
+            }
+        }
+        return affected
+    }
+    private struct ReconciliationIdentity: Codable {
+        let profile: String
+        let storeID: String
+        let replicaID: String
+        let key: String
+        let outputRevisionID: String
+        let witnessID: String
+        let createdAt: String
+        let modifiedAt: String
+    }
+    private func reconciliationIdentity(
+        key: String, origin: String, after: [String],
+        coordinator: PeerIntakeCoordinator
+    ) throws -> ReconciliationIdentity {
+        let path = ["authority", "local-reconciliation-identities", key]
+        if let bytes = try coordinator.journal.files.readIfPresent(path: path, maximumBytes: 4096) {
+            let value = try PeerPackage.decode(ReconciliationIdentity.self, bytes, maximum: 4096)
+            guard value.profile == "tractanda.local-reconciliation-identity.v1",
+                value.storeID == coordinator.storeID, value.replicaID == origin, value.key == key,
+                try after.allSatisfy({ try RevisionTimestamp(value.modifiedAt) > RevisionTimestamp($0) })
+            else { throw TractandaError("invalidAuthority", "Reconciliation reservation context differs.") }
+            _ = try AuthorityRecord.persistentID(.text(value.outputRevisionID))
+            _ = try AuthorityRecord.persistentID(.text(value.witnessID))
+            _ = try RevisionTimestamp(value.createdAt)
+            return value
+        }
+        // Real UUIDv1 identities are issued once and persisted before a prepared/sealed unit.
+        // Retrying does not fabricate deterministic UUIDs or change the reserved original.
+        let value = ReconciliationIdentity(
+            profile: "tractanda.local-reconciliation-identity.v1",
+            storeID: coordinator.storeID, replicaID: origin, key: key,
+            outputRevisionID: try makePersistentUUID().uuidString.lowercased(),
+            witnessID: try makePersistentUUID().uuidString.lowercased(), createdAt: Timestamp.now(),
+            modifiedAt: try RevisionPublicationClock.after(after, now: publicationClockForTesting))
+        try coordinator.journal.files.writeImmutable(try JSON.encode(value), path: path, maximumBytes: 4096)
+        return value
+    }
+    private func reconcileAuthorityProjection(
+        _ itemID: String, causes: [AuthorityBinding],
+        coordinator: PeerIntakeCoordinator, index: ItemIndex
+    ) throws {
+        guard try index.revisionCount(itemID: itemID) > 0 else { return }
+        let snapshot = try analyzeCurrentProjection(
+            itemID, using: index,
+            limits: revisionProjectionLimits, progress: coordinator.progress)
+        let policies = try projectionPolicies(snapshot, using: index)
+        guard snapshot.analysis.isResolved else {
+            try index.replaceCurrentProjection(
+                snapshot: snapshot,
+                state: projectionState(for: snapshot, status: .conflicted), policies: policies,
+                policiesComplete: true)
+            return
+        }
+        if let local = replicaID, try index.peerOriginRetired(local) {
+            _ = try prepareRecoveredProjection(
+                itemID, using: index, verifiedSnapshot: snapshot, deferMaterialization: true)
+            return
+        }
+        let causeKey = try index.authorityReconciliationCauseKey(
+            itemID: itemID,
+            frontier: snapshot.analysis.frontier, causes: causes)
+        guard let floor = try index.authorityExposureFloor(itemID: itemID, excludingCauseKey: causeKey),
+            try snapshot.representative == nil
+                || RevisionTimestamp(snapshot.representative!.modifiedAt)
+                    < RevisionTimestamp(floor.modifiedAt)
+        else {
+            let prepared = try prepareRecoveredProjection(itemID, using: index, verifiedSnapshot: snapshot)
+            if let revision = prepared.revision { try rememberHead(Self.residentHead(revision)) }
+            return
+        }
+        let parents = Array(Set(snapshot.physicalHeads + [snapshot.clockFloor.revisionID])).sorted()
+        guard !parents.isEmpty, parents.count <= 1024, !causes.isEmpty,
+            let parent = try index.revision(parents[0]), let origin = replicaID
+        else {
+            throw TractandaError("resourceLimit", "Reconciliation ancestry/control proof is incomplete.")
+        }
+        let planDigest = try index.authorityReconciliationPlanDigest(fields: snapshot.analysis.fields)
+        let identityKey = AuthorityRecordCodec.sha256(
+            try JSON.encode(
+                ItemValue.object([
+                    "item": .text(itemID), "parents": .list(parents.map(ItemValue.text)),
+                    "frontier": .list(snapshot.analysis.frontier.map(ItemValue.text)),
+                    "cause": .text(causeKey), "exposure": floor.witness.itemValue,
+                    "acceptedClock": .date(snapshot.clockFloor.modifiedAt), "plan": .text(planDigest),
+                ])))
+        let identity = try reconciliationIdentity(
+            key: identityKey, origin: origin,
+            after: [snapshot.clockFloor.modifiedAt, floor.modifiedAt], coordinator: coordinator)
+        let modified = identity.modifiedAt
+        let outputID = identity.outputRevisionID
+        let witness = try AuthorityRecord(
+            recordID: identity.witnessID,
+            storeID: coordinator.storeID, originReplicaID: origin, kind: .reconciliationWitness,
+            parentAuthorityIDs: Array(Set(causes.map(\.recordID) + [floor.witness.recordID])).sorted(),
+            actorPrincipal: "replica:" + origin, createdAt: identity.createdAt,
+            payload: [
+                "itemID": .text(itemID), "parents": .list(parents.map(ItemValue.text)),
+                "frontier": .list(snapshot.analysis.frontier.map(ItemValue.text)),
+                "causes": .list(causes.map(\.itemValue)), "exposures": .list([floor.witness.itemValue]),
+                "baseFloor": .date(floor.modifiedAt), "modifiedAt": .date(modified),
+                "outputRevisionID": .text(outputID),
+                "planDigest": .text(planDigest),
+            ])
+        let provenance = try RevisionProvenance(
+            kind: .automaticMerge, originReplicaID: origin,
+            parents: parents, writtenFields: [], unsetFields: [], frontier: snapshot.analysis.frontier,
+            mergeProfile: AuthorityStore.reconciliationProfile,
+            authorityWitness: coordinator.recordBinding(witness))
+        var fields = snapshot.analysis.fields
+        fields["itemID"] = .text(itemID)
+        fields["revisionID"] = .text(outputID)
+        fields["createdAt"] = .date(parent.createdAt)
+        fields["modifiedAt"] = .date(modified)
+        fields["actor"] = .text("replica:" + origin)
+        fields["operationID"] = .text(outputID)
+        fields["requestIdentity"] = .text(try JSON.encode(provenance.itemValue).base64EncodedString())
+        fields["revisionAncestry"] = provenance.itemValue
+        let revision = try Revision(fields: fields, formatVersion: 2)
+        try ItemSemantics.validate(revision)
+        let output = try publishVerifiedCombination(
+            revision, snapshot: snapshot, policies: policies,
+            using: index, authorityControls: [witness])
+        let reservation = try index.reserveReconciliation(
+            .init(witness: AuthorityRecordCodec.decode(AuthorityRecordCodec.encode(witness))))
+        try index.completeReconciliation(
+            reservation, revision: AuthorityRevision(originalBytes: RecordCodec.encode(output)))
+        try rememberHead(Self.residentHead(output))
+    }
+    func commitPeerIntake(
+        context: PeerPackage.Context, packageID: String, expectedContextToken: String,
+        retainedRecovery: Bool = false
+    )
+        throws -> AuthorityStore.Result
+    {
+        let coordinator = try requirePeerIntake()
+        guard let index else {
+            throw TractandaError("indexUnavailable", "Intake requires the accepted catalogue.")
+        }
+        return try coordinator.withOperation {
+            try index.withCatalogueScanBudget(reusingActiveBudget: true) {
+                try commitPeerIntakeBody(
+                    context: context, packageID: packageID, expectedContextToken: expectedContextToken,
+                    retainedRecovery: retainedRecovery)
+            }
+        }
+    }
+    private func commitPeerIntakeBody(
+        context: PeerPackage.Context, packageID: String, expectedContextToken: String, retainedRecovery: Bool
+    ) throws -> AuthorityStore.Result {
+        let coordinator = try requirePeerIntake()
+        if retainedRecovery {
+            guard try coordinator.journal.publication(packageID) != nil else {
+                throw TractandaError("invalidPeerPackage", "Retained recovery requires an existing seal.")
+            }
+        } else {
+            try coordinator.journal.requireCurrentProfile(packageID)
+        }
+        let markerWasDirty = StoreCheckpoint.isDirty(root: root)
+        try coordinator.requireIntakeCurrent(context, packageID: packageID)
+        guard expectedContextToken == (try peerIntakeContextToken()), let index, isCanonicalReady else {
+            throw TractandaError("revisionConflict", "Intake authority/current context changed.")
+        }
+        guard try coordinator.journal.beginRecord(packageID).context == context else {
+            throw TractandaError(
+                "untrustedPeer", "Package belongs to a different authenticated session/configuration.")
+        }
+        _ = try coordinator.journal.intakeState(context: context, packageID: packageID)
+        if try coordinator.journal.publication(packageID) == nil,
+            !(try index.authorityPackagePage(packageID: packageID, limit: 1)).isEmpty {
+            throw TractandaError("peerRepairRequired", "Retained package lost its admitted publication proof.")
+        }
+        try coordinator.prepareOriginals(
+            packageID: packageID, index: index, publish: false, recovering: retainedRecovery)
+        // Verify framing and full originals before sealing. Missing payload closure remains staged.
+        var requiresPeerLifecycleReader = false
+        var requiresEnrollmentReader = false
+        let preflight = "preflight:" + packageID
+        try index.authorityBeginWalk(token: preflight)
+        defer { try? index.authorityEndWalk(token: preflight) }
+        try coordinator.journal.walk(packageID) { descriptor, bytes in
+            try coordinator.requireStorageIdentity(descriptor, index: index)
+            if descriptor.kind == .attachment || descriptor.kind == .document {
+                guard try index.authorityVisitOnce(token: preflight, id: descriptor.id) else {
+                    throw TractandaError(
+                        "invalidPeerPackage", "Repeated all-kind object identity before seal.")
+                }
+                return
+            }
+            let bytes =
+                try bytes
+                ?? index.retainedAuthorityObject(id: descriptor.id).flatMap { try coordinator.bytes($0) }
+            guard let bytes else {
+                throw TractandaError("missingDependencies", "Original object transfer is incomplete.")
+            }
+            guard try index.authorityVisitOnce(token: preflight, id: descriptor.id) else {
+                throw TractandaError("invalidPeerPackage", "Repeated object identity in package index.")
+            }
+            if let known = try index.retainedAuthorityObject(id: descriptor.id) {
+                guard known.descriptor == descriptor, try coordinator.bytes(known) == bytes else {
+                    throw TractandaError(
+                        "peerObjectCollision", "Retained identity differs; incoming stage is preserved.")
+                }
+                try coordinator.requireRetainedReceipt(known, original: bytes, index: index)
+            } else if descriptor.kind == .item, let known = try index.revision(descriptor.id) {
+                _ = try PooledCanonicalRecord.read(row: known, root: root, ownerUID: ownerUID)
+                guard known.digest == Data(SHA256.hash(data: bytes)) else {
+                    throw TractandaError(
+                        "peerObjectCollision", "Existing history differs; incoming stage is preserved.")
+                }
+            }
+            switch descriptor.kind {
+            case .item:
+                guard try AuthorityRevision(originalBytes: bytes).revision.revisionID == descriptor.id else {
+                    throw TractandaError(
+                        "invalidPeerPackage", "Item descriptor identity differs from original.")
+                }
+            case .authority:
+                let record = try AuthorityRecordCodec.decode(bytes).record
+                guard record.recordID == descriptor.id, record.storeID == context.storeID else {
+                    throw TractandaError(
+                        "invalidPeerPackage", "Control descriptor identity/store differs from original.")
+                }
+                if record.kind == .enrollmentApproval { requiresEnrollmentReader = true }
+                if record.kind == .originRetirement || record.kind == .originRetirementPage {
+                    requiresPeerLifecycleReader = true
+                }
+            default:
+                throw TractandaError(
+                    "missingDependencies", "Payload closure is not enabled in metadata intake.")
+            }
+        }
+        let begin = try coordinator.journal.beginRecord(packageID)
+        if try coordinator.journal.publication(packageID) == nil {
+            let prepared =
+                try coordinator.journal.preparedPublication(packageID)
+                ?? .init(
+                    packageID: packageID,
+                    manifestDigest: AuthorityRecordCodec.sha256(try JSON.encode(begin.manifest)),
+                    context: context, contextToken: expectedContextToken,
+                    arrivalMinute: PeerIntakeJournal.currentArrivalMinute())
+            try coordinator.journal.prepare(prepared)
+            if requiresEnrollmentReader {
+                try CanonicalReaderRequirement.beforeEnrollmentApprovalPublication(root: root, ownerUID: ownerUID)
+            } else if requiresPeerLifecycleReader {
+                try CanonicalReaderRequirement.beforePeerLifecyclePublication(root: root, ownerUID: ownerUID)
+            } else {
+                try CanonicalReaderRequirement.beforeAuthorityPublication(root: root, ownerUID: ownerUID)
+            }
+            try StoreCheckpoint.markDirty(root: root)
+            try coordinator.journal.seal(packageID)
+        }
+        try StoreCheckpoint.markDirty(root: root)
+        var intakePhase = "retainingOriginals"
+        do {
+            try index.execute("SAVEPOINT peer_intake")
+            try coordinator.retainSealed(packageID, index: index, allowReviewClosure: true)
+            authorityCatchupActive = true
+            defer { authorityCatchupActive = false }
+            var affected: [String: [AuthorityBinding]] = [:]
+            var iterations = 0
+            while true {
+                iterations += 1
+                guard iterations <= coordinator.journal.limits.maximumWork else {
+                    throw TractandaError("resourceLimit", "Intake closure work exhausted.")
+                }
+                let before = try index.catalogueWatermark()
+                intakePhase = "validatingControls"
+                try validateAuthorityControls(packageID: packageID, coordinator: coordinator, index: index)
+                let admissionChanged = try activateOriginAdmissions(coordinator: coordinator, index: index)
+                if admissionChanged {
+                    try validateAuthorityControls(packageID: nil, coordinator: coordinator, index: index)
+                    try reconsiderOriginObservations(coordinator: coordinator, index: index)
+                }
+                if try activatePendingRetirements(coordinator: coordinator, index: index) {
+                    for (item, causes) in try reducePeerRetirements(
+                        coordinator: coordinator, index: index)
+                    {
+                        affected[item] = Array(Set((affected[item] ?? []) + causes)).sorted {
+                            $0.recordID < $1.recordID
+                        }
+                    }
+                }
+                try recheckPeerRetirementEffects(coordinator: coordinator, index: index)
+                intakePhase = "evaluatingAuthority"
+                _ = try coordinator.evaluatePending(
+                    packageID: packageID, index: index,
+                    evaluate: { node, evidence in
+                        try self.evaluateIncomingAuthority(
+                            node, evidence: evidence, coordinator: coordinator, index: index)
+                    },
+                    evaluateMaterialization: { node in
+                        try self.evaluateAuthorityMaterialization(
+                            node, coordinator: coordinator, index: index)
+                    },
+                    beforeAcceptance: { node, result in
+                        try self.sealAuthorityAcceptance(
+                            node, evaluation: result,
+                            coordinator: coordinator, index: index)
+                    })
+                intakePhase = "promotingAccepted"
+                try promoteEligiblePeerPackage(packageID, coordinator: coordinator, index: index)
+                intakePhase = "refreshingCurrentPolicy"
+                try refreshCurrentAccessConfigurations(using: index)
+                intakePhase = "reducingAffectedAuthority"
+                for (item, causes) in try applyAuthorityPolicyEffects(
+                    packageID: packageID, coordinator: coordinator, index: index)
+                {
+                    affected[item] = Array(Set((affected[item] ?? []) + causes)).sorted {
+                        $0.recordID < $1.recordID
+                    }
+                }
+                if try index.catalogueWatermark() == before, !admissionChanged { break }
+            }
+            // All causes included in the next PRE cut now have complete affected-target effects.
+            authorityCatchupActive = false
+            intakePhase = "reconcilingCurrent"
+            for (item, causes) in affected.sorted(by: { $0.key < $1.key }) {
+                try reconcileAuthorityProjection(item, causes: causes, coordinator: coordinator, index: index)
+            }
+            intakePhase = "finishingDispositionEffects"
+            try finishAuthorityDispositionEffects(coordinator: coordinator, index: index)
+            // Finish any ordinary merge deferred by the catch-up barrier.
+            var finalCursor: String?
+            while true {
+                let rows = try index.authorityPackagePage(
+                    packageID: packageID, after: finalCursor, limit: 128)
+                if rows.isEmpty { break }
+                for row in rows {
+                    finalCursor = row.descriptor.id
+                    guard row.descriptor.kind == .item, let accepted = try index.revision(row.descriptor.id),
+                        let current = try index.currentProjection(itemID: accepted.itemID),
+                        current.state.status == .reviewRequired,
+                        current.state.resource?.code == "authorityCatchupPending"
+                    else { continue }
+                    _ = try prepareRecoveredProjection(accepted.itemID, using: index)
+                }
+            }
+            intakePhase = "recordingVisibility"
+            try persistAuthorityAcceptanceEffects(
+                packageID: packageID, coordinator: coordinator, index: index)
+            try drainAuthorityVisibility(coordinator: coordinator, index: index)
+            let result = try coordinator.evaluatePending(
+                packageID: packageID, index: index,
+                evaluate: { node, evidence in
+                    try self.evaluateIncomingAuthority(
+                        node, evidence: evidence, coordinator: coordinator, index: index)
+                },
+                evaluateMaterialization: { node in
+                    try self.evaluateAuthorityMaterialization(node, coordinator: coordinator, index: index)
+                },
+                beforeAcceptance: { node, result in
+                    try self.sealAuthorityAcceptance(
+                        node, evaluation: result,
+                        coordinator: coordinator, index: index)
+                })
+            try index.execute("RELEASE peer_intake")
+            try coordinator.journal.applied(packageID)
+            try coordinator.completeDocumentCorpus(packageID: packageID, index: index)
+            if !markerWasDirty { try StoreCheckpoint.clear(root: root) }
+            clearSavedViewPages()
+            generation = Identifier.make()
+            return result
+        } catch {
+            try? index.execute("ROLLBACK TO peer_intake")
+            try? index.execute("RELEASE peer_intake")
+            quarantineCheckpoint()
+            if let failure = error as? TractandaError,
+                ["resourceLimit", "projectionRequired"].contains(failure.code)
+            {
+                throw TractandaError(
+                    failure.code, failure.message + " [intake: " + intakePhase + "]", osError: failure.osError
+                )
+            }
+            throw error
+        }
+    }
+    /// Validate the entire proposed initial cut with the existing disk graph/projection engine
+    /// before making the private pin durable. No canonical bytes or accepted live index are copied.
+    private func validateAuthorityBootstrapAdmission(index: ItemIndex) throws {
+        guard let coordinator = peerIntake else {
+            throw TractandaError("authorityModeRequired", "Missing authority coordinator.")
+        }
+        guard let localReplica = replicaID else {
+            throw TractandaError(
+                "missingReplicaIdentity", "Bootstrap needs the captured private replica identity.")
+        }
+        try AuthorityStore.validateInitialHistory(
+            root: root,
+            storeID: canonicalStoreIdentity(creatingIfMissing: false), replicaID: localReplica,
+            files: coordinator.journal.files
+        ) { id, digest in
+            guard let row = try index.retainedAuthorityObject(id: id) else { return false }
+            return try row.descriptor.sha256 == digest
+                && index.authorityDisposition(id: id)?.disposition == .eligible
+        }
+        var cursor: String?
+        while true {
+            let rows = try index.recoveryRowPage(after: cursor)
+            if rows.isEmpty { break }
+            for row in rows {
+                cursor = row.revisionID
+                guard let retained = try index.retainedAuthorityObject(id: row.revisionID),
+                    retained.path == row.path,
+                    retained.descriptor.sha256 == row.digest.map({ String(format: "%02x", $0) }).joined(),
+                    try index.authorityDisposition(id: row.revisionID)?.disposition == .eligible
+                else {
+                    throw TractandaError(
+                        "authorityBootstrapRequired",
+                        "The reviewed initial cut omits existing canonical history.")
+                }
+            }
+        }
+        let path = indexDirectory.appendingPathComponent("authority-cut-" + Identifier.make() + ".sqlite")
+        let temporary = try ItemIndex(path: path.path, create: true)
+        defer {
+            try? temporary.closeChecked()
+            for suffix in ["", "-wal", "-shm"] {
+                try? FileManager.default.removeItem(atPath: path.path + suffix)
+            }
+        }
+        try coordinator.withOperation(recovery: true) {
+            var after: String?
+            while true {
+                let rows = try index.retainedAuthorityPage(after: after)
+                if rows.isEmpty { break }
+                for row in rows {
+                    after = row.descriptor.id
+                    guard row.descriptor.kind == .item,
+                        try index.authorityDisposition(id: row.descriptor.id)?.disposition == .eligible
+                    else { continue }
+                    let node = try AuthorityRevision(originalBytes: coordinator.bytes(row))
+                    try ItemSemantics.validate(node.revision)
+                    try temporary.insertRecoveryRow(
+                        authorityCatalogueRow(row, node: node), graphFields: node.revision.fields)
+                }
+            }
+            try temporary.validateRecoveryGraph(
+                requireLinearProjection: false, progress: coordinator.progress)
+            var item: String?
+            while let next = try temporary.recoveryItem(after: item) {
+                item = next
+                _ = try temporary.analyzeRevisionProjection(
+                    itemID: next,
+                    loadVerified: { row in
+                        try PooledCanonicalRecord.read(row: row, root: self.root, ownerUID: self.ownerUID)
+                    }, progress: coordinator.progress)
+            }
+        }
+    }
+    func pinAuthorityBootstrap(
+        rootID: String, sha256: String, expectedContextToken: String, actorUID: UInt32? = nil,
+        beforeAcceptance: (() throws -> Void)? = nil
+    ) throws {
+        if accessContext == nil {
+            return try withAccess(forUID: actorUID ?? ownerUID) {
+                try pinAuthorityBootstrap(
+                    rootID: rootID, sha256: sha256, expectedContextToken: expectedContextToken,
+                    beforeAcceptance: beforeAcceptance)
+            }
+        }
+        try requireAdministrator()
+        let coordinator = try requirePeerIntake()
+        guard expectedContextToken == (try peerIntakeContextToken()), let index else {
+            throw TractandaError("revisionConflict", "Bootstrap review context changed.")
+        }
+        let pin = AuthorityStore.BootstrapPin(
+            recordID: rootID, sha256: sha256,
+            actor: accessContext?.account?.name ?? "uid:\(accessContext!.uid)")
+        if let old = try coordinator.configuration()?.bootstrap, old != pin {
+            throw TractandaError("invalidAuthority", "The initial bootstrap cannot expand or be replaced.")
+        }
+        try index.execute("SAVEPOINT authority_bootstrap")
+        do {
+            try coordinator.seedBootstrap(pin, index: index)
+            try validateAuthorityBootstrapAdmission(index: index)
+            try requireAdministrator()
+            try beforeAcceptance?()
+            try CanonicalReaderRequirement.beforeAuthorityPublication(root: root, ownerUID: ownerUID)
+            let old = try coordinator.configuration()
+            try StoreCheckpoint.markDirty(root: root)
+            try AuthorityStore.writeConfiguration(
+                .init(
+                    profile: "tractanda.peer-configuration.v1", peers: old?.peers ?? [], bootstrap: pin,
+                    lifecycle: old?.lifecycle, credentialBindings: old?.credentialBindings),
+                root: root, files: coordinator.journal.files)
+            try index.execute("RELEASE authority_bootstrap")
+        } catch {
+            try? index.execute("ROLLBACK TO authority_bootstrap")
+            try? index.execute("RELEASE authority_bootstrap")
+            throw error
+        }
+        // Initial-cut promotion uses full recovery once; future ordinary appends stay incremental.
+        authorityBootstrapPending = false
+        authorityExistingHistoryAdmitted = true  // Exact reviewed pin is already durable above.
+        try rebuildIndex()
+        if let currentIndex = self.index {
+            try ensureInitialAuthorityVisibility(coordinator: coordinator, index: currentIndex)
+        }
+        generation = Identifier.make()
+    }
+    private func resumePendingPeerIntakes(using coordinator: PeerIntakeCoordinator, index: ItemIndex) throws {
+        var cursor: String?
+        while true {
+            let packages = try index.authorityPendingPackagePage(after: cursor, limit: 128)
+            if packages.isEmpty { break }
+            for packageID in packages {
+                cursor = packageID
+                guard let publication = try coordinator.journal.publication(packageID) else {
+                    throw TractandaError("invalidAuthority", "Unsealed retained package.")
+                }
+                guard try coordinator.intakePublicationIsCurrent(publication) else { continue }
+                _ = try commitPeerIntake(
+                    context: publication.context, packageID: packageID,
+                    expectedContextToken: peerIntakeContextToken(), retainedRecovery: true)
+            }
+        }
+    }
+}
+
 // Durable document lifecycle is internal until the sequential producer/coordinator is wired.
 extension ItemStore {
     private func saveDocumentJob(_ record: DocumentJobRecord) throws {
@@ -4142,15 +8903,32 @@ extension ItemStore {
         do {
             let intent = record.intent
             _ = try get(intent.source.itemID)
-            guard let index, let receipts = try index.receipts(named: intent.request.operationID) else {
-                throw TractandaError(
-                    "indexUnavailable", "Cannot reconcile bounded document operation receipts.")
+            guard let index else {
+                throw TractandaError("indexUnavailable", "Cannot reconcile document operation receipts.")
             }
-            let matches = receipts.filter { $0.actor == intent.actorPrincipal }
-            guard matches.count <= 1 else {
-                throw TractandaError("operationMismatch", "Document intent has conflicting actor receipts.")
+            func originalActorReceipt(origin: String?) throws -> ItemIndex.CatalogueRow? {
+                guard
+                    let receipts = try index.receipts(
+                        named: intent.request.operationID, localReplicaID: origin, kind: .authored)
+                else {
+                    throw TractandaError(
+                        "indexUnavailable", "Cannot reconcile bounded document operation receipts.")
+                }
+                let matches = receipts.filter { $0.actor == intent.actorPrincipal }
+                if origin == nil { for row in matches { try requireLocalLegacyReceipt(row) } }
+                guard matches.count <= 1 else {
+                    throw TractandaError(
+                        "operationMismatch", "Document intent has conflicting actor receipts.")
+                }
+                return matches.first
             }
-            guard let match = matches.first else { return nil }
+            let origin =
+                try replicaID
+                ?? ReplicaIdentity.load(
+                    root: root, storeID: canonicalStoreIdentity(creatingIfMissing: false), ownerUID: ownerUID)?
+                .replicaID
+            let local = try origin.flatMap { try originalActorReceipt(origin: $0) }
+            guard let match = try local ?? originalActorReceipt(origin: nil) else { return nil }
             guard let prior = try loadRevision(match.revisionID) else {
                 throw TractandaError(
                     "recoveryError", "Document commit receipt points to an unavailable revision.")
@@ -4201,6 +8979,7 @@ extension ItemStore {
                 try startDocumentJob(request, identity: identity, configurationSHA256: configurationSHA256)
             }
         }
+        try requireActivePublishingOrigin()
         let current = try get(request.itemID)
         let actor = accessContext!.uid
         if let existing = try documentJobs.values.first(where: {
@@ -5147,9 +9926,10 @@ extension ItemStore {
             let page = try index.retainedCorpusWorkPage(after: cursor, limit: 64)
             guard !page.isEmpty else { break }
             for work in page {
+                try retireFinishedOrIdlePeerCorpus(work.workID, index: index)
                 try stagingByteQuota.observeDerived(
                     workID: work.workID,
-                    retainedEncodedBytes: work.retainedEncodedBytes, recovering: true)
+                    retainedEncodedBytes: index.corpusRetainedBytes(work.workID), recovering: true)
                 cursor = work.workID
             }
         }
@@ -5208,6 +9988,26 @@ extension ItemStore {
 }
 
 extension ItemStore {
+    private func retireFinishedOrIdlePeerCorpus(_ workID: String, index: ItemIndex) throws {
+        guard let owner = try index.peerDocumentCorpusOwner(workID) else { return }
+        var applied = false
+        if UUID(uuidString: owner.package)?.version1Components != nil, let peerIntake,
+            try peerIntake.journal.publication(owner.package) != nil
+        {
+            let begin = try peerIntake.journal.beginRecord(owner.package)
+            applied =
+                try peerIntake.journal.intakeState(context: begin.context, packageID: owner.package).phase
+                == .applied
+        }
+        let observations =
+            try applied
+            ? index.completePeerDocumentCorpus(packageID: owner.package, workID: workID, limit: 1)
+            : index.expirePeerDocumentCorpus(workID)
+        for work in observations {
+            try stagingByteQuota.observeDerived(
+                workID: work.workID, retainedEncodedBytes: work.retainedEncodedBytes, recovering: true)
+        }
+    }
     func documentJobIndexRecoveryWork(_ id: String, generation: Int64, discard: Bool)
         throws -> DocumentJobIndexRecoveryWork
     {
@@ -5238,6 +10038,7 @@ extension ItemStore {
             ? stagingByteQuota.chargedCorpusWorkPage(after: after, limit: 64)
             : index.retainedCorpusWorkPage(after: after, limit: 64).map(\.workID)
         for id in ids {
+            if !charged { try retireFinishedOrIdlePeerCorpus(id, index: index) }
             try stagingByteQuota.observeDerived(
                 workID: id, retainedEncodedBytes: index.corpusRetainedBytes(id), recovering: true)
         }
@@ -5259,5 +10060,3120 @@ extension ItemStore {
     private func hasRetainedDocumentIndexWork(_ record: DocumentJobRecord) throws -> Bool {
         guard let index else { return record.checkpoint.corpusArtifactName != nil }
         return try index.corpusRetainedBytes(record.intent.jobID) > 0
+    }
+}
+
+// Internal atomic stale-authority review; deliberately no native/public endpoint.
+extension ItemStore {
+    func prepareAuthorityReview(
+        itemID: String, revisionID: String, evidence: AuthorityBinding, actorUID: UInt32? = nil
+    ) throws -> AuthorityStore.ReviewState {
+        try authorityReviewState(
+            itemID: itemID, revisionID: revisionID, evidence: evidence, actorUID: actorUID,
+            requireStorageReady: true)
+    }
+    private func authorityReviewState(
+        itemID: String, revisionID: String, evidence: AuthorityBinding, actorUID: UInt32?,
+        requireStorageReady: Bool
+    ) throws -> AuthorityStore.ReviewState {
+        let uid = actorUID ?? accessContext?.uid ?? ownerUID
+        return try withAccess(forUID: uid) {
+            try requireAdministrator()
+            let coordinator = try requirePeerIntake()
+            guard isCanonicalReady, authorityExistingHistoryAdmitted, !authorityCatchupActive,
+                let index, let origin = replicaID,
+                let raw = try index.retainedAuthorityObject(id: revisionID),
+                raw.descriptor.kind == .item,
+                try index.authorityDisposition(id: revisionID)?.disposition == .held,
+                let witness = try index.retainedAuthorityObject(id: evidence.recordID),
+                witness.descriptor.sha256 == evidence.sha256,
+                let cut = try index.authorityControlHead(originID: origin),
+                let current = try index.currentProjection(itemID: itemID)
+            else {
+                throw TractandaError(
+                    "operationReviewRequired", "Exact held original/current review context is unavailable.")
+            }
+            return try coordinator.withOperation {
+                try index.initializeAuthorityReviewSchema()
+                let node = try AuthorityRevision(originalBytes: coordinator.bytes(raw))
+                let testimony = try AuthorityRecordCodec.decode(coordinator.bytes(witness))
+                guard node.revision.itemID == itemID, try node.revision.provenance?.kind == .authored,
+                    let originalOrigin = try node.revision.provenance?.originReplicaID,
+                    try coordinator.freshReceipt(
+                        revisionID, origin: originalOrigin, index: index,
+                        forAdministratorReview: true) != nil,
+                    try coordinator.freshReceipt(
+                        evidence.recordID, origin: originalOrigin, index: index,
+                        forAdministratorReview: true) != nil,
+                    try coordinator.matchesIdentity(node, testimony.record),
+                    try AuthorityRecord.list(testimony.record.payload["acceptedAuthority"]).isEmpty
+                else {
+                    throw TractandaError(
+                        "operationReviewRequired",
+                        "Review cannot enroll an origin or supply missing/unsupported original proof.")
+                }
+                if requireStorageReady {
+                    guard try reviewStorageReady(node.revision.fields, coordinator: coordinator, index: index)
+                    else {
+                        throw TractandaError(
+                            "reviewPreparationRequired",
+                            "Run bounded review preflight before taking its snapshot.")
+                    }
+                }
+                // Source authorization may be stale, but identity, actual intent and causal dependencies
+                // must be complete. A decision never repairs forged or missing testimony.
+                try coordinator.validatePolicyCut(testimony.record, index: index)
+                let retirements = try index.peerRetirementCauses(
+                    revisionID: revisionID, origin: originalOrigin)
+                let frontier = try index.authorityReviewFrontier(revisionID: revisionID)
+                let holds = try index.authorityReviewControlHolds(revisionID: revisionID, cut: cut)
+                let policies = try (current.state.frontier ?? []).map { id -> AuthorityStore.Target in
+                    guard let row = try index.revision(id), row.itemID == itemID,
+                        try index.eligibilityAtCut(revisionID: id, cut: cut) == .eligible
+                    else {
+                        throw TractandaError(
+                            "missingDependencies", "Review PRE policy is not accepted at its frozen cut.")
+                    }
+                    return try .init(
+                        itemID: itemID, revisionID: id,
+                        sha256: row.digest.map { String(format: "%02x", $0) }.joined())
+                }
+                var admissions: [ItemValue] = []
+                if let row = try index.currentHeadSummary(classID: AccessConfiguration.classID),
+                    let exact = try index.revision(row.revisionID)
+                {
+                    admissions = [
+                        try AuthorityStore.Target(
+                            itemID: exact.itemID, revisionID: exact.revisionID,
+                            sha256: exact.digest.map { String(format: "%02x", $0) }.joined()
+                        ).itemValue
+                    ]
+                }
+                let account = accessContext?.account
+                let token = AuthorityRecordCodec.sha256(
+                    try JSON.encode(
+                        ItemValue.object([
+                            "target": AuthorityStore.Target(
+                                itemID: itemID, revisionID: revisionID, sha256: node.sha256
+                            ).itemValue,
+                            "evidence": evidence.itemValue, "state": .text(current.state.stateToken),
+                            "frontier": .list(frontier.map(\.itemValue)),
+                            "holds": .list(holds.map(\.itemValue)),
+                            "retirements": .list(retirements.map(\.itemValue)),
+                            "policies": .list(policies.map(\.itemValue)), "admission": .list(admissions),
+                            "uid": .integer(Int64(uid)), "principal": .text(account?.name ?? "uid:\(uid)"),
+                            "groups": .list((account?.groupIDs.sorted() ?? []).map { .integer(Int64($0)) }),
+                        ])))
+                return .init(
+                    original: try .init(itemID: itemID, revisionID: revisionID, sha256: node.sha256),
+                    evidence: evidence, stateToken: token, decisionFrontier: frontier,
+                    controlHolds: holds, policyFrontier: policies, current: current.state,
+                    retirements: retirements)
+            }
+        }
+    }
+}
+
+extension ItemStore {
+    private func reviewStorageReady(
+        _ fields: [String: ItemValue], coordinator: PeerIntakeCoordinator, index: ItemIndex,
+        corpusScope: String? = nil
+    ) throws -> Bool {
+        do {
+            guard
+                try authorityStorageVerified(
+                    fields, coordinator: coordinator, index: index, corpusScope: corpusScope)
+            else { return false }
+            for document in try AttachmentDocumentRepresentation.representations(in: fields)
+            where document.content != nil {
+                if try !index.peerDocumentCorpusReady(document) { return false }
+            }
+            return true
+        } catch let error as TractandaError where error.code == "peerPayloadVerifying" {
+            return false
+        }
+    }
+    private func reviewPreflightScope(
+        _ state: AuthorityStore.ReviewState, request: AuthorityStore.ReviewRequest?,
+        uid: UInt32, coordinator: PeerIntakeCoordinator
+    ) throws -> String {
+        guard let origin = replicaID, let actor = accessContext?.account?.name else {
+            throw TractandaError("operationReviewRequired", "Named active review origin is unavailable.")
+        }
+        let intent = try request.map { try JSON.encode($0) }
+        guard (intent?.count ?? 0) <= PooledCanonicalRecord.maximumRecordBytes else {
+            throw TractandaError("resourceLimit", "Review intent exceeds its canonical record window.")
+        }
+        let binding: ItemValue = .object([
+            "store": .text(coordinator.storeID), "origin": .text(origin),
+            "actor": .text(actor), "uid": .integer(Int64(uid)),
+            "target": state.original.itemValue, "evidence": state.evidence.itemValue,
+            "state": .text(state.stateToken), "phase": .text(request == nil ? "snapshot" : "resolution"),
+            "intent": .text(intent?.base64EncodedString() ?? ""),
+        ])
+        return "local-review:" + AuthorityRecordCodec.sha256(try JSON.encode(binding))
+    }
+    /// A private cache handle is bound to the authenticated target/current context. Slow
+    /// work is outside preview SAVEPOINTs and never mints a publication identity.
+    func preflightAuthorityReview(
+        itemID: String, revisionID: String, evidence: AuthorityBinding, actorUID: UInt32? = nil
+    ) throws -> AuthorityStore.ReviewPreflight {
+        let uid = actorUID ?? accessContext?.uid ?? ownerUID
+        return try withAccess(forUID: uid) {
+            try requireAdministrator()
+            try requireActivePublishingOrigin()
+            let coordinator = try requirePeerIntake()
+            guard let index else { throw TractandaError("indexUnavailable", "Review index is unavailable.") }
+            return try coordinator.withOperation {
+                let state = try authorityReviewState(
+                    itemID: itemID, revisionID: revisionID, evidence: evidence, actorUID: uid,
+                    requireStorageReady: false)
+                let scope = try reviewPreflightScope(state, request: nil, uid: uid, coordinator: coordinator)
+                guard let raw = try index.retainedAuthorityObject(id: revisionID) else {
+                    throw TractandaError("missingDependencies", "Held original disappeared.")
+                }
+                let held = try AuthorityRevision(originalBytes: coordinator.bytes(raw))
+                let ready = try reviewStorageReady(
+                    held.revision.fields, coordinator: coordinator, index: index, corpusScope: scope)
+                if ready {
+                    let fresh = try authorityReviewState(
+                        itemID: itemID, revisionID: revisionID, evidence: evidence, actorUID: uid,
+                        requireStorageReady: false)
+                    try requireActivePublishingOrigin()
+                    guard fresh.stateToken == state.stateToken else {
+                        throw TractandaError("stateConflict", "Review context changed during preparation.")
+                    }
+                }
+                return .init(handle: scope, ready: ready)
+            }
+        }
+    }
+    func preflightAuthorityReviewResolution(
+        _ request: AuthorityStore.ReviewRequest, actorUID: UInt32? = nil
+    ) throws -> AuthorityStore.ReviewPreflight {
+        let uid = actorUID ?? accessContext?.uid ?? ownerUID
+        return try withAccess(forUID: uid) {
+            try requireAdministrator()
+            try requireActivePublishingOrigin()
+            let coordinator = try requirePeerIntake()
+            guard let index else { throw TractandaError("indexUnavailable", "Review index is unavailable.") }
+            return try coordinator.withOperation {
+                let state = try authorityReviewState(
+                    itemID: request.itemID, revisionID: request.revisionID, evidence: request.evidence,
+                    actorUID: uid, requireStorageReady: false)
+                guard state.stateToken == request.expectedStateToken,
+                    state.decisionFrontier == request.reviewedFrontier,
+                    state.controlHolds == request.reviewedControlHolds,
+                    state.retirements == request.reviewedRetirements,
+                    !request.operationID.isEmpty, request.operationID.utf8.count <= 200,
+                    !request.operationID.contains("\0"),
+                    Set(request.changes.keys).isDisjoint(with: request.unset),
+                    Set(request.changes.keys).union(request.unset).isDisjoint(
+                        with: RevisionMerge.managedFields),
+                    request.unset == Array(Set(request.unset)).sorted(),
+                    let raw = try index.retainedAuthorityObject(id: request.revisionID)
+                else {
+                    throw TractandaError("stateConflict", "Review intent must match the fresh exact context.")
+                }
+                let held = try AuthorityRevision(originalBytes: coordinator.bytes(raw))
+                let row = try authorityCatalogueRow(raw, node: held)
+                let context = try index.previewAuthorityReviewContext(
+                    held: held, heldRow: row,
+                    loadVerified: {
+                        try PooledCanonicalRecord.read(row: $0, root: self.root, ownerUID: self.ownerUID)
+                    },
+                    limits: revisionProjectionLimits, progress: coordinator.progress)
+                let required = Set(context.analysis.conflicts.keys).union(context.analysis.protectedFields)
+                    .union(try held.revision.provenance!.writtenFields)
+                    .union(try held.revision.provenance!.unsetFields)
+                guard required.isSubset(of: Set(request.changes.keys).union(request.unset)) else {
+                    throw TractandaError(
+                        "invalidArguments", "Explicitly choose every reviewed authored/conflicting field.")
+                }
+                var fields = context.analysis.fields
+                fields.merge(request.changes) { _, value in value }
+                for key in request.unset { fields.removeValue(forKey: key) }
+                let scope = try reviewPreflightScope(
+                    state, request: request, uid: uid, coordinator: coordinator)
+                let ready =
+                    try reviewStorageReady(
+                        held.revision.fields, coordinator: coordinator, index: index, corpusScope: scope)
+                    && reviewStorageReady(fields, coordinator: coordinator, index: index, corpusScope: scope)
+                if ready {
+                    let fresh = try authorityReviewState(
+                        itemID: request.itemID, revisionID: request.revisionID, evidence: request.evidence,
+                        actorUID: uid, requireStorageReady: false)
+                    try requireActivePublishingOrigin()
+                    guard fresh.stateToken == state.stateToken else {
+                        throw TractandaError("stateConflict", "Review context changed during preparation.")
+                    }
+                }
+                return .init(handle: scope, ready: ready)
+            }
+        }
+    }
+    private func reviewIdentityPath(origin: String, actor: String, operation: String) throws -> [String] {
+        [
+            "authority", "local-review-identities",
+            AuthorityRecordCodec.sha256(
+                try JSON.encode(
+                    ItemValue.list([.text(origin), .text(actor), .text(operation)]))),
+        ]
+    }
+    private func reviewRow(_ original: AuthorityRevision, path: String) throws -> ItemIndex.CatalogueRow {
+        let m = try FileMetadata.read(at: root.appendingPathComponent(path))
+        let r = original.revision
+        guard m.type == .regular, m.uid == ownerUID, m.mode & 0o777 == 0o400,
+            m.size == original.originalBytes.count
+        else { throw TractandaError("invalidAuthority", "Review draft descriptor changed.") }
+        return .init(
+            revisionID: r.revisionID, itemID: r.itemID, path: path, parentID: r.supersedes,
+            actor: r.fields["actor"]!.string!, operationID: r.fields["operationID"]!.string!,
+            size: m.size, inode: m.inode, uid: m.uid, mode: m.mode,
+            modificationSeconds: m.modificationSeconds, modificationNanoseconds: m.modificationNanoseconds,
+            digest: Data(SHA256.hash(data: original.originalBytes)),
+            createdAt: r.fields["createdAt"]!.dateString!,
+            feedbackRevisionIDs: r.fields["learningFeedback"]?.map?.values.compactMap {
+                try? LearningFeedback($0).revisionID
+            } ?? [],
+            modifiedAt: r.modifiedAt, provenance: try r.provenance)
+    }
+    private func reviewTestimony(
+        revision: AuthorityRevision, identity: AuthorityStore.ReviewIdentity,
+        state: AuthorityStore.ReviewState, coordinator: PeerIntakeCoordinator, index: ItemIndex,
+        decision: AuthorityBinding
+    ) throws -> AuthorityRecord {
+        guard let context = accessContext else {
+            throw TractandaError("forbidden", "Fresh reviewer identity is required.")
+        }
+        let account = context.account
+        var names = Set(currentAccessConfigurations.flatMap(\.groups))
+        names.insert(AccessConfiguration.defaultAdministratorGroup)
+        names.formUnion(currentAccessConfigurations.compactMap(\.administratorGroup))
+        if let account { names.insert(account.primaryGroupName) }
+        for target in state.policyFrontier {
+            guard let row = try index.revision(target.revisionID) else {
+                throw TractandaError("missingDependencies", "Review PRE policy is missing.")
+            }
+            let policy = try PooledCanonicalRecord.read(row: row, root: root, ownerUID: ownerUID).revision
+            if let value = policy.fields["permissions"] {
+                let permissions = try ItemPermissions(value)
+                names.insert(permissions.group)
+                names.formUnion(permissions.groups.keys)
+            }
+        }
+        if let value = revision.revision.fields["permissions"] {
+            let permission = try ItemPermissions(value)
+            names.insert(permission.group)
+            names.formUnion(permission.groups.keys)
+        }
+        var groups: [String: ItemValue] = [:]
+        for name in names {
+            let actual = accessConfiguration?.groupAliases[name] ?? name
+            if let group = try? accounts.groupID(named: actual), account?.groupIDs.contains(group) == true {
+                groups[actual] = .integer(Int64(group))
+            }
+        }
+        if let account {
+            var administrationGroups = Set(currentAccessConfigurations.compactMap(\.administratorGroup))
+            administrationGroups.insert(AccessConfiguration.defaultAdministratorGroup)
+            for name in administrationGroups {
+                if let gid = try? accounts.groupID(named: name), account.groupIDs.contains(gid) {
+                    groups[name] = .integer(Int64(gid))
+                }
+            }
+        }
+        var aliases: [String: ItemValue] = [:]
+        for configuration in currentAccessConfigurations {
+            for (name, target) in configuration.userAliases.merging(
+                configuration.groupAliases,
+                uniquingKeysWith: { $0 == $1 ? $0 : "" })
+            {
+                guard !target.isEmpty, aliases[name] == nil || aliases[name] == .text(target) else {
+                    throw TractandaError("invalidAuthority", "Review alias context is ambiguous.")
+                }
+                aliases[name] = .text(target)
+            }
+        }
+        var admission: [ItemValue] = []
+        if let summary = try index.currentHeadSummary(classID: AccessConfiguration.classID),
+            let row = try index.revision(summary.revisionID)
+        {
+            guard try index.eligibilityAtCut(revisionID: row.revisionID, cut: identity.preCut) == .eligible
+            else {
+                throw TractandaError(
+                    "missingDependencies", "Review admission policy is absent from its PRE cut.")
+            }
+            admission = [
+                try AuthorityStore.Target(
+                    itemID: row.itemID, revisionID: row.revisionID,
+                    sha256: row.digest.map { String(format: "%02x", $0) }.joined()
+                ).itemValue
+            ]
+        }
+        guard !admission.isEmpty else {
+            throw TractandaError(
+                "operationReviewRequired", "Review needs an explicit accepted administrator policy.")
+        }
+        let p = try revision.revision.provenance!
+        return try AuthorityRecord(
+            recordID: identity.evidenceID, storeID: coordinator.storeID,
+            originReplicaID: identity.replicaID, kind: .authoredEvidence,
+            parentAuthorityIDs: [decision.recordID, identity.preCut.recordID].sorted(),
+            actorPrincipal: identity.actor,
+            createdAt: identity.createdAt,
+            payload: [
+                "target": AuthorityStore.Target(
+                    itemID: revision.revision.itemID, revisionID: revision.revision.revisionID,
+                    sha256: revision.sha256
+                ).itemValue,
+                "parents": .list(p.parents.map(ItemValue.text)),
+                "frontier": .list(p.frontier.map(ItemValue.text)),
+                "itemPolicies": .list(state.policyFrontier.map(\.itemValue)),
+                "admissionPolicies": .list(admission),
+                "principal": .text(identity.actor), "sourceUID": .integer(Int64(context.uid)),
+                "sourceAdministration": try sourceAdministration().itemValue,
+                "groups": .object(groups), "aliases": .object(aliases),
+                "rights": .list([.text("administrator"), .text("read"), .text("write")]),
+                "evaluated": .boolean(true),
+                "intent": .object([
+                    "writtenFields": .list(p.writtenFields.map(ItemValue.text)),
+                    "unsetFields": .list(p.unsetFields.map(ItemValue.text)),
+                ]),
+                "acceptedAuthority": .list([decision.itemValue]),
+                "sourceControl": .list([identity.preCut.itemValue]),
+            ])
+    }
+
+    func resolveAuthorityReview(_ request: AuthorityStore.ReviewRequest, actorUID: UInt32? = nil) throws
+        -> AuthorityStore.ReviewResult
+    {
+        let uid = actorUID ?? accessContext?.uid ?? ownerUID
+        return try withAccess(forUID: uid) {
+            try requireAdministrator()
+            let coordinator = try requirePeerIntake()
+            guard isCanonicalReady, !authorityCatchupActive, let index, let origin = replicaID,
+                !request.operationID.isEmpty, request.operationID.utf8.count <= 200,
+                !request.operationID.contains("\0"), let account = accessContext?.account
+            else {
+                throw TractandaError(
+                    "operationReviewRequired", "A fresh named administrator and ready Store are required.")
+            }
+            let encodedRequest = try JSON.encode(request)
+            let requestDigest = AuthorityRecordCodec.sha256(encodedRequest)
+            let reservationPath = try reviewIdentityPath(
+                origin: origin, actor: account.name, operation: request.operationID)
+            return try coordinator.withOperation {
+                try index.withCatalogueScanBudget(reusingActiveBudget: true) {
+                    try index.initializeAuthorityReviewSchema()
+                    let prior = try coordinator.journal.files.readIfPresent(
+                        path: reservationPath, maximumBytes: 8192)
+                    let reserved = try prior.map {
+                        try PeerPackage.decode(AuthorityStore.ReviewIdentity.self, $0, maximum: 8192)
+                    }
+                    if let reserved {
+                        guard reserved.profile == "tractanda.local-authority-review.v1",
+                            reserved.storeID == coordinator.storeID, reserved.replicaID == origin,
+                            reserved.actor == account.name, reserved.request == requestDigest
+                        else {
+                            throw TractandaError(
+                                "operationMismatch",
+                                "This origin-pinned review operation has different intent.")
+                        }
+                        if try coordinator.journal.publication(reserved.packageID) != nil,
+                            let raw = try index.retainedAuthorityObject(id: reserved.revisionID),
+                            let d = try index.retainedAuthorityObject(id: reserved.decisionID)
+                        {
+                            let cOriginal = try AuthorityRevision(originalBytes: coordinator.bytes(raw))
+                            let c = cOriginal.revision
+                            let decision = try AuthorityRecordCodec.decode(coordinator.bytes(d)).record
+                            guard decision.kind == .reviewDecision, decision.actorPrincipal == account.name,
+                                decision.originReplicaID == origin,
+                                try AuthorityRecord.list(decision.payload["resolution"]) == [
+                                    AuthorityStore.Target(
+                                        itemID: c.itemID, revisionID: c.revisionID, sha256: cOriginal.sha256
+                                    ).itemValue
+                                ],
+                                try AuthorityStore.Target(value: decision.payload["target"]!).revisionID
+                                    == request.revisionID,
+                                try AuthorityBinding(value: decision.payload["evidence"]!)
+                                    == request.evidence,
+                                c.fields["requestIdentity"] == .text(encodedRequest.base64EncodedString()),
+                                c.fields["actor"] == .text("user:" + account.name)
+                            else {
+                                throw TractandaError(
+                                    "operationMismatch",
+                                    "Historical review receipt differs from immutable intent.")
+                            }
+                            // Receipt acknowledgement never re-applies the old approval or grants current access.
+                            return .init(
+                                revision: c,
+                                decision: try .init(recordID: d.descriptor.id, sha256: d.descriptor.sha256),
+                                wasReplayed: true, current: try itemState(request.itemID),
+                                disposition: try currentReviewDisposition(
+                                    originalID: request.revisionID, resolutionID: c.revisionID, index: index))
+                        }
+                    }
+                    try requireActivePublishingOrigin()
+                    let state = try prepareAuthorityReview(
+                        itemID: request.itemID, revisionID: request.revisionID,
+                        evidence: request.evidence, actorUID: uid)
+                    guard state.stateToken == request.expectedStateToken,
+                        state.decisionFrontier == request.reviewedFrontier,
+                        state.controlHolds == request.reviewedControlHolds,
+                        state.retirements == request.reviewedRetirements,
+                        Set(request.changes.keys).isDisjoint(with: request.unset),
+                        Set(request.changes.keys).union(request.unset).isDisjoint(
+                            with: RevisionMerge.managedFields),
+                        request.unset == Array(Set(request.unset)).sorted(),
+                        let raw = try index.retainedAuthorityObject(id: request.revisionID),
+                        let preCut = try index.authorityControlHead(originID: origin)
+                    else {
+                        throw TractandaError(
+                            "stateConflict",
+                            "Review must consume the exact current held/decision/policy context."
+                        )
+                    }
+                    let held = try AuthorityRevision(originalBytes: coordinator.bytes(raw))
+                    let heldRow = try authorityCatalogueRow(raw, node: held)
+                    let load: (ItemIndex.CatalogueRow) throws -> PooledCanonicalRecord = {
+                        try PooledCanonicalRecord.read(row: $0, root: self.root, ownerUID: self.ownerUID)
+                    }
+                    let context = try index.previewAuthorityReviewContext(
+                        held: held, heldRow: heldRow,
+                        loadVerified: load, limits: revisionProjectionLimits, progress: coordinator.progress)
+                    let addressed = Set(request.changes.keys).union(request.unset)
+                    let required = Set(context.analysis.conflicts.keys).union(
+                        context.analysis.protectedFields
+                    )
+                    .union(try held.revision.provenance!.writtenFields).union(
+                        try held.revision.provenance!.unsetFields)
+                    guard required.isSubset(of: addressed) else {
+                        throw TractandaError(
+                            "invalidArguments",
+                            "Explicitly choose every held authored field and conflicting/protected field.")
+                    }
+                    var resolutionFields = context.analysis.fields
+                    resolutionFields.merge(request.changes) { _, value in value }
+                    for key in request.unset { resolutionFields.removeValue(forKey: key) }
+                    let corpusScope = try reviewPreflightScope(
+                        state, request: request, uid: uid, coordinator: coordinator)
+                    guard
+                        try reviewStorageReady(
+                            resolutionFields, coordinator: coordinator, index: index, corpusScope: corpusScope
+                        )
+                    else {
+                        throw TractandaError(
+                            "reviewPreparationRequired",
+                            "Complete bounded exact-request preflight before review publication.")
+                    }
+                    let identity: AuthorityStore.ReviewIdentity
+                    if let reserved {
+                        guard reserved.preCut == preCut else {
+                            throw TractandaError(
+                                "stateConflict",
+                                "Unsealed review PRE cut changed; use a fresh reviewed operation.")
+                        }
+                        identity = reserved
+                    } else {
+                        identity = .init(
+                            profile: "tractanda.local-authority-review.v1", storeID: coordinator.storeID,
+                            replicaID: origin, actor: account.name, request: requestDigest,
+                            packageID: try makePersistentUUID().uuidString.lowercased(),
+                            revisionID: try makePersistentUUID().uuidString.lowercased(),
+                            decisionID: try makePersistentUUID().uuidString.lowercased(),
+                            evidenceID: try makePersistentUUID().uuidString.lowercased(),
+                            controlID: try makePersistentUUID().uuidString.lowercased(),
+                            visibilityID: try makePersistentUUID().uuidString.lowercased(),
+                            createdAt: Timestamp.now(),
+                            modifiedAt: try RevisionPublicationClock.after(
+                                [context.clockFloor.modifiedAt], now: publicationClockForTesting),
+                            preCut: preCut)
+                        try coordinator.journal.files.writeImmutable(
+                            try JSON.encode(identity), path: reservationPath, maximumBytes: 8192)
+                    }
+                    var fields = context.analysis.fields
+                    for (key, value) in request.changes { fields[key] = value }
+                    for key in request.unset { fields.removeValue(forKey: key) }
+                    let parents = Array(Set(context.physicalHeads + [context.clockFloor.revisionID])).sorted()
+                    let provenance = try RevisionProvenance(
+                        kind: .resolution, originReplicaID: origin, parents: parents,
+                        writtenFields: request.changes.keys.sorted(), unsetFields: request.unset,
+                        frontier: context.analysis.frontier)
+                    fields["itemID"] = .text(request.itemID)
+                    fields["revisionID"] = .text(identity.revisionID)
+                    fields["createdAt"] = held.revision.fields["createdAt"]
+                    fields["modifiedAt"] = .date(identity.modifiedAt)
+                    fields["actor"] = .text("user:" + account.name)
+                    fields["operationID"] = .text(request.operationID)
+                    fields["requestIdentity"] = .text(encodedRequest.base64EncodedString())
+                    fields["revisionAncestry"] = provenance.itemValue
+                    let revision = try Revision(fields: fields, formatVersion: 2)
+                    try ItemSemantics.validate(revision)
+                    let data = try RecordCodec.encode(revision)
+                    guard data.count <= PooledCanonicalRecord.maximumRecordBytes else {
+                        throw TractandaError(
+                            "resourceLimit", "Complete reviewed resolution exceeds its record window.")
+                    }
+                    let original = try AuthorityRevision(originalBytes: data)
+                    let target = try AuthorityStore.Target(
+                        itemID: request.itemID, revisionID: revision.revisionID, sha256: original.sha256)
+                    let draftPath = ["authority", "review-drafts", identity.revisionID + ".tractanda"]
+                    if let existing = try coordinator.journal.files.readIfPresent(
+                        path: draftPath, maximumBytes: PooledCanonicalRecord.maximumRecordBytes)
+                    {
+                        guard existing == data else {
+                            throw TractandaError("operationMismatch", "Reserved review draft differs.")
+                        }
+                    } else {
+                        try coordinator.journal.files.writeImmutable(
+                            data, path: draftPath, maximumBytes: PooledCanonicalRecord.maximumRecordBytes)
+                    }
+                    let row = try reviewRow(original, path: draftPath.joined(separator: "/"))
+                    var admissions: [ItemValue] = []
+                    if let summary = try index.currentHeadSummary(classID: AccessConfiguration.classID),
+                        let a = try index.revision(summary.revisionID)
+                    {
+                        admissions = [
+                            try AuthorityStore.Target(
+                                itemID: a.itemID, revisionID: a.revisionID,
+                                sha256: a.digest.map { String(format: "%02x", $0) }.joined()
+                            ).itemValue
+                        ]
+                    }
+                    let d = try AuthorityRecord(
+                        recordID: identity.decisionID, storeID: coordinator.storeID,
+                        originReplicaID: origin, kind: .reviewDecision,
+                        parentAuthorityIDs: Array(
+                            Set(
+                                [preCut.recordID] + state.decisionFrontier.map(\.recordID)
+                                    + state.controlHolds.map(\.recordID) + state.retirements.map(\.recordID))
+                        ).sorted(),
+                        actorPrincipal: account.name, createdAt: identity.createdAt,
+                        payload: [
+                            "target": state.original.itemValue, "evidence": state.evidence.itemValue,
+                            "holds": .list(state.decisionFrontier.map { .text($0.recordID) }),
+                            "decisionFrontier": .list(state.decisionFrontier.map { .text($0.recordID) }),
+                            "decision": .text("accept"),
+                            "administrationPolicies": .list(admissions),
+                            "itemPolicies": .list(state.policyFrontier.map(\.itemValue)),
+                            "reason": .text("Explicit atomic administrator review with fresh resolution."),
+                            "sourceControl": .list([preCut.itemValue]),
+                            "resolution": .list([target.itemValue]),
+                            "controlHolds": .list(state.controlHolds.map(\.itemValue)),
+                            "retirements": .list(state.retirements.map(\.itemValue)),
+                        ])
+                    let decision = try coordinator.recordBinding(d)
+                    let e = try reviewTestimony(
+                        revision: original, identity: identity, state: state,
+                        coordinator: coordinator, index: index, decision: decision)
+                    let oldEvidence = try coordinator.control(state.evidence, index: index).record
+                    func policyIDs(_ evidence: AuthorityRecord) throws -> [String] {
+                        try Array(
+                            Set(
+                                (AuthorityRecord.list(evidence.payload["admissionPolicies"])
+                                    + AuthorityRecord.list(evidence.payload["itemPolicies"]))
+                                    .map { try AuthorityRecord.binding($0).revisionID })
+                        ).sorted()
+                    }
+                    let control = try AuthorityRecord(
+                        recordID: identity.controlID, storeID: coordinator.storeID,
+                        originReplicaID: origin, kind: .controlCommit, parentAuthorityIDs: [preCut.recordID],
+                        actorPrincipal: account.name, createdAt: identity.createdAt,
+                        payload: [
+                            "controls": .list([preCut.itemValue]), "localParent": .list([preCut.itemValue]),
+                            "bootstrap": .list(
+                                try coordinator.configuration()?.bootstrap.map {
+                                    [try AuthorityBinding(recordID: $0.recordID, sha256: $0.sha256).itemValue]
+                                } ?? []),
+                            "deltas": .list(
+                                [
+                                    AuthorityStore.DispositionDelta(
+                                        target: state.original, eligible: true,
+                                        actor: held.revision.fields["actor"]!.string!,
+                                        policyIDs: try policyIDs(oldEvidence), causes: [decision],
+                                        evidence: state.evidence),
+                                    AuthorityStore.DispositionDelta(
+                                        target: target, eligible: true,
+                                        actor: revision.fields["actor"]!.string!,
+                                        policyIDs: try policyIDs(e), causes: [decision],
+                                        evidence: try coordinator.recordBinding(e)),
+                                ].sorted { $0.target.revisionID < $1.target.revisionID }.map(\.itemValue)),
+                        ])
+                    let plan = try AuthorityStore.VerifiedReviewPlan(
+                        event: .init(
+                            record: AuthorityRecordCodec.decode(AuthorityRecordCodec.encode(d)),
+                            parents: state.decisionFrontier),
+                        held: held, heldRow: heldRow, resolution: original,
+                        evidence: AuthorityRecordCodec.decode(AuthorityRecordCodec.encode(e)),
+                        control: .init(
+                            control: AuthorityRecordCodec.decode(AuthorityRecordCodec.encode(control))),
+                        policyFrontier: state.policyFrontier, operationID: request.operationID)
+                    try preflightReviewPolicyTransitions(plan, coordinator: coordinator, index: index)
+                    let draftLoad: (ItemIndex.CatalogueRow) throws -> PooledCanonicalRecord = { requested in
+                        if requested.revisionID == revision.revisionID {
+                            let checked = try self.reviewRow(original, path: row.path)
+                            guard checked == requested,
+                                try coordinator.journal.files.read(
+                                    path: draftPath, maximumBytes: PooledCanonicalRecord.maximumRecordBytes)
+                                    == data
+                            else {
+                                throw TractandaError("invalidAuthority", "Immutable review draft changed.")
+                            }
+                            return .init(
+                                revision: revision,
+                                metadata: try FileMetadata.read(
+                                    at: self.root.appendingPathComponent(row.path)),
+                                archived: false, metadataDrifted: false)
+                        }
+                        return try load(requested)
+                    }
+                    let reviewedPolicies = try state.policyFrontier.map { target -> Revision in
+                        guard let row = try index.revision(target.revisionID) else {
+                            throw TractandaError("missingDependencies", "PRE-review policy disappeared.")
+                        }
+                        return try load(row).revision
+                    }
+                    _ = try index.previewAuthorityReview(
+                        plan: plan, resolutionRow: row, loadVerified: draftLoad,
+                        limits: revisionProjectionLimits, progress: coordinator.progress,
+                        validate: { _ in
+                            try self.validateAuthorityReviewResolution(
+                                revision, context: context, policies: reviewedPolicies, using: index)
+                        })
+                    try beforeProjectionCommitAuthorityForTesting?()
+                    try withAccess(forUID: uid) {
+                        try requireActivePublishingOrigin()
+                        let fresh = try prepareAuthorityReview(
+                            itemID: request.itemID, revisionID: request.revisionID,
+                            evidence: request.evidence, actorUID: uid)
+                        guard fresh.stateToken == state.stateToken else {
+                            throw TractandaError(
+                                "stateConflict", "Fresh authority or reviewed state changed before sealing.")
+                        }
+                        // C-only named principals and references are absent from the PRE token.
+                        // Repeat full staged validation under fresh NSS, sharing the SAME work budget.
+                        _ = try index.previewAuthorityReview(
+                            plan: plan, resolutionRow: row, loadVerified: draftLoad,
+                            limits: revisionProjectionLimits, progress: coordinator.progress,
+                            validate: { _ in
+                                try self.validateAuthorityReviewResolution(
+                                    revision, context: context, policies: reviewedPolicies, using: index)
+                            })
+                        guard
+                            try AuthorityRecordCodec.encode(
+                                reviewTestimony(
+                                    revision: original, identity: identity,
+                                    state: state, coordinator: coordinator, index: index, decision: decision))
+                                == plan.evidence.originalBytes
+                        else {
+                            throw TractandaError(
+                                "stateConflict", "Fresh source identity testimony changed before sealing.")
+                        }
+                    }
+                    try CanonicalReaderRequirement.beforeReviewPublication(root: root, ownerUID: ownerUID)
+                    // Physical arrival is local wall time; logical modifiedAt may be far ahead.
+                    let minute = String(identity.createdAt.prefix(16)).replacingOccurrences(
+                        of: "-", with: "/"
+                    )
+                    .replacingOccurrences(of: "T", with: "/").replacingOccurrences(of: ":", with: "/")
+                    let localPath =
+                        "items/" + minute + "/" + request.itemID + "/" + revision.revisionID + ".tractanda"
+                    let cutBinding = try coordinator.recordBinding(control)
+                    let visibility = try AuthorityRecord(
+                        recordID: identity.visibilityID, storeID: coordinator.storeID,
+                        originReplicaID: origin,
+                        kind: .visibilityWitness, parentAuthorityIDs: [cutBinding.recordID],
+                        actorPrincipal: account.name, createdAt: identity.createdAt,
+                        payload: [
+                            "target": target.itemValue, "cut": cutBinding.itemValue,
+                            "modifiedAt": .date(revision.modifiedAt), "causeKey": .list([]),
+                        ])
+                    let markerWasDirty = StoreCheckpoint.isDirty(root: root)
+                    var sealed = false
+                    do {
+                        let package = try coordinator.stageLocal(
+                            revision: revision, bytes: data, evidence: e,
+                            contextToken: peerIntakeContextToken(), arrivalMinute: minute,
+                            localItemPath: localPath,
+                            controls: [d, control, visibility], afterSeal: { sealed = true },
+                            reservedPackageID: identity.packageID)
+                        try coordinator.retainSealed(
+                            package, index: index, applyAssessment: false, allowReviewClosure: true)
+                        guard let retained = try index.retainedAuthorityObject(id: revision.revisionID) else {
+                            throw TractandaError("missingDependencies", "Sealed review C is unavailable.")
+                        }
+                        try index.execute("SAVEPOINT apply_authority_review")
+                        do {
+                            let after = try index.applyValidatedReview(
+                                plan: plan, resolutionRow: authorityCatalogueRow(retained, node: original),
+                                loadVerified: load, limits: revisionProjectionLimits,
+                                progress: coordinator.progress)
+                            try index.retainValidatedControl(plan.control)
+                            try retainReviewPolicyInvalidations(plan, coordinator: coordinator, index: index)
+                            for delta in plan.control.deltas {
+                                try coordinator.restoreControlAcceptance(delta, index: index)
+                            }
+                            try index.retainLocalAuthorityAcceptance(plan.control)
+                            try consumeRestoredAuthorityEffects(
+                                plan.control, review: plan, coordinator: coordinator, index: index)
+                            try index.replaceCurrentProjection(
+                                snapshot: after, state: readyProjectionState(revision),
+                                policies: [
+                                    .init(
+                                        revisionID: revision.revisionID, classID: revision.classID,
+                                        permissions: revision.fields["permissions"])
+                                ], policiesComplete: true)
+                            try index.put(revision)
+                            try index.retainValidatedExposure(
+                                .init(
+                                    witness: AuthorityRecordCodec.decode(
+                                        AuthorityRecordCodec.encode(visibility))),
+                                locallyVisible: true)
+                            try index.execute("RELEASE apply_authority_review")
+                        } catch {
+                            try? index.execute("ROLLBACK TO apply_authority_review")
+                            try? index.execute("RELEASE apply_authority_review")
+                            throw error
+                        }
+                        try coordinator.journal.applied(package)
+                        try drainAuthorityVisibility(coordinator: coordinator, index: index)
+                        for work in try index.completePeerDocumentCorpus(packageID: corpusScope) {
+                            try stagingByteQuota.observeDerived(
+                                workID: work.workID, retainedEncodedBytes: work.retainedEncodedBytes)
+                        }
+                        try rememberHead(Self.residentHead(revision))
+                        if revision.classID == AccessConfiguration.classID {
+                            try refreshCurrentAccessConfigurations(using: index)
+                        }
+                        generation = Identifier.make()
+                        clearSavedViewPages()
+                        if !markerWasDirty { try StoreCheckpoint.clear(root: root) }
+                        return .init(
+                            revision: revision, decision: decision, wasReplayed: false,
+                            current: try itemState(request.itemID), disposition: .approved)
+                    } catch {
+                        if sealed || (try? coordinator.journal.publication(identity.packageID)) != nil {
+                            quarantineCheckpoint()
+                        }
+                        throw error
+                    }
+                }
+            }
+        }
+    }
+    private func currentReviewDisposition(originalID: String, resolutionID: String, index: ItemIndex) throws
+        -> AuthorityStore.ReviewDisposition
+    {
+        let review = try index.authorityReviewDisposition(revisionID: originalID)
+        if review == .approved,
+            try index.authorityDisposition(id: originalID)?.disposition != .eligible
+                || index.authorityDisposition(id: resolutionID)?.disposition != .eligible
+        {
+            return .held
+        }
+        return review
+    }
+    private func validateAuthorityReviewResolution(
+        _ revision: Revision, context: RevisionProjection.Snapshot, policies: [Revision],
+        using index: ItemIndex
+    ) throws {
+        try requireAdministrator()
+        try ItemSemantics.validate(revision)
+        if policies.contains(where: { $0.classID == AccessConfiguration.classID }) {
+            guard revision.classID == AccessConfiguration.classID else {
+                throw TractandaError("invalidAccessConfiguration", "Access configuration cannot be retyped.")
+            }
+        }
+        if revision.classID == AccessConfiguration.classID {
+            guard policies.contains(where: { $0.classID == AccessConfiguration.classID }) else {
+                throw TractandaError(
+                    "invalidAccessConfiguration",
+                    "Review cannot create a second or retyped access configuration.")
+            }
+            let configuration = try AccessConfiguration(revision.fields["accessConfiguration"]!)
+            try configuration.validate(
+                using: PrincipalResolver(directory: accounts, configuration: configuration))
+        }
+        if let value = revision.fields["permissions"], let fresh = accessContext {
+            try ItemPermissions(value).validate(using: fresh.resolver)
+        }
+        guard try !knownCategoryConstraintConflicts(replacing: revision).contains(revision.itemID) else {
+            throw TractandaError("categoryCycle", "Reviewed resolution violates category invariants.")
+        }
+        try validateResolutionReferences(revision, snapshot: context, using: index)
+        for holding in try RoleSemantics.holdings(revision) {
+            let holder = try get(holding.holder.itemID, revisionID: holding.holder.revisionID)
+            guard ItemTypes.ancestry(holder.classID).contains("PersonItem"), holder.classID != "RoleItem",
+                !holder.isDeleted
+            else { throw TractandaError("invalidHolder", "Reviewed resolution holder is unavailable.") }
+        }
+    }
+}
+
+extension ItemStore {
+    /// Only exact D/C-bound post-controls use this path. A raw review record is never a grant.
+    private func authorityReviewPlan(
+        for control: AuthorityStore.VerifiedControlPlan, coordinator: PeerIntakeCoordinator, index: ItemIndex
+    ) throws -> AuthorityStore.VerifiedReviewPlan? {
+        var selected: (AuthorityStore.DispositionDelta, AuthorityRecordCodec.Verified, AuthorityBinding)?
+        for delta in control.deltas where delta.eligible {
+            guard let evidence = delta.evidence,
+                let raw = try index.retainedAuthorityObject(id: evidence.recordID),
+                raw.descriptor.sha256 == evidence.sha256
+            else { continue }
+            let witness = try AuthorityRecordCodec.decode(coordinator.bytes(raw))
+            guard witness.record.kind == .authoredEvidence else { continue }
+            let approvals = try AuthorityRecord.list(witness.record.payload["acceptedAuthority"]).map(
+                AuthorityBinding.init(value:))
+            guard !approvals.isEmpty else { continue }
+            if approvals.count == 1, !delta.causes.contains(approvals[0]) { continue }
+            guard approvals.count == 1, selected == nil else {
+                throw TractandaError("invalidAuthority", "Atomic review needs one exact fresh C decision.")
+            }
+            selected = (delta, witness, approvals[0])
+        }
+        guard let selected else { return nil }
+        let d = try coordinator.control(selected.2, index: index)
+        let parentIDs = try AuthorityRecord.ids(d.record.payload["decisionFrontier"])
+        let parents = try parentIDs.map { id -> AuthorityBinding in
+            guard let row = try index.retainedAuthorityObject(id: id), row.descriptor.kind == .authority
+            else { throw TractandaError("missingDependencies", "Reviewed decision dependency is missing.") }
+            return try .init(recordID: id, sha256: row.descriptor.sha256)
+        }
+        let event = try AuthorityStore.VerifiedReviewEvent(record: d, parents: parents)
+        guard let b = try index.retainedAuthorityObject(id: event.target.revisionID),
+            b.descriptor.sha256 == event.target.sha256,
+            let c = try index.retainedAuthorityObject(id: event.resolution.revisionID),
+            c.descriptor.sha256 == event.resolution.sha256
+        else {
+            throw TractandaError(
+                "missingDependencies", "Atomic review omitted its exact unchanged B or fresh C.")
+        }
+        let held = try AuthorityRevision(originalBytes: coordinator.bytes(b))
+        let resolution = try AuthorityRevision(originalBytes: coordinator.bytes(c))
+        return try .init(
+            event: event, held: held, heldRow: authorityCatalogueRow(b, node: held), resolution: resolution,
+            evidence: selected.1, control: control,
+            policyFrontier: AuthorityRecord.list(d.record.payload["itemPolicies"]).map(
+                AuthorityStore.Target.init(value:)),
+            operationID: resolution.revision.fields["operationID"]!.string!)
+    }
+    /// Re-evaluate the historical administrator proof in its frozen PRE context. Present
+    /// administrator authorization is a separate mandatory runtime pre-seal check.
+    private func validateHistoricalReviewAuthority(
+        _ plan: AuthorityStore.VerifiedReviewPlan, coordinator: PeerIntakeCoordinator, index: ItemIndex
+    ) throws {
+        let evidence = plan.evidence.record
+        let d = plan.event.record.record
+        guard try coordinator.matchesIdentity(plan.resolution, evidence),
+            d.actorPrincipal == evidence.actorPrincipal, d.originReplicaID == evidence.originReplicaID,
+            evidence.payload["evaluated"] == .boolean(true),
+            evidence.payload["rights"]?.array?.contains(.text("administrator")) == true,
+            d.payload["administrationPolicies"] == evidence.payload["admissionPolicies"],
+            d.payload["itemPolicies"] == evidence.payload["itemPolicies"],
+            try !AuthorityRecord.list(evidence.payload["admissionPolicies"]).isEmpty
+        else {
+            throw TractandaError(
+                "invalidAuthority", "Decision and C differ from their PRE-review administrator context.")
+        }
+        try validateReviewPolicyCut(evidence, cut: plan.event.preCut, coordinator: coordinator, index: index)
+        var aliases: [String: ItemValue] = [:]
+        for binding in try AuthorityRecord.list(evidence.payload["admissionPolicies"]) {
+            guard let node = try coordinator.bindingAtCut(binding, cut: plan.event.preCut, index: index),
+                node.revision.classID == AccessConfiguration.classID,
+                let value = node.revision.fields["accessConfiguration"]
+            else {
+                throw TractandaError(
+                    "missingDependencies", "Review's accepted administrator policy is unavailable.")
+            }
+            let configuration = try AccessConfiguration(value)
+            let administrator = try SourceAdministration.administrator(configuration, evidence: evidence)
+            guard administrator else {
+                throw TractandaError(
+                    "forbidden", "Decision author was not an administrator under the PRE-review policy.")
+            }
+            for (name, target) in configuration.userAliases.merging(
+                configuration.groupAliases, uniquingKeysWith: { $0 == $1 ? $0 : "" })
+            {
+                guard !target.isEmpty, aliases[name] == nil || aliases[name] == .text(target) else {
+                    throw TractandaError("invalidAuthority", "Review aliases conflict with its PRE policy.")
+                }
+                aliases[name] = .text(target)
+            }
+        }
+        guard aliases == evidence.payload["aliases"]?.map else {
+            throw TractandaError("invalidAuthority", "Review alias testimony differs from the PRE policy.")
+        }
+    }
+    private func finishRecoveryAuthorityReviews(coordinator: PeerIntakeCoordinator, index: ItemIndex) throws {
+        var cursor: String?
+        var any = false
+        while true {
+            let page = try index.authorityReviewItemPage(after: cursor, limit: 128)
+            if page.isEmpty { break }
+            for item in page {
+                cursor = item
+                any = true
+                // Existing disk projection validates each C in its OWN parent context,
+                // including earlier demotion materializations. No current cache is exposed.
+                _ = try analyzeCurrentProjection(
+                    item, using: index, limits: revisionProjectionLimits, progress: coordinator.progress)
+            }
+        }
+        guard try index.authorityReviewRecoveryIsComplete() else {
+            throw TractandaError("recoveryError", "Atomic review closure remains incomplete.")
+        }
+        if any {
+            try validateAuthorityControls(
+                packageID: nil, coordinator: coordinator, index: index, recovering: true)
+            try reduceRetainedAuthorityInventory(coordinator: coordinator, index: index)
+            cursor = nil
+            while true {
+                let page = try index.authorityReviewItemPage(after: cursor, limit: 128)
+                if page.isEmpty { break }
+                for item in page {
+                    cursor = item
+                    try index.reconcileAuthorityAcceptedItem(itemID: item)
+                }
+            }
+        }
+    }
+}
+
+extension ItemStore {
+    /// Review policies are exact eligible AUTHORED frontier snapshots. Transparent physical
+    /// materializations in the PRE cut are expanded only after the existing disk projector
+    /// validates their full own-context payloads; a claimed frontier alone proves nothing.
+    private func validateReviewPolicyCut(
+        _ evidence: AuthorityRecord, cut: AuthorityBinding,
+        coordinator: PeerIntakeCoordinator, index: ItemIndex,
+        policyFields: [String] = ["admissionPolicies", "itemPolicies"]
+    ) throws {
+        guard try index.hasValidatedAuthorityControl(cut),
+            try coordinator.control(cut, index: index).record.originReplicaID == evidence.originReplicaID
+        else { throw TractandaError("missingDependencies", "Review PRE source cut is not validated.") }
+        // Source PRE proof is immutable and independent of today's accepted projection.
+        // Retained policies are NEVER used as a receiver-current permission fallback.
+        for field in policyFields {
+            var groups: [String: [AuthorityStore.Target]] = [:]
+            for value in try AuthorityRecord.list(evidence.payload[field]) {
+                let target = try AuthorityStore.Target(value: value)
+                groups[target.itemID, default: []].append(target)
+            }
+            for (item, policies) in groups {
+                let physical = try index.authorityItemFrontierAtCut(itemID: item, cut: cut)
+                var authored: Set<String> = []
+                for id in physical {
+                    guard let raw = try index.retainedAuthorityObject(id: id), raw.descriptor.kind == .item
+                    else {
+                        throw TractandaError(
+                            "missingDependencies", "Exact historical PRE policy original is absent.")
+                    }
+                    let node = try AuthorityRevision(originalBytes: coordinator.bytes(raw))
+                    guard node.revision.itemID == item,
+                        try index.eligibilityAtCut(revisionID: id, cut: cut) == .eligible
+                    else {
+                        throw TractandaError(
+                            "invalidAuthority", "Source PRE policy identity/eligibility differs.")
+                    }
+                    if try node.revision.provenance?.kind == .automaticMerge {
+                        authored.formUnion(try node.revision.provenance!.frontier)
+                    } else {
+                        authored.insert(id)
+                    }
+                }
+                for id in authored.sorted() {
+                    for other in authored where id != other {
+                        if try index.authorityRetainedHasAncestor(source: other, target: id) {
+                            authored.remove(id)
+                            break
+                        }
+                    }
+                }
+                guard authored.sorted() == policies.map(\.revisionID).sorted() else {
+                    throw TractandaError(
+                        "invalidAuthority", "Review policies are not the exact authored PRE frontier.")
+                }
+                for policy in policies {
+                    guard try coordinator.bindingAtCut(policy.itemValue, cut: cut, index: index) != nil else {
+                        throw TractandaError(
+                            "missingDependencies",
+                            "Exact retained policy bytes or source-cut proof is absent.")
+                    }
+                }
+            }
+        }
+    }
+
+}
+
+extension ItemStore {
+    private func retainReviewPolicyInvalidations(
+        _ plan: AuthorityStore.VerifiedReviewPlan, coordinator: PeerIntakeCoordinator, index: ItemIndex
+    ) throws {
+        let current = plan.resolution.revision
+        for target in plan.policyFrontier {
+            guard let row = try index.retainedAuthorityObject(id: target.revisionID),
+                row.descriptor.sha256 == target.sha256
+            else {
+                throw TractandaError("missingDependencies", "Reviewed PRE policy original is missing.")
+            }
+            let previous = try AuthorityRevision(originalBytes: coordinator.bytes(row))
+            if previous.revision.fields["permissions"] != current.fields["permissions"]
+                || previous.revision.fields["accessConfiguration"] != current.fields["accessConfiguration"]
+            {
+                try AuthorityStore.validateReviewPolicyTransition(plan, previous: previous)
+                try index.retainValidatedReviewInvalidation(plan, previous: previous)
+            }
+        }
+    }
+}
+
+extension ItemStore {
+    private func preflightReviewPolicyTransitions(
+        _ plan: AuthorityStore.VerifiedReviewPlan,
+        coordinator: PeerIntakeCoordinator, index: ItemIndex
+    ) throws {
+        for target in plan.policyFrontier {
+            guard let raw = try index.retainedAuthorityObject(id: target.revisionID),
+                raw.descriptor.sha256 == target.sha256
+            else {
+                throw TractandaError("missingDependencies", "Review PRE transition input is missing.")
+            }
+            let old = try AuthorityRevision(originalBytes: coordinator.bytes(raw))
+            if old.revision.fields["permissions"] != plan.resolution.revision.fields["permissions"]
+                || old.revision.fields["accessConfiguration"]
+                    != plan.resolution.revision.fields["accessConfiguration"]
+            {
+                try AuthorityStore.validateReviewPolicyTransition(plan, previous: old)
+            }
+        }
+    }
+}
+
+extension ItemStore {
+    /// Consume obsolete queued negatives only AFTER restoring the exact authorized LOCAL
+    /// positive publication. This never grants a target or approves an unnamed descendant.
+    private func consumeRestoredAuthorityEffects(
+        _ control: AuthorityStore.VerifiedControlPlan, review: AuthorityStore.VerifiedReviewPlan?,
+        coordinator: PeerIntakeCoordinator, index: ItemIndex
+    ) throws {
+        guard let origin = replicaID, control.control.record.originReplicaID == origin else { return }
+        for delta in control.deltas where delta.eligible {
+            if let review {
+                try index.consumeSupersededAuthorityEffect(
+                    control: control.binding, originID: origin,
+                    target: delta.target, cut: review.event.preCut, review: review)
+            } else if let binding = delta.evidence,
+                let raw = try index.retainedAuthorityObject(id: delta.target.revisionID)
+            {
+                let original = try AuthorityRevision(originalBytes: coordinator.bytes(raw))
+                guard try original.revision.provenance?.kind == .authored else { continue }
+                let evidence = try coordinator.control(binding, index: index)
+                guard let cut = try coordinator.sourceControl(evidence.record) else { continue }
+                try index.consumeSupersededAuthorityEffect(
+                    control: control.binding, originID: origin,
+                    target: delta.target, cut: cut, original: original, evidence: evidence)
+            }
+        }
+    }
+}
+
+extension ItemStore {
+    /// A later sealed LOCAL authored publication can become eligible only after a
+    /// provisional review parent completes, after the initial canonical scan. Restore
+    /// exactly that accepted fact incrementally, never by rescanning the store.
+    private func restoreRecoveredLocalAuthored(
+        _ control: AuthorityStore.VerifiedControlPlan, coordinator: PeerIntakeCoordinator, index: ItemIndex
+    ) throws {
+        guard indexRebuildInProgress, try index.acceptedGraphProofIsCurrent() else { return }
+        for delta in control.deltas where delta.eligible {
+            guard try index.revision(delta.target.revisionID) == nil,
+                let selected = delta.evidence,
+                let raw = try index.retainedAuthorityObject(id: delta.target.revisionID)
+            else { continue }
+            let original = try AuthorityRevision(originalBytes: coordinator.bytes(raw))
+            guard try original.revision.provenance?.kind == .authored else { continue }
+            let evidence = try coordinator.control(selected, index: index)
+            let revision = original.revision
+            // Use the SAME ownership/digest/dependency registries as the initial scan.
+            // These checks never infer a client permission or fetch a remote payload.
+            for attachment in try AttachmentDescriptor.descriptors(in: revision.fields) {
+                if try index.registerRecoveryAttachment(attachment, itemID: revision.itemID) {
+                    let control = rebuildControl
+                    let startingBytes = control?.status.originalBytesVerified ?? 0
+                    try attachmentPayloads.validate(
+                        descriptor: attachment,
+                        progress: { verified in
+                            let prior = control?.status.originalBytesVerified ?? startingBytes
+                            let total = startingBytes.addingReportingOverflow(verified)
+                            guard !total.overflow else {
+                                throw TractandaError(
+                                    "resourceLimit", "Recovered dependency byte progress overflowed.")
+                            }
+                            try control?.pulse(originalBytes: total.partialValue - prior)
+                        })
+                    attachmentRecoveryValidationsForTesting += 1
+                }
+            }
+            for document in try AttachmentDocumentRepresentation.representations(in: revision.fields) {
+                if let content = document.content,
+                    try index.registerRecoveryDocument(document, itemID: revision.itemID)
+                {
+                    try documentContents.validate(
+                        content, source: document.source, identity: document.identity,
+                        extractedAt: document.extractedAt, boundary: { try self.rebuildControl?.check() },
+                        progress: { _ in try self.rebuildControl?.pulse(pages: 1) })
+                }
+            }
+            try index.restoreLocallyAcceptedAuthored(
+                row: authorityCatalogueRow(raw, node: original),
+                original: original, control: control.binding, evidence: evidence,
+                loadVerified: {
+                    try PooledCanonicalRecord.read(row: $0, root: self.root, ownerUID: self.ownerUID)
+                },
+                limits: revisionProjectionLimits, progress: coordinator.progress)
+        }
+    }
+}
+
+// Internal managed peer lifecycle. There is deliberately no Service/CLI/native wire route.
+extension ItemStore {
+    func rotatePeerIntakeCredential(
+        peerID: String, replacement: PeerPackage.Context,
+        operationID: String
+    ) throws {
+        try managePeerLifecycle(
+            peerID: peerID, replacement: replacement,
+            retiredOriginIDs: [], operationID: operationID)
+    }
+    /// Removes this credential endpoint and explicitly retires the selected origin identities.
+    /// An empty set removes only the endpoint; no own-origin is inferred from a relay label.
+    func removePeerIntake(peerID: String, retiredOriginIDs: [String], operationID: String) throws {
+        try managePeerLifecycle(
+            peerID: peerID, replacement: nil,
+            retiredOriginIDs: retiredOriginIDs, operationID: operationID)
+    }
+    private func managePeerLifecycle(
+        peerID: String, replacement: PeerPackage.Context?,
+        retiredOriginIDs: [String], operationID: String, credentialCommitment: String? = nil
+    ) throws {
+        if accessContext == nil {
+            return try withAccess(forUID: ownerUID) {
+                try managePeerLifecycle(
+                    peerID: peerID, replacement: replacement,
+                    retiredOriginIDs: retiredOriginIDs, operationID: operationID,
+                    credentialCommitment: credentialCommitment)
+            }
+        }
+        try requireAdministrator()
+        let coordinator = try requirePeerIntake()
+        _ = try AuthorityRecord.persistentID(.text(operationID))
+        guard retiredOriginIDs == Array(Set(retiredOriginIDs)).sorted(), retiredOriginIDs.count <= 256,
+            let actor = accessContext?.account?.name
+        else {
+            throw TractandaError(
+                "invalidPeerLifecycle", "Explicit sorted origins/current administrator required.")
+        }
+        var requestFields: [String: ItemValue] = [
+            "peerID": .text(peerID), "actor": .text(actor),
+            "replacement": .text(
+                try replacement.map { String(decoding: try JSON.encode($0), as: UTF8.self) } ?? "removed"),
+            "retiredOrigins": .list(retiredOriginIDs.map(ItemValue.text)),
+        ]
+        if let credentialCommitment {
+            _ = try AuthorityRecord.digest(.text(credentialCommitment))
+            requestFields["credentialCommitment"] = .text(credentialCommitment)
+        }
+        let request = ItemValue.object(requestFields)
+        let requestDigest = AuthorityRecordCodec.sha256(try JSON.encode(request))
+        var mutationStarted = false
+        do {
+            if let saved = try coordinator.lifecycleOperation(operationID) {
+                guard saved.requestDigest == requestDigest else {
+                    throw TractandaError(
+                        "operationMismatch", "Lifecycle operation identity names a different request.")
+                }
+                mutationStarted = true
+                try coordinator.finishLifecycleOperation(saved)
+                if !isCanonicalReady { try rebuildIndex() }
+                generation = Identifier.make()
+                return
+            }
+            guard isCanonicalReady, authorityExistingHistoryAdmitted, !authorityCatchupActive,
+                let index, let localOrigin = replicaID,
+                let previous = try coordinator.configuration()
+            else {
+                throw TractandaError(
+                    "operationReviewRequired", "Lifecycle requires a recovered current store.")
+            }
+            let old = try previous.context(peerID: peerID)
+            guard old.storeID == coordinator.storeID,
+                Set(retiredOriginIDs).isSubset(of: old.permittedOrigins)
+            else {
+                throw TractandaError(
+                    "invalidPeerLifecycle", "Retired origins must be explicitly permitted by this endpoint.")
+            }
+            try requireActivePublishingOrigin()
+            if !retiredOriginIDs.isEmpty, peerClockHealth?.permitsRetirement == false {
+                throw TractandaError(
+                    "clockUnhealthy",
+                    "Known clock drift prevents issuing a new peer retirement; check reference-time diagnostics."
+                )
+            }
+            var peers = previous.peers.filter { $0.peerID != peerID }
+            if let replacement {
+                guard replacement.peerID == old.peerID, replacement.storeID == old.storeID,
+                    replacement.permittedOrigins == old.permittedOrigins,
+                    replacement.configurationDigest != old.configurationDigest, retiredOriginIDs.isEmpty
+                else {
+                    throw TractandaError(
+                        "invalidPeerLifecycle",
+                        "Credential rotation must preserve exact peer/origin identities.")
+                }
+                peers.append(replacement)
+            }
+            var state = previous.lifecycle ?? .empty
+            guard !retiredOriginIDs.contains(localOrigin),
+                replacement.map({ candidate in
+                    !state.historicalContexts.contains(where: {
+                        $0.peerID == candidate.peerID
+                            && $0.configurationDigest == candidate.configurationDigest
+                    })
+                }) ?? true
+            else {
+                throw TractandaError(
+                    "invalidPeerLifecycle",
+                    "Local origin retirement/credential generation reuse is unsupported.")
+            }
+            if !state.historicalContexts.contains(old) { state.historicalContexts.append(old) }
+            var retirementBytes: Data?
+            try AuthorityStore.requireNoPendingPeerLifecycle(root: root, files: coordinator.journal.files)
+            mutationStarted = true
+            try CanonicalReaderRequirement.beforePeerLifecyclePublication(root: root, ownerUID: ownerUID)
+            if !retiredOriginIDs.isEmpty {
+                try index.withCatalogueScanBudget(reusingActiveBudget: true) {
+                    // A real administrator retirement incorporates accepted imports into the
+                    // existing sparse causal DAG. It does not create acknowledgement loops.
+                    var draft = try coordinator.prepareSourceCut(
+                        index: index, origin: localOrigin, actor: actor)
+                    if draft.cut == nil {
+                        let genesis = try coordinator.makeControl(
+                            origin: localOrigin, actor: actor,
+                            localParent: nil, parents: [], deltas: [], bootstrap: nil)
+                        draft = .init(cut: try coordinator.recordBinding(genesis), records: [genesis])
+                    }
+                    if !draft.records.isEmpty {
+                        let package = try coordinator.stageControlUnit(
+                            draft.records, contextToken: peerIntakeContextToken())
+                        try coordinator.retainSealed(package, index: index)
+                        try validateAuthorityControls(
+                            packageID: package, coordinator: coordinator,
+                            index: index, localUnit: true)
+                        try coordinator.journal.applied(package)
+                        try drainAuthorityVisibility(coordinator: coordinator, index: index)
+                    }
+                    guard let cut = draft.cut, try index.hasValidatedAuthorityControl(cut) else {
+                        throw TractandaError(
+                            "invalidPeerLifecycle", "Retirement accepted cut is not validated.")
+                    }
+                    let retirementID = try UUID.makeVersion1()
+                    let effectiveAt = try UUIDVersion1Components(retirementID).timestampUTC
+                    var admission: [ItemValue] = []
+                    if let head = try index.currentHeadSummary(classID: AccessConfiguration.classID),
+                        let row = try index.retainedAuthorityObject(id: head.revisionID)
+                    {
+                        admission = [
+                            try AuthorityStore.Target(
+                                itemID: head.itemID, revisionID: head.revisionID,
+                                sha256: row.descriptor.sha256
+                            ).itemValue
+                        ]
+                    }
+                    let rootRecord = try AuthorityRecord(
+                        recordID: retirementID.uuidString.lowercased(),
+                        storeID: coordinator.storeID, originReplicaID: localOrigin, kind: .originRetirement,
+                        parentAuthorityIDs: [cut.recordID],
+                        actorPrincipal: actor, createdAt: Timestamp.now(),
+                        payload: [
+                            "operationID": .text(operationID), "cut": cut.itemValue,
+                            "effectiveAt": .date(effectiveAt),
+                            "retirementProfile": .text(PeerLifecycle.timestampProfile),
+                            "sourceAdministration": try sourceAdministration().itemValue,
+                            "sourceUID": .integer(Int64(accessContext!.uid)),
+                            "groups": .object(try sourceAdministrationGroups()),
+                            "origins": .list(retiredOriginIDs.map(ItemValue.text)),
+                            "administrationPolicies": .list(admission),
+                        ])
+                    retirementBytes = try AuthorityRecordCodec.encode(rootRecord)
+                    state.retirements.append(
+                        .init(
+                            operationID: operationID,
+                            root: try coordinator.recordBinding(rootRecord), origins: retiredOriginIDs))
+                }
+            }
+            var credentialBindings = previous.credentialBindings ?? [:]
+            credentialBindings.removeValue(forKey: peerID)
+            if let credentialCommitment, replacement != nil { credentialBindings[peerID] = credentialCommitment }
+            let configuration = AuthorityStore.Configuration(
+                profile: previous.profile,
+                peers: peers.sorted { $0.peerID < $1.peerID }, bootstrap: previous.bootstrap, lifecycle: state,
+                credentialBindings: credentialBindings.isEmpty ? nil : credentialBindings
+            )
+            try state.validate(storeID: coordinator.storeID)
+            let operation = PeerLifecycle.Operation(
+                profile: PeerLifecycle.capability,
+                operationID: operationID, requestDigest: requestDigest,
+                previousConfigurationDigest: AuthorityRecordCodec.sha256(try JSON.encode(Optional(previous))),
+                sequence: try AuthorityStore.configurationSequence(root: root) + 1,
+                configuration: configuration, retirementBytes: retirementBytes)
+            try coordinator.prepareLifecycleOperation(operation)
+            try coordinator.lifecycleBoundaryForTesting?(.prepared)
+            try coordinator.finishLifecycleOperation(operation)
+            try coordinator.lifecycleBoundaryForTesting?(.committed)
+            if let retirementBytes {
+                let record = try AuthorityRecordCodec.decode(retirementBytes).record
+                try coordinator.retainSealed(record.recordID, index: index)
+                try coordinator.loadPeerRetirements(index: index)
+                try coordinator.validatePeerRetirementCuts(index: index)
+                try validateActivatedRetirements(coordinator: coordinator, index: index)
+                for (item, causes) in try reducePeerRetirements(
+                    coordinator: coordinator, index: index)
+                {
+                    try reconcileAuthorityProjection(
+                        item, causes: causes, coordinator: coordinator, index: index)
+                }
+                try finishAuthorityDispositionEffects(coordinator: coordinator, index: index)
+            }
+            generation = Identifier.make()
+        } catch {
+            if mutationStarted { quarantineCheckpoint() }
+            throw error
+        }
+    }
+}
+
+extension ItemStore {
+    private func sourceAdministration() throws -> SourceAdministration {
+        try .init(
+            defaultAdministratorGroup: AccessConfiguration.defaultAdministratorGroup,
+            serviceOwnerPrincipal: accounts.user(forUID: ownerUID).name)
+    }
+    private func sourceAdministrationGroups() throws -> [String: ItemValue] {
+        guard let account = accessContext?.account else {
+            throw TractandaError("unresolvedPrincipal", "Source administrator account is unavailable.")
+        }
+        var names = Set(currentAccessConfigurations.flatMap(\.groups))
+        names.insert(account.primaryGroupName)
+        names.insert(AccessConfiguration.defaultAdministratorGroup)
+        names.formUnion(currentAccessConfigurations.compactMap(\.administratorGroup))
+        var result: [String: ItemValue] = [:]
+        for name in names {
+            if let gid = try? accounts.groupID(named: name), account.groupIDs.contains(gid) {
+                result[name] = .integer(Int64(gid))
+            }
+        }
+        return result
+    }
+    private func requireActivePublishingOrigin() throws {
+        guard authorityIntakeEnabled, let origin = replicaID, let index else { return }
+        if try index.peerOriginRetired(origin) {
+            throw TractandaError(
+                "localOriginRetired",
+                "This replica was retired; normal publication is disabled. Read and administrator recovery remain available."
+            )
+        }
+    }
+}
+
+extension ItemStore {
+    private func validateRetirementAuthority(
+        _ original: AuthorityRecordCodec.Verified,
+        coordinator: PeerIntakeCoordinator, index: ItemIndex
+    ) throws {
+        let record = original.record
+        guard record.kind == .originRetirement,
+            record.payload["retirementProfile"] == .text(PeerLifecycle.timestampProfile),
+            let effective = record.payload["effectiveAt"]?.dateString,
+            try RevisionTimestamp(effective).formatted() == effective,
+            try PeerLifecycle.revisionTicks(record.recordID) == RevisionTimestamp(effective).ticks,
+            try !AuthorityRecord.list(record.payload["administrationPolicies"]).isEmpty
+        else {
+            throw TractandaError(
+                "missingDependencies",
+                "Timestamp retirement needs exact canonical source administrator proof.")
+        }
+        let cut = try AuthorityBinding(value: record.payload["cut"]!)
+        try validateReviewPolicyCut(
+            record, cut: cut, coordinator: coordinator, index: index,
+            policyFields: ["administrationPolicies"])
+        for binding in try AuthorityRecord.list(record.payload["administrationPolicies"]) {
+            guard let node = try coordinator.bindingAtCut(binding, cut: cut, index: index),
+                node.revision.classID == AccessConfiguration.classID,
+                let value = node.revision.fields["accessConfiguration"],
+                try SourceAdministration.administrator(AccessConfiguration(value), evidence: record)
+            else {
+                throw TractandaError(
+                    "forbidden", "Retirement author is not a source administrator in its exact PRE cut.")
+            }
+        }
+    }
+    private func validateActivatedRetirements(coordinator: PeerIntakeCoordinator, index: ItemIndex) throws {
+        for activation in try coordinator.configuration()?.lifecycle?.retirements ?? [] {
+            try validateRetirementAuthority(
+                coordinator.retirementOriginal(activation.root, index: index), coordinator: coordinator,
+                index: index)
+        }
+        try coordinator.foreignRetirements { activation in
+            try validateRetirementAuthority(
+                coordinator.retirementOriginal(activation.root, index: index), coordinator: coordinator,
+                index: index)
+        }
+    }
+    private func activatePendingRetirements(coordinator: PeerIntakeCoordinator, index: ItemIndex) throws
+        -> Bool
+    {
+        var after: String?
+        var work = 0
+        var admitted = false
+        while true {
+            let page = try index.peerRetirementRootPage(after: after)
+            if page.isEmpty { break }
+            for row in page {
+                after = row.descriptor.id
+                work += 1
+                try coordinator.progress?()
+                guard work <= coordinator.journal.limits.maximumWork else {
+                    throw TractandaError("resourceLimit", "Retirement validation work exhausted.")
+                }
+                let binding = try AuthorityBinding(recordID: row.descriptor.id, sha256: row.descriptor.sha256)
+                if try index.peerRetirementIsActive(binding) { continue }
+                if try coordinator.journal.files.readIfPresent(
+                    path: [".peer-retirement-activations", binding.recordID], maximumBytes: 4096) != nil
+                {
+                    continue
+                }
+                let original = try AuthorityRecordCodec.decode(coordinator.bytes(row))
+                let record = original.record
+                // Historical snapshot roots are audit evidence only, never mixed into timestamp eligibility.
+                guard record.payload["retirementProfile"] == .text(PeerLifecycle.timestampProfile),
+                    let receipt = try coordinator.freshReceipt(
+                        record.recordID, origin: record.originReplicaID, index: index),
+                    receipt.peerID != "local"
+                else { continue }
+                do {
+                    try validateRetirementAuthority(original, coordinator: coordinator, index: index)
+                } catch let error as TractandaError
+                    where ["missingDependencies", "forbidden", "unresolvedPrincipal", "invalidAuthority"]
+                    .contains(error.code)
+                {
+                    continue  // Inert observations cannot block unrelated accepted content.
+                }
+                try coordinator.activateForeignRetirement(binding, packageID: receipt.packageID)
+                admitted = true
+            }
+        }
+        return try admitted && coordinator.loadPeerRetirements(index: index)
+    }
+}
+
+extension ItemStore {
+    private func validateForeignReviewSeals(coordinator: PeerIntakeCoordinator, index: ItemIndex) throws {
+        let directory = root.appendingPathComponent(".peer-review-activations")
+        guard FileManager.default.fileExists(atPath: directory.path) else { return }
+        var work = 0
+        try POSIXDirectory.withEntries(at: directory) { name in
+            work += 1
+            guard work <= coordinator.journal.limits.maximumObjects,
+                let row = try index.retainedAuthorityObject(id: name), row.descriptor.kind == .authority
+            else {
+                throw TractandaError("invalidAuthority", "Activated foreign decision original is missing.")
+            }
+            let decision = try AuthorityBinding(recordID: name, sha256: row.descriptor.sha256)
+            guard let activation = try coordinator.foreignReviewActivation(decision),
+                let control = try index.retainedAuthorityObject(id: activation.control.recordID),
+                control.descriptor.sha256 == activation.control.sha256,
+                let receipt = try index.authorityReceipt(objectID: name, packageID: activation.packageID),
+                let plan = try authorityReviewPlan(
+                    for: .init(control: AuthorityRecordCodec.decode(coordinator.bytes(control))),
+                    coordinator: coordinator, index: index),
+                plan.event.binding == decision,
+                try coordinator.receiptContextPermits(
+                    receipt, origin: plan.event.record.record.originReplicaID, index: index)
+            else {
+                throw TractandaError(
+                    "invalidAuthority", "Activated foreign review lost its exact proof or receipt.")
+            }
+            return true
+        }
+    }
+}
+
+extension ItemStore {
+    private func recheckPeerRetirementEffects(coordinator: PeerIntakeCoordinator, index: ItemIndex) throws {
+        var after: String?
+        var work = 0
+        while true {
+            let packages = try index.peerRetirementRecheckPackagePage(after: after)
+            if packages.isEmpty { return }
+            for package in packages {
+                after = package
+                work += 1
+                guard work <= coordinator.journal.limits.maximumWork else {
+                    throw TractandaError("resourceLimit", "Retirement recheck work exhausted.")
+                }
+                _ = try coordinator.evaluatePending(
+                    packageID: package, index: index,
+                    evaluate: {
+                        try self.evaluateIncomingAuthority(
+                            $0, evidence: $1, coordinator: coordinator, index: index)
+                    },
+                    evaluateMaterialization: {
+                        try self.evaluateAuthorityMaterialization($0, coordinator: coordinator, index: index)
+                    },
+                    beforeAcceptance: { node, result in
+                        try self.sealAuthorityAcceptance(
+                            node, evaluation: result, coordinator: coordinator, index: index)
+                    })
+                try promoteEligiblePeerPackage(package, coordinator: coordinator, index: index)
+                try index.finishPeerRetirementRecheck(packageID: package)
+            }
+        }
+    }
+}
+
+extension ItemStore {
+    private func exactHistoricalReconciliation(
+        _ plan: AuthorityStore.VerifiedReconciliationPlan,
+        coordinator: PeerIntakeCoordinator, index: ItemIndex
+    ) throws -> Bool {
+        guard try index.authorityHasLocalHistoryAdmission(revisionID: plan.outputRevisionID),
+            let raw = try index.retainedAuthorityObject(id: plan.outputRevisionID),
+            raw.descriptor.kind == .item
+        else { return false }
+        let value = try AuthorityRevision(originalBytes: coordinator.bytes(raw)).revision
+        let binding = try AuthorityBinding(
+            recordID: plan.witness.record.recordID, sha256: plan.witness.sha256)
+        guard let p = try value.provenance else { return false }
+        return try p.kind == .automaticMerge && p.mergeProfile == AuthorityStore.reconciliationProfile
+            && p.authorityWitness == binding && p.writtenFields.isEmpty && p.unsetFields.isEmpty
+            && value.itemID == plan.itemID && value.modifiedAt == plan.modifiedAt
+            && p.parents == plan.parents && p.frontier == plan.frontier
+            && p.originReplicaID == plan.witness.record.originReplicaID
+            && index.authorityReconciliationPlanDigest(fields: RevisionMerge.semanticFields(value))
+                == plan.planDigest
+    }
+}
+
+extension ItemStore {
+    /// One-system administrator capability, not a local account impersonation. Only exact
+    /// authenticated source D/B/C proof can enter this synchronous semantic preview.
+    /// No caller UID, stored actor, OS account or ordinary authorization is changed.
+    private func withSharedReviewValidation<T>(
+        _ plan: AuthorityStore.VerifiedReviewPlan,
+        coordinator: PeerIntakeCoordinator, index: ItemIndex, _ body: () throws -> T
+    ) throws -> T {
+        let origin = plan.event.record.record.originReplicaID
+        guard try index.peerAuthorityIssuerPermits(plan.event.binding.recordID),
+            plan.control.control.record.originReplicaID == origin,
+            plan.evidence.record.originReplicaID == origin
+        else {
+            throw TractandaError("forbidden", "Shared review issuer is not currently valid.")
+        }
+        for id in [plan.event.binding.recordID, plan.control.binding.recordID, plan.evidence.record.recordID]
+        {
+            guard try coordinator.freshReceipt(id, origin: origin, index: index) != nil else {
+                throw TractandaError(
+                    "untrustedPeer", "Shared review lacks exact authenticated allowed-origin testimony.")
+            }
+        }
+        let heldOrigin = try plan.held.revision.provenance!.originReplicaID
+        guard
+            try index.peerReviewCoversCurrentRetirements(
+                revisionID: plan.event.target.revisionID, origin: heldOrigin,
+                covered: plan.event.retirements)
+        else {
+            throw TractandaError(
+                "forbidden", "Shared review omits a currently applicable retirement cause.")
+        }
+        guard
+            try coordinator.freshReceipt(
+                plan.event.target.revisionID, origin: heldOrigin, index: index,
+                forAdministratorReview: true) != nil,
+            let heldEvidence = try index.retainedAuthorityObject(id: plan.event.evidence.recordID),
+            heldEvidence.descriptor.sha256 == plan.event.evidence.sha256,
+            try coordinator.freshReceipt(
+                plan.event.evidence.recordID, origin: heldOrigin, index: index,
+                forAdministratorReview: true) != nil
+        else {
+            throw TractandaError(
+                "untrustedPeer", "Shared review cannot enroll an unknown held-origin contribution.")
+        }
+        let evidence = try AuthorityRecordCodec.decode(coordinator.bytes(heldEvidence)).record
+        guard try coordinator.matchesIdentity(plan.held, evidence) else {
+            throw TractandaError(
+                "invalidAuthority", "Shared review held evidence differs from its exact original.")
+        }
+        try coordinator.validatePolicyCut(evidence, index: index)
+        try validateHistoricalReviewAuthority(plan, coordinator: coordinator, index: index)
+        let previous = accessContext
+        accessContext = StoreAccessContext(
+            uid: ownerUID, account: nil,
+            resolver: PrincipalResolver(directory: accounts, configuration: accessConfiguration),
+            isAdministrator: true)
+        defer { accessContext = previous }
+        return try body()
+    }
+}
+
+// Internal first-source support. The stopped development driver is not an installed product.
+extension ItemStore {
+    static func createInitialized(
+        root: URL, indexDirectory: URL? = nil,
+        accounts: any AccountDirectory = SystemAccountDirectory(),
+        initialAccessConfiguration: ItemValue, actorUID: UInt32, operationID: String,
+        initializationKey: String? = nil,
+        progress: ((String) throws -> Void)? = nil
+    ) throws -> ItemStore {
+        // The ordinary empty store policy admits only its OS owner.
+        guard actorUID == tractanda_uid() else {
+            throw TractandaError("forbidden", "Empty store administration requires its owning OS user.")
+        }
+        let request: InitialAuthorityBootstrap.Request
+        if let old = try InitialAuthorityBootstrap.load(root: root) {
+            guard old.operationID == operationID, old.actorUID == actorUID,
+                old.initialAccessConfiguration == initialAccessConfiguration, old.inventory == nil,
+                old.initializationKey == initializationKey
+            else { throw InitialAuthorityBootstrap.failure("Fresh creation inputs changed.") }
+            request = old
+        } else {
+            request = try .make(operationID: operationID, actorUID: actorUID,
+                policy: initialAccessConfiguration, inventory: nil, actor: "uid:\(actorUID)",
+                initializationKey: initializationKey)
+        }
+        let store = try ItemStore(root: root, indexDirectory: indexDirectory, accounts: accounts,
+            revisionProjectionEnabled: true, authorityIntakeEnabled: true, firstSourceOperation: request,
+            firstSourceProgress: progress)
+        try store.finishInitialAuthority(request, progress: progress)
+        return store
+    }
+
+    /// Preflight under ordinary opening/current policy, BEFORE authority constructor capture.
+    /// The receipt is a fixed local operation, not an authority assessment or acceptance grant.
+    func prepareInitialAuthorityConversion(
+        operationID: String, actorUID: UInt32, limits: InitialAuthorityBootstrap.Limits = .init(),
+        progress: (() throws -> Void)? = nil
+    ) throws -> InitialAuthorityBootstrap.Request {
+        try withAccess(forUID: actorUID) {
+            try requireAdministrator()
+            guard !authorityIntakeEnabled, !accessConfigurationAmbiguous, !accessConfigurationProofUnavailable,
+                try InitialAuthorityBootstrap.load(root: root) == nil,
+                !FileManager.default.fileExists(atPath: root.appendingPathComponent("authority").path),
+                !FileManager.default.fileExists(atPath: root.appendingPathComponent(".peer-configuration").path),
+                !FileManager.default.fileExists(atPath: root.appendingPathComponent(".peer-retirement-activations").path)
+            else { throw InitialAuthorityBootstrap.failure("Conversion requires an unconverted standalone store.") }
+            try limits.validate()
+            try InitialAuthorityBootstrap.capacity(root: root, limits: limits)
+            guard let index else { throw TractandaError("indexError", "Missing catalogue.") }
+            let policyID = try index.currentHeadSummary(classID: AccessConfiguration.classID)?.revisionID
+            var originals: [InitialAuthorityBootstrap.Original] = []
+            var total = 0
+            var cursor: String?
+            while true {
+                try progress?()
+                try InitialAuthorityBootstrap.capacity(root: root, limits: limits)
+                let rows = try index.recoveryRowPage(after: cursor, limit: 128)
+                if rows.isEmpty { break }
+                for row in rows {
+                    cursor = row.revisionID
+                    guard originals.count < limits.maximumRecords,
+                        row.size <= UInt64(limits.maximumBytes - total)
+                    else { throw TractandaError("resourceLimit", "First-source total inventory cap exceeded.") }
+                    let verified = try PooledCanonicalRecord.read(row: row, root: root, ownerUID: ownerUID)
+                    guard verified.metadata.size <= UInt64(limits.maximumBytes - total) else {
+                        throw TractandaError("resourceLimit", "First-source total byte cap exceeded.")
+                    }
+                    let bytes = try Data(contentsOf: root.appendingPathComponent(row.path))
+                    guard AuthorityRecordCodec.sha256(bytes) == row.digest.map({ String(format: "%02x", $0) }).joined(),
+                        try FileMetadata.read(at: root.appendingPathComponent(row.path)) == verified.metadata
+                    else { throw InitialAuthorityBootstrap.failure("Canonical original changed during preflight.") }
+                    total += bytes.count
+                    try originals.append(.init(path: row.path, itemID: row.itemID, revisionID: row.revisionID,
+                        sha256: AuthorityRecordCodec.sha256(bytes), length: bytes.count,
+                        currentAccessConfiguration: row.revisionID == policyID, mode: verified.metadata.mode,
+                        uid: verified.metadata.uid, packageID: UUID.makeVersion1().uuidString.lowercased(),
+                        framingID: UUID.makeVersion1().uuidString.lowercased()))
+                }
+            }
+            // Allocation of a genuinely legacy local identity is an authorized preflight mutation.
+            // Modern history with a missing identity fails inside this existing API.
+            try withAccess(forUID: actorUID) { try requireAdministrator() }
+            let local = try ReplicaIdentity.initialize(root: root,
+                storeID: canonicalStoreIdentity(creatingIfMissing: false), ownerUID: ownerUID,
+                hasModernOrigins: index.hasModernRevisionOrigins())
+            replicaID = local.replicaID
+            for original in originals {
+                let revision = try RecordCodec.decode(InitialAuthorityBootstrap.readOriginal(root: root, original: original))
+                if let origin = try revision.provenance?.originReplicaID, origin != local.replicaID {
+                    throw TractandaError("invalidAuthority", "Standalone preflight found an unknown modern origin.")
+                }
+            }
+            let files = InitialAuthorityBootstrap.files(root)
+            let inventory = try InitialAuthorityBootstrap.Inventory(
+                storeIdentity: InitialAuthorityBootstrap.storeIdentityBytes(root: root),
+                replicaIdentity: files.read(path: [".tractanda-replica-identity.json"], maximumBytes: 4096),
+                originals: originals)
+            let request = try InitialAuthorityBootstrap.Request.make(operationID: operationID,
+                actorUID: actorUID, policy: nil, inventory: inventory, limits: limits,
+                actor: accessContext?.account?.name ?? "uid:\(actorUID)")
+            try InitialAuthorityBootstrap.validateOriginalInventory(root: root, request: request,
+                progress: progress)
+            try withAccess(forUID: actorUID) { try requireAdministrator() }
+            try files.writeImmutable(JSON.encode(request), path: [InitialAuthorityBootstrap.receiptName],
+                maximumBytes: InitialAuthorityBootstrap.maximumReceiptBytes)
+            return request
+        }
+    }
+
+    /// The strict builder can only retain the exact originals of its root-bound local operation.
+    /// It never manufactures authored testimony and never admits a foreign modern origin.
+    func finishInitialAuthority(
+        _ request: InitialAuthorityBootstrap.Request, progress: ((String) throws -> Void)? = nil
+    ) throws {
+        guard try InitialAuthorityBootstrap.load(root: root) == request,
+            let coordinator = peerIntake, let index, let origin = replicaID,
+            !accessConfigurationAmbiguous, !accessConfigurationProofUnavailable
+        else { throw InitialAuthorityBootstrap.failure("Missing current-policy first-source operation.") }
+        if try InitialAuthorityBootstrap.completed(root: root, request: request) { return }
+        // A sealed fresh initial policy is the accepted handoff. This branch only records
+        // completion of that exact publication, without recovering the actor's old rights.
+        if request.inventory == nil, try finalizeAcceptedFreshInitialization(request, progress: progress) { return }
+        try withAccess(forUID: request.actorUID) {
+            try requireAdministrator()
+            try InitialAuthorityBootstrap.capacity(root: root, limits: request.limits)
+            try InitialAuthorityBootstrap.validateOriginalInventory(root: root, request: request,
+                progress: { try progress?("inventory") })
+            let actor = request.actor
+            let records = try InitialAuthorityBootstrap.records(root: root, request: request,
+                storeID: coordinator.storeID, origin: origin, actor: actor)
+            // Initial metadata uses the same immutable local transport identity as later
+            // publications. The separate token binds this exact initialization operation.
+            let metadataContext = try coordinator.context(peerID: "local")
+            let initializationDigest = try InitialAuthorityBootstrap.digest(request)
+            let historyContext = try PeerPackage.Context(peerID: "local", storeID: coordinator.storeID,
+                configurationDigest: initializationDigest, permittedOrigins: [origin])
+            func retain(_ objects: [(PeerPackage.Object, Data)], package: String, framing: String, path: String?) throws {
+                let context = objects.allSatisfy { $0.0.kind == .authority } ? metadataContext : historyContext
+                try progress?("retain")
+                try InitialAuthorityBootstrap.capacity(root: root, limits: request.limits)
+                try withAccess(forUID: request.actorUID) { try requireAdministrator() }
+                if try coordinator.journal.publication(package) == nil {
+                    let manifest = try coordinator.stageObjects(objects, context: context, packageID: package,
+                        reservedPageID: framing)
+                    var publication = try coordinator.journal.preparedPublication(package)
+                        ?? PeerIntakeJournal.Publication(packageID: package,
+                            manifestDigest: AuthorityRecordCodec.sha256(JSON.encode(manifest)),
+                            context: context, contextToken: initializationDigest,
+                            arrivalMinute: String(request.createdAt.prefix(16))
+                                .replacingOccurrences(of: "-", with: "/")
+                                .replacingOccurrences(of: "T", with: "/")
+                                .replacingOccurrences(of: ":", with: "/"))
+                    publication.localItemPath = path
+                    try coordinator.journal.prepare(publication)
+                    try StoreCheckpoint.markDirty(root: root)
+                    try coordinator.journal.seal(package)
+                }
+                _ = try InitialAuthorityBootstrap.verifyPublication(objects, package: package,
+                    framing: framing, path: path, context: context, request: request, coordinator: coordinator)
+                try withAccess(forUID: request.actorUID) {
+                    try requireAdministrator()
+                    try coordinator.retainSealed(package, index: index)
+                }
+            }
+            for original in InitialAuthorityBootstrap.admittedOriginals(request) {
+                let bytes = try InitialAuthorityBootstrap.readOriginal(root: root, original: original)
+                let revision = try RecordCodec.decode(bytes)
+                guard try revision.provenance?.originReplicaID == nil || revision.provenance?.originReplicaID == origin else {
+                    throw TractandaError("invalidAuthority", "Standalone conversion cannot enroll an unknown modern origin.")
+                }
+                try retain([(InitialAuthorityBootstrap.descriptor(bytes, kind: .item,
+                    id: revision.revisionID), bytes)], package: original.packageID,
+                    framing: original.framingID, path: original.path)
+            }
+            let objects = try records.map { record -> (PeerPackage.Object, Data) in
+                let bytes = try AuthorityRecordCodec.encode(record)
+                return (InitialAuthorityBootstrap.descriptor(bytes, kind: .authority, id: record.recordID), bytes)
+            }
+            for (offset, allocation) in request.pages.enumerated() {
+                try retain([objects[offset]], package: allocation.packageID, framing: allocation.framingID, path: nil)
+            }
+            try retain(Array(objects.suffix(2)), package: request.packageID, framing: request.framingID, path: nil)
+            let rootRecord = records.last!
+            if request.foundingPolicy != nil { try progress?("beforePolicy") }
+            try progress?("beforePin")
+            try withAccess(forUID: request.actorUID) {
+                try requireAdministrator()
+                if request.foundingPolicy != nil {
+                    try InitialAuthorityBootstrap.requireFreshCreator(request, ownerUID: ownerUID, accounts: accounts)
+                }
+                let digest = try AuthorityRecordCodec.sha256(AuthorityRecordCodec.encode(rootRecord))
+                if let pin = try coordinator.configuration()?.bootstrap {
+                    guard pin.recordID == rootRecord.recordID, pin.sha256 == digest else {
+                        throw TractandaError("invalidAuthority", "The operation conflicts with the original bootstrap pin.")
+                    }
+                    // The original pin actor is historical testimony; do not rewrite it when
+                    // today's authenticated actor resolves to a different account spelling.
+                    try rebuildIndex()
+                } else {
+                    try pinAuthorityBootstrap(rootID: rootRecord.recordID, sha256: digest,
+                        expectedContextToken: peerIntakeContextToken(), beforeAcceptance: {
+                            if request.foundingPolicy != nil { try progress?("beforePinAcceptance") }
+                            guard try InitialAuthorityBootstrap.load(root: self.root) == request else {
+                                throw InitialAuthorityBootstrap.failure("Initial request changed before acceptance.")
+                            }
+                            if let founding = request.foundingPolicy {
+                                try InitialAuthorityBootstrap.requireFreshCreator(request,
+                                    ownerUID: self.ownerUID, accounts: self.accounts)
+                                try InitialAuthorityBootstrap.validateOriginalInventory(root: self.root, request: request)
+                                let bytes = try InitialAuthorityBootstrap.readOriginal(root: self.root, original: founding.original)
+                                let object = InitialAuthorityBootstrap.descriptor(bytes, kind: .item, id: founding.original.revisionID)
+                                let publication = try InitialAuthorityBootstrap.verifyPublication([(object, bytes)],
+                                    package: founding.original.packageID, framing: founding.original.framingID,
+                                    path: founding.original.path, context: historyContext, request: request, coordinator: coordinator)
+                                guard let receipt = try index.authorityReceipt(objectID: object.id, packageID: founding.original.packageID),
+                                    try AuthorityStore.isInitialHistoryReceipt(receipt,
+                                        node: AuthorityRevision(originalBytes: bytes), publication: publication,
+                                        root: self.root, storeID: coordinator.storeID, ownerUID: self.ownerUID,
+                                        files: coordinator.journal.files) else {
+                                    throw InitialAuthorityBootstrap.failure("Founding policy capture proof changed before pin acceptance.")
+                                }
+                            }
+                        })
+                }
+            }
+            if request.foundingPolicy != nil {
+                try progress?("afterPin")
+                guard try finalizeAcceptedFreshInitialization(request, progress: progress) else {
+                    throw InitialAuthorityBootstrap.failure("Initial policy has not been accepted.")
+                }
+                return
+            }
+            // The strict pin/rebuild above has admitted this fixed initial inventory. Its
+            // exact sealed packages are completed history, not perpetual pending quota.
+            let initialPackages = (request.inventory?.originals.map(\.packageID) ?? [])
+                + request.pages.map(\.packageID) + [request.packageID]
+            for packageID in initialPackages {
+                try withAccess(forUID: request.actorUID) {
+                    try requireAdministrator()
+                    try coordinator.journal.applied(packageID)
+                }
+            }
+            try progress?("afterPin")
+            try progress?("beforeComplete")
+            try withAccess(forUID: request.actorUID) { try requireAdministrator() }
+            try InitialAuthorityBootstrap.capacity(root: root, limits: request.limits)
+            try InitialAuthorityBootstrap.files(root).writeImmutable(
+                JSON.encode(InitialAuthorityBootstrap.Completion(requestDigest: InitialAuthorityBootstrap.digest(request))),
+                path: [InitialAuthorityBootstrap.completeName], maximumBytes: 4096)
+        }
+    }
+    /// Exact finite bookkeeping after the canonical initial pin hands authority to the new policy.
+    /// No creator lookup or restored administrator context is permitted after acceptance.
+    private func finalizeAcceptedFreshInitialization(
+        _ request: InitialAuthorityBootstrap.Request, progress: ((String) throws -> Void)?
+    ) throws -> Bool {
+        guard request.inventory == nil, let founding = request.foundingPolicy,
+            request.actorUID == ownerUID, request.actor == "uid:\(ownerUID)",
+            let coordinator = peerIntake, let index, let origin = replicaID,
+            coordinator.storeID == request.freshStoreID, origin == request.freshReplicaID
+        else { return false }
+        guard let pin = try coordinator.configuration()?.bootstrap else { return false }
+        let records = try InitialAuthorityBootstrap.records(root: root, request: request,
+            storeID: coordinator.storeID, origin: origin, actor: request.actor)
+        let rootDigest = try AuthorityRecordCodec.sha256(AuthorityRecordCodec.encode(records.last!))
+        let originalBytes = try InitialAuthorityBootstrap.readOriginal(root: root, original: founding.original)
+        guard pin.recordID == request.rootID, pin.sha256 == rootDigest, pin.actor == request.actor,
+            originalBytes == founding.bytes,
+            let summary = try index.currentHeadSummary(classID: AccessConfiguration.classID),
+            summary.itemID == founding.original.itemID, summary.revisionID == founding.original.revisionID,
+            let row = try index.revision(summary.revisionID), row.path == founding.original.path,
+            row.digest.map({ String(format: "%02x", $0) }).joined() == founding.original.sha256,
+            try index.revisionCount(itemID: summary.itemID) == 1,
+            try index.authorityDisposition(id: row.revisionID)?.disposition == .eligible,
+            try index.acceptedGraphProofIsCurrent()
+        else { throw InitialAuthorityBootstrap.failure("Initial handoff lacks its exact accepted policy/pin.") }
+        let metadataContext = try coordinator.context(peerID: "local")
+        let historyContext = try PeerPackage.Context(peerID: "local", storeID: coordinator.storeID,
+            configurationDigest: InitialAuthorityBootstrap.digest(request), permittedOrigins: [origin])
+        func verify(_ objects: [(PeerPackage.Object, Data)], package: String, framing: String,
+                    path: String?, context: PeerPackage.Context) throws -> PeerIntakeJournal.Publication {
+            let publication = try InitialAuthorityBootstrap.verifyPublication(objects, package: package,
+                framing: framing, path: path, context: context, request: request, coordinator: coordinator)
+            for (object, bytes) in objects {
+                guard let retained = try index.authorityReceipt(objectID: object.id, packageID: package),
+                    retained.descriptor == object, retained.peerID == "local", retained.permittedOrigin,
+                    retained.configurationDigest == context.configurationDigest,
+                    try coordinator.bytes(retained) == bytes
+                else { throw InitialAuthorityBootstrap.failure("Initial handoff receipt/original changed.") }
+            }
+            return publication
+        }
+        let policyObject = InitialAuthorityBootstrap.descriptor(originalBytes, kind: .item, id: row.revisionID)
+        let publication = try verify([(policyObject, originalBytes)], package: founding.original.packageID,
+            framing: founding.original.framingID, path: founding.original.path, context: historyContext)
+        guard let retained = try index.authorityReceipt(objectID: row.revisionID, packageID: founding.original.packageID),
+            retained.path == row.path,
+            try AuthorityStore.isInitialHistoryReceipt(retained,
+                node: AuthorityRevision(originalBytes: originalBytes), publication: publication,
+                root: root, storeID: coordinator.storeID, ownerUID: ownerUID, files: coordinator.journal.files)
+        else { throw InitialAuthorityBootstrap.failure("Initial handoff lost its original captured proof.") }
+        let objects = try records.map { record -> (PeerPackage.Object, Data) in
+            let bytes = try AuthorityRecordCodec.encode(record)
+            return (InitialAuthorityBootstrap.descriptor(bytes, kind: .authority, id: record.recordID), bytes)
+        }
+        for (offset, allocation) in request.pages.enumerated() {
+            _ = try verify([objects[offset]], package: allocation.packageID, framing: allocation.framingID,
+                path: nil, context: metadataContext)
+        }
+        _ = try verify(Array(objects.suffix(2)), package: request.packageID, framing: request.framingID,
+            path: nil, context: metadataContext)
+        // Every mutation below is fixed by the proven immutable request and accepted canonical cut.
+        for packageID in [founding.original.packageID] + request.pages.map(\.packageID) + [request.packageID] {
+            try coordinator.journal.applied(packageID)
+        }
+        try progress?("beforeComplete")
+        try InitialAuthorityBootstrap.capacity(root: root, limits: request.limits)
+        try InitialAuthorityBootstrap.files(root).writeImmutable(
+            JSON.encode(InitialAuthorityBootstrap.Completion(requestDigest: InitialAuthorityBootstrap.digest(request))),
+            path: [InitialAuthorityBootstrap.completeName], maximumBytes: 4096)
+        return true
+    }
+
+}
+
+// Offline source enrollment ownership. No active peer configuration is written by this unit.
+extension ItemStore {
+    var peerEnrollmentBoundaryForTesting: ((String) throws -> Void)? {
+        get { peerIntake?.enrollmentBoundaryForTesting }
+        set { peerIntake?.enrollmentBoundaryForTesting = newValue }
+    }
+    private func enrollmentJournal(_ id: String, _ coordinator: PeerIntakeCoordinator)
+        -> PeerEnrollmentApproval.Journal {
+        .init(files: coordinator.journal.files, operationID: id)
+    }
+    private func enrollmentOperation(_ handle: PeerEnrollmentApproval.Handle,
+                                     _ coordinator: PeerIntakeCoordinator,
+                                     readBudget: ((Int) throws -> Void)? = nil) throws -> PeerEnrollmentApproval.Operation {
+        guard let value = try enrollmentJournal(handle.operationID, coordinator)
+            .read(PeerEnrollmentApproval.Operation.self, "request.json", readBudget: readBudget),
+            value.operationID == handle.operationID, value.profile == PeerEnrollmentApproval.capability
+        else { throw PeerEnrollmentApproval.failure("Exact enrollment request is missing.") }
+        let preparation = try PeerEnrollmentApproval.preparation(value.input.preparationBytes)
+        guard preparation.commonStoreID == coordinator.storeID, preparation.sourceReplicaID == replicaID else {
+            throw PeerEnrollmentApproval.failure("Enrollment source/store identity differs.")
+        }
+        return value
+    }
+    private func enrollmentKeys(_ operation: PeerEnrollmentApproval.Operation,
+                                _ coordinator: PeerIntakeCoordinator) throws -> (PeerCredential, PeerCredential) {
+        let input = operation.input
+        let local = try PeerCredentialStore(files: coordinator.journal.files).load(
+            peerID: input.sourceContext.peerID, configurationDigest: input.sourceContext.configurationDigest)
+        let remote = try PeerCredentialStore(files: coordinator.journal.files,
+            prefix: [PeerEnrollmentApproval.directory, operation.operationID, "remote"]).load(
+                peerID: input.targetContext.peerID, configurationDigest: input.targetContext.configurationDigest)
+        let request = PeerEnrollmentApproval.Request(operationID: operation.operationID,
+            preparationBytes: input.preparationBytes, sourceContext: input.sourceContext,
+            targetContext: input.targetContext, sourceCredential: local, targetCredential: remote)
+        let loaded = try PeerEnrollmentApproval.checkPair(request, source: replicaID!,
+            storeID: coordinator.storeID, trustedOrigins: operation.trustedOrigins)
+        guard try JSON.encode(loaded) == JSON.encode(input) else {
+            throw PeerEnrollmentApproval.failure("Staged enrollment credential metadata differs.")
+        }
+        return (local, remote)
+    }
+    private func requireEnrollmentFences(_ operation: PeerEnrollmentApproval.Operation,
+                                         coordinator: PeerIntakeCoordinator, index: ItemIndex) throws {
+        let preparation = try PeerEnrollmentApproval.preparation(operation.input.preparationBytes)
+        guard isCanonicalReady, authorityExistingHistoryAdmitted, !authorityCatchupActive,
+            replicaID == preparation.sourceReplicaID,
+            try !index.peerOriginRetired(preparation.sourceReplicaID),
+            try !index.peerOriginRetired(preparation.targetReplicaID)
+        else { throw PeerEnrollmentApproval.failure("Recovered active source/target membership is required.") }
+        let configuration = try coordinator.configuration()
+        guard !((configuration?.lifecycle?.historicalContexts ?? []).contains {
+            $0.peerID == operation.input.sourceContext.peerID
+                && $0.configurationDigest == operation.input.sourceContext.configurationDigest
+        }) else { throw PeerEnrollmentApproval.failure("Enrollment credential generation was revoked.") }
+        _ = try enrollmentKeys(operation, coordinator)
+    }
+    private func requireCurrentEnrollment(_ operation: PeerEnrollmentApproval.Operation,
+                                           coordinator: PeerIntakeCoordinator, index: ItemIndex) throws {
+        try requireAdministrator()
+        try requireEnrollmentFences(operation, coordinator: coordinator, index: index)
+        // Exclude only this operation's exact accepted decision, never an arbitrary target.
+        let ownAdmission: AuthorityBinding?
+        if let decision = try coordinator.originDecision(operation.input.sourceContext.permittedOrigins[0]),
+            decision.approval.id == operation.approvalID,
+            let approval = try enrollmentJournal(operation.operationID, coordinator).read(Data.self, "approval.json"),
+            let accepted = try enrollmentJournal(operation.operationID, coordinator).read(PeerEnrollmentApproval.Accepted.self, "accepted.json"),
+            accepted.approval.recordID == operation.approvalID,
+            accepted.approval.sha256 == AuthorityRecordCodec.sha256(approval),
+            decision.approval.sha256 == accepted.approval.sha256 {
+            ownAdmission = accepted.approval
+        } else { ownAdmission = nil }
+        guard let account = accessContext?.account, accessContext?.uid == operation.actorUID,
+            account.name == operation.actor,
+            try sourceAdministrationGroups() == operation.groups,
+            try sourceAdministration().itemValue == operation.sourceAdministration,
+            try peerExchangeSecurityBinding(coordinator: coordinator, index: index,
+                excludingAdmission: ownAdmission,
+                configurationOverride: enrollmentConfigurationBeforeOwnRegistration(operation, coordinator)) == operation.securityBinding,
+            try coordinator.configuration()?.bootstrap.map({ try AuthorityBinding(recordID: $0.recordID, sha256: $0.sha256) })
+                == operation.bootstrap
+        else { throw PeerEnrollmentApproval.failure("Enrollment authority/security changed; review and start a new operation.") }
+    }
+    private func enrollmentScope(_ operation: PeerEnrollmentApproval.Operation,
+                                  coordinator: PeerIntakeCoordinator, index: ItemIndex)
+        -> PeerEnrollmentApproval.OwnerExportScope {
+        .init(context: operation.input.sourceContext, validate: { [self] in
+            try requireCurrentEnrollment(operation, coordinator: coordinator, index: index)
+        })
+    }
+    private func enrollmentPlan(_ operation: PeerEnrollmentApproval.Operation,
+                                coordinator: PeerIntakeCoordinator, index: ItemIndex) -> PeerExportPlan {
+        PeerExportPlan(coordinator: coordinator, index: index, context: operation.input.sourceContext,
+            securityBinding: operation.securityBinding,
+            ownerScope: enrollmentScope(operation, coordinator: coordinator, index: index))
+    }
+    private func enrollmentAdministrationPolicies(_ index: ItemIndex,
+                                                  coordinator: PeerIntakeCoordinator) throws -> [ItemValue] {
+        guard !accessConfigurationAmbiguous, !accessConfigurationProofUnavailable,
+            let head = try index.currentHeadSummary(classID: AccessConfiguration.classID),
+            let raw = try index.retainedAuthorityObject(id: head.revisionID)
+        else { throw PeerEnrollmentApproval.failure("Current global administration frontier is unavailable.") }
+        let node = try AuthorityRevision(originalBytes: coordinator.bytes(raw))
+        let ids = try node.revision.provenance?.kind == .automaticMerge
+            ? node.revision.provenance!.frontier : [node.revision.revisionID]
+        guard ids.count <= AuthorityRecord.maximumEntries else {
+            throw TractandaError("resourceLimit", "Enrollment administration frontier exceeds its window.")
+        }
+        return try ids.sorted().map { id in
+            guard let raw = try index.retainedAuthorityObject(id: id) else {
+                throw PeerEnrollmentApproval.failure("Administration original is unavailable.")
+            }
+            let revision = try AuthorityRevision(originalBytes: coordinator.bytes(raw)).revision
+            guard revision.itemID == head.itemID else { throw PeerEnrollmentApproval.failure("Administration item differs.") }
+            return try AuthorityStore.Target(itemID: head.itemID, revisionID: id, sha256: raw.descriptor.sha256).itemValue
+        }
+    }
+    func beginPeerEnrollment(_ request: PeerEnrollmentApproval.Request, forUID uid: UInt32) throws
+        -> PeerEnrollmentApproval.Handle {
+        try withAccess(forUID: uid) {
+            try requireAdministrator()
+            let coordinator = try requirePeerIntake()
+            guard isCanonicalReady, authorityExistingHistoryAdmitted, !authorityCatchupActive,
+                let index, let source = replicaID, let configuration = try coordinator.configuration(),
+                let pin = configuration.bootstrap
+            else { throw PeerEnrollmentApproval.failure("Enrollment requires initialized canonical source history.") }
+            _ = try AuthorityRecord.persistentID(.text(request.operationID))
+            let handle = PeerEnrollmentApproval.Handle(operationID: request.operationID)
+            let journal = enrollmentJournal(request.operationID, coordinator)
+            let saved = try journal.read(PeerEnrollmentApproval.Operation.self, "request.json")
+            let trustedOrigins: [String]
+            if let saved { trustedOrigins = saved.trustedOrigins }
+            else { trustedOrigins = try coordinator.admittedOriginSnapshot(index: index, localOrigin: source) }
+            let input = try PeerEnrollmentApproval.checkPair(request, source: source,
+                storeID: coordinator.storeID, trustedOrigins: trustedOrigins)
+            if let saved {
+                guard try JSON.encode(saved.input) == JSON.encode(input), saved.actorUID == uid else {
+                    throw PeerEnrollmentApproval.failure("Enrollment operation already binds another exact request.")
+                }
+                let keys = try enrollmentKeys(saved, coordinator)
+                try PeerEnrollmentApproval.compare(keys.0, request.sourceCredential)
+                try PeerEnrollmentApproval.compare(keys.1, request.targetCredential)
+                try requireCurrentEnrollment(saved, coordinator: coordinator, index: index)
+                return handle
+            }
+            guard !configuration.peers.contains(where: { $0.peerID == input.sourceContext.peerID }),
+                let account = accessContext?.account else {
+                throw PeerEnrollmentApproval.failure("Enrollment requires a new peer and an authenticated operator.")
+            }
+            let preparation = try PeerEnrollmentApproval.preparation(input.preparationBytes)
+            func id() throws -> String { try UUID.makeVersion1().uuidString.lowercased() }
+            let operation = try PeerEnrollmentApproval.Operation(profile: PeerEnrollmentApproval.capability,
+                operationID: request.operationID, input: input, actorUID: uid, actor: account.name,
+                groups: sourceAdministrationGroups(), sourceAdministration: sourceAdministration().itemValue,
+                administrationPolicies: enrollmentAdministrationPolicies(index, coordinator: coordinator),
+                trustedOrigins: trustedOrigins,
+                bootstrap: .init(recordID: pin.recordID, sha256: pin.sha256),
+                issuerAdmission: coordinator.originAdmission(source, index: index),
+                securityBinding: peerExchangeSecurityBinding(coordinator: coordinator, index: index),
+                approvalID: id(), publicationID: id(), framingID: id(), planID: id(), packageID: id(),
+                createdAt: Timestamp.now())
+            let identities = [coordinator.storeID, source, preparation.targetReplicaID, preparation.operationID,
+                operation.operationID, input.pairingID, operation.approvalID, operation.publicationID,
+                operation.framingID, operation.planID, operation.packageID]
+            guard Set(identities).count == identities.count,
+                !(configuration.lifecycle?.historicalContexts ?? []).contains(input.sourceContext)
+            else { throw PeerEnrollmentApproval.failure("Enrollment reserved identities/generation collide.") }
+            for identity in identities.dropFirst(4) {
+                guard try index.retainedAuthorityObject(id: identity) == nil else {
+                    throw PeerEnrollmentApproval.failure("Enrollment identity collides with retained history.")
+                }
+            }
+            guard try !index.peerOriginRetired(source), try !index.peerOriginRetired(preparation.targetReplicaID) else {
+                throw PeerEnrollmentApproval.failure("Enrollment source or target is disposed.")
+            }
+            // The private full bytes precede the intent: a recorded request can never bind a new key on retry.
+            try PeerCredentialStore(files: coordinator.journal.files).stage(request.sourceCredential)
+            try PeerCredentialStore(files: coordinator.journal.files,
+                prefix: [PeerEnrollmentApproval.directory, request.operationID, "remote"]).stage(request.targetCredential)
+            try journal.write(operation, "request.json")
+            return handle
+        }
+    }
+    private func stageEnrollmentRecord(_ bytes: Data, packageID: String, framingID: String,
+                                       operation: PeerEnrollmentApproval.Operation,
+                                       coordinator: PeerIntakeCoordinator, index: ItemIndex,
+                                       approval: Bool) throws {
+        let record = try AuthorityRecordCodec.decode(bytes)
+        let descriptor = PeerPackage.Object(kind: .authority, id: record.record.recordID,
+            length: bytes.count, sha256: record.sha256)
+        let local = try coordinator.context(peerID: "local")
+        if try coordinator.journal.publication(packageID) == nil {
+            let manifest = try coordinator.stageObjects([(descriptor, bytes)], context: local,
+                packageID: packageID, reservedPageID: framingID)
+            let publication = try coordinator.journal.preparedPublication(packageID) ?? PeerIntakeJournal.Publication(packageID: packageID,
+                manifestDigest: AuthorityRecordCodec.sha256(try JSON.encode(manifest)),
+                context: local, contextToken: PeerEnrollmentApproval.capability,
+                arrivalMinute: PeerIntakeJournal.currentArrivalMinute())
+            try coordinator.journal.prepare(publication)
+            if approval { try coordinator.enrollmentBoundaryForTesting?("beforeAcceptance") }
+            if approval {
+                try CanonicalReaderRequirement.beforeOriginAdmissionPublication(root: root, ownerUID: ownerUID)
+            } else { try CanonicalReaderRequirement.beforeControlPublication(root: root, ownerUID: ownerUID) }
+            // Re-resolve the real OS principal immediately before acceptance, including NSS changes.
+            try withAccess(forUID: operation.actorUID) {
+                try requireCurrentEnrollment(operation, coordinator: coordinator, index: index)
+                if approval { try validateEnrollmentAuthority(record, coordinator: coordinator, index: index) }
+                try StoreCheckpoint.markDirty(root: root)
+                try coordinator.journal.seal(packageID)
+            }
+            if approval { try coordinator.enrollmentBoundaryForTesting?("accepted") }
+        }
+        guard let sealed = try coordinator.journal.publication(packageID), sealed.context == local,
+            sealed.contextToken == PeerEnrollmentApproval.capability,
+            try coordinator.journal.object(descriptor, packageID: packageID) == bytes
+        else { throw PeerEnrollmentApproval.failure("Enrollment exact canonical publication proof differs.") }
+        // Durable publication already accepted this exact local decision. Completion is not a fresh grant.
+        try coordinator.retainSealed(packageID, index: index)
+        if !approval {
+            try validateAuthorityControls(packageID: packageID, coordinator: coordinator, index: index, localUnit: true)
+        }
+        try coordinator.journal.applied(packageID)
+    }
+    private func captureEnrollment(_ operation: PeerEnrollmentApproval.Operation,
+                                   coordinator: PeerIntakeCoordinator, index: ItemIndex) throws -> PeerEnrollmentApproval.Capture {
+        let journal = enrollmentJournal(operation.operationID, coordinator)
+        if let capture = try journal.read(PeerEnrollmentApproval.Capture.self, "capture.json") { return capture }
+        let draft: PeerEnrollmentApproval.Draft
+        if let old = try journal.read(PeerEnrollmentApproval.Draft.self, "draft.json") { draft = old }
+        else {
+            let source = try PeerEnrollmentApproval.preparation(operation.input.preparationBytes).sourceReplicaID
+            let prepared = try coordinator.prepareSourceCut(index: index, origin: source, actor: operation.actor)
+            guard let cut = prepared.cut, prepared.records.count <= 128 else {
+                throw TractandaError("resourceLimit", "Enrollment PRE join exceeds one bounded draft; reconcile and review a new operation.")
+            }
+            let records = try prepared.records.map { record -> PeerEnrollmentApproval.Draft.Record in
+                let bytes = try AuthorityRecordCodec.encode(record)
+                let binding = try coordinator.recordBinding(record)
+                let path = try journal.path("draft-" + record.recordID + ".authority")
+                try coordinator.journal.files.writeImmutable(bytes, path: path, maximumBytes: AuthorityRecord.maximumBytes)
+                return try .init(binding: binding, packageID: UUID.makeVersion1().uuidString.lowercased(),
+                    framingID: UUID.makeVersion1().uuidString.lowercased())
+            }
+            draft = .init(cut: cut, records: records)
+            try journal.write(draft, "draft.json") // Exact records and all framing allocations precede canonical use.
+        }
+        for item in draft.records {
+            let bytes = try coordinator.journal.files.read(
+                path: journal.path("draft-" + item.binding.recordID + ".authority"), maximumBytes: AuthorityRecord.maximumBytes)
+            guard AuthorityRecordCodec.sha256(bytes) == item.binding.sha256 else {
+                throw PeerEnrollmentApproval.failure("Reserved PRE control bytes differ.")
+            }
+            try stageEnrollmentRecord(bytes, packageID: item.packageID, framingID: item.framingID,
+                operation: operation, coordinator: coordinator, index: index, approval: false)
+        }
+        guard try index.hasValidatedAuthorityControl(draft.cut) else {
+            throw PeerEnrollmentApproval.failure("Enrollment PRE cut is not accepted.")
+        }
+        try drainAuthorityVisibility(coordinator: coordinator, index: index)
+        let capture = try PeerEnrollmentApproval.Capture(boundary: PeerInventory.capture(
+            context: operation.input.sourceContext, coordinator: coordinator, index: index,
+            ownerScope: enrollmentScope(operation, coordinator: coordinator, index: index)), cut: draft.cut)
+        try journal.write(capture, "capture.json")
+        return capture
+    }
+    func stepPeerEnrollment(_ handle: PeerEnrollmentApproval.Handle, forUID uid: UInt32,
+                            window: PeerExportPlan.Window = .init()) throws -> PeerEnrollmentApproval.Status {
+        try withAccess(forUID: uid) {
+            let coordinator = try requirePeerIntake()
+            guard let index else { throw PeerEnrollmentApproval.failure("Enrollment requires its rebuilt inventory.") }
+            let operation = try enrollmentOperation(handle, coordinator)
+            try requireCurrentEnrollment(operation, coordinator: coordinator, index: index)
+            return try index.withCatalogueScanBudget(reusingActiveBudget: true) {
+                let journal = enrollmentJournal(handle.operationID, coordinator)
+                let capture = try captureEnrollment(operation, coordinator: coordinator, index: index)
+                let plan = enrollmentPlan(operation, coordinator: coordinator, index: index)
+                let export: PeerExportPlan.Handle
+                if try coordinator.journal.files.readIfPresent(
+                    path: ["authority", "export", operation.planID, "begin.json"], maximumBytes: PeerPackage.maximumPageBytes) == nil {
+                    export = try plan.begin(planID: operation.planID, packageID: operation.packageID,
+                        boundary: capture.boundary, limits: .init())
+                } else { export = try plan.reopen(planID: operation.planID, packageID: operation.packageID) }
+                if let manifest = try plan.manifest(export) {
+                    return .init(phase: .ready, approval: nil, manifest: manifest)
+                }
+                let previous = try journal.selection(maximumWork: coordinator.journal.limits.maximumWork)
+                if previous?.complete != true {
+                    let page = try PeerInventory.page(context: operation.input.sourceContext,
+                        boundary: capture.boundary, cursor: previous?.cursor, limit: 128,
+                        coordinator: coordinator, index: index, evaluationsAvailable: true,
+                        limits: .init(), progress: nil,
+                        ownerScope: enrollmentScope(operation, coordinator: coordinator, index: index))
+                    _ = try plan.select(export, entries: page.entries, finish: page.nextCursor == nil)
+                    let next = try PeerEnrollmentApproval.Selection(sequence: (previous?.sequence ?? 0) + 1,
+                        previousDigest: previous.map { AuthorityRecordCodec.sha256(try JSON.encode($0)) } ?? "",
+                        cursor: page.nextCursor, complete: page.nextCursor == nil)
+                    try journal.write(next, "selection-\(next.sequence).json")
+                    return .init(phase: page.nextCursor == nil ? .building : .selecting, approval: nil, manifest: nil)
+                }
+                let status = try plan.step(export, window: window)
+                if status.pending == 0, status.missing > 0 || status.unsupported > 0 {
+                    let blocked = try index.peerExportSlots(operation.planID,
+                        status: status.missing > 0 ? PeerExportPlan.ObjectState.missing.rawValue
+                            : PeerExportPlan.ObjectState.unsupported.rawValue, limit: 1).first
+                    throw TractandaError("enrollmentBaselineIncomplete",
+                        "Finite enrollment baseline needs canonical dependency review: "
+                            + (blocked?.reason ?? blocked?.unsupportedReason ?? "unavailable dependency")
+                            + " (" + (blocked?.id ?? "unknown") + "). Repair retained evidence and start a reviewed operation.")
+                }
+                return .init(phase: status.manifest == nil ? .building : .ready,
+                    approval: nil, manifest: status.manifest)
+            }
+        }
+    }
+    private func enrollmentRecord(_ operation: PeerEnrollmentApproval.Operation,
+                                  capture: PeerEnrollmentApproval.Capture,
+                                  manifest: PeerPackage.Manifest) throws -> AuthorityRecord {
+        let input = operation.input
+        let preparation = try PeerEnrollmentApproval.preparation(input.preparationBytes)
+        var payload: [String: ItemValue] = [
+            "approvalProfile": .text(PeerEnrollmentApproval.capability),
+        ]
+        if let issuer = operation.issuerAdmission { payload["issuerAdmission"] = .list([issuer.itemValue]) }
+        return try AuthorityRecord(recordID: operation.approvalID, storeID: preparation.commonStoreID,
+            originReplicaID: preparation.sourceReplicaID, kind: .enrollmentApproval,
+            parentAuthorityIDs: [capture.cut.recordID], actorPrincipal: operation.actor,
+            createdAt: operation.createdAt, payload: payload.merging([
+                "approvalProfile": .text(PeerEnrollmentApproval.capability),
+                "operationID": .text(operation.operationID),
+                "preparationDigest": .text(AuthorityRecordCodec.sha256(input.preparationBytes)),
+                "targetReplicaID": .text(preparation.targetReplicaID), "pairingID": .text(input.pairingID),
+                "sourceIsInitiator": .boolean(input.sourceIsInitiator), "credentialProfile": .text(input.profile),
+                "sourcePeer": .text(input.sourceContext.peerID), "targetPeer": .text(input.targetContext.peerID),
+                "sourceConfiguration": .text(input.sourceContext.configurationDigest),
+                "targetConfiguration": .text(input.targetContext.configurationDigest),
+                "sourceOrigins": .list(input.sourceContext.permittedOrigins.map(ItemValue.text)),
+                "targetOrigins": .list(input.targetContext.permittedOrigins.map(ItemValue.text)),
+                "sourceCredential": .text(input.sourceCredentialCommitment),
+                "targetCredential": .text(input.targetCredentialCommitment),
+                "bootstrap": .list([operation.bootstrap.itemValue]),
+                "securityBinding": .text(operation.securityBinding), "cut": capture.cut.itemValue,
+                "administrationPolicies": .list(operation.administrationPolicies),
+                "sourceAdministration": operation.sourceAdministration,
+                "sourceUID": .integer(Int64(operation.actorUID)), "groups": .object(operation.groups),
+                "planID": .text(operation.planID), "packageID": .text(operation.packageID),
+                "manifestDigest": .text(AuthorityRecordCodec.sha256(try JSON.encode(manifest))),
+                "boundaryDigest": .text(AuthorityRecordCodec.sha256(try JSON.encode(capture.boundary))),
+            ], uniquingKeysWith: { _, supplied in supplied }))
+    }
+    private func validateEnrollmentAuthority(_ original: AuthorityRecordCodec.Verified,
+                                              coordinator: PeerIntakeCoordinator, index: ItemIndex) throws {
+        let record = original.record
+        guard record.kind == .enrollmentApproval,
+            record.payload["approvalProfile"] == .text(PeerEnrollmentApproval.capability),
+            try coordinator.freshReceipt(record.recordID, origin: record.originReplicaID, index: index) != nil
+                || record.originReplicaID == replicaID
+        else { throw PeerEnrollmentApproval.failure("Enrollment testimony lacks a trusted origin receipt.") }
+        let cut = try AuthorityBinding(value: record.payload["cut"]!)
+        try validateReviewPolicyCut(record, cut: cut, coordinator: coordinator, index: index,
+            policyFields: ["administrationPolicies"])
+        for binding in try AuthorityRecord.list(record.payload["administrationPolicies"]) {
+            guard let policy = try coordinator.bindingAtCut(binding, cut: cut, index: index),
+                policy.revision.classID == AccessConfiguration.classID,
+                let value = policy.revision.fields["accessConfiguration"],
+                try SourceAdministration.administrator(AccessConfiguration(value), evidence: record)
+            else { throw PeerEnrollmentApproval.failure("Enrollment author lacks exact historical source administrator proof.") }
+        }
+        let bootstrap = try AuthorityRecord.list(record.payload["bootstrap"]).map(AuthorityBinding.init(value:))
+        guard let pin = try coordinator.configuration()?.bootstrap,
+            bootstrap == [try .init(recordID: pin.recordID, sha256: pin.sha256)],
+            let root = try index.retainedAuthorityObject(id: pin.recordID), root.descriptor.sha256 == pin.sha256,
+            try AuthorityRecordCodec.decode(coordinator.bytes(root)).record.kind == .bootstrap
+        else { throw PeerEnrollmentApproval.failure("Enrollment permanent bootstrap pin is unavailable or changed.") }
+    }
+    func acceptPeerEnrollment(_ handle: PeerEnrollmentApproval.Handle, forUID uid: UInt32) throws
+        -> PeerEnrollmentApproval.Status {
+        try withAccess(forUID: uid) {
+            let coordinator = try requirePeerIntake()
+            guard let index else { throw PeerEnrollmentApproval.failure("Enrollment requires its rebuilt inventory.") }
+            let operation = try enrollmentOperation(handle, coordinator)
+            // An exact accepted publication can finish bookkeeping after its author is demoted.
+            if try coordinator.journal.publication(operation.publicationID) != nil {
+                return try finishAcceptedPeerEnrollment(handle)
+            }
+            try requireCurrentEnrollment(operation, coordinator: coordinator, index: index)
+            let journal = enrollmentJournal(handle.operationID, coordinator)
+            guard let capture = try journal.read(PeerEnrollmentApproval.Capture.self, "capture.json") else {
+                throw PeerEnrollmentApproval.failure("Build the finite enrollment baseline before acceptance.")
+            }
+            let plan = enrollmentPlan(operation, coordinator: coordinator, index: index)
+            let export = try plan.reopen(planID: operation.planID, packageID: operation.packageID)
+            guard let manifest = try plan.manifest(export) else {
+                throw PeerEnrollmentApproval.failure("Enrollment baseline is not completely sealed.")
+            }
+            let record = try enrollmentRecord(operation, capture: capture, manifest: manifest)
+            try journal.write(try AuthorityRecordCodec.encode(record), "approval.json")
+            try stageEnrollmentRecord(AuthorityRecordCodec.encode(record), packageID: operation.publicationID,
+                framingID: operation.framingID, operation: operation,
+                coordinator: coordinator, index: index, approval: true)
+            return try finishAcceptedPeerEnrollment(handle)
+        }
+    }
+    func finishAcceptedPeerEnrollment(_ handle: PeerEnrollmentApproval.Handle) throws -> PeerEnrollmentApproval.Status {
+        let coordinator = try requirePeerIntake()
+        guard isCanonicalReady, let index else { throw PeerEnrollmentApproval.failure("Recover canonical source history first.") }
+        let operation = try enrollmentOperation(handle, coordinator)
+        let journal = enrollmentJournal(handle.operationID, coordinator)
+        guard let bytes = try journal.read(Data.self, "approval.json"),
+            let capture = try journal.read(PeerEnrollmentApproval.Capture.self, "capture.json") else {
+            throw PeerEnrollmentApproval.failure("Exact enrollment approval/capture is absent.")
+        }
+        let original = try AuthorityRecordCodec.decode(bytes)
+        let plan = enrollmentPlan(operation, coordinator: coordinator, index: index)
+        let manifest = try plan.retainedManifest(planID: operation.planID, packageID: operation.packageID)
+        guard try AuthorityRecordCodec.encode(enrollmentRecord(operation, capture: capture, manifest: manifest)) == bytes,
+            let publication = try coordinator.journal.publication(operation.publicationID),
+            try publication.context == coordinator.context(peerID: "local"),
+            publication.contextToken == PeerEnrollmentApproval.capability,
+            try coordinator.journal.object(.init(kind: .authority, id: operation.approvalID,
+                length: bytes.count, sha256: original.sha256), packageID: operation.publicationID) == bytes
+        else { throw PeerEnrollmentApproval.failure("Enrollment has no exact durable accepted publication proof.") }
+        try coordinator.retainSealed(operation.publicationID, index: index)
+        try validateEnrollmentAuthority(original, coordinator: coordinator, index: index)
+        try coordinator.journal.applied(operation.publicationID)
+        let accepted = try PeerEnrollmentApproval.Accepted(approval: .init(recordID: operation.approvalID, sha256: original.sha256),
+            publicationID: operation.publicationID, manifestDigest: AuthorityRecordCodec.sha256(JSON.encode(manifest)))
+        try journal.write(accepted, "accepted.json")
+        _ = try activateOriginAdmissions(coordinator: coordinator, index: index)
+        return .init(phase: .accepted, approval: accepted.approval, manifest: manifest)
+    }
+    func readPeerEnrollment(_ handle: PeerEnrollmentApproval.Handle, object: PeerPackage.Object,
+                            offset: Int, maximumBytes: Int = PeerPackage.maximumChunkBytes,
+                            forUID uid: UInt32) throws -> PeerExportPlan.Chunk {
+        try withAccess(forUID: uid) {
+            let coordinator = try requirePeerIntake()
+            guard let index else { throw PeerEnrollmentApproval.failure("Enrollment requires its rebuilt inventory.") }
+            let operation = try enrollmentOperation(handle, coordinator)
+            _ = try finishAcceptedPeerEnrollment(handle) // Private marker alone never authorizes bytes.
+            try requireCurrentEnrollment(operation, coordinator: coordinator, index: index)
+            let plan = enrollmentPlan(operation, coordinator: coordinator, index: index)
+            let export = try plan.reopen(planID: operation.planID, packageID: operation.packageID)
+            return try plan.read(export, object: object, offset: offset, maximumBytes: maximumBytes)
+        }
+    }
+}
+
+extension ItemStore {
+    /// Source acceptance replay validates canonical proof and historical authority. Pending private
+    /// work does not block ordinary opening; a disposable unfinished export needs explicit review.
+    private func validateSourceEnrollmentApprovals(coordinator: PeerIntakeCoordinator, index: ItemIndex) throws {
+        let directory = root.appendingPathComponent(PeerEnrollmentApproval.directory)
+        guard FileManager.default.fileExists(atPath: directory.path) else { return }
+        var work = 0
+        try POSIXDirectory.withEntries(at: directory) { name in
+            work += 1
+            guard work <= coordinator.journal.limits.maximumObjects else {
+                throw TractandaError("resourceLimit", "Enrollment replay exceeds its operation window.")
+            }
+            let handle = PeerEnrollmentApproval.Handle(operationID: name)
+            let journal = enrollmentJournal(name, coordinator)
+            guard let operation = try journal.read(PeerEnrollmentApproval.Operation.self, "request.json") else {
+                return true // An interrupted private key staging is inert.
+            }
+            guard let publication = try coordinator.journal.publication(operation.publicationID) else { return true }
+            _ = try enrollmentOperation(handle, coordinator)
+            guard let bytes = try journal.read(Data.self, "approval.json"),
+                let capture = try journal.read(PeerEnrollmentApproval.Capture.self, "capture.json") else {
+                throw PeerEnrollmentApproval.failure("Accepted enrollment lost its exact private request/capture proof.")
+            }
+            let original = try AuthorityRecordCodec.decode(bytes)
+            let manifest = try enrollmentPlan(operation, coordinator: coordinator, index: index)
+                .retainedManifest(planID: operation.planID, packageID: operation.packageID)
+            guard try AuthorityRecordCodec.encode(enrollmentRecord(operation, capture: capture, manifest: manifest)) == bytes,
+                publication.contextToken == PeerEnrollmentApproval.capability,
+                try publication.context == coordinator.context(peerID: "local"),
+                try coordinator.journal.object(.init(kind: .authority, id: operation.approvalID,
+                    length: bytes.count, sha256: original.sha256), packageID: operation.publicationID) == bytes,
+                let raw = try index.retainedAuthorityObject(id: operation.approvalID), raw.descriptor.sha256 == original.sha256,
+                try coordinator.hasLocalPublicationReceipt(objectID: operation.approvalID,
+                    origin: original.record.originReplicaID, index: index)
+            else { throw PeerEnrollmentApproval.failure("Accepted canonical enrollment publication is incomplete or changed.") }
+            try validateEnrollmentAuthority(original, coordinator: coordinator, index: index)
+            return true
+        }
+    }
+    func peerEnrollmentApprovalBytes(_ handle: PeerEnrollmentApproval.Handle, forUID uid: UInt32) throws -> Data {
+        try withAccess(forUID: uid) {
+            let coordinator = try requirePeerIntake()
+            guard let index else { throw PeerEnrollmentApproval.failure("Recover enrollment source inventory first.") }
+            let operation = try enrollmentOperation(handle, coordinator)
+            _ = try finishAcceptedPeerEnrollment(handle)
+            try requireCurrentEnrollment(operation, coordinator: coordinator, index: index)
+            guard let bytes = try enrollmentJournal(handle.operationID, coordinator).read(Data.self, "approval.json") else {
+                throw PeerEnrollmentApproval.failure("Accepted approval bytes are unavailable.")
+            }
+            return bytes
+        }
+    }
+}
+
+extension ItemStore {
+    var originAdmissionBoundaryForTesting: ((String) throws -> Void)? {
+        get { peerIntake?.originAdmissionBoundaryForTesting }
+        set { peerIntake?.originAdmissionBoundaryForTesting = newValue }
+    }
+    /// Host-private historical membership inspection; neither channel authentication nor a grant.
+    func peerOriginMembership(_ origin: String, readBudget: ((Int) throws -> Void)? = nil) throws -> AuthorityBinding? {
+        let coordinator = try requirePeerIntake()
+        guard let index else { throw TractandaError("indexUnavailable", "Membership requires canonical replay.") }
+        return try index.withCatalogueScanBudget(reusingActiveBudget: true) {
+            try coordinator.withOperation { try coordinator.originAdmission(origin, index: index, readBudget: readBudget) }
+        }
+    }
+
+    /// Historical public decision replay: never loads a private enrollment request or any key.
+    private func validateOriginAdmissions(coordinator: PeerIntakeCoordinator, index: ItemIndex) throws {
+        let directory = root.appendingPathComponent(PeerOriginAdmission.directory)
+        guard FileManager.default.fileExists(atPath: directory.path) else { return }
+        var work = 0
+        try POSIXDirectory.withEntries(at: directory) { origin in
+            work += 1
+            guard work <= min(4096, coordinator.journal.limits.maximumObjects),
+                let decision = try coordinator.originDecision(origin),
+                try coordinator.originAdmission(origin, index: index) != nil else {
+                throw PeerOriginAdmission.failure("Canonical membership replay lost its public authority.")
+            }
+            let original = try coordinator.admissionOriginal(decision)
+            try validateEnrollmentAuthority(original, coordinator: coordinator, index: index)
+            guard try index.peerAuthorityTimePermits(origin: original.record.originReplicaID,
+                ticks: PeerLifecycle.revisionTicks(original.record.recordID)) else {
+                throw PeerOriginAdmission.failure("Admission issuer was already disposed at issuance.")
+            }
+            return true
+        }
+        _ = try coordinator.replayOriginReceipts(index: index, create: false)
+    }
+
+    /// Validated explicit-target decisions form a bounded anchored fixed point, not a peer-list union.
+    @discardableResult
+    private func activateOriginAdmissions(coordinator: PeerIntakeCoordinator, index: ItemIndex) throws -> Bool {
+        try coordinator.withOperation {
+            try index.withCatalogueScanBudget(reusingActiveBudget: true) {
+                try activateOriginAdmissionsBody(coordinator: coordinator, index: index)
+            }
+        }
+    }
+    private func activateOriginAdmissionsBody(coordinator: PeerIntakeCoordinator, index: ItemIndex) throws -> Bool {
+        var changed = false, progress = true, work = 0
+        while progress {
+            progress = false
+            var after: String?
+            while true {
+                let rows = try index.authorityKindPage(kind: "enrollmentApproval", after: after, limit: 128)
+                if rows.isEmpty { break }
+                for row in rows {
+                    after = row.descriptor.id
+                    work += 1
+                    try coordinator.progress?()
+                    guard work <= coordinator.journal.limits.maximumWork else {
+                        throw TractandaError("resourceLimit", "Origin admission decision work exhausted.")
+                    }
+                    let original = try AuthorityRecordCodec.decode(coordinator.bytes(row))
+                    let record = original.record
+                    let target = try AuthorityRecord.persistentID(record.payload["targetReplicaID"])
+                    if try coordinator.originDecision(target) != nil { continue }
+                    guard let issuer = try coordinator.originAdmission(record.originReplicaID, index: index),
+                        record.originReplicaID != target,
+                        try index.peerAuthorityTimePermits(origin: record.originReplicaID,
+                            ticks: PeerLifecycle.revisionTicks(record.recordID)),
+                        let receipt = try coordinator.freshReceipt(record.recordID, origin: record.originReplicaID, index: index),
+                        let publication = try coordinator.journal.publication(receipt.packageID, readBudget: coordinator.admissionReadBudget()) else { continue }
+                    if publication.context.peerID == "local",
+                        publication.contextToken != PeerEnrollmentApproval.capability { continue }
+                    if let prior = record.payload["issuerAdmission"] {
+                        guard try AuthorityRecord.list(prior).map(AuthorityBinding.init(value:)) == [issuer] else { continue }
+                    } else {
+                        // Earlier canonical envelopes can only root directly in the permanent initialization.
+                        guard let pin = try coordinator.configuration(readBudget: coordinator.admissionReadBudget())?.bootstrap,
+                            issuer == (try AuthorityBinding(recordID: pin.recordID, sha256: pin.sha256)) else { continue }
+                    }
+                    do { try validateEnrollmentAuthority(original, coordinator: coordinator, index: index) }
+                    catch let error as TractandaError where ["missingDependencies", "enrollmentReviewRequired"].contains(error.code) {
+                        continue // Retained unvalidated testimony is not membership.
+                    }
+                    let decision = PeerOriginAdmission.Decision(profile: PeerOriginAdmission.capability,
+                        target: target, approval: row.descriptor, packageID: receipt.packageID, issuerAdmission: issuer)
+                    try CanonicalReaderRequirement.beforeOriginAdmissionPublication(root: root, ownerUID: ownerUID)
+                    try coordinator.journal.files.writeImmutable(JSON.encode(decision),
+                        path: [PeerOriginAdmission.directory, target], maximumBytes: PeerPackage.maximumPageBytes)
+                    try coordinator.originAdmissionBoundaryForTesting?(target)
+                    progress = true
+                    changed = true
+                }
+            }
+            if try coordinator.replayOriginReceipts(index: index, create: true) { changed = true }
+        }
+        return changed
+    }
+
+    private func reconsiderOriginObservations(coordinator: PeerIntakeCoordinator, index: ItemIndex) throws {
+        var after: String?, work = 0
+        while true {
+            let packages = try index.originReconsiderationPage(after: after)
+            if packages.isEmpty { break }
+            for package in packages {
+                after = package
+                work += 1
+                guard work <= coordinator.journal.limits.maximumWork else {
+                    throw TractandaError("resourceLimit", "Admission reconsideration work exhausted.")
+                }
+                _ = try coordinator.evaluatePending(packageID: package, index: index,
+                    evaluate: { try self.evaluateIncomingAuthority($0, evidence: $1, coordinator: coordinator, index: index) },
+                    evaluateMaterialization: { try self.evaluateAuthorityMaterialization($0, coordinator: coordinator, index: index) },
+                    beforeAcceptance: { try self.sealAuthorityAcceptance($0, evaluation: $1, coordinator: coordinator, index: index) })
+                try promoteEligiblePeerPackage(package, coordinator: coordinator, index: index)
+                try index.execute("DELETE FROM peer_origin_reconsideration WHERE package=?", [package])
+            }
+        }
+    }
+}
+
+// Exact accepted finite enrollment completion. No listener or ordinary service can open this owner.
+extension ItemStore {
+    func peerEnrollmentActivationMaterial(_ handle: PeerEnrollmentApproval.Handle, forUID uid: UInt32) throws
+        -> PeerEnrollmentActivation.Material {
+        try withAccess(forUID: uid) {
+            let c = try requirePeerIntake()
+            return try c.withOperation {
+            guard let index else { throw PeerEnrollmentActivation.failure("Recover source inventory first.") }
+            let op = try enrollmentOperation(handle, c, readBudget: c.admissionReadBudget())
+            let status = try finishAcceptedPeerEnrollment(handle)
+            try requireCurrentEnrollment(op, coordinator: c, index: index)
+            let keys = try enrollmentKeys(op, c)
+            guard let baseline = status.manifest,
+                let approval = try enrollmentJournal(op.operationID, c).read(Data.self, "approval.json", readBudget: c.admissionReadBudget()),
+                let prepared = try c.journal.preparedPublication(op.publicationID, readBudget: c.admissionReadBudget()),
+                let published = try c.journal.publication(op.publicationID, readBudget: c.admissionReadBudget()) else {
+                throw PeerEnrollmentActivation.failure("Accepted complete approval publication is absent.")
+            }
+            let manifest = try c.journal.beginRecord(op.publicationID, readBudget: c.admissionReadBudget()).manifest
+            guard let framing = try c.journal.object(manifest.root, packageID: op.publicationID, readBudget: c.admissionReadBudget()) else {
+                throw PeerEnrollmentActivation.failure("Accepted approval framing is absent.")
+            }
+            return .init(preparationBytes: op.input.preparationBytes, baseline: baseline,
+                proof: .init(manifest: manifest, framingBytes: framing, approvalBytes: approval,
+                    prepared: prepared, publication: published),
+                sourceContext: op.input.sourceContext, targetContext: op.input.targetContext,
+                targetCredential: keys.1, targetPrivateBytesDigest: op.input.targetPrivateBytesDigest)
+            }
+        }
+    }
+    private func provisioningOwner() throws -> (PeerEnrollmentActivation.Scope, PeerIntakeCoordinator) {
+        guard let scope = targetProvisioningScope else {
+            throw PeerEnrollmentActivation.failure("Only the private provisioning owner can complete this target.")
+        }
+        try scope.validate()
+        return (scope, try requirePeerIntake())
+    }
+    func startTargetEnrollment() throws {
+        let (scope, _) = try provisioningOwner()
+        for manifest in [scope.record.baseline, scope.record.proof.manifest] {
+            _ = try beginPeerIntake(context: scope.record.targetContext, manifestBytes: JSON.encode(manifest))
+        }
+        let proof = scope.record.proof
+        _ = try appendTargetEnrollment(packageID: proof.manifest.packageID, object: proof.manifest.root,
+            offset: 0, bytes: proof.framingBytes)
+        let original = try AuthorityRecordCodec.decode(proof.approvalBytes)
+        _ = try appendTargetEnrollment(packageID: proof.manifest.packageID,
+            object: .init(kind: .authority, id: original.record.recordID, length: proof.approvalBytes.count,
+                          sha256: original.sha256), offset: 0, bytes: proof.approvalBytes)
+    }
+    func appendTargetEnrollment(packageID: String, object: PeerPackage.Object, offset: Int, bytes: Data) throws -> PeerPackage.Status {
+        let (scope, c) = try provisioningOwner()
+        return try c.withOperation {
+            // Descriptor possession is not admission. Discover it from the two exact immutable
+            // approved manifest trees before creating any original/document staging binding.
+            var cursor: PeerPackage.ResumeCursor?, work = 0, found = false
+            repeat {
+                let page = try resumePeerIntake(context: scope.record.targetContext, packageID: packageID,
+                    cursor: cursor, limit: targetEnrollmentPageLimitForTesting ?? 128, progress: c.progress)
+                work += page.objects.count + 1
+                guard work <= c.journal.limits.maximumWork else {
+                    throw TractandaError("resourceLimit", "Provisioning descriptor discovery exhausted its work window.")
+                }
+                if page.objects.contains(where: { $0.descriptor == object }) { found = true; break }
+                if page.blockedOnIndex { break }
+                cursor = page.nextCursor
+            } while cursor != nil
+            guard found else { throw PeerEnrollmentActivation.failure("Object is outside the exact currently discoverable approved closure.") }
+            return try appendPeerObject(context: scope.record.targetContext, packageID: packageID,
+                object: object, offset: offset, bytes: bytes)
+        }
+    }
+    func resumeTargetEnrollment(packageID: String, cursor: PeerPackage.ResumeCursor?, limit: Int) throws -> PeerPackage.ResumePage {
+        let (scope, coordinator) = try provisioningOwner()
+        return try resumePeerIntake(context: scope.record.targetContext, packageID: packageID, cursor: cursor, limit: limit, progress: coordinator.progress)
+    }
+    /// Walks the finite retained manifest; never infers completeness from an applied marker.
+    private func requireProvisioningClosure(_ manifest: PeerPackage.Manifest,
+                                            context: PeerPackage.Context) throws {
+        var cursor: PeerPackage.ResumeCursor?, work = 0
+        repeat {
+            let page = try resumePeerIntake(context: context, packageID: manifest.packageID, cursor: cursor,
+                limit: targetEnrollmentPageLimitForTesting ?? 128, progress: try requirePeerIntake().progress)
+            work += page.objects.count + 1
+            guard work <= PeerPackage.Limits().maximumWork,
+                !page.blockedOnIndex, page.objects.allSatisfy({ $0.verifiedComplete }) else {
+                throw TractandaError("missingDependencies", "Exact approved enrollment closure remains incomplete.")
+            }
+            cursor = page.nextCursor
+        } while cursor != nil
+    }
+    /// Replayed after SQLite loss too. It uses actual receiver receipts and historical public
+    /// policy/control proof, never the source's private marker or the survival of an ancestor key.
+    private func validateTargetEnrollment(coordinator c: PeerIntakeCoordinator, index: ItemIndex,
+                                           requireReceipt: Bool = true,
+                                           validation: TargetEnrollmentValidation = .committedControls) throws {
+        guard let record = try PeerEnrollmentActivation.loadRecord(c.journal.files,
+            readBudget: c.admissionReadBudget()) else {
+            if try PeerEnrollmentActivation.requiresTargetProof(root: root, ownerUID: ownerUID) {
+                throw PeerEnrollmentActivation.failure("Required target activation request is absent during canonical replay.")
+            }
+            return
+        }
+        if requireReceipt, try PeerEnrollmentActivation.loadReceipt(c.journal.files, readBudget: c.admissionReadBudget()) == nil { return }
+        if validation == .committedControls, !isCanonicalReady {
+            throw PeerEnrollmentActivation.failure("Bounded committed-proof validation requires the existing validated catalogue checkpoint/replay.")
+        }
+        let prep = try record.preparation
+        guard replicaID == prep.targetReplicaID, c.storeID == prep.commonStoreID,
+            let pin = try c.configuration(readBudget: c.admissionReadBudget())?.bootstrap,
+            pin.recordID == record.pin.bootstrap.recordID, pin.sha256 == record.pin.bootstrap.sha256 else {
+            throw PeerEnrollmentActivation.failure("Target bootstrap/identity differs from approved preparation.")
+        }
+        let original = try AuthorityRecordCodec.decode(record.proof.approvalBytes)
+        let administrationIDs = try Set(AuthorityRecord.list(original.record.payload["administrationPolicies"])
+            .map { try AuthorityRecord.binding($0).revisionID })
+        for manifest in [record.baseline, record.proof.manifest] {
+            guard let publication = try c.journal.publication(manifest.packageID, readBudget: c.admissionReadBudget()),
+                publication.context == record.targetContext,
+                publication.manifestDigest == AuthorityRecordCodec.sha256(try JSON.encode(manifest)),
+                try c.journal.preparedPublication(manifest.packageID, readBudget: c.admissionReadBudget()) == publication else {
+                throw PeerEnrollmentActivation.failure("Target activation lost an exact accepted receiver publication.")
+            }
+            if validation == .fullReplay {
+                try c.journal.walk(manifest.packageID, readBudget: c.admissionReadBudget()) { object, bytes in
+                    // Full initial activation/canonical rebuild owns this finite original walk.
+                    // Warm checkpoint opening and accepted completion retries retain exact seals
+                    // and historical control proof, without rehashing the entire baseline.
+                    if object.kind == .authority || object.kind == .item {
+                        guard let row = try index.retainedAuthorityObject(id: object.id), row.descriptor == object else {
+                            throw PeerEnrollmentActivation.failure("Activated target lost an approved retained original.")
+                        }
+                        let original = try c.bytes(row)
+                        if object.kind == .item, !administrationIDs.contains(object.id) {
+                            targetEnrollmentReadMetrics.record(object.id)
+                        }
+                        guard bytes == nil || bytes == original else {
+                            throw PeerEnrollmentActivation.failure("Activated target lost approved retained original proof.")
+                        }
+                    }
+                }
+            }
+        }
+        guard let row = try index.retainedAuthorityObject(id: record.pin.approval.recordID),
+            row.descriptor.sha256 == record.pin.approval.sha256,
+            try c.bytes(row) == record.proof.approvalBytes,
+            try c.originAdmission(prep.targetReplicaID, index: index) == record.pin.approval else {
+            throw PeerEnrollmentActivation.failure("Target has no exact canonical accepted global admission.")
+        }
+        try validateEnrollmentAuthority(original, coordinator: c, index: index)
+    }
+    func activateTargetEnrollment() throws -> PeerEnrollmentActivation.Receipt {
+        let (scope, c) = try provisioningOwner()
+        return try c.withOperation {
+            do {
+                let record = scope.record, prep = try record.preparation
+                if let done = try PeerEnrollmentActivation.loadReceipt(c.journal.files, readBudget: c.admissionReadBudget()) {
+                    try PeerEnrollmentActivation.requireActivated(root: root, ownerUID: ownerUID)
+                    try validateTargetEnrollment(coordinator: c, index: index!)
+                    return done
+                }
+                try requireProvisioningClosure(record.baseline, context: record.targetContext)
+                _ = try commitPeerIntake(context: record.targetContext, packageID: record.baseline.packageID,
+                    expectedContextToken: peerIntakeContextToken())
+                try targetProvisioningProgress?("baselineAccepted")
+                if let pin = try c.configuration(readBudget: c.admissionReadBudget())?.bootstrap {
+                    guard pin.recordID == record.pin.bootstrap.recordID, pin.sha256 == record.pin.bootstrap.sha256 else {
+                        throw PeerEnrollmentActivation.failure("Permanent target bootstrap differs.")
+                    }
+                } else {
+                    // The ordinary independently reviewed initial pin performs the real policy handoff.
+                    try pinAuthorityBootstrap(rootID: record.pin.bootstrap.recordID, sha256: record.pin.bootstrap.sha256,
+                        expectedContextToken: peerIntakeContextToken(), actorUID: ownerUID)
+                }
+                try targetProvisioningProgress?("bootstrapPinned")
+                try requireProvisioningClosure(record.proof.manifest, context: record.targetContext)
+                _ = try commitPeerIntake(context: record.targetContext, packageID: record.proof.manifest.packageID,
+                    expectedContextToken: peerIntakeContextToken())
+                guard let index = self.index else { throw PeerEnrollmentActivation.failure("Recover target inventory.") }
+                try validateTargetEnrollment(coordinator: c, index: index, requireReceipt: false, validation: .fullReplay)
+                guard try !index.peerOriginRetired(prep.targetReplicaID), try !index.peerOriginRetired(prep.sourceReplicaID) else {
+                    throw PeerEnrollmentActivation.failure("A disposed node cannot activate a pairing.")
+                }
+                try targetProvisioningProgress?("approvalAccepted")
+                let path = [PeerEnrollmentActivation.directory, "configuration.json"]
+                let old = try c.configuration(readBudget: c.admissionReadBudget())
+                let commit: PeerEnrollmentActivation.ConfigurationCommit
+                if let bytes = try c.journal.files.readIfPresent(path: path, maximumBytes: PeerEnrollmentActivation.maximumBytes, readBudget: c.admissionReadBudget()) {
+                    commit = try PeerPackage.decode(PeerEnrollmentActivation.ConfigurationCommit.self, bytes)
+                    guard commit.profile == PeerEnrollmentActivation.capability,
+                        commit.requestDigest == (try record.digest), commit.approval == record.pin.approval,
+                        old == commit.before || old == commit.after else {
+                        throw PeerEnrollmentActivation.failure("Activation configuration changed outside this accepted operation.")
+                    }
+                } else {
+                    guard let old, old.peers.isEmpty, old.credentialBindings?.isEmpty != false,
+                        old.lifecycle?.historicalContexts.isEmpty != false else {
+                        throw PeerEnrollmentActivation.failure("A prepared target cannot adopt unrelated pairing history.")
+                    }
+                    let after = AuthorityStore.Configuration(profile: old.profile, peers: [record.targetContext],
+                        bootstrap: old.bootstrap, lifecycle: old.lifecycle,
+                        credentialBindings: [record.targetContext.peerID: record.targetCredentialCommitment])
+                    commit = .init(profile: PeerEnrollmentActivation.capability, requestDigest: try record.digest,
+                        approval: record.pin.approval, before: old, after: after,
+                        sequence: try AuthorityStore.configurationSequence(root: root) + 1)
+                    try CanonicalReaderRequirement.beforeEnrollmentActivationPublication(root: root, ownerUID: ownerUID)
+                    try c.journal.files.writeImmutable(JSON.encode(commit), path: path,
+                        maximumBytes: PeerEnrollmentActivation.maximumBytes)
+                }
+                try PeerEnrollmentActivation.validateTargetConfiguration(commit, record: record)
+                try AuthorityStore.writeConfiguration(commit.after, root: root, files: c.journal.files, sequence: commit.sequence)
+                try targetProvisioningProgress?("configurationCommitted")
+                let receipt = PeerEnrollmentActivation.Receipt(profile: PeerEnrollmentActivation.capability,
+                    requestDigest: try record.digest, approval: record.pin.approval,
+                    baselineDigest: AuthorityRecordCodec.sha256(try JSON.encode(record.baseline)),
+                    configurationDigest: AuthorityRecordCodec.sha256(try JSON.encode(commit.after)),
+                    configurationSequence: commit.sequence)
+                try c.journal.files.writeImmutable(JSON.encode(receipt),
+                    path: [PeerEnrollmentActivation.directory, "activated.json"], maximumBytes: PeerEnrollmentActivation.maximumBytes)
+                try targetProvisioningProgress?("receiptCommitted")
+                try PeerEnrollmentActivation.requireActivated(root: root, ownerUID: ownerUID)
+                targetProvisioningPending = false
+                c.provisioningScope = nil
+                return receipt
+            }
+        }
+    }
+}
+
+extension ItemStore {
+    private func enrollmentOwnAdmission(_ operation: PeerEnrollmentApproval.Operation,
+                                         _ c: PeerIntakeCoordinator) throws -> AuthorityBinding? {
+        guard let decision = try c.originDecision(operation.input.sourceContext.permittedOrigins[0]),
+            decision.approval.id == operation.approvalID,
+            let bytes = try enrollmentJournal(operation.operationID, c).read(Data.self, "approval.json", readBudget: c.admissionReadBudget()),
+            let accepted = try enrollmentJournal(operation.operationID, c).read(PeerEnrollmentApproval.Accepted.self, "accepted.json", readBudget: c.admissionReadBudget()),
+            accepted.approval.recordID == operation.approvalID,
+            accepted.approval.sha256 == AuthorityRecordCodec.sha256(bytes),
+            decision.approval.sha256 == accepted.approval.sha256 else { return nil }
+        return accepted.approval
+    }
+    private func registrationCommit(_ operation: PeerEnrollmentApproval.Operation,
+                                     _ c: PeerIntakeCoordinator) throws -> PeerEnrollmentActivation.ConfigurationCommit? {
+        guard let bytes = try c.journal.files.readIfPresent(
+            path: [PeerEnrollmentActivation.sourceDirectory, operation.operationID, "configuration.json"],
+            maximumBytes: PeerEnrollmentActivation.maximumBytes, readBudget: c.admissionReadBudget()) else { return nil }
+        let value = try PeerPackage.decode(PeerEnrollmentActivation.ConfigurationCommit.self, bytes)
+        guard let accepted = try enrollmentJournal(operation.operationID, c).read(PeerEnrollmentApproval.Accepted.self, "accepted.json", readBudget: c.admissionReadBudget()),
+            value.profile == PeerEnrollmentActivation.capability,
+            value.requestDigest == AuthorityRecordCodec.sha256(try JSON.encode(operation)),
+            value.approval == accepted.approval, value.sequence > 0,
+            value.after == (try enrollmentRegisteredConfiguration(operation, before: value.before)) else {
+            throw PeerEnrollmentActivation.failure("Source registration lost exact approved configuration transition.")
+        }
+        return value
+    }
+    private func enrollmentRegisteredConfiguration(_ op: PeerEnrollmentApproval.Operation,
+                                                    before: AuthorityStore.Configuration?) throws -> AuthorityStore.Configuration {
+        guard let before, before.peers.count < 256,
+            !before.peers.contains(where: { $0.peerID == op.input.sourceContext.peerID }),
+            !((before.lifecycle?.historicalContexts ?? []).contains(where: {
+                $0.peerID == op.input.sourceContext.peerID && $0.configurationDigest == op.input.sourceContext.configurationDigest
+            })),
+            before.bootstrap?.recordID == op.bootstrap.recordID, before.bootstrap?.sha256 == op.bootstrap.sha256 else {
+            throw PeerEnrollmentActivation.failure("Source peer slot/bootstrap/generation is unavailable.")
+        }
+        var bindings = before.credentialBindings ?? [:]
+        bindings[op.input.sourceContext.peerID] = op.input.sourceCredentialCommitment
+        return .init(profile: before.profile, peers: (before.peers + [op.input.sourceContext]).sorted { $0.peerID < $1.peerID },
+            bootstrap: before.bootstrap, lifecycle: before.lifecycle, credentialBindings: bindings)
+    }
+    /// Only an exact operation-owned after-image can be normalized. Current unrelated security
+    /// facts (policy, disposal, admission and every other configuration byte) remain in the fence.
+    private func enrollmentConfigurationBeforeOwnRegistration(_ op: PeerEnrollmentApproval.Operation,
+                                                               _ c: PeerIntakeCoordinator) throws -> Data? {
+        guard let commit = try registrationCommit(op, c), try c.configuration(readBudget: c.admissionReadBudget()) == commit.after else { return nil }
+        let bytes = try c.journal.files.read(path: [".peer-configuration", String(format: "%020llu.json", commit.sequence)],
+            maximumBytes: PeerEnrollmentActivation.maximumBytes, readBudget: c.admissionReadBudget())
+        guard bytes == (try JSON.encode(commit.after)) else {
+            throw PeerEnrollmentActivation.failure("Source registration configuration witness differs.")
+        }
+        return try commit.before.map { try JSON.encode($0) } ?? Data()
+    }
+    /// Accepted historical completion, not a fresh grant. Host caller identity still resolves on
+    /// the serial owner; canonical administrator proof and exact staged source secret are checked.
+    func registerAcceptedPeerEnrollment(_ handle: PeerEnrollmentApproval.Handle, forUID uid: UInt32) throws {
+        try withAccess(forUID: uid) {
+            let c = try requirePeerIntake()
+            return try c.withOperation {
+            guard let index else { throw PeerEnrollmentActivation.failure("Recover source inventory first.") }
+            let op = try enrollmentOperation(handle, c, readBudget: c.admissionReadBudget())
+            guard let account = accessContext?.account,
+                (uid == op.actorUID && account.name == op.actor) || isAdministrator else {
+                throw PeerEnrollmentActivation.failure("Only the exact authenticated operation author or a current global administrator can finish registration.")
+            }
+            let status = try finishAcceptedPeerEnrollment(handle)
+            let prep = try PeerEnrollmentApproval.preparation(op.input.preparationBytes)
+            guard isCanonicalReady, authorityExistingHistoryAdmitted, !authorityCatchupActive,
+                try !index.peerOriginRetired(prep.sourceReplicaID), try !index.peerOriginRetired(prep.targetReplicaID),
+                let approval = status.approval, try enrollmentOwnAdmission(op, c) == approval else {
+                throw PeerEnrollmentActivation.failure("Current disposal or canonical admission fences source registration.")
+            }
+            let key = try PeerCredentialStore(files: c.journal.files).load(peerID: op.input.sourceContext.peerID,
+                configurationDigest: op.input.sourceContext.configurationDigest)
+            guard try key.commitment == op.input.sourceCredentialCommitment,
+                try key.privateBytesDigest == op.input.sourcePrivateBytesDigest,
+                key.binding.localReplicaID == prep.sourceReplicaID, key.binding.remoteReplicaID == prep.targetReplicaID,
+                !((try c.configuration(readBudget: c.admissionReadBudget())?.lifecycle?.historicalContexts ?? []).contains(op.input.sourceContext)),
+                try peerExchangeSecurityBinding(coordinator: c, index: index, excludingAdmission: approval,
+                    configurationOverride: enrollmentConfigurationBeforeOwnRegistration(op, c)) == op.securityBinding else {
+                throw PeerEnrollmentActivation.failure("Source generation, exact private bytes or unrelated security changed.")
+            }
+            let path = [PeerEnrollmentActivation.sourceDirectory, op.operationID, "configuration.json"]
+            let commit: PeerEnrollmentActivation.ConfigurationCommit
+            if let saved = try registrationCommit(op, c) {
+                commit = saved
+                guard try c.configuration(readBudget: c.admissionReadBudget()) == commit.before || c.configuration(readBudget: c.admissionReadBudget()) == commit.after else {
+                    throw PeerEnrollmentActivation.failure("Unrelated configuration change fences source registration.")
+                }
+            } else {
+                let before = try c.configuration(readBudget: c.admissionReadBudget())
+                commit = .init(profile: PeerEnrollmentActivation.capability,
+                    requestDigest: AuthorityRecordCodec.sha256(try JSON.encode(op)), approval: approval,
+                    before: before, after: try enrollmentRegisteredConfiguration(op, before: before),
+                    sequence: try AuthorityStore.configurationSequence(root: root) + 1)
+                try CanonicalReaderRequirement.beforeEnrollmentActivationPublication(root: root, ownerUID: ownerUID)
+                try c.journal.files.writeImmutable(JSON.encode(commit), path: path,
+                    maximumBytes: PeerEnrollmentActivation.maximumBytes)
+            }
+            try c.enrollmentBoundaryForTesting?("registrationPrepared")
+            try AuthorityStore.writeConfiguration(commit.after, root: root, files: c.journal.files, sequence: commit.sequence)
+            try c.enrollmentBoundaryForTesting?("registrationCommitted")
+            let marker = [PeerEnrollmentActivation.sourceDirectory, op.operationID, "registered.json"]
+            let acknowledgement = try JSON.encode(approval)
+            // All current authority, exact private bytes and canonical configuration checks above
+            // still run on a retry. The immutable acknowledgement itself is exact-idempotent.
+            if let existing = try c.journal.files.readIfPresent(path: marker,
+                maximumBytes: PeerEnrollmentActivation.maximumBytes, readBudget: c.admissionReadBudget()) {
+                guard existing == acknowledgement else {
+                    throw PeerEnrollmentActivation.failure("Source registration acknowledgement bytes differ.")
+                }
+                try c.journal.files.synchronizeDirectory(Array(marker.dropLast()))
+            } else {
+                try c.journal.files.writeImmutable(acknowledgement, path: marker,
+                    maximumBytes: PeerEnrollmentActivation.maximumBytes)
+            }
+            }
+        }
+    }
+    private func validateSourceRegistrations(coordinator c: PeerIntakeCoordinator) throws {
+        let directory = root.appendingPathComponent(PeerEnrollmentActivation.sourceDirectory)
+        guard FileManager.default.fileExists(atPath: directory.path) else { return }
+        var work = 0
+        try POSIXDirectory.withEntries(at: directory) { name in
+            work += 1
+            guard work <= c.journal.limits.maximumObjects else {
+                throw TractandaError("resourceLimit", "Source registration replay window exceeded.")
+            }
+            let op = try enrollmentOperation(.init(operationID: name), c, readBudget: c.admissionReadBudget())
+            guard let commit = try registrationCommit(op, c) else {
+                throw PeerEnrollmentActivation.failure("Registration lost exact configuration intent.")
+            }
+            if let bytes = try c.journal.files.readIfPresent(
+                path: [PeerEnrollmentActivation.sourceDirectory, name, "registered.json"],
+                maximumBytes: PeerEnrollmentActivation.maximumBytes, readBudget: c.admissionReadBudget()) {
+                guard try PeerPackage.decode(AuthorityBinding.self, bytes) == commit.approval,
+                    try c.journal.files.read(path: [".peer-configuration", String(format: "%020llu.json", commit.sequence)],
+                        maximumBytes: PeerEnrollmentActivation.maximumBytes, readBudget: c.admissionReadBudget()) == JSON.encode(commit.after) else {
+                    throw PeerEnrollmentActivation.failure("Registration lost historical committed configuration proof.")
+                }
+            }
+            return true
+        }
+    }
+}
+
+// Native-only operator adapters. Private enrollment scopes remain constructed inside Core.
+extension ItemStore {
+    func nativeEnrollmentPreflight(forUID uid: UInt32) throws {
+        try withAccess(forUID: uid) {
+            _ = try nativeCredentialRegistrationContext()
+            guard authorityExistingHistoryAdmitted, !authorityCatchupActive, let index,
+                try index.acceptedGraphProofIsCurrent(), try requirePeerIntake().configuration()?.bootstrap != nil else {
+                throw PeerEnrollmentApproval.failure("Enrollment requires a recovered current source.")
+            }
+        }
+    }
+    private func nativeEnrollmentDescription(_ operation: PeerEnrollmentApproval.Operation, phase: String,
+        approval: AuthorityBinding? = nil, manifest: PeerPackage.Manifest? = nil) throws -> PeerEnrollmentOperatorStatus {
+        let prep = try PeerEnrollmentApproval.preparation(operation.input.preparationBytes)
+        return try .init(operationID: operation.operationID, phase: phase, storeID: prep.commonStoreID,
+            sourceReplicaID: prep.sourceReplicaID, targetReplicaID: prep.targetReplicaID,
+            bootstrap: operation.bootstrap, approval: approval, baselineManifest: manifest.map { try JSON.encode($0) })
+    }
+    func nativeEnrollmentBegin(_ input: PeerEnrollmentPairInput, forUID uid: UInt32) throws -> PeerEnrollmentOperatorStatus {
+        try nativeEnrollmentPreflight(forUID: uid)
+        let pair = try input.withBytes { try PeerEnrollmentPairInput.decode($0) }
+        return try withAccess(forUID: uid) {
+            let c = try requirePeerIntake()
+            guard let index, let source = replicaID else { throw NativePeerEnrollment.failure() }
+            let saved = try enrollmentJournal(pair.operationID, c).read(PeerEnrollmentApproval.Operation.self, "request.json")
+            let prep = try PeerEnrollmentApproval.preparation(pair.preparationBytes)
+            // Exact retries preserve the original origin set, including after their own admission.
+            let sourceContext = try saved?.input.sourceContext ?? PeerPackage.Context(peerID: pair.sourceCredential.binding.peerID,
+                storeID: prep.commonStoreID, configurationDigest: pair.sourceCredential.binding.configurationDigest,
+                permittedOrigins: [prep.targetReplicaID])
+            let targetContext = try saved?.input.targetContext ?? PeerPackage.Context(peerID: pair.targetCredential.binding.peerID,
+                storeID: prep.commonStoreID, configurationDigest: pair.targetCredential.binding.configurationDigest,
+                permittedOrigins: c.admittedOriginSnapshot(index: index, localOrigin: source))
+            let request = PeerEnrollmentApproval.Request(operationID: pair.operationID, preparationBytes: pair.preparationBytes,
+                sourceContext: sourceContext, targetContext: targetContext, sourceCredential: pair.sourceCredential,
+                targetCredential: pair.targetCredential)
+            let handle = try beginPeerEnrollment(request, forUID: uid)
+            return try nativeEnrollmentStatus(handle.operationID, forUID: uid)
+        }
+    }
+    /// Reads bounded request/seal/publication witnesses. Never selects, repairs or finishes work.
+    func nativeEnrollmentStatus(_ operationID: String, forUID uid: UInt32) throws -> PeerEnrollmentOperatorStatus {
+        try withAccess(forUID: uid) {
+            let c = try requirePeerIntake()
+            return try c.withOperation {
+                guard let index else { throw NativePeerEnrollment.failure() }
+                let operation = try enrollmentOperation(.init(operationID: operationID), c)
+                try requireCurrentEnrollment(operation, coordinator: c, index: index)
+                let journal = enrollmentJournal(operationID, c)
+                let plan = enrollmentPlan(operation, coordinator: c, index: index)
+                if let publication = try c.journal.publication(operation.publicationID) {
+                    guard let bytes = try journal.read(Data.self, "approval.json"),
+                        let capture = try journal.read(PeerEnrollmentApproval.Capture.self, "capture.json") else {
+                        throw PeerEnrollmentApproval.failure("Accepted source proof is unavailable.")
+                    }
+                    let manifest = try plan.retainedManifest(planID: operation.planID, packageID: operation.packageID)
+                    let original = try AuthorityRecordCodec.decode(bytes)
+                    let descriptor = PeerPackage.Object(kind: .authority, id: operation.approvalID, length: bytes.count, sha256: original.sha256)
+                    guard try AuthorityRecordCodec.encode(enrollmentRecord(operation, capture: capture, manifest: manifest)) == bytes,
+                        publication.context == (try c.context(peerID: "local")), publication.contextToken == PeerEnrollmentApproval.capability,
+                        let row = try index.authorityReceipt(objectID: operation.approvalID, packageID: operation.publicationID),
+                        row.permittedOrigin, row.descriptor == descriptor,
+                        try c.receiptContextPermits(row, origin: original.record.originReplicaID, index: index),
+                        try c.journal.retainedBytes(descriptor, publication: publication) == bytes,
+                        try index.acceptedGraphProofIsCurrent() else {
+                        throw PeerEnrollmentApproval.failure("Accepted source status needs its actual retained canonical proof.")
+                    }
+                    try validateEnrollmentAuthority(original, coordinator: c, index: index)
+                    let accepted = PeerEnrollmentApproval.Accepted(approval: try .init(recordID: operation.approvalID, sha256: original.sha256),
+                        publicationID: operation.publicationID, manifestDigest: AuthorityRecordCodec.sha256(try JSON.encode(manifest)))
+                    if let saved = try journal.read(PeerEnrollmentApproval.Accepted.self, "accepted.json") {
+                        guard try JSON.encode(saved) == JSON.encode(accepted) else { throw NativePeerEnrollment.failure() }
+                    }
+                    return try nativeEnrollmentDescription(operation, phase: "accepted", approval: accepted.approval, manifest: manifest)
+                }
+                if try c.journal.files.readIfPresent(path: ["authority", "export", operation.planID, "begin.json"],
+                    maximumBytes: PeerPackage.maximumPageBytes) != nil {
+                    let handle = try plan.reopen(planID: operation.planID, packageID: operation.packageID)
+                    if let manifest = try plan.manifest(handle) { return try nativeEnrollmentDescription(operation, phase: "ready", manifest: manifest) }
+                    return try nativeEnrollmentDescription(operation, phase: "building")
+                }
+                return try nativeEnrollmentDescription(operation, phase: "pending")
+            }
+        }
+    }
+    func nativeEnrollmentCall(_ call: PeerEnrollmentNativeCall, forUID uid: UInt32) throws -> Data {
+        return try withAccess(forUID: uid) {
+        let handle = PeerEnrollmentApproval.Handle(operationID: call.operationID)
+        switch call.action {
+        case "status": return try JSON.encode(nativeEnrollmentStatus(call.operationID, forUID: uid))
+        case "step", "accept":
+            if call.action == "accept" {
+                let c = try requirePeerIntake(), operation = try enrollmentOperation(handle, c)
+                if try c.journal.publication(operation.publicationID) != nil {
+                    guard let account = accessContext?.account,
+                        (uid == operation.actorUID && account.name == operation.actor) || isAdministrator else {
+                        throw TractandaError("forbidden", "Only the exact operation author or a current global administrator can acknowledge accepted enrollment.")
+                    }
+                }
+            }
+            let status = try call.action == "step" ? stepPeerEnrollment(handle, forUID: uid) : acceptPeerEnrollment(handle, forUID: uid)
+            let operation = try enrollmentOperation(handle, requirePeerIntake())
+            return try JSON.encode(nativeEnrollmentDescription(operation, phase: status.phase.rawValue,
+                approval: status.approval, manifest: status.manifest))
+        case "register":
+            try registerAcceptedPeerEnrollment(handle, forUID: uid)
+            let c = try requirePeerIntake(), operation = try enrollmentOperation(handle, c)
+            let accepted = try enrollmentJournal(call.operationID, c).read(PeerEnrollmentApproval.Accepted.self, "accepted.json")
+            return try JSON.encode(nativeEnrollmentDescription(operation, phase: "registered", approval: accepted?.approval))
+        case "read":
+            guard let object = call.object else { throw NativePeerEnrollment.failure() }
+            let chunk = try readPeerEnrollment(handle, object: object, offset: call.offset, maximumBytes: call.maximumBytes, forUID: uid)
+            return try JSON.encode(PeerEnrollmentNativeChunk(object: chunk.descriptor, offset: chunk.offset, bytes: chunk.bytes))
+        default: throw NativePeerEnrollment.failure()
+        }
+        }
+    }
+    func nativeEnrollmentValidateDelivery(_ operationID: String, forUID uid: UInt32) throws {
+        try withAccess(forUID: uid) {
+            let c = try requirePeerIntake()
+            guard let index else { throw NativePeerEnrollment.failure() }
+            let operation = try enrollmentOperation(.init(operationID: operationID), c)
+            try requireCurrentEnrollment(operation, coordinator: c, index: index)
+        }
+    }
+    func nativeEnrollmentExport(_ operationID: String, forUID uid: UInt32) throws -> PeerEnrollmentTargetOutput {
+        try .init(material: peerEnrollmentActivationMaterial(.init(operationID: operationID), forUID: uid))
     }
 }

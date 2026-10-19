@@ -98,11 +98,16 @@ final class ItemSearchTests: XCTestCase {
                 let selected =
                     behavior == "continuation" && ids.count > 1
                     ? Array(available.prefix(1)) : available.filter { ids.contains($0.itemID) }
+                let unresolvedID = behavior == "unresolved" ? ids.first : nil
+                let blockedIDs = behavior == "unhydrated" || behavior == "oversized" ? ids : []
+                let readable = selected.filter { $0.itemID != unresolvedID && !blockedIDs.contains($0.itemID) }
                 result = [
                     "state": "stable",
-                    "remainingIDs": behavior == "continuation" && ids.count > 1 ? Array(ids.dropFirst()) : [],
-                    "oversizedIDs": [],
-                    "list": try selected.map {
+                    "notFound": ids.filter { id in !available.contains { $0.itemID == id } },
+                    "remainingIDs": behavior == "continuation" && ids.count > 1 ? Array(ids.dropFirst()) : behavior == "unhydrated" ? blockedIDs : [],
+                    "oversizedIDs": behavior == "oversized" ? blockedIDs : [],
+                    "unresolved": unresolvedID.map { [["itemID": $0, "status": "conflicted", "stateToken": "token"]] } ?? [],
+                    "list": try readable.map {
                         try JSONSerialization.jsonObject(with: TractandaCore.JSON.encode($0))
                     },
                 ]
@@ -155,7 +160,7 @@ final class ItemSearchTests: XCTestCase {
         throw TractandaCore.TractandaError("timeout", "Test delivery timeout")
     }
 
-    func testSearchInvokesFromViewsAndCategoriesAndRetainsTypingBindings() throws {
+    func testSearchInvokesFromViewsAndCategoriesAndRetainsTypingBindings() async throws {
         let fixture = try Fixture()
         let app = try fixture.app()
         XCTAssertTrue(screen(app).contains("[Views]"))
@@ -179,7 +184,7 @@ final class ItemSearchTests: XCTestCase {
         XCTAssertNotEqual(Keymap.standard.command(for: .modified(.text("f"), .control), in: .text), .filter)
     }
 
-    func testTextSearchIsGlobalWithoutSavingViewAndEscapeRestoresSelection() throws {
+    func testTextSearchIsGlobalWithoutSavingViewAndEscapeRestoresSelection() async throws {
         let fixture = try Fixture()
         _ = try fixture.item("needle outside", extra: ["scope": .text("outside")])
         _ = try fixture.item("inside", extra: ["scope": .text("inside")])
@@ -206,7 +211,7 @@ final class ItemSearchTests: XCTestCase {
         XCTAssertTrue(before.contains("inside"))
     }
 
-    func testClearRemovesSearchAndOptionalExpressionWorks() throws {
+    func testClearRemovesSearchAndOptionalExpressionWorks() async throws {
         let fixture = try Fixture()
         _ = try fixture.item("needle")
         let app = try fixture.app(itemsOnly: true)
@@ -246,7 +251,7 @@ final class ItemSearchTests: XCTestCase {
         XCTAssertEqual(try fixture.client.revision(for: category.itemID), category)
     }
 
-    func testSemanticRankingDeduplicationAndCurrentRevisionAuthorization() throws {
+    func testSemanticRankingDeduplicationAndCurrentRevisionAuthorization() async throws {
         let fixture = try Fixture()
         let first = try fixture.item("First")
         let second = try fixture.item("Second")
@@ -308,6 +313,57 @@ final class ItemSearchTests: XCTestCase {
         }
         let requests = await transport.requests
         XCTAssertEqual(requests.count, 4)
+    }
+
+    func testSemanticMixedReadableAndUnresolvedResultsRetainReadableHits() async throws {
+        let first = try Revision(fields: [
+            "itemID": .text("10000000-0000-1000-8000-010000000001"),
+            "revisionID": .text("10000000-0000-1000-8001-010000000001"),
+            "classID": .text("Item"), "schemaVersion": .integer(1),
+            "subject": .text("Readable"), "createdAt": .date(Timestamp.now()),
+            "modifiedAt": .date(Timestamp.now()), "actor": .text("fixture"),
+            "operationID": .text("fixture"), "requestIdentity": .text("fixture"),
+        ])
+        let second = try Revision(fields: [
+            "itemID": .text("20000000-0000-1000-8000-010000000001"),
+            "revisionID": .text("20000000-0000-1000-8001-010000000001"),
+            "classID": .text("Item"), "schemaVersion": .integer(1),
+            "subject": .text("Unresolved"), "createdAt": .date(Timestamp.now()),
+            "modifiedAt": .date(Timestamp.now()), "actor": .text("fixture"),
+            "operationID": .text("fixture"), "requestIdentity": .text("fixture"),
+        ])
+        let hits = [first, second].map {
+            ItemSearchHit(itemID: $0.itemID, revisionID: $0.revisionID, passage: "hit", similarity: 0.9)
+        }
+        let loader = ItemSearchLoader(client: TractandaClient.ItemClient(
+            transport: Transport(items: [first, second], hits: hits, behavior: "unresolved")))
+        loader.start(text: "meaning", expression: "")
+        guard case .ready(let page) = try await ready(loader).outcome else { return XCTFail("Expected readable partial result") }
+        XCTAssertEqual(page.items.map(\.itemID), [second.itemID])
+        XCTAssertEqual(page.unresolved.map(\.itemID), [first.itemID])
+        XCTAssertFalse(page.items.isEmpty)
+    }
+
+    func testSemanticUnhydratedAndOversizedResultsStayExplicit() async throws {
+        let item = try Revision(fields: [
+            "itemID": .text("30000000-0000-1000-8000-010000000001"),
+            "revisionID": .text("30000000-0000-1000-8001-010000000001"),
+            "classID": .text("Item"), "schemaVersion": .integer(1),
+            "subject": .text("Partial"), "createdAt": .date(Timestamp.now()),
+            "modifiedAt": .date(Timestamp.now()), "actor": .text("fixture"),
+            "operationID": .text("fixture"), "requestIdentity": .text("fixture"),
+        ])
+        let hit = ItemSearchHit(itemID: item.itemID, revisionID: item.revisionID, passage: "hit", similarity: 0.9)
+        for behavior in ["unhydrated", "oversized"] {
+            let loader = ItemSearchLoader(client: TractandaClient.ItemClient(
+                transport: Transport(items: [item], hits: [hit], behavior: behavior)))
+            loader.start(text: "meaning", expression: "")
+            guard case .ready(let page) = try await ready(loader).outcome else {
+                return XCTFail("Expected a partial semantic result")
+            }
+            XCTAssertTrue(page.items.isEmpty)
+            XCTAssertEqual(page.unhydratedIDs, [item.itemID])
+        }
     }
 
     func testReplacementAndCancelRejectLateReplies() async throws {

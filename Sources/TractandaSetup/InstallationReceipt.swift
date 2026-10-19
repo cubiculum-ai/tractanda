@@ -15,10 +15,24 @@ struct InstallationReceipt: Codable, Equatable {
     var release: String
     var manifestSHA256: String
     var state: State
+    var recoveryReason: String? = nil
     var initialized: Bool
     var sampled: Bool
     var board: [String: String]
+    /// Desired nil is disabled, including legacy receipts. Snapshot never implies enablement.
+    var peerRuntimeConfiguration: ManagedPeerConfiguration?
+    var peerRuntimePrevious: ManagedPeerConfigurationSnapshot?
     var definitionSHA256: String?
+    var authenticationDefinitionSHA256: String? = nil
+    var packageSetupOwner: SetupPackageOwner? = nil
+    var preparedStoreID: String? = nil
+    var preparedReplicaID: String? = nil
+    /// One bounded old/desired witness per mutable systemd definition, never program bytes.
+    struct PackageDefinitionChange: Codable, Equatable {
+        let old: String?
+        let desired: String?
+    }
+    var packageDefinitions: [String: PackageDefinitionChange]? = nil
     var releases: [String: String]
     var documentExtraction: DocumentExtractionPayload?
     var documentScratchDirectory: String?
@@ -47,6 +61,8 @@ struct InstallationReceipt: Codable, Equatable {
         initialized = false
         sampled = false
         board = [:]
+        peerRuntimeConfiguration = nil
+        peerRuntimePrevious = nil
         definitionSHA256 = nil
         releases = [release.path: manifestSHA256]
         documentExtraction = nil

@@ -10,13 +10,15 @@ final class ItemTextContentTests: XCTestCase {
                 "subject": .text(""), "body": .text(" \n\t"),
                 "developmentUUIDMigration": .object(["note": .text("original issuer unknown")]),
                 "templateKey": .text("internal-template-marker"),
+                "captureDate": .object(["property": .text("operative-date-key")]),
+                "inlineCaptureBindings": .object(["#hidden": .text("mechanical-binding-noise")]),
                 "assignee": .text(""), "whitespace": .text(" \t\n\u{2003}"),
                 "nested": .list([.object(["empty": .text("\n")])]),
             ]))
         let corpus = ItemTextContent.corpus(for: revision)
         XCTAssertTrue(corpus.metadata.isEmpty)
         XCTAssertTrue(corpus.sourceText.isEmpty)
-        XCTAssertEqual(ItemTextContent.profile, "tractanda.item-text.v6")
+        XCTAssertEqual(ItemTextContent.profile, "tractanda.item-text.v8")
     }
 
     func testOperationalExclusionDoesNotHideOrdinaryNestedText() throws {

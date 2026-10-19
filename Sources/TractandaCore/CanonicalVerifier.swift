@@ -17,6 +17,7 @@ struct CanonicalVerifier: Sendable {
         let storeIdentity: String
         let generation: String
         let catalogueWatermark: Int64
+        var authorityEnforced = false
     }
 
     struct Finding: Sendable, Equatable {
@@ -75,6 +76,7 @@ struct CanonicalVerifier: Sendable {
         var pendingMaximum = 0
         var depthMaximum = 0
         var catalogueCount = 0
+        var heldCount = 0
         var failure: String?
         var status: Status = .incomplete
 
@@ -92,7 +94,7 @@ struct CanonicalVerifier: Sendable {
             let catalogue = try CanonicalCatalogueReader(
                 path: snapshot.indexPath, identity: snapshot.storeIdentity,
                 watermark: snapshot.catalogueWatermark,
-                maxSeenBytes: seenPathByteLimit)
+                maxSeenBytes: seenPathByteLimit, authorityEnforced: snapshot.authorityEnforced)
             reader = catalogue
             let itemsURL = URL(fileURLWithPath: snapshot.rootPath).appendingPathComponent("items")
             guard let itemsHandle = itemsURL.path.withCString({ tractanda_directory_open($0) }) else {
@@ -183,6 +185,33 @@ struct CanonicalVerifier: Sendable {
                         }
 
                         guard let row = try catalogue.row(path: relative) else {
+                            if let retained = try catalogue.retainedRow(path: relative) {
+                                heldCount += 1
+                                try catalogue.markSeen(relative)
+                                let safe =
+                                    (metadata.uid == snapshot.ownerUID && metadata.mode & 0o077 == 0)
+                                    || archived
+                                if safe, metadata.size == retained.size, retained.size <= 8 * 1024 * 1024 {
+                                    let data = try Data(contentsOf: child)
+                                    if let node = try? AuthorityRevision(originalBytes: data),
+                                        node.sha256 == retained.digest,
+                                        node.revision.revisionID == retained.revisionID,
+                                        CanonicalRecordPath.validate(
+                                            relative, itemID: node.revision.itemID,
+                                            revisionID: retained.revisionID),
+                                        try readMetadata(child) == metadata
+                                    {
+                                        continue
+                                    }
+                                }
+                                batch.append(
+                                    .init(
+                                        kind: .changed, path: relative, revisionID: retained.revisionID,
+                                        detail:
+                                            "Retained authority original differs from its sealed inventory"))
+                                if batch.count >= findingBatchLimit { try await flush() }
+                                continue
+                            }
                             batch.append(
                                 .init(
                                     kind: .unexpected, path: relative, revisionID: nil,
@@ -266,9 +295,24 @@ struct CanonicalVerifier: Sendable {
                     guard let next = page.nextRowID else { break }
                     cursor = next
                 }
+                var heldCursor: String?
+                while true {
+                    try Task.checkCancellation()
+                    let rows = try catalogue.unseenRetainedPage(after: heldCursor)
+                    if rows.isEmpty { break }
+                    for row in rows {
+                        heldCursor = row.revisionID
+                        heldCount += 1
+                        batch.append(
+                            .init(
+                                kind: .missing, path: row.path, revisionID: row.revisionID,
+                                detail: "Retained authority original is absent"))
+                        if batch.count >= findingBatchLimit { try await flush() }
+                    }
+                }
                 try await flush()
                 status = .complete
-                catalogueCount = catalogue.catalogueRowsRead
+                catalogueCount = catalogue.catalogueRowsRead + heldCount
             }
         } catch is CancellationError {
             status = .cancelled

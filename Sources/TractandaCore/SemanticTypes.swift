@@ -278,7 +278,7 @@ struct SemanticQuery: Sendable, Equatable {
     let viewID: String?
     let limit: Int
     let createdAt: Date
-    let expiresAt: Date
+    var expiresAt: Date
     let evaluatedAt: Date
     let timeZone: String
 }

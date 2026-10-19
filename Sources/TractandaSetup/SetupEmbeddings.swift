@@ -31,27 +31,20 @@ struct BundledSemanticConfiguration: Codable, Equatable {
 
 extension SetupEngine {
     func embeddingDefinitionURL(_ name: String) -> URL {
-        roots.launchDefinitions.appendingPathComponent("ai.tractanda.embeddings." + name + ".plist")
+        serviceBackend.definitionURL(name, role: .embeddings)
     }
-    func embeddingLabel(_ name: String) -> String { "system/ai.tractanda.embeddings." + name }
+    func embeddingLabel(_ name: String) -> String { serviceBackend.label(name, role: .embeddings) }
     func unloadEmbedding(_ receipt: InstallationReceipt) throws {
         guard receipt.embedding != nil else { return }
-        if try runner.run("/bin/launchctl", ["print", embeddingLabel(receipt.instance)], environment: [:])
-            .status == 0
-        {
-            try successful("/bin/launchctl", ["bootout", embeddingLabel(receipt.instance)])
-        }
+        try serviceBackend.unload(receipt.instance, role: .embeddings)
     }
     func loadEmbedding(_ receipt: InstallationReceipt) throws {
         guard receipt.embedding != nil else { return }
-        if try runner.run("/bin/launchctl", ["print", embeddingLabel(receipt.instance)], environment: [:])
-            .status != 0
-        {
-            try successful(
-                "/bin/launchctl", ["bootstrap", "system", embeddingDefinitionURL(receipt.instance).path])
-        }
+        try serviceBackend.load(receipt.instance, role: .embeddings,
+            enableAtBoot: !(try packageStartupIsConfiguring(receipt.instance)))
     }
     func replaceEmbeddingRegistration(_ receipt: inout InstallationReceipt) throws {
+        try requirePackageRelease(receipt.release)
         guard let payload = receipt.embedding else { return }
         guard receipt.port < 65535 else {
             throw SetupError("A bundled embedding service needs a port after the HTTP port.")
@@ -73,9 +66,13 @@ extension SetupEngine {
                 "logs/" + receipt.instance + "-embeddings.log"
             ).path,
         ]
-        let bytes = try PropertyListSerialization.data(fromPropertyList: dictionary, format: .xml, options: 0)
+        let bytes = roots.platform == .linux
+            ? try serviceBackend.systemdDefinition(instance: receipt.instance, role: .embeddings, arguments: arguments)
+            : try PropertyListSerialization.data(fromPropertyList: dictionary, format: .xml, options: 0)
         try unloadEmbedding(receipt)
-        try writeProtected(bytes, to: embeddingDefinitionURL(receipt.instance), mode: 0o644)
+        if roots.platform == .linux {
+            try publishPackageDefinition(bytes, role: .embeddings, receipt: &receipt)
+        } else { try writeProtected(bytes, to: embeddingDefinitionURL(receipt.instance), mode: 0o644) }
         receipt.embeddingDefinitionSHA256 = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }
             .joined()
         try writeReceipt(receipt)
@@ -111,15 +108,11 @@ extension SetupEngine {
     }
 
     func embeddingListenerState(_ receipt: InstallationReceipt) throws -> (ownsPort: Bool, detail: String) {
-        let job = try runner.run(
-            "/bin/launchctl", ["print", embeddingLabel(receipt.instance)], environment: [:])
-        guard job.status == 0,
-            let line = job.output.split(separator: "\n").map({ $0.trimmingCharacters(in: .whitespaces) })
-                .first(where: { $0.hasPrefix("pid = ") }),
-            let pid = Int(line.dropFirst(6)), pid > 1
-        else { return (false, "launchd exit=\(job.status), no running PID reported.") }
+        guard let pid = try serviceBackend.mainPID(receipt.instance, role: .embeddings) else {
+            return (false, "The owned embedding system service has no running main process.")
+        }
         let listener = try runner.run(
-            "/usr/sbin/lsof",
+            roots.platform == .linux ? "/usr/bin/lsof" : "/usr/sbin/lsof",
             [
                 "-nP", "-a", "-p", String(pid),
                 "-iTCP:" + String(receipt.port + 1), "-sTCP:LISTEN", "-Fpn",

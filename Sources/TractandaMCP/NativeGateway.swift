@@ -87,7 +87,9 @@ actor NativeGateway {
             throw TractandaError("connectionClosed", "Native gateway is unavailable.")
         }
         let compactWriteMethods = [
-            "TractandaItem/commit", "TractandaLearning/feedback", "TractandaLearning/settings",
+            "TractandaItem/commit", "TractandaItem/commitCapture", "TractandaItem/resolveConflict",
+            "TractandaLearning/feedback",
+            "TractandaLearning/settings",
         ]
         let adapted =
             compactWriteMethods.contains(method)

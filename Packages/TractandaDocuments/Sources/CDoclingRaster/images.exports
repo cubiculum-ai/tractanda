@@ -1,0 +1,4 @@
+TRACTANDA_DOCLING_IMAGES_1 {
+ global: tdr_png; tdr_jpeg;
+ local: *;
+};

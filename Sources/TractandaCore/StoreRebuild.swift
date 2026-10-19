@@ -195,6 +195,19 @@ final class RebuildControl: @unchecked Sendable {
         defer { lock.unlock() }
         try checkLocked()
     }
+    /// Actual graph VM/page/queue work advances liveness without pretending it projected items.
+    func graphProgress() throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try checkLocked()
+        let now = ProcessInfo.processInfo.systemUptime
+        lastProgress = now
+        if now - lastPersistence >= 1 {
+            value.updatedAt = Timestamp.now()
+            try journal.save(value)
+            lastPersistence = now
+        }
+    }
     func pulse(
         phase: String? = nil, records: Int64 = 0, originalBytes: Int64 = 0, pages: Int64 = 0,
         items: Int64 = 0, durabilityEntries: Int64 = 0

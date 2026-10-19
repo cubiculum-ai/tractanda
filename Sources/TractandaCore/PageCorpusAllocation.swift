@@ -67,7 +67,11 @@ enum PageCorpusAllocation {
         allocationUnit: Int64
     ) throws -> Int64 {
         let growth = try rounded(additionalBytes, allocationUnit: allocationUnit)
-        let physical = try PageCorpusEmitter.add(usage.allocatedBytes, growth)
+        // The filesystem value can be its maximum record/transfer size (Linux ZFS reports
+        // that in both statvfs fields). It is a conservative reservation, not a minimum
+        // physical charge for each write. Operator admission uses the bounded output
+        // estimate; actual directory/file allocations are checked again after writes.
+        let physical = try PageCorpusEmitter.add(usage.allocatedBytes, additionalBytes)
         let logical = try PageCorpusEmitter.add(usage.logicalBytes, additionalBytes)
         guard physical <= maximumBytes, logical <= maximumBytes else {
             throw failure("Corpus spool reached its physical or logical operator byte budget.")

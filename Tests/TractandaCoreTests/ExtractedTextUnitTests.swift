@@ -43,12 +43,18 @@ final class ExtractedTextUnitTests: XCTestCase, @unchecked Sendable {
             total = sum.partialValue
         }
     }
-    private func makeStore(_ root: URL, accounts: any AccountDirectory = SystemAccountDirectory()) throws
-        -> ItemStore
-    {
-        try ItemStore(
+    private func makeStore(
+        _ root: URL, accounts: any AccountDirectory = SystemAccountDirectory(),
+        initialAccessConfiguration: ItemValue? = nil
+    ) throws -> ItemStore {
+        if !FileManager.default.fileExists(atPath: root.path) {
+            _ = try ItemStore.initializeFresh(
+                root: root, accounts: accounts, initialAccessConfiguration: initialAccessConfiguration)
+        }
+        return try ItemStore(
             root: root, accounts: accounts,
-            attachmentUploadPolicy: .init(maximumStagedBytes: cap, minimumFreeBytes: reserve))
+            attachmentUploadPolicy: .init(maximumStagedBytes: cap, minimumFreeBytes: reserve),
+            revisionProjectionEnabled: true, authorityIntakeEnabled: true)
     }
     private func source(_ root: URL, text: String = "held source") throws -> Revision {
         let store = try makeStore(root)
@@ -408,11 +414,11 @@ final class ExtractedTextUnitTests: XCTestCase, @unchecked Sendable {
         let accounts = Accounts()
         let revision: Revision
         do {
-            let store = try makeStore(root, accounts: accounts)
-            _ = try store.configureAccess(
-                .object([
+            let store = try makeStore(
+                root, accounts: accounts,
+                initialAccessConfiguration: .object([
                     "profile": .text(AccessConfiguration.profile), "groups": .list([.text("staff")]),
-                ]), operationID: "access")
+                ]))
             revision = try store.commit(
                 .init(
                     classID: "Item",

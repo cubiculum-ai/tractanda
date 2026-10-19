@@ -89,14 +89,17 @@ final class StoreRebuildTests: XCTestCase, @unchecked Sendable {
         let root = try root()
         defer { try? FileManager.default.removeItem(at: root) }
         let accounts = Accounts()
+        _ = try ItemStore.initializeFresh(
+            root: root, accounts: accounts,
+            initialAccessConfiguration: .object([
+                "profile": .text(AccessConfiguration.profile),
+                "administration": .text("system"), "administratorGroup": .text("admins"),
+                "groups": .list([.text("staff")]),
+            ]))
         do {
-            let store = try ItemStore(root: root, accounts: accounts)
-            _ = try store.configureAccess(
-                .object([
-                    "profile": .text(AccessConfiguration.profile),
-                    "administration": .text("system"), "administratorGroup": .text("admins"),
-                    "groups": .list([.text("staff")]),
-                ]), operationID: "policy")
+            _ = try ItemStore(
+                root: root, accounts: accounts,
+                revisionProjectionEnabled: true, authorityIntakeEnabled: true)
         }
         let coordinator = try await ServiceCoordinator(opening: root, makeAccountDirectory: { accounts })
         let gate = Gate()
@@ -135,8 +138,9 @@ final class StoreRebuildTests: XCTestCase, @unchecked Sendable {
     func testCancelAfterVerifiedRecordLeavesDirtyIndexAndStartupRestreams() async throws {
         let root = try root()
         defer { try? FileManager.default.removeItem(at: root) }
+        _ = try ItemStore.initializeFresh(root: root)
         do {
-            let store = try ItemStore(root: root)
+            let store = try ItemStore(root: root, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             _ = try store.commit(
                 CommitRequest(classID: "Item", changes: ["subject": .text("saved")], operationID: "item"))
         }
@@ -173,7 +177,7 @@ final class StoreRebuildTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(StoreCheckpoint.isDirty(root: root))
         await coordinator.close()
         do {
-            let reopened = try ItemStore(root: root)
+            let reopened = try ItemStore.openInitialized(root: root)
             XCTAssertTrue(reopened.isCanonicalTrusted)
             XCTAssertFalse(StoreCheckpoint.isDirty(root: root))
         }
@@ -189,8 +193,9 @@ final class StoreRebuildTests: XCTestCase, @unchecked Sendable {
         defer { try? FileManager.default.removeItem(at: root) }
         var source: Revision!
         var attachment: AttachmentDescriptor!
+        _ = try ItemStore.initializeFresh(root: root)
         do {
-            let store = try ItemStore(root: root)
+            let store = try ItemStore(root: root, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             let base = try store.commit(CommitRequest(classID: "Item", operationID: "item")).revision
             let bytes = Data("tiny original".utf8)
             let upload = try store.beginAttachment(
@@ -275,8 +280,9 @@ final class StoreRebuildTests: XCTestCase, @unchecked Sendable {
     func testSessionAuthorizationStatusAndCancellationBypassOccupiedQueue() async throws {
         let root = try root()
         defer { try? FileManager.default.removeItem(at: root) }
+        _ = try ItemStore.initializeFresh(root: root)
         do {
-            let store = try ItemStore(root: root)
+            let store = try ItemStore(root: root, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             _ = try store.commit(CommitRequest(classID: "Item", operationID: "item"))
         }
         let coordinator = try await ServiceCoordinator(opening: root)
@@ -353,5 +359,70 @@ final class StoreRebuildTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(restored.state, "interruptedRecovered")
         XCTAssertEqual(restored.phase, "startupRecoveryCompleted")
         XCTAssertFalse(restored.requiresRecovery)
+    }
+
+    func testNativeCancellationDuringGraphWorkSurvivesGCDBoundary() async throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = try ItemStore.initializeFresh(root: root)
+        do {
+            let store = try ItemStore(root: root, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            _ = try store.commit(CommitRequest(classID: "Item", operationID: "graph-item"))
+        }
+        let coordinator = try await ServiceCoordinator(opening: root)
+        let entered = expectation(description: "GCD graph progress is executing")
+        let release = DispatchSemaphore(value: 0)
+        let once = NSLock()
+        nonisolated(unsafe) var didEnter = false
+        try await coordinator.setRebuildGraphProgressHookForTesting {
+            once.lock()
+            let first = !didEnter
+            didEnter = true
+            once.unlock()
+            if first {
+                XCTAssertFalse(
+                    Task.isCancelled, "Native cancellation is explicit control, not GCD Task state")
+                entered.fulfill()
+                _ = release.wait(timeout: .now() + 5)
+            }
+        }
+        let started = try status(
+            await coordinator.handle(
+                request("TractandaStore/rebuild", ["operationID": "graph-cancel"]), forUID: getuid()))
+        await fulfillment(of: [entered], timeout: 3)
+        let progress = try status(
+            await coordinator.handle(request("TractandaStore/rebuildStatus"), forUID: getuid()))
+        XCTAssertEqual(progress.phase, "validatingRevisionGraph")
+        _ = try await coordinator.handle(
+            request("TractandaStore/rebuildCancel", ["jobID": started.jobID]), forUID: getuid())
+        release.signal()
+        let final = try await finished(coordinator, uid: getuid())
+        XCTAssertEqual(final.state, "cancelled")
+        XCTAssertTrue(final.requiresRecovery)
+        await coordinator.close()
+        let recovered = try ItemStore.openInitialized(root: root)
+        XCTAssertTrue(recovered.isCanonicalTrusted)
+    }
+
+    func testGraphWorkAdvancesLivenessWithoutFakingProjectionCounters() throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        do { _ = try ItemStore(root: root) }
+        let initial = StoreRebuildStatus(
+            jobID: try UUID.makeVersion1().uuidString.lowercased(), operationID: "graph-progress",
+            updatedAt: Timestamp.now(), noProgressTimeoutSeconds: 0.08)
+        let control = try RebuildControl(
+            status: initial, journal: RebuildJournal(root: root, ownerUID: getuid()))
+        try control.pulse(phase: "validatingRevisionGraph")
+        for _ in 0..<8 {
+            Thread.sleep(forTimeInterval: 0.02)
+            try control.graphProgress()
+        }
+        XCTAssertEqual(control.status.itemsProjected, 0)
+        XCTAssertEqual(control.status.recordsVerified, 0)
+        Thread.sleep(forTimeInterval: 0.10)
+        XCTAssertThrowsError(try control.graphProgress()) {
+            XCTAssertEqual(($0 as? TractandaError)?.code, "rebuildNoProgress")
+        }
     }
 }

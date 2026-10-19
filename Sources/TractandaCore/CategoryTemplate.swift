@@ -128,6 +128,10 @@ public struct CategoryTemplate: Codable, Sendable {
                 selection["timeZone"] = .text(timeZone)
                 fields["selection"] = .object(selection)
             }
+            if var capture = fields["captureDate"]?.map {
+                capture["timeZone"] = .text(timeZone)
+                fields["captureDate"] = .object(capture)
+            }
             if let keys = entry.viewCategoryKeys, var view = fields["viewDefinition"]?.map {
                 view["categoryPath"] = .list(
                     keys.compactMap { installed[$0].map { .reference(ItemReference($0.itemID)) } })

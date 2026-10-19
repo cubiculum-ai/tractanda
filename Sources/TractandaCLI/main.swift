@@ -1,4 +1,5 @@
 import Foundation
+import CTractandaPlatform
 import TractandaCore
 import TractandaKanban
 import TractandaServer
@@ -17,7 +18,7 @@ let usage = """
       tractanda seed STORE [--index-directory PATH]
       tractanda configure-access STORE TAGGED_CONFIG_JSON OPERATION_ID [--index-directory PATH]
       tractanda serve STORE SOCKET [--max-requests N] [--index-directory PATH]
-      tractanda daemon STORE SOCKET [--index-directory PATH] [--http-port PORT|--no-http] [--managed] [--document-converter PATH --document-model-directory PATH --document-scratch-directory PATH] [--attachment-upload-idle-seconds N] [--attachment-staged-byte-quota N] [--attachment-minimum-free-bytes N] [--rebuild-no-progress-seconds N] [--view ID | --project-root ID --status-root ID [--project ID]]
+      tractanda daemon STORE SOCKET [--index-directory PATH] [--http-port PORT|--no-http] [--managed] [--document-converter PATH --document-model-directory PATH --document-scratch-directory PATH] [--document-inspect-seconds N] [--document-model-load-seconds N] [--document-page-seconds N] [--document-no-progress-seconds N] [--document-termination-grace-seconds N] [--attachment-upload-idle-seconds N] [--attachment-staged-byte-quota N] [--attachment-minimum-free-bytes N] [--rebuild-no-progress-seconds N] [--view ID | --project-root ID --status-root ID [--project ID]] [--peer-runtime-config ABSOLUTE_PATH]
       tractanda connections list|add|default|remove ...
       tractanda service prepare|install|activate|start|stop|status|uninstall ...
       tractanda uuid-v1 [COUNT]
@@ -29,9 +30,16 @@ let usage = """
       tractanda request SOCKET [JSON_FILE]          (otherwise reads stdin)
       tractanda call SOCKET METHOD [ARGUMENTS_JSON] (otherwise reads stdin)
       tractanda info SOCKET
+      tractanda [--profile NAME | --socket PATH] peer enrollment activate --operation-id UUID --file PATH --root ABSOLUTE_PATH --source-replica UUID --bootstrap-id UUID --bootstrap-sha256 HEX --approval-id UUID --approval-sha256 HEX [--target-user OS_USER]
+      tractanda [--profile NAME | --socket PATH] peer status
+      tractanda [--profile NAME | --socket PATH] peer enrollment pair|begin|step|status|accept|read|export-target|register [options]
+      tractanda [--profile NAME | --socket PATH] peer credential register --file PATH --origin UUID [--origin UUID...] --operation-id UUID
       tractanda describe SOCKET [TOPIC]           (overview, types, or properties)
       tractanda extracted-text SOCKET ITEM_ID... (bounded source text and current citation locators)
       tractanda get SOCKET ITEM_ID...
+      tractanda item-state SOCKET ITEM_ID...
+      tractanda conflicts SOCKET [LIMIT] [CURSOR]
+      tractanda resolve-conflict SOCKET REQUEST_JSON
       tractanda query SOCKET EXPRESSION
       tractanda search SOCKET LITERAL_PHRASE
       tractanda history SOCKET ITEM_ID
@@ -53,7 +61,7 @@ let usage = """
       tractanda document-job SOCKET page JOB_ID PAGE_NUMBER
       tractanda attach SOCKET ITEM_ID BASE_REVISION OPERATION_ID FILE [MEDIA_TYPE]
       tractanda attachments SOCKET ITEM_ID [REVISION_ID]
-      tractanda export-attachment SOCKET ITEM_ID ATTACHMENT_ID DESTINATION [REVISION_ID]
+      tractanda export-attachment SOCKET ITEM_ID ATTACHMENT_ID DESTINATION [REVISION_ID] [--resume-directory PRIVATE_STAGE] [--max-staged-bytes BYTES]
       tractanda extract-attachment SOCKET ITEM_ID BASE_REVISION OPERATION_ID ATTACHMENT_ID
       tractanda attachment-document SOCKET ITEM_ID ATTACHMENT_ID [--revision REVISION_ID] [--page N] [--max-bytes N]
       tractanda detach SOCKET ITEM_ID BASE_REVISION OPERATION_ID ATTACHMENT_ID
@@ -64,6 +72,9 @@ let usage = """
       tractanda kanban SOCKET VIEW_ITEM_ID
       tractanda export-kanban SOCKET VIEW_ITEM_ID HTML_OR_JSON_FILE
       tractanda install-categories SOCKET TEMPLATE_JSON IANA_TIME_ZONE
+      tractanda capture-preview SOCKET REQUEST_JSON [AT_TIMESTAMP]
+      tractanda capture-commit SOCKET PLAN_JSON
+      tractanda capture-note SOCKET SUBJECT BODY OPERATION_ID [--preview]
       tractanda web SOCKET VIEW_ITEM_ID [--port N] [--session-file PATH]
       tractanda web SOCKET INITIAL_PROJECT_ID --project-root CATEGORY_ID --status-root CATEGORY_ID [--port N] [--session-file PATH]
       tractanda learning-status|learn|learning-reset SOCKET CATEGORY_ID
@@ -162,6 +173,30 @@ func run() throws {
         return
     }
     if try handleConnectionCommand(args) { return }
+    if let activation = try peerEnrollmentActivateOptions(arguments: args, options: options) {
+        guard tractanda_start_signals() == 0 else { throw TractandaError("cancelled", "Cannot install finite workflow cancellation handlers.") }
+        defer { tractanda_restore_signals() }
+        output(try activation.execute())
+        return
+    }
+    if let enrollment = try peerEnrollmentOptions(arguments: args, options: options) {
+        output(try enrollment.execute())
+        return
+    }
+    if let credentialOptions = try peerCredentialRegistrationOptions(arguments: args, options: options) {
+        let input = try PeerPrivateCredentialInput.capture(path: credentialOptions.filePath)
+        let connection = try credentialOptions.connection.resolve()
+        output(try NativePeerCredentialRegistration.register(
+            connection: connection,
+            input: input,
+            permittedOrigins: credentialOptions.permittedOrigins,
+            operationID: credentialOptions.operationID))
+        return
+    }
+    if let statusOptions = try peerStatusOptions(arguments: args, options: options) {
+        output(try call(statusOptions.resolve(), PeerOperatorStatus.nativeMethod, [:]))
+        return
+    }
     let isStoreCommand = ["init", "seed", "serve", "configure-access"].contains(command)
     var selectedConnection: ServerConnection?
     if hasConnectionOptions {
@@ -188,26 +223,28 @@ func run() throws {
             args.removeSubrange(option...(option + 1))
         }
         let isManaged = command == "serve" && args.contains("--managed")
-        if isManaged,
-            !FileManager.default.fileExists(
-                atPath: URL(fileURLWithPath: args[1]).appendingPathComponent("items").path)
-        {
-            throw TractandaError("invalidStore", "Managed startup requires an existing initialized store.")
+        let root = URL(fileURLWithPath: args[1], isDirectory: true)
+        let store: ItemStore
+        if command == "init" || (command == "seed" && !FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("canonical-reader.json").path)) {
+            store = try ItemStore.initializeFresh(root: root, indexDirectory: indexDirectory)
+        } else {
+            store = try ItemStore.openInitialized(root: root, indexDirectory: indexDirectory)
         }
-        let store = try ItemStore(
-            root: URL(fileURLWithPath: args[1], isDirectory: true), indexDirectory: indexDirectory)
         if command == "init" {
             output(try JSON.encode(["store": store.root.path, "state": store.state]))
             return
         }
         if command == "seed" {
-            output(try JSON.encode(DemoFixture.seed(store)))
+            output(try JSON.encode(store.withAccess(forUID: store.ownerUID) { try DemoFixture.seed(store) }))
             return
         }
         if command == "configure-access" {
             try require(4)
             let value = try JSON.decode(ItemValue.self, Data(contentsOf: URL(fileURLWithPath: args[2])))
-            output(try JSON.encode(store.configureAccess(value, operationID: args[3])))
+            output(try JSON.encode(store.withAccess(forUID: store.ownerUID) {
+                try store.configureAccess(value, operationID: args[3])
+            }))
             return
         }
         try require(3)
@@ -229,6 +266,36 @@ func run() throws {
     let socket = args[1]
     let connection = try selectedConnection ?? ConnectionPreferences().resolve(socketPath: socket)
     switch command {
+    case "capture-preview":
+        try require(3)
+        guard args.count <= 4 else { throw TractandaError("usage", usage) }
+        let request = try JSON.decode(CommitRequest.self, Data(contentsOf: URL(fileURLWithPath: args[2])))
+        output(
+            try JSON.encode(
+                ItemClient(connection: connection).prepareCapture(
+                    CapturePreparation(request: request, at: args.count == 4 ? args[3] : nil))))
+    case "capture-commit":
+        guard args.count == 3 else { throw TractandaError("usage", usage) }
+        let plan = try JSON.decode(CapturePlan.self, Data(contentsOf: URL(fileURLWithPath: args[2])))
+        output(try JSON.encode(ItemClient(connection: connection).commitCapture(plan)))
+    case "capture-note":
+        guard args.count == 5 || (args.count == 6 && args[5] == "--preview") else {
+            throw TractandaError("usage", usage)
+        }
+        let client = ItemClient(connection: connection)
+        let plan = try client.prepareCapture(
+            CapturePreparation(
+                request: CommitRequest(
+                    classID: "Item", changes: ["subject": .text(args[2]), "body": .text(args[3])],
+                    operationID: args[4])))
+        if args.count == 6 || !plan.canCommit {
+            output(try JSON.encode(plan))
+        } else {
+            // Emit the frozen plan before writing, so an uncertain result is recoverable.
+            FileHandle.standardError.write(try JSON.encode(plan))
+            FileHandle.standardError.write(Data("\n".utf8))
+            output(try JSON.encode(client.commitCapture(plan)))
+        }
     case "describe":
         guard args.count <= 3 else { throw TractandaError("usage", usage) }
         output(
@@ -303,9 +370,45 @@ func run() throws {
     case "export-attachment":
         try require(5)
         let destination = URL(fileURLWithPath: args[4])
-        let descriptor = try AttachmentFiles.export(
-            client: ItemClient(connection: connection), itemID: args[2], attachmentID: args[3],
-            destination: destination, revisionID: args.count > 5 ? args[5] : nil)
+        var tail = Array(args.dropFirst(5))
+        let revisionID = tail.first.flatMap { $0.hasPrefix("--") ? nil : $0 }
+        if revisionID != nil { tail.removeFirst() }
+        var stage: String?
+        var maximum: Int64 = 8 * 1024 * 1024 * 1024
+        var maximumSpecified = false
+        while !tail.isEmpty {
+            guard tail.count >= 2 else {
+                throw TractandaError("invalidArguments", "Missing download option value.")
+            }
+            switch tail[0] {
+            case "--resume-directory" where stage == nil: stage = tail[1]
+            case "--max-staged-bytes" where !maximumSpecified:
+                guard let value = Int64(tail[1]), value > 0 else {
+                    throw TractandaError("invalidArguments", "Use a positive staging byte quota.")
+                }
+                maximum = value
+                maximumSpecified = true
+            default: throw TractandaError("invalidArguments", "Unknown or repeated download option.")
+            }
+            tail.removeFirst(2)
+        }
+        let descriptor: AttachmentDescriptor
+        if let stage {
+            guard let revisionID else {
+                throw TractandaError("invalidArguments", "Resumable export requires an explicit REVISION_ID.")
+            }
+            descriptor = try AttachmentFiles.exportResumable(
+                connection: connection, itemID: args[2], attachmentID: args[3], destination: destination,
+                revisionID: revisionID, resumeDirectory: URL(fileURLWithPath: stage),
+                policy: AttachmentDownloadPolicy(maximumStagedBytes: maximum))
+        } else {
+            guard !maximumSpecified else {
+                throw TractandaError("invalidArguments", "Staging quota requires --resume-directory.")
+            }
+            descriptor = try AttachmentFiles.export(
+                client: ItemClient(connection: connection), itemID: args[2], attachmentID: args[3],
+                destination: destination, revisionID: revisionID)
+        }
         output(try JSON.encode(descriptor))
     case "detach":
         try require(6)
@@ -455,6 +558,46 @@ func run() throws {
     case "get":
         try require(3)
         output(try call(connection, "TractandaItem/get", ["ids": Array(args.dropFirst(2))]))
+    case "item-state":
+        try require(3)
+        let ids = Array(args.dropFirst(2))
+        guard ids.count <= 64, Set(ids).count == ids.count else {
+            throw TractandaError("invalidArguments", "item-state accepts at most 64 distinct IDs.")
+        }
+        for id in ids { try Identifier.validate(id) }
+        output(try call(connection, "TractandaItem/state", ["ids": ids]))
+    case "conflicts":
+        try require(2)
+        guard args.count <= 4 else { throw TractandaError("usage", usage) }
+        let limit = args.count > 2 ? Int(args[2]) : nil
+        if args.count > 2, limit == nil {
+            throw TractandaError("invalidArguments", "limit must be an integer.")
+        }
+        guard (1...256).contains(limit ?? 64) else {
+            throw TractandaError("invalidArguments", "limit must be 1 through 256.")
+        }
+        let cursor = args.count > 3 ? args[3] : nil
+        if let cursor, cursor.isEmpty || cursor.utf8.count > 8_192 {
+            throw TractandaError("invalidArguments", "cursor must contain 1 through 8192 UTF-8 bytes.")
+        }
+        var request: [String: Any] = ["limit": limit ?? 64]
+        if let cursor { request["cursor"] = cursor }
+        output(try call(connection, "TractandaItem/conflicts", request))
+    case "resolve-conflict":
+        guard args.count == 3 else { throw TractandaError("usage", usage) }
+        let request = try JSON.decode(
+            ResolveConflictRequest.self, Data(contentsOf: URL(fileURLWithPath: args[2])))
+        try Identifier.validate(request.itemID)
+        guard !request.expectedStateToken.isEmpty, request.expectedStateToken.utf8.count <= 8_192,
+            !request.reviewedFrontier.isEmpty, request.reviewedFrontier.count <= 1024,
+            Set(request.reviewedFrontier).count == request.reviewedFrontier.count,
+            !request.operationID.isEmpty, request.operationID.utf8.count <= 200,
+            !request.operationID.contains("\0"), Set(request.unset).count == request.unset.count,
+            Set(request.changes.keys).isDisjoint(with: request.unset)
+        else { throw TractandaError("invalidArguments", "Invalid conflict resolution request.") }
+        for id in request.reviewedFrontier { try Identifier.validate(id) }
+        let requestObject = try JSONSerialization.jsonObject(with: JSON.encode(request))
+        output(try call(connection, "TractandaItem/resolveConflict", requestObject))
     case "query", "search":
         try require(3)
         output(

@@ -16,6 +16,7 @@ final class DaemonApplicationTests: XCTestCase {
     {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
             "daemon-app-\(UUID().uuidString)")
+        _ = try ItemStore.initializeFresh(root: root)
         let coordinator = try await ServiceCoordinator(opening: root)
         let uid = try await coordinator.accountIdentity(forUID: tractanda_uid()).uid
         let sessions = SessionAuthority(coordinator: coordinator, authenticator: Authenticator(uid: uid))

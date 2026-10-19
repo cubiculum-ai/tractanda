@@ -1,0 +1,4 @@
+TRACTANDA_DOCLING_PDF_1 {
+ global: tdr_open; tdr_render; tdr_close; tdr_backend_version;
+ local: *;
+};

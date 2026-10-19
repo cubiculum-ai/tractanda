@@ -73,6 +73,12 @@ struct ToolDefinition: Sendable {
                 arguments["limit"] = .int(32)
             }
         }
+        if nativeMethod == "TractandaItem/state", arguments["maxBytes"] == nil {
+            arguments["maxBytes"] = .int(65_536)
+        }
+        if nativeMethod == "TractandaItem/conflicts", arguments["limit"] == nil {
+            arguments["limit"] = .int(64)
+        }
         for name in ["ids", "categoryIDs"] where arguments[name] != nil {
             guard let values = arguments[name]?.arrayValue, !values.isEmpty, values.count <= 64,
                 values.allSatisfy({ $0.stringValue != nil })
@@ -102,6 +108,16 @@ struct ToolDefinition: Sendable {
             if let limit = arguments["limit"] {
                 guard let value = limit.intValue, (1...262_144).contains(value) else {
                     throw TractandaError("invalidArguments", "limit must be 1 through 262144 UTF8 bytes.")
+                }
+            }
+        }
+        if nativeMethod == "TractandaItem/state" || nativeMethod == "TractandaItem/get" {
+            if let ids = arguments["ids"]?.arrayValue {
+                guard Set(ids.compactMap(\.stringValue)).count == ids.count else {
+                    throw TractandaError("invalidArguments", "ids must be distinct.")
+                }
+                if nativeMethod == "TractandaItem/state" {
+                    for id in ids { try validateUUIDv1(id.stringValue, field: "ids") }
                 }
             }
         }
@@ -248,6 +264,42 @@ struct ToolDefinition: Sendable {
             guard (1...64).contains(limit) else {
                 throw TractandaError("invalidArguments", "limit must be an integer from 1 through 64.")
             }
+        case "TractandaItem/conflicts":
+            let limit: Int
+            if let supplied = arguments["limit"] {
+                guard let value = supplied.intValue else {
+                    throw TractandaError("invalidArguments", "limit must be an integer from 1 through 256.")
+                }
+                limit = value
+            } else {
+                limit = 64
+            }
+            if let cursor = arguments["cursor"] {
+                guard let value = cursor.stringValue, !value.isEmpty, value.utf8.count <= 8_192 else {
+                    throw TractandaError("invalidArguments", "cursor must contain 1 through 8192 bytes.")
+                }
+            }
+            guard (1...256).contains(limit)
+            else { throw TractandaError("invalidArguments", "Invalid conflict cursor or page limit.") }
+        case "TractandaItem/resolveConflict":
+            try validateUUIDv1(arguments["itemID"]?.stringValue, field: "itemID")
+            guard let stateToken = arguments["expectedStateToken"]?.stringValue,
+                !stateToken.isEmpty, stateToken.utf8.count <= 8_192,
+                let frontier = arguments["reviewedFrontier"]?.arrayValue,
+                (1...1024).contains(frontier.count), frontier.allSatisfy({ $0.stringValue != nil }),
+                Set(frontier.compactMap(\.stringValue)).count == frontier.count,
+                let changes = arguments["changes"]?.objectValue,
+                let unset = arguments["unset"]?.arrayValue, unset.count <= 4096,
+                unset.allSatisfy({
+                    guard let field = $0.stringValue else { return false }
+                    return !field.isEmpty && !field.contains("\0")
+                }),
+                Set(unset.compactMap(\.stringValue)).count == unset.count,
+                Set(changes.keys).isDisjoint(with: Set(unset.compactMap(\.stringValue))),
+                let operationID = arguments["operationID"]?.stringValue,
+                !operationID.isEmpty, operationID.utf8.count <= 200, !operationID.contains("\0")
+            else { throw TractandaError("invalidArguments", "Invalid conflict resolution fields.") }
+            for id in frontier { try validateUUIDv1(id.stringValue, field: "reviewedFrontier") }
         default:
             break
         }
@@ -373,7 +425,7 @@ enum ToolCatalog {
         .init(
             "tractanda_query", method: "TractandaItem/query",
             description:
-                "Find readable item IDs with the portable Spotlight expression, literal FTS text and cumulative categoryPath, or a saved viewID. A viewID cannot be combined with inline criteria. With tractanda.live-seek-cursor.v1, cursor paging is available for descending modifiedAt/createdAt order with no filter or a bounded indexed typed scalar/list predicate, including administrator raw-item queries. Category, personal and saved-view results remain on position paging. Cursor binds the live query, actor, store, state and clock; it is not an access grant. Do not send position with cursor. Other query shapes use position. Get contents separately. Read tractanda://reference/query for the supported grammar.",
+                "Find readable item IDs with the portable Spotlight expression, literal FTS text and cumulative categoryPath, or a saved viewID. A viewID cannot be combined with inline criteria. With tractanda.live-seek-cursor.v1, cursor paging is available for descending modifiedAt/createdAt order with no filter or a bounded indexed typed scalar/list predicate, including administrator raw-item queries. Category, personal and saved-view results remain on position paging. Cursor binds the live query, actor, store, state and clock; it is not an access grant. Do not send position with cursor. Other query shapes use position. Query results explicitly report unresolved completeness and whether authorized conflicts are available; get contents separately and do not treat omitted item bodies as notFound. Read tractanda://reference/query for the supported grammar.",
             properties: page([
                 "expression": text, "text": text, "at": text, "timeZone": text,
                 "cursor": text,
@@ -386,7 +438,7 @@ enum ToolCatalog {
         .init(
             "tractanda_get", method: "TractandaItem/get",
             description:
-                "Batch-fetch current revisions with ids (an array, even for one item); do not use itemID or itemIDs. Accepts up to 64 IDs. projection and properties are mutually exclusive; choose one or omit both. notFound are unreadable/missing IDs; remainingIDs are unprocessed IDs to fetch next with the same projection; compare state between pages. oversizedIDs require a narrower projection. Item count and maxBytes are independent; fields are not silently truncated.",
+                "Batch-fetch current revisions with ids (an array, even for one item); do not use itemID or itemIDs. Accepts up to 64 IDs. projection and properties are mutually exclusive; choose one or omit both. notFound are unreadable/missing IDs; unresolved contains readable items without a current representative; remainingIDs are unprocessed IDs to fetch next with the same projection; compare state between pages. oversizedIDs require a narrower projection. Item count and maxBytes are independent; fields are not silently truncated.",
             properties: [
                 "ids": identifiers, "projection": projection, "properties": propertyNames,
                 "maxBytes": .object([
@@ -394,6 +446,59 @@ enum ToolCatalog {
                     "default": .int(524_288),
                 ]),
             ], required: ["ids"]),
+        .init(
+            "tractanda_state", method: "TractandaItem/state",
+            description:
+                "Read current item projection status, state token, representative/frontier and bounded conflict details without requiring a current content representative. notFound remains privacy-safe. Follow remainingIDs; increase maxBytes within its bound or handle oversized/resource results explicitly. ready means a resolved current projection, not a Ready/In review workflow category or an actionable task. Requires tractanda.revision-projection.v1.",
+            properties: [
+                "ids": .object([
+                    "type": .string("array"), "items": uuidV1Identifier,
+                    "minItems": .int(1), "maxItems": .int(64), "uniqueItems": .bool(true),
+                ]),
+                "maxBytes": .object([
+                    "type": .string("integer"), "minimum": .int(8_192), "maximum": .int(524_288),
+                    "default": .int(65_536),
+                ]),
+            ], required: ["ids"], requiredFeature: ServerFeature.revisionProjection.rawValue),
+        .init(
+            "tractanda_conflicts", method: "TractandaItem/conflicts",
+            description:
+                "List authorized current conflicts/invariant/resource states with an opaque continuation cursor and store state token. It does not select a branch. Requires tractanda.revision-projection.v1.",
+            properties: [
+                "limit": .object([
+                    "type": .string("integer"), "minimum": .int(1), "maximum": .int(256),
+                    "default": .int(64),
+                ]), "cursor": .object(["type": .string("string"), "maxLength": .int(8_192)]),
+            ], requiredFeature: ServerFeature.revisionProjection.rawValue),
+        .init(
+            "tractanda_resolve_conflict", method: "TractandaItem/resolveConflict",
+            description:
+                "Explicitly resolve the complete reviewed frontier with top-level changes/unsets. The expected itemState token fences stale review. This does not edit one branch in place; it creates a separate authored resolution. Retry with the same operationID. Requires tractanda.revision-projection.v1.",
+            properties: [
+                "itemID": uuidV1Identifier,
+                "expectedStateToken": .object([
+                    "type": .string("string"), "minLength": .int(1), "maxLength": .int(8_192),
+                ]),
+                "reviewedFrontier": .object([
+                    "type": .string("array"), "items": uuidV1Identifier,
+                    "minItems": .int(1), "maxItems": .int(1024), "uniqueItems": .bool(true),
+                ]),
+                "changes": .object(["type": .string("object"), "additionalProperties": tagged]),
+                "unset": .object([
+                    "type": .string("array"),
+                    "items": .object(["type": .string("string"), "minLength": .int(1)]),
+                    "maxItems": .int(4096),
+                    "uniqueItems": .bool(true),
+                ]),
+                "operationID": .object([
+                    "type": .string("string"), "minLength": .int(1), "maxLength": .int(200),
+                ]),
+            ],
+            required: [
+                "itemID", "expectedStateToken", "reviewedFrontier", "changes", "unset", "operationID",
+            ],
+            readOnly: false, idempotent: true, destructive: true,
+            requiredFeature: ServerFeature.revisionProjection.rawValue),
         .init(
             "tractanda_extracted_text", method: "TractandaItem/extractedText",
             description:
@@ -590,6 +695,28 @@ enum ToolCatalog {
             required: ["action", "operationID", "changes", "unset"], readOnly: false,
             idempotent: true, destructive: true),
         .init(
+            "tractanda_capture_preview", method: "TractandaItem/prepareCapture",
+            description:
+                "Explicit authoring preview for #name, #[Parent/Child] or #[categoryID]. Supply a complete native CommitRequest in request. Body stays plain text. Unknown, ambiguous, excluded and conflicting dates require review. Category captureDate freezes a YYYY-MM-DD calendar date using its configured timezone; no alarm is scheduled. Return the entire unchanged plan to tractanda_capture_commit, retaining it for retries. Imports and tractanda_commit do not parse hashtags.",
+            properties: ["request": .object(["type": .string("object")]), "at": text],
+            required: ["request"], requiredFeature: ServerFeature.inlineCapture.rawValue),
+        .init(
+            "tractanda_capture_commit", method: "TractandaItem/commitCapture",
+            description:
+                "Commit the exact complete plan from tractanda_capture_preview after resolving all issues. Revalidates current item/category permissions, revisions and frozen interpretation, then publishes body, assignments and dates in one revision. Retry the identical plan after uncertainty; never generate a fresh operationID for the same edit.",
+            properties: [
+                "request": .object(["type": .string("object")]), "evaluatedAt": text,
+                "commitRequest": .object(["type": .string("object")]),
+                "categoryRevisionIDs": .object(["type": .string("object")]),
+                "mentions": .object(["type": .string("array")]),
+                "issues": .object(["type": .string("array")]),
+            ],
+            required: [
+                "request", "evaluatedAt", "commitRequest", "categoryRevisionIDs", "mentions", "issues",
+            ],
+            readOnly: false, idempotent: true, destructive: true,
+            requiredFeature: ServerFeature.inlineCapture.rawValue),
+        .init(
             "tractanda_semantic_status", method: "TractandaSemantic/status",
             description:
                 "Read semantic-index availability for the current OS-bound readable scope. Missing configuration means disabled.",
@@ -597,7 +724,7 @@ enum ToolCatalog {
         .init(
             "tractanda_semantic_search", method: "TractandaSemantic/search",
             description:
-                "Start an asynchronous semantic query; poll tractanda_semantic_results with queryID. A server declaring tractanda.semantic-job-timing.v1 in tractanda_info.features returns createdAt/expiresAt (120 seconds) and a pending retryAfterMilliseconds hint. Retain that expiry. Compiled documentation alone does not prove timing support. Makes no canonical edit.",
+                "Start an asynchronous semantic query; poll tractanda_semantic_results with queryID. A server declaring tractanda.semantic-job-timing.v1 in tractanda_info.features returns createdAt/expiresAt and a pending retryAfterMilliseconds hint. Pending allowance is hardware-configurable; consuming completion starts a separate 120-second result-retention window. Use the latest returned expiry. Compiled documentation alone does not prove timing support. Makes no canonical edit.",
             properties: [
                 "text": text, "expression": text, "viewID": identifier,
                 "categoryPath": .object(["type": .string("array"), "items": identifier, "maxItems": .int(32)]
@@ -611,7 +738,7 @@ enum ToolCatalog {
         .init(
             "tractanda_semantic_results", method: "TractandaSemantic/results",
             description:
-                "Poll a caller-scoped queryID. With native feature tractanda.semantic-job-timing.v1, result states retain createdAt/expiresAt and pending includes retryAfterMilliseconds; polling never extends expiry. notFound errors omit timing and deliberately do not distinguish expired/unknown/foreign IDs. Start a new search. Results recheck current access.",
+                "Poll a caller-scoped queryID. With native feature tractanda.semantic-job-timing.v1, result states return createdAt/expiresAt and pending includes retryAfterMilliseconds; completion updates expiry to the bounded result-retention window, while polling never extends it. notFound errors omit timing and deliberately do not distinguish expired/unknown/foreign IDs. Start a new search. Results recheck current access.",
             properties: ["queryID": identifier], required: ["queryID"]),
         .init(
             "tractanda_semantic_configure", method: "TractandaSemantic/configure",

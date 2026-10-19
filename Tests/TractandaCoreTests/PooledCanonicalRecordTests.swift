@@ -30,7 +30,8 @@ final class PooledCanonicalRecordTests: XCTestCase {
             mode: mode ?? row.mode, modificationSeconds: modificationSeconds ?? row.modificationSeconds,
             modificationNanoseconds: modificationNanoseconds ?? row.modificationNanoseconds,
             digest: digest ?? row.digest, createdAt: row.createdAt,
-            feedbackRevisionIDs: row.feedbackRevisionIDs)
+            feedbackRevisionIDs: row.feedbackRevisionIDs,
+            modifiedAt: row.modifiedAt, provenance: row.provenance)
     }
 
     func testReadsAndVerifiesCanonicalRevision() throws {

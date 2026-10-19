@@ -112,6 +112,215 @@ final class MCPTests: XCTestCase {
         }
     }
 
+    func testRevisionProjectionToolsDeclareFeatureAndRequireStateCAS() throws {
+        let definitions = Dictionary(
+            uniqueKeysWithValues: ToolCatalog.definitions().map { ($0.tool.name, $0) })
+        let state = try XCTUnwrap(definitions["tractanda_state"])
+        let conflicts = try XCTUnwrap(definitions["tractanda_conflicts"])
+        let resolve = try XCTUnwrap(definitions["tractanda_resolve_conflict"])
+        for definition in [state, conflicts, resolve] {
+            XCTAssertEqual(definition.requiredFeature, ServerFeature.revisionProjection.rawValue)
+        }
+        XCTAssertNoThrow(
+            try state.arguments(from: [
+                "ids": .array([.string("11111111-1111-1111-8111-111111111111")])
+            ]))
+        XCTAssertThrowsError(try state.arguments(from: ["ids": .array([.string("invalid")])]))
+        XCTAssertThrowsError(try conflicts.arguments(from: ["limit": .int(257)]))
+        let first = "11111111-1111-1111-8111-111111111111"
+        let second = "22222222-2222-1222-8222-222222222222"
+        let valid: [String: Value] = [
+            "itemID": .string(first), "expectedStateToken": .string("token"),
+            "reviewedFrontier": .array([.string(first), .string(second)]),
+            "changes": .object(["subject": .object(["type": .string("text"), "value": .string("chosen")])]),
+            "unset": .array([]), "operationID": .string("review-op"),
+        ]
+        XCTAssertNoThrow(try resolve.arguments(from: valid))
+        var legacyCAS = valid
+        legacyCAS["expectedRevisionID"] = .string(first)
+        XCTAssertThrowsError(try resolve.arguments(from: legacyCAS))
+        var repeatedFrontier = valid
+        repeatedFrontier["reviewedFrontier"] = .array([.string(first), .string(first)])
+        XCTAssertThrowsError(try resolve.arguments(from: repeatedFrontier))
+    }
+
+    func testResolveConflictToolGatesFeatureAndRetainsProjectionInCompactReceipt() async throws {
+        let itemID = "11111111-1111-1111-8111-111111111111"
+        let revisionID = "22222222-2222-1222-8222-222222222222"
+        let frontierID = "33333333-3333-1333-8333-333333333333"
+        let backend = NativeGateway(backend: { requestData in
+            let envelope = try JSONSerialization.jsonObject(with: requestData) as! [String: Any]
+            let calls = envelope["methodCalls"] as! [[Any]]
+            let method = calls[0][0] as! String
+            let result: [String: Any]
+            if method == "TractandaStore/info" {
+                result = ["features": [ServerFeature.revisionProjection.rawValue]]
+            } else {
+                result = [
+                    "revision": [
+                        "formatVersion": 2,
+                        "fields": [
+                            "itemID": itemID, "revisionID": revisionID, "requestIdentity": "private",
+                        ],
+                    ],
+                    "replayed": false, "indexReady": true, "warnings": [],
+                    "itemState": [
+                        "itemID": itemID, "stateToken": "ready-token", "status": "ready",
+                        "representativeRevisionID": revisionID, "detailsComplete": true,
+                    ],
+                ]
+            }
+            return try JSONSerialization.data(withJSONObject: [
+                "methodResponses": [[method, result, "client"]]
+            ])
+        })
+        let definition = try XCTUnwrap(
+            ToolCatalog.definitions().first { $0.tool.name == "tractanda_resolve_conflict" })
+        let arguments: [String: Value] = [
+            "itemID": .string(itemID), "expectedStateToken": .string("review-token"),
+            "reviewedFrontier": .array([.string(frontierID)]),
+            "changes": .object(["subject": .object(["type": .string("text"), "value": .string("chosen")])]),
+            "unset": .array([]), "operationID": .string("resolve-op"),
+        ]
+        let result = try await MCPAdapter.callNativeTool(
+            definition: definition, supplied: arguments, gateway: backend)
+        let decoded = try JSONDecoder().decode(Value.self, from: result)
+        XCTAssertNil(
+            decoded.objectValue?["revision"]?.objectValue?["fields"]?.objectValue?["requestIdentity"])
+        XCTAssertEqual(
+            decoded.objectValue?["itemState"]?.objectValue?["stateToken"]?.stringValue, "ready-token")
+    }
+
+    func testRevisionProjectionToolsExposeFeatureAndGuardConflictCASArguments() throws {
+        let definitions = Dictionary(
+            uniqueKeysWithValues: ToolCatalog.definitions().map { ($0.tool.name, $0) })
+        let state = try XCTUnwrap(definitions["tractanda_state"])
+        let conflicts = try XCTUnwrap(definitions["tractanda_conflicts"])
+        let resolve = try XCTUnwrap(definitions["tractanda_resolve_conflict"])
+        for tool in [state, conflicts, resolve] {
+            XCTAssertEqual(tool.requiredFeature, ServerFeature.revisionProjection.rawValue)
+        }
+        XCTAssertEqual(state.nativeMethod, "TractandaItem/state")
+        XCTAssertEqual(conflicts.nativeMethod, "TractandaItem/conflicts")
+        XCTAssertEqual(resolve.nativeMethod, "TractandaItem/resolveConflict")
+
+        let first = "11111111-1111-1111-8111-111111111111"
+        let second = "22222222-2222-1222-8222-222222222222"
+        XCTAssertNoThrow(try state.arguments(from: ["ids": .array([.string(first)])]))
+        XCTAssertThrowsError(try state.arguments(from: ["ids": .array([.string(first), .string(first)])]))
+        XCTAssertThrowsError(try state.arguments(from: ["ids": .array([.string("bad-id")])]))
+        let defaults = try conflicts.arguments(from: [:])
+        XCTAssertEqual(defaults["limit"], .int(64))
+        XCTAssertThrowsError(try conflicts.arguments(from: ["limit": .int(257)]))
+
+        let request: [String: Value] = [
+            "itemID": .string(first), "expectedStateToken": .string("state-token"),
+            "reviewedFrontier": .array([.string(first), .string(second)]),
+            "changes": .object(["subject": .object(["type": .string("text"), "value": .string("selected")])]),
+            "unset": .array([]), "operationID": .string("resolution-op"),
+        ]
+        XCTAssertNoThrow(try resolve.arguments(from: request))
+        var staleCAS = request
+        staleCAS["expectedRevisionID"] = .string(first)
+        XCTAssertThrowsError(try resolve.arguments(from: staleCAS))
+        var incompleteFrontier = request
+        incompleteFrontier["reviewedFrontier"] = .array([.string(first), .string(first)])
+        XCTAssertThrowsError(try resolve.arguments(from: incompleteFrontier))
+        XCTAssertTrue(resolve.idempotent)
+        XCTAssertFalse(resolve.readOnly)
+    }
+
+    func testInlineCaptureToolsDeclareFrozenPlanAndFeature() throws {
+        let definitions = ToolCatalog.definitions()
+        let preview = try XCTUnwrap(definitions.first { $0.tool.name == "tractanda_capture_preview" })
+        let commit = try XCTUnwrap(definitions.first { $0.tool.name == "tractanda_capture_commit" })
+        XCTAssertEqual(preview.nativeMethod, "TractandaItem/prepareCapture")
+        XCTAssertEqual(commit.nativeMethod, "TractandaItem/commitCapture")
+        for definition in [preview, commit] {
+            XCTAssertEqual(definition.requiredFeature, ServerFeature.inlineCapture.rawValue)
+        }
+        XCTAssertTrue(preview.readOnly)
+        XCTAssertFalse(commit.readOnly)
+        XCTAssertTrue(commit.idempotent)
+        XCTAssertEqual(
+            commit.required,
+            ["request", "evaluatedAt", "commitRequest", "categoryRevisionIDs", "mentions", "issues"])
+        XCTAssertThrowsError(try commit.arguments(from: ["request": .object([:])]))
+        let reference = try XCTUnwrap(ResourceCatalog.references.first { $0.key == "items" })
+        XCTAssertTrue(reference.text.contains("Retain the full plan through uncertainty"))
+        XCTAssertTrue(reference.text.contains("YYYY-MM-DD date-only"))
+    }
+
+    func testInlineCaptureMCPPreviewCommitAndReplayUseOneNativeRevision() async throws {
+        let parent = FileManager.default.temporaryDirectory
+        var capacity = statvfs()
+        guard statvfs(parent.path, &capacity) == 0, capacity.f_frsize > 0 else {
+            throw TractandaError("fixtureCapacity", "Cannot inspect tiny capture fixture capacity.")
+        }
+        let bytes = UInt64(capacity.f_bavail).multipliedReportingOverflow(by: UInt64(capacity.f_frsize))
+        guard !bytes.overflow, bytes.partialValue >= 10 * 1024 * 1024 * 1024 + 4 * 1024 * 1024 else {
+            throw TractandaError("fixtureCapacity", "Tiny capture fixture needs 10GiB reserve plus 4MiB cap.")
+        }
+        // Three records with a few short revisions estimate <1MiB; no models or external services.
+        let root = parent.appendingPathComponent("capture-mcp-\(Identifier.make())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try ItemStore.initializeFresh(root: root)
+        let category = try store.commit(
+            CommitRequest(
+                classID: "Item",
+                changes: [
+                    "subject": .text("Tomorrow"),
+                    "selection": .object([
+                        "language": .text(SpotlightQuery.profile), "expression": .text("itemID == *"),
+                    ]),
+                    "captureDate": .object([
+                        "property": .text("plannedDate"), "dayOffset": .integer(1),
+                        "timeZone": .text("UTC"),
+                    ]),
+                ], operationID: "category")
+        ).revision
+        let bridge = NativeServiceBridge(service: ItemService(store: store), peerUID: store.ownerUID)
+        let gateway = NativeGateway(backend: { bridge.handle($0) })
+        let preview = try XCTUnwrap(
+            ToolCatalog.definitions().first { $0.tool.name == "tractanda_capture_preview" })
+        let commit = try XCTUnwrap(
+            ToolCatalog.definitions().first { $0.tool.name == "tractanda_capture_commit" })
+        let request = CommitRequest(
+            classID: "Item", changes: ["body": .text("#tomorrow")], operationID: "capture")
+        let arguments = try JSONDecoder().decode(
+            Value.self,
+            from: JSON.encode(
+                CapturePreparation(
+                    request: request,
+                    at: "2026-03-28T23:30:00Z"))
+        ).objectValue!
+        let planData = try await MCPAdapter.callNativeTool(
+            definition: preview, supplied: arguments, gateway: gateway)
+        let plan = try JSON.decode(CapturePlan.self, planData)
+        XCTAssertTrue(plan.canCommit)
+        XCTAssertNil(plan.commitRequest.changes["categoryOverrides"]?.map?[category.itemID])
+        let frozen = try JSONDecoder().decode(Value.self, from: planData).objectValue!
+        let result = try await MCPAdapter.callNativeTool(
+            definition: commit, supplied: frozen, gateway: gateway)
+        let saved = try JSONDecoder().decode(Value.self, from: result).objectValue!
+        let fields = saved["revision"]!.objectValue!["fields"]!.objectValue!
+        XCTAssertEqual(fields["plannedDate"]?.objectValue?["value"]?.stringValue, "2026-03-29")
+        XCTAssertNil(fields["requestIdentity"], "MCP write results omit the server receipt payload")
+        _ = try store.commit(
+            CommitRequest(
+                action: .revise, itemID: category.itemID,
+                expectedRevisionID: category.revisionID, changes: ["subject": .text("Renamed")],
+                operationID: "rename"))
+        let replayData = try await MCPAdapter.callNativeTool(
+            definition: commit, supplied: frozen, gateway: gateway)
+        let replay = try JSONDecoder().decode(Value.self, from: replayData).objectValue!
+        let replayFields = replay["revision"]!.objectValue!["fields"]!.objectValue!
+        XCTAssertEqual(replay["replayed"]?.boolValue, true)
+        XCTAssertEqual(replayFields["revisionID"], fields["revisionID"])
+        let itemID = fields["itemID"]!.objectValue!["value"]!.stringValue!
+        XCTAssertEqual(try store.history(itemID).count, 1)
+    }
+
     func testAttachmentToolsAdvertiseReadOnlyBoundsAndRejectInvalidByteRanges() throws {
         let definitions = ToolCatalog.definitions()
         let list = try XCTUnwrap(definitions.first { $0.tool.name == "tractanda_attachments" })
@@ -315,12 +524,11 @@ final class MCPTests: XCTestCase {
             "tractanda-mcp-attachment-" + UUID().uuidString.lowercased(), isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let accounts = AttachmentAccounts()
-        let store = try ItemStore(root: root, accounts: accounts)
-        _ = try store.configureAccess(
-            .object([
+        let store = try ItemStore.initializeFresh(root: root, accounts: accounts,
+            initialAccessConfiguration: .object([
                 "profile": .text(AccessConfiguration.profile),
                 "users": .list([.text("alice"), .text("bob")]),
-            ]), operationID: "fixture-access")
+            ]))
         let body = Data("tiny-original".utf8)
         let sha256 = "5ce819276cba11f0ced8df8de3c75ad66f4caaaeefa87317eb75b12129b3b6bb"
         let base = try store.commit(

@@ -8,8 +8,9 @@ struct DocumentWorkerBudgets: Sendable {
     let noProgress: Double
     let terminationGrace: Double
     init(
-        inspect: Double = 30, modelLoad: Double = 180, page: Double = 180,
-        noProgress: Double = 60, terminationGrace: Double = 2
+        inspect: Double = DocumentJobResources.defaultInspectSeconds, modelLoad: Double = DocumentJobResources.defaultModelLoadSeconds,
+        page: Double = DocumentJobResources.defaultPageSeconds,
+        noProgress: Double = DocumentJobResources.defaultNoProgressSeconds, terminationGrace: Double = DocumentJobResources.defaultTerminationGraceSeconds
     ) throws {
         guard
             [inspect, modelLoad, page, noProgress, terminationGrace].allSatisfy({
@@ -34,6 +35,7 @@ struct DocumentWorkerDeadline {
     private(set) var phase: Phase
     private var started: ContinuousClock.Instant
     private var lastProgress: ContinuousClock.Instant
+    private var silentCompute = false
     init(budgets: DocumentWorkerBudgets, phase: Phase, now: ContinuousClock.Instant = .now) {
         self.budgets = budgets
         self.phase = phase
@@ -44,8 +46,12 @@ struct DocumentWorkerDeadline {
         self.phase = phase
         started = now
         lastProgress = now
+        silentCompute = false
     }
-    mutating func observe(meaningful: Bool, now: ContinuousClock.Instant = .now) {
+    mutating func observe(meaningful: Bool, workerPhase: String? = nil, now: ContinuousClock.Instant = .now) {
+        if let workerPhase {
+            silentCompute = ["modelLoad", "render", "prepare", "prefill"].contains(workerPhase)
+        }
         if meaningful { lastProgress = now }
     }
     private var phaseSeconds: Double {
@@ -58,14 +64,18 @@ struct DocumentWorkerDeadline {
         }
         return seconds
     }
+    private var usesProgressDeadline: Bool {
+        !silentCompute
+    }
     var deadline: ContinuousClock.Instant {
-        min(
+        if !usesProgressDeadline { return started.advanced(by: .seconds(phaseSeconds)) }
+        return min(
             started.advanced(by: .seconds(phaseSeconds)),
             lastProgress.advanced(by: .seconds(budgets.noProgress)))
     }
     /// Safe bounded context captured at failure, before termination can add cleanup time.
     func timeoutFailure(lastPhase: String?, now: ContinuousClock.Instant = .now) -> TractandaError {
-        let noProgress =
+        let noProgress = usesProgressDeadline &&
             lastProgress.advanced(by: .seconds(budgets.noProgress))
             < started.advanced(by: .seconds(phaseSeconds))
         let origin = noProgress ? lastProgress : started

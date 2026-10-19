@@ -25,21 +25,24 @@ actor SemanticEmbeddingProvider: SemanticEmbedding {
     init(configuration: SemanticConfiguration) throws {
         try configuration.validate()
         self.configuration = configuration
+        let settings = try Self.sessionConfiguration(configuration)
+        session = URLSession(configuration: settings, delegate: RedirectBlocker(), delegateQueue: nil)
+    }
+
+    static func sessionConfiguration(_ configuration: SemanticConfiguration) throws -> URLSessionConfiguration {
+        try configuration.validate()
         let settings = URLSessionConfiguration.ephemeral
-        settings.timeoutIntervalForRequest = 15
-        settings.timeoutIntervalForResource = 20
+        settings.timeoutIntervalForRequest = configuration.effectiveProviderTimeoutSeconds
+        settings.timeoutIntervalForResource = configuration.effectiveProviderTimeoutSeconds
         settings.httpShouldSetCookies = false
         settings.requestCachePolicy = .reloadIgnoringLocalCacheData
         // Numeric loopback alone does not suppress an OS PAC/proxy setting.
         // An empty proxy dictionary keeps this local-only provider direct.
         settings.connectionProxyDictionary = [:]
-        session = URLSession(configuration: settings, delegate: RedirectBlocker(), delegateQueue: nil)
+        return settings
     }
-
-    func embed(_ inputs: [String], query: Bool) async throws -> [[Double]] {
-        guard !inputs.isEmpty, inputs.count <= 16,
-            inputs.allSatisfy({ $0.utf8.count <= 32_768 })
-        else { throw TractandaError("semanticProvider", "Embedding batch exceeds local pilot limits.") }
+    static func request(_ configuration: SemanticConfiguration, inputs: [String], query: Bool) throws -> URLRequest {
+        try configuration.validate()
         guard let endpoint = URL(string: configuration.endpoint) else {
             throw TractandaError("semanticEndpoint", "Configured local endpoint is invalid.")
         }
@@ -49,8 +52,17 @@ actor SemanticEmbeddingProvider: SemanticEmbedding {
         ]
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
+        request.timeoutInterval = configuration.effectiveProviderTimeoutSeconds
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+        return request
+    }
+
+    func embed(_ inputs: [String], query: Bool) async throws -> [[Double]] {
+        guard !inputs.isEmpty, inputs.count <= 16,
+            inputs.allSatisfy({ $0.utf8.count <= 32_768 })
+        else { throw TractandaError("semanticProvider", "Embedding batch exceeds local pilot limits.") }
+        let request = try Self.request(configuration, inputs: inputs, query: query)
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw TractandaError("semanticProvider", "Local embedding provider returned an invalid response.")

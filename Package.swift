@@ -18,6 +18,7 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "Packages/TractandaClient"),
+        .package(path: "Packages/TractandaPeerTLS"),
         .package(url: "https://github.com/apple/swift-nio.git", exact: "2.101.3"),
         .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", exact: "0.12.1"),
         .package(url: "https://github.com/apple/swift-log.git", exact: "1.15.1"),
@@ -41,7 +42,8 @@ let package = Package(
             ]),
         .target(
             name: "CTractandaPlatform",
-            linkerSettings: [.linkedLibrary("pam"), .linkedLibrary("uuid", .when(platforms: [.linux]))]),
+            linkerSettings: [.linkedLibrary("pam"), .linkedLibrary("uuid", .when(platforms: [.linux])),
+                .linkedLibrary("proc", .when(platforms: [.macOS]))]),
         .executableTarget(name: "TractandaAuthHelper", dependencies: ["CTractandaPlatform"]),
         .executableTarget(
             name: "TractandaSetup",
@@ -56,6 +58,24 @@ let package = Package(
                 "CSQLite", "CTractandaPlatform", "TractandaLearning", "TractandaVectors",
                 .product(name: "TractandaClient", package: "TractandaClient"),
                 .product(name: "Crypto", package: "swift-crypto"),
+            ]),
+        .target(
+            name: "TractandaPeerTransport",
+            dependencies: [
+                "TractandaCore", .product(name: "TractandaPeerTLS", package: "TractandaPeerTLS"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+            ]),
+        .testTarget(
+            name: "TractandaPeerTransportTests",
+            dependencies: [
+                "TractandaPeerTransport", "TractandaCore",
+                .product(name: "TractandaPeerTLS", package: "TractandaPeerTLS"),
+                .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "CryptoExtras", package: "swift-crypto"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOEmbedded", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
             ]),
         .target(name: "TractandaKanban", dependencies: ["TractandaCore"]),
         .target(
@@ -87,19 +107,23 @@ let package = Package(
         .target(
             name: "TractandaServer",
             dependencies: [
-                "TractandaCore", "TractandaWeb", "TractandaMCP", "TractandaKanban",
+                "TractandaCore", "TractandaWeb", "TractandaMCP", "TractandaKanban", "TractandaPeerTransport",
                 "CTractandaPlatform",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
                 .product(name: "MCP", package: "swift-sdk"),
+                .product(name: "Crypto", package: "swift-crypto"),
             ]),
         .executableTarget(
             name: "TractandaCLI",
-            dependencies: ["TractandaCore", "TractandaKanban", "TractandaWeb", "TractandaServer"]),
+            dependencies: ["TractandaCore", "TractandaKanban", "TractandaWeb", "TractandaServer", "CTractandaPlatform"]),
         .testTarget(name: "TractandaCLITests", dependencies: ["TractandaCLI", "TractandaCore"]),
         .testTarget(
             name: "TractandaCoreTests", dependencies: ["TractandaCore"], resources: [.copy("Fixtures")]),
+        // Offline development support is compiled only into this opt-in test executable.
+        .testTarget(name: "FirstSourceConversionTests", dependencies: ["TractandaCore"],
+            path: "scripts/development/first-source-conversion", exclude: ["README.md", "run.py"]),
         .testTarget(name: "TractandaSetupTests", dependencies: ["TractandaSetup"]),
         .testTarget(
             name: "TractandaVectorsTests", dependencies: ["TractandaVectors", "CSQLite", "CTractandaVec1"]),
@@ -113,7 +137,7 @@ let package = Package(
         .testTarget(
             name: "TractandaServerTests",
             dependencies: [
-                "TractandaServer", "CTractandaPlatform",
+                "TractandaServer", "CTractandaPlatform", "TractandaPeerTransport",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
             ]),

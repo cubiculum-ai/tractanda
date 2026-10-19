@@ -7,7 +7,7 @@ public enum RecordCodec {
         let headers = [
             "MIME-Version: 1.0",
             "Content-Type: application/vnd.tractanda.item+json; charset=utf-8",
-            "X-Tractanda-Format-Version: 1",
+            "X-Tractanda-Format-Version: \(revision.formatVersion)",
             "X-IsA: \(revision.classID)",
             "X-Item-ID: \(revision.itemID)",
             "X-Revision-ID: \(revision.revisionID)",
@@ -40,7 +40,7 @@ public enum RecordCodec {
             headers["x-item-id"] == revision.itemID,
             headers["x-revision-id"] == revision.revisionID,
             headers["x-isa"] == revision.classID,
-            headers["x-tractanda-format-version"] == "1",
+            headers["x-tractanda-format-version"] == String(revision.formatVersion),
             headers["content-type"] == "application/vnd.tractanda.item+json; charset=utf-8"
         else {
             throw TractandaError("invalidRecord", "Envelope and dictionary disagree.")

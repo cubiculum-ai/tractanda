@@ -1,0 +1,15 @@
+--- a/config/compiler_cpu_abi.gn
++++ b/config/compiler_cpu_abi.gn
+@@ -55,7 +55,11 @@
+       cpu_abi_cflags += [ "-m64" ]
+       cpu_abi_ldflags += [ "-m64" ]
+     }
+-    cpu_abi_cflags += [ "-msse3" ]
++    if (is_linux && target_os != "chromeos") {
++      cpu_abi_cflags += [ "-msse2" ]
++    } else {
++      cpu_abi_cflags += [ "-msse3" ]
++    }
+     if (target_os == "chromeos" && cros_target_cpu_arch != "" &&
+         is_a_target_toolchain) {
+       cpu_abi_cflags += [ "-march=$cros_target_cpu_arch" ]

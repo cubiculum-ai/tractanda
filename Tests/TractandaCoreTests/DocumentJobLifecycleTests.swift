@@ -151,7 +151,10 @@ final class DocumentJobLifecycleTests: XCTestCase {
             _ = try store.prepareDocumentJobPublication(jobID, generation: claim.checkpoint.generation)
             store.afterDocumentJobCommitForTesting = { throw TractandaError("injected", "Lost commit reply") }
             XCTAssertThrowsError(try store.publishDocumentJob(jobID, generation: claim.checkpoint.generation))
-            committedRevision = try store.get(attached.itemID).revisionID
+            let canonical = try store.get(attached.itemID)
+            committedRevision = canonical.revisionID
+            XCTAssertEqual(canonical.formatVersion, 2)
+            XCTAssertEqual(try canonical.provenance?.originReplicaID, store.replicaID)
             XCTAssertEqual(try store.documentJobStatus(jobID).state, "completed")
         }
         let store = try AttachmentFixtureCapacity.makeStore(root: directory)
@@ -161,7 +164,10 @@ final class DocumentJobLifecycleTests: XCTestCase {
         XCTAssertEqual(result.state, "completed")
         XCTAssertEqual(result.committed?.revisionID, committedRevision)
         XCTAssertTrue(result.committed?.wasReplayed == true)
-        XCTAssertEqual(try store.get(intent.itemID).revisionID, committedRevision)
+        let reopened = try store.get(intent.itemID)
+        XCTAssertEqual(reopened.revisionID, committedRevision)
+        XCTAssertEqual(reopened.formatVersion, 2)
+        XCTAssertEqual(try reopened.provenance?.originReplicaID, store.replicaID)
     }
     func testUncertainPageBeforeCheckpointReopensOnlyOneOutcomeAndRejectsChangedReplay() throws {
         let directory = try root()

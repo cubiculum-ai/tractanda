@@ -2,6 +2,8 @@
 """Apply only the exact known local patch to the pinned runtime checkout."""
 
 import argparse
+import importlib.util
+import sys
 import hashlib
 import json
 import stat
@@ -13,7 +15,7 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def apply(checkout):
+def _apply_gelu(checkout):
     checkout = Path(checkout).resolve()
     root = Path(__file__).resolve().parent
     manifest = json.loads((root / "manifest.json").read_text())
@@ -57,6 +59,16 @@ def apply(checkout):
         "manifestSHA256": digest(root / "manifest.json"),
         "patches": receipts,
     }
+
+
+def apply(checkout):
+    if sys.platform == "linux":
+        source = Path(__file__).resolve().parent / "apply-linux.py"
+        spec = importlib.util.spec_from_file_location("tractanda_linux_docling_patch", source)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.apply(checkout, _apply_gelu)
+    return _apply_gelu(checkout)
 
 
 if __name__ == "__main__":

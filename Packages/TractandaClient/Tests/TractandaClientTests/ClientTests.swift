@@ -13,9 +13,9 @@ private actor ScriptedTransport: ItemTransport {
     }
 }
 
-func revision(_ subject: String) throws -> Revision {
+func revision(_ subject: String, itemID: String? = nil) throws -> Revision {
     try Revision(fields: [
-        "itemID": .text(Identifier.make()), "revisionID": .text(Identifier.make()),
+        "itemID": .text(itemID ?? Identifier.make()), "revisionID": .text(Identifier.make()),
         "classID": .text("Item"), "actor": .text("user:test"), "operationID": .text("fixture"),
         "requestIdentity": .text("fixture"), "schemaVersion": .integer(1),
         "createdAt": .date("2026-09-08T00:00:00Z"), "modifiedAt": .date("2026-09-08T00:00:00Z"),
@@ -26,6 +26,261 @@ func revision(_ subject: String) throws -> Revision {
             "futureSetting": .text("preserve me"),
         ]),
     ])
+}
+
+@Test func batchGetPreservesMixedResolvedAndUnresolvedOutcomes() async throws {
+    let resolved = try revision("Resolved")
+    let unresolvedID = Identifier.make()
+    let missingID = Identifier.make()
+    let remainingID = Identifier.make()
+    let oversizedID = Identifier.make()
+    let unresolved = ItemUnresolvedState(
+        itemID: unresolvedID, status: .reviewRequired, stateToken: "item-state-token")
+    let response = ItemGetResult(
+        list: [resolved], notFound: [missingID], unresolved: [unresolved], state: "store-state",
+        remainingIDs: [remainingID], oversizedIDs: [oversizedID])
+    let transport = try ScriptedTransport([reply("TractandaItem/get", object(response))])
+
+    let result = try await ItemClient(transport: transport).items(
+        ids: [resolved.itemID, unresolvedID, missingID, remainingID, oversizedID])
+
+    #expect(result.list == [resolved])
+    #expect(result.unresolved == [unresolved])
+    #expect(result.notFound == [missingID])
+    #expect(result.remainingIDs == [remainingID])
+    #expect(result.oversizedIDs == [oversizedID])
+}
+
+@Test func getQueryAndHistoryKeepTypedHistoricalDispositions() async throws {
+    let demoted = try revision("Formerly accepted")
+    let dispositions = [demoted.revisionID: HistoricalDisposition.demoted]
+    let typedGet = ItemGetResult(
+        list: [demoted], notFound: [], state: "store-state",
+        historicalDispositions: dispositions)
+    let getTransport = try ScriptedTransport([reply("TractandaItem/get", object(typedGet))])
+    let get = try await ItemClient(transport: getTransport).items(ids: [demoted.itemID])
+    #expect(get.list == [demoted])
+    #expect(get.historicalDispositions == dispositions)
+
+    let legacyGetTransport = try ScriptedTransport([
+        reply(
+            "TractandaItem/get",
+            [
+                "list": [try object(demoted)], "notFound": [], "state": "store-state",
+            ])
+    ])
+    let legacyGet = try await ItemClient(transport: legacyGetTransport).items(ids: [demoted.itemID])
+    #expect(legacyGet.historicalDispositions.isEmpty)
+
+    let invalidGetTransport = try ScriptedTransport([
+        reply(
+            "TractandaItem/get",
+            [
+                "list": [try object(demoted)], "notFound": [], "state": "store-state",
+                "historicalDispositions": [Identifier.make(): "demoted"],
+            ])
+    ])
+    await #expect(
+        throws: TractandaError("protocolError", "The server returned an invalid native response.")
+    ) {
+        try await ItemClient(transport: invalidGetTransport).items(ids: [demoted.itemID])
+    }
+
+    let pageResult = ItemHistoryResult(
+        list: [demoted], total: 4, historicalDispositions: dispositions)
+    let historyTransport = try ScriptedTransport([
+        reply("TractandaItem/history", object(pageResult))
+    ])
+    let history = try await ItemClient(transport: historyTransport).history(
+        itemID: demoted.itemID, position: 2, limit: 1)
+    #expect(history.list == [demoted])
+    #expect(history.total == 4)
+    #expect(history.historicalDispositions == dispositions)
+    let requests = await historyTransport.requests
+    let envelope = try JSONSerialization.jsonObject(with: requests[0]) as! [String: Any]
+    let call = (envelope["methodCalls"] as! [[Any]])[0]
+    let arguments = call[1] as! [String: Any]
+    #expect(arguments["itemID"] as? String == demoted.itemID)
+    #expect(arguments["position"] as? Int == 2)
+    #expect(arguments["limit"] as? Int == 1)
+
+    let legacyHistoryTransport = try ScriptedTransport([
+        reply("TractandaItem/history", ["list": [try object(demoted)], "total": 1])
+    ])
+    let legacyHistory = try await ItemClient(transport: legacyHistoryTransport).history(
+        itemID: demoted.itemID)
+    #expect(legacyHistory.historicalDispositions.isEmpty)
+
+    let exactRevisionResult = RevisionGetResult(
+        revision: demoted, historicalDispositions: dispositions)
+    let exactRevisionTransport = try ScriptedTransport([
+        reply("TractandaRevision/get", object(exactRevisionResult))
+    ])
+    let exactRevision = try await ItemClient(transport: exactRevisionTransport).call(
+        "TractandaRevision/get",
+        arguments: ["itemID": demoted.itemID, "revisionID": demoted.revisionID],
+        returning: RevisionGetResult.self)
+    #expect(exactRevision.revision == demoted)
+    #expect(exactRevision.historicalDispositions == dispositions)
+
+    let invalidDispositionTransport = try ScriptedTransport([
+        reply(
+            "TractandaItem/history",
+            [
+                "list": [try object(demoted)], "total": 1,
+                "historicalDispositions": [Identifier.make(): "demoted"],
+            ])
+    ])
+    await #expect(
+        throws: TractandaError("protocolError", "The server returned an invalid native response.")
+    ) {
+        try await ItemClient(transport: invalidDispositionTransport).history(itemID: demoted.itemID)
+    }
+}
+
+@Test func queryPageCarriesDispositionFromItsGetHydration() async throws {
+    let historical = try revision("Demoted query result")
+    let result = ItemGetResult(
+        list: [historical], notFound: [], state: "query-token",
+        historicalDispositions: [historical.revisionID: .demoted])
+    let transport = try ScriptedTransport([
+        reply(
+            "TractandaItem/query",
+            [
+                "ids": [historical.itemID], "position": 0, "total": 1, "queryState": "query-token",
+            ]),
+        reply("TractandaItem/get", object(result)),
+    ])
+    let page = try await ItemClient(transport: transport).page(matching: ItemQuery(limit: 1))
+    #expect(page.items == [historical])
+    #expect(page.historicalDispositions == [historical.revisionID: .demoted])
+}
+
+@Test func singleRevisionReportsReadableUnresolvedState() async throws {
+    let itemID = Identifier.make()
+    let unresolved = ItemUnresolvedState(
+        itemID: itemID, status: .conflicted, stateToken: "token")
+    let result = ItemGetResult(list: [], notFound: [], unresolved: [unresolved], state: "state")
+    let transport = try ScriptedTransport([reply("TractandaItem/get", object(result))])
+    do {
+        _ = try await ItemClient(transport: transport).revision(for: itemID)
+        Issue.record("Expected unresolved item error")
+    } catch let error as TractandaError {
+        #expect(error.code == "itemUnresolved")
+    }
+}
+
+@Test func queryPageRetainsConsumedUnresolvedIDsAcrossGetChunks() async throws {
+    let ids = (0..<65).map { _ in Identifier.make() }
+    let resolved = try (0..<63).map { try revision("Resolved \($0)", itemID: ids[$0]) }
+    let unresolved = ItemUnresolvedState(
+        itemID: ids[63], status: .conflicted, stateToken: "item-token")
+    let transport = try ScriptedTransport([
+        reply(
+            "TractandaItem/query",
+            [
+                "ids": ids, "position": 7, "total": 100, "queryState": "query-token",
+                "completeness": "unresolvedItems", "conflictsAvailable": true,
+            ]),
+        reply(
+            "TractandaItem/get",
+            object(
+                ItemGetResult(
+                    list: resolved, notFound: [], unresolved: [unresolved], state: "query-token"))),
+        reply(
+            "TractandaItem/get",
+            object(
+                ItemGetResult(
+                    list: [], notFound: [ids[64]], state: "query-token"))),
+    ])
+
+    let page = try await ItemClient(transport: transport).page(matching: ItemQuery(position: 7, limit: 256))
+
+    #expect(page.items == resolved)
+    #expect(page.unresolved == [unresolved])
+    #expect(page.notFound == [ids[64]])
+    #expect(page.consumedCount == 65)
+    #expect(page.position == 7)
+    #expect(page.hasNextPage)
+    #expect(page.completeness == .unresolvedItems)
+    #expect(page.conflictsAvailable)
+    let requests = await transport.requests
+    #expect(requests.count == 3)
+    let firstGet = try JSONSerialization.jsonObject(with: requests[1]) as! [String: Any]
+    let secondGet = try JSONSerialization.jsonObject(with: requests[2]) as! [String: Any]
+    let firstCall = firstGet["methodCalls"] as! [[Any]]
+    let secondCall = secondGet["methodCalls"] as! [[Any]]
+    let firstArgs = firstCall[0][1] as! [String: Any]
+    let secondArgs = secondCall[0][1] as! [String: Any]
+    #expect((firstArgs["ids"] as? [String])?.count == 64)
+    #expect((secondArgs["ids"] as? [String]) == [ids[64]])
+}
+
+@Test func stateAndConflictResolutionPreserveStateCASWithoutChangingOrdinaryCommitShape() async throws {
+    let itemID = Identifier.make()
+    let state = ItemState(
+        itemID: itemID, stateToken: "state-token", status: .conflicted,
+        frontier: [Identifier.make(), Identifier.make()], conflictingFields: ["subject"],
+        detailsComplete: true)
+    let stateResult = ItemStateResult(list: [state], notFound: [], state: "store-state")
+    let resolvedRevisionBase = try revision("Resolved", itemID: itemID)
+    var fields = resolvedRevisionBase.fields
+    fields["operationID"] = .text("resolve-op")
+    let resolvedRevision = try Revision(fields: fields)
+    let commitResult = CommitResult(
+        revision: resolvedRevision, wasReplayed: false, isIndexReady: true, warnings: [],
+        itemState: ItemState(
+            itemID: itemID, stateToken: "new-state", status: .ready,
+            representativeRevisionID: resolvedRevision.revisionID, detailsComplete: true))
+    let transport = try ScriptedTransport([
+        reply("TractandaItem/state", object(stateResult)),
+        reply("TractandaItem/resolveConflict", object(commitResult)),
+    ])
+    let client = ItemClient(transport: transport)
+    #expect(try await client.itemStates(ids: [itemID]) == stateResult)
+    let request = ResolveConflictRequest(
+        itemID: itemID, expectedStateToken: "state-token", reviewedFrontier: state.frontier!,
+        changes: ["subject": .text("chosen")], unset: [], operationID: "resolve-op")
+    let result = try await client.resolveConflict(request)
+    #expect(result.revision == resolvedRevision)
+    #expect(result.itemState?.stateToken == "new-state")
+    let requests = await transport.requests
+    let envelope = try JSONSerialization.jsonObject(with: requests[1]) as! [String: Any]
+    let calls = envelope["methodCalls"] as! [[Any]]
+    let arguments = calls[0][1] as! [String: Any]
+    #expect(arguments["expectedStateToken"] as? String == "state-token")
+    #expect(arguments["reviewedFrontier"] as? [String] == state.frontier)
+    #expect(arguments["expectedRevisionID"] == nil)
+
+    let ordinary = CommitRequest(
+        action: .revise, itemID: itemID, expectedRevisionID: "base", operationID: "normal")
+    let ordinaryObject = try JSONSerialization.jsonObject(with: JSON.encode(ordinary)) as! [String: Any]
+    #expect(ordinaryObject["expectedStateToken"] == nil)
+    #expect(ordinaryObject["reviewedFrontier"] == nil)
+}
+
+@Test func conflictPagesRetainOpaqueCursorAndStoreState() async throws {
+    let item = ItemState(
+        itemID: Identifier.make(), stateToken: "item-token", status: .invariantConflict,
+        frontier: [Identifier.make()], detailsComplete: false,
+        resource: ItemStateResource(code: "categoryCycle", phase: .analysis, message: "Review required"))
+    let transport = try ScriptedTransport([
+        reply(
+            "TractandaItem/conflicts",
+            object(
+                ItemConflictPage(
+                    list: [item], nextCursor: "opaque-next", state: "store-token")))
+    ])
+    let page = try await ItemClient(transport: transport).conflicts(limit: 16, cursor: "opaque-before")
+    #expect(page.list == [item])
+    #expect(page.nextCursor == "opaque-next")
+    #expect(page.state == "store-token")
+    let requests = await transport.requests
+    let envelope = try JSONSerialization.jsonObject(with: requests[0]) as! [String: Any]
+    let calls = envelope["methodCalls"] as! [[Any]]
+    let arguments = calls[0][1] as! [String: Any]
+    #expect(arguments["limit"] as? Int == 16)
+    #expect(arguments["cursor"] as? String == "opaque-before")
 }
 
 func reply(_ method: String, _ value: Any, tag: String = "client") throws -> Data {

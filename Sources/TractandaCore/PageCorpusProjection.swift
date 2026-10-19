@@ -26,12 +26,27 @@ struct PageCorpusSpoolPolicy: Sendable {
         self.availableBytes = availableBytes
         self.stagingBoundary = stagingBoundary
     }
-    func check(at directory: URL, additionalBytes: Int64) throws {
-        let growth = try PageCorpusAllocation.rounded(
-            additionalBytes, allocationUnit: PageCorpusAllocation.allocationUnit(at: directory))
-        guard additionalBytes >= 0, growth <= maximumBytes else {
+    func reservation(additionalBytes: Int64, allocationUnit: Int64) throws -> Int64 {
+        guard additionalBytes >= 0, additionalBytes <= maximumBytes else {
             throw TractandaError("resourceLimit", "Corpus spool exceeds its operator byte budget.")
         }
+        return try PageCorpusAllocation.rounded(additionalBytes, allocationUnit: allocationUnit)
+    }
+    func checkAvailable(_ available: UInt64, reservedGrowth: Int64) throws {
+        guard reservedGrowth >= 0 else {
+            throw TractandaError("resourceLimit", "Invalid corpus spool reservation.")
+        }
+        let needed = UInt64(minimumFreeBytes).addingReportingOverflow(UInt64(reservedGrowth))
+        guard !needed.overflow, available >= needed.partialValue else {
+            throw TractandaError("resourceLimit", "Corpus spool would cross its genuine-free reserve.")
+        }
+    }
+    func check(at directory: URL, additionalBytes: Int64) throws {
+        let growth = try reservation(
+            additionalBytes: additionalBytes,
+            allocationUnit: PageCorpusAllocation.allocationUnit(at: directory))
+        // Preserve the conservative reservation for shared staging and genuine free space.
+        // This is not an exact pre-write physical allocation guarantee on variable filesystems.
         try stagingBoundary?(directory, growth)
         let available: UInt64
         if let availableBytes {
@@ -49,10 +64,7 @@ struct PageCorpusSpoolPolicy: Sendable {
             }
             available = product.partialValue
         }
-        let needed = UInt64(minimumFreeBytes).addingReportingOverflow(UInt64(growth))
-        guard !needed.overflow, available >= needed.partialValue else {
-            throw TractandaError("resourceLimit", "Corpus spool would cross its genuine-free reserve.")
-        }
+        try checkAvailable(available, reservedGrowth: growth)
     }
 }
 
@@ -367,10 +379,10 @@ enum PageCorpusProjection {
     }
 
     private static func budget(_ directory: URL, policy: PageCorpusSpoolPolicy, additional: Int64) throws {
-        let growth = try PageCorpusAllocation.check(
+        _ = try PageCorpusAllocation.check(
             PageCorpusAllocation.usage(at: directory), maximumBytes: policy.maximumBytes,
             additionalBytes: additional, allocationUnit: PageCorpusAllocation.allocationUnit(at: directory))
-        try policy.check(at: directory, additionalBytes: growth)
+        try policy.check(at: directory, additionalBytes: additional)
     }
     private static func privateDirectory(_ url: URL) throws {
         let metadata = try FileMetadata.read(at: url)

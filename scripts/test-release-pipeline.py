@@ -322,17 +322,19 @@ class ReleaseTests(unittest.TestCase):
         # Run the actual orchestration with side effects replaced, so adding a
         # stage without updating the plan cannot silently misstate progress.
         pipeline = object.__new__(release.Pipeline)
-        pipeline.state = {'status': 'ready', 'commit': 'test', 'steps': {}}
+        pipeline.state = {'status': 'ready', 'commit': 'test', 'steps': {}, 'delivery': release.delivery.fresh()}
         pipeline.source = Path('/unused')
         pipeline.save = lambda: None
         pipeline.step = lambda name, action: pipeline.state['steps'].update({name: {}})
         pipeline.verify_artifacts = lambda: None
         pipeline.health = lambda: {}
+        pipeline.install_gate = lambda: pipeline.state['steps'].update({'install-authorization': {}}) or True
+        pipeline.cluster_gate = lambda: pipeline.state['steps'].update({'cluster-acceptance': {}}) or True
         pipeline.wait_for_ci = lambda timeout: pipeline.state['steps'].update({'ci': {}})
         with patch.object(release, 'git', side_effect=['test', '']):
             pipeline.run()
-        self.assertEqual(pipeline.state['plannedSteps'], list(release.RELEASE_STEPS))
-        self.assertEqual(list(pipeline.state['steps']), list(release.RELEASE_STEPS))
+        self.assertEqual(pipeline.state['plannedSteps'], release.delivery.release_plan(release.RELEASE_STEPS))
+        self.assertEqual(list(pipeline.state['steps']), release.delivery.release_plan(release.RELEASE_STEPS))
         self.assertEqual(pipeline.state['status'], 'complete')
 
     def test_release_configuration_does_not_require_a_notary_profile(self):
@@ -384,8 +386,8 @@ class ReleaseTests(unittest.TestCase):
         pipeline = release.Pipeline({'directory': '/unused', 'version': 'test', 'steps': {},
             'configuration': {'softwareRoot': '/installed', 'instance': 'production'}})
         manifest = {'files': [{'path': 'bin/tractanda', 'sha256': 'signed'}],
-                    'embedding': {'model': 'granite'}}
-        native = json.dumps({'server': {'executableSHA256': 'signed'}})
+                    'embedding': {'model': 'granite'}, 'canonicalFormats': {'profile': 'test-fixture'}}
+        native = json.dumps({'server': {'executableSHA256': 'signed'}, 'canonicalFormats': manifest['canonicalFormats']})
         with patch.object(release, 'read', return_value=manifest), patch.object(release, 'sha', return_value='same'):
             for semantic in ({'enabled': False}, {'enabled': True, 'model': 'qwen'}):
                 with patch.object(release, 'command', side_effect=[native, json.dumps(semantic)]):
@@ -561,16 +563,18 @@ class ReleaseTests(unittest.TestCase):
         pipeline = object.__new__(release.Pipeline)
         pipeline.directory = Path('/unused')
         pipeline.source = Path('/unused/source')
-        pipeline.state = {'status': 'ready', 'commit': 'test', 'steps': {}}
+        pipeline.state = {'status': 'ready', 'commit': 'test', 'steps': {}, 'delivery': release.delivery.fresh()}
         pipeline.save = lambda: None
         pipeline.step = lambda name, action: pipeline.state['steps'].update({name: {}})
         pipeline.verify_artifacts = lambda: None
         pipeline.health = lambda: {}
+        pipeline.install_gate = lambda: pipeline.state['steps'].update({'install-authorization': {}}) or True
+        pipeline.cluster_gate = lambda: pipeline.state['steps'].update({'cluster-acceptance': {}}) or True
         pipeline.wait_for_ci = lambda timeout: pipeline.state['steps'].update({'ci': {}})
         seen = []
         def retention(value):
             self.assertEqual(value.state['status'], 'complete')
-            self.assertEqual(set(value.state['steps']), set(release.RELEASE_STEPS))
+            self.assertEqual(set(value.state['steps']), set(release.delivery.release_plan(release.RELEASE_STEPS)))
             seen.append(value)
         with patch.object(release, 'git', side_effect=['test', '']), \
                 patch.object(release, 'record_release_retention', side_effect=retention):

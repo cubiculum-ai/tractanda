@@ -1,0 +1,115 @@
+--- a/Sources/NIOSSL/NIOSSLHandler.swift
++++ b/Sources/NIOSSL/NIOSSLHandler.swift
+@@ -1164,3 +1164,8 @@
+         self.doHandshakeStep(context: storedContext)
+     }
+ }
++
++// Tractanda addition: package-only facts on the owning event loop.
++extension NIOSSLHandler {
++    package func tractandaFacts() -> TractandaTLSFacts { self.connection.tractandaFacts() }
++}
+--- a/Sources/NIOSSL/SSLConnection.swift
++++ b/Sources/NIOSSL/SSLConnection.swift
+@@ -42,6 +42,8 @@
+ /// framing required by TLS. It also records the configuration and parent `NIOSSLContext` object
+ /// used to create the connection.
+ internal final class SSLConnection {
++    internal var tractandaSelectedIdentity: [UInt8]?
++    internal var tractandaTicketMessages = 0
+     private let ssl: OpaquePointer
+     internal let parentContext: NIOSSLContext
+     private var bio: ByteBufferBIO?
+@@ -78,6 +80,24 @@
+         SSL_set_ex_data(self.ssl, sslConnectionExDataIndex, pointerToSelf)
+ 
+         self.setRenegotiationSupport(self.parentContext.configuration.renegotiationSupport)
++
++        // Capture only public credential identity and handshake message type, never message bodies.
++        SSL_set_info_callback(self.ssl) { ssl, event, _ in
++            guard let ssl, event & SSL_CB_HANDSHAKE_DONE != 0,
++                  let credential = SSL_get0_selected_credential(ssl) else { return }
++            var count = 0
++            if let identity = SSL_CREDENTIAL_get0_pre_shared_key_id(credential, &count) {
++                SSLConnection.loadConnectionFromSSL(ssl).tractandaSelectedIdentity =
++                    Array(UnsafeBufferPointer(start: identity, count: count))
++            }
++        }
++        SSL_set_msg_callback(self.ssl) { _, _, contentType, bytes, count, ssl, _ in
++            guard contentType == 22, count > 0, let bytes, let ssl else { return }
++            if bytes.load(as: UInt8.self) == 4 {
++                SSLConnection.loadConnectionFromSSL(ssl).tractandaTicketMessages += 1
++            }
++        }
++
+     }
+ 
+     deinit {
+@@ -590,3 +610,24 @@
+         return Unmanaged<SSLConnection>.fromOpaque(connectionPointer).takeUnretainedValue()
+     }
+ }
++
++// Tractanda addition: package-only authentication facts; never exports keys/native pointers.
++package struct TractandaTLSFacts {
++    package let version: UInt16
++    package let group: UInt16
++    package let cipher: UInt16
++    package let identity: [UInt8]?
++    package let server: Bool
++    package let certificate: Bool
++    package let earlyData: Bool
++    package let ticketMessages: Int
++}
++extension SSLConnection {
++    func tractandaFacts() -> TractandaTLSFacts {
++        .init(version: UInt16(SSL_version(self.ssl)), group: SSL_get_group_id(self.ssl),
++            cipher: SSL_get_current_cipher(self.ssl).map { SSL_CIPHER_get_protocol_id($0) } ?? 0,
++            identity: self.tractandaSelectedIdentity, server: SSL_is_server(self.ssl) != 0,
++            certificate: SSL_get0_peer_certificates(self.ssl) != nil,
++            earlyData: SSL_early_data_accepted(self.ssl) != 0, ticketMessages: self.tractandaTicketMessages)
++    }
++}
+--- a/Sources/NIOSSL/SSLContext.swift
++++ b/Sources/NIOSSL/SSLContext.swift
+@@ -1007,3 +1007,40 @@
+         }
+     }
+ }
++
++// Tractanda addition: package-only immutable imported-PSK context construction.
++extension NIOSSLContext {
++    package convenience init(tractandaKey: UnsafeBufferPointer<UInt8>, identity: [UInt8], context: [UInt8], alpn: String) throws {
++        var configuration = TLSConfiguration.makeClientConfiguration()
++        configuration.minimumTLSVersion = .tlsv13
++        configuration.maximumTLSVersion = .tlsv13
++        configuration.certificateVerification = .none
++        configuration.trustRoots = .certificates([])
++        configuration.curves = [.x25519_MLKEM768]
++        configuration.applicationProtocols = [alpn]
++        try self.init(configuration: configuration)
++        try self.tractandaInstallPSK(key: tractandaKey, identity: identity, context: context)
++    }
++
++    package func tractandaInstallPSK(key: UnsafeBufferPointer<UInt8>, identity: [UInt8], context: [UInt8]) throws {
++        let credential = identity.withUnsafeBufferPointer { identity in
++            context.withUnsafeBufferPointer { context in
++                SSL_CREDENTIAL_new_pre_shared_key(key.baseAddress, key.count, identity.baseAddress,
++                    identity.count, EVP_sha256(), context.baseAddress, context.count)
++            }
++        }
++        guard let credential else { throw BoringSSLError.unknownError(BoringSSLError.buildErrorStack()) }
++        defer { SSL_CREDENTIAL_free(credential) }
++        guard SSL_CTX_add1_credential(self.sslContext, credential) == 1 else {
++            throw BoringSSLError.unknownError(BoringSSLError.buildErrorStack())
++        }
++        SSL_CTX_set_num_tickets(self.sslContext, 0)
++        SSL_CTX_set_session_cache_mode(self.sslContext, SSL_SESS_CACHE_OFF)
++        SSL_CTX_set_early_data_enabled(self.sslContext, 0)
++        SSL_CTX_set_options(self.sslContext, UInt32(SSL_OP_NO_TICKET))
++        var cipher: UInt16 = 0x1302
++        guard SSL_CTX_set1_tls13_ciphers(self.sslContext, &cipher, nil, 1) == 1 else {
++            throw BoringSSLError.unknownError(BoringSSLError.buildErrorStack())
++        }
++    }
++}

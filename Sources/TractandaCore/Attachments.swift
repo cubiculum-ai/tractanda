@@ -29,6 +29,20 @@ final class AttachmentPayloadStore: @unchecked Sendable {
 
     private let stagingQuota: StagingByteQuota?
     private let root: URL
+    private var placement: PayloadPlacement!
+    var placementArrivalMinuteForTesting: (() throws -> String) {
+        get { placement.arrivalMinute }
+        set { placement.arrivalMinute = newValue }
+    }
+    var afterPlacementIntentForTesting: (() throws -> Void)? {
+        get { placement.afterIntent }
+        set { placement.afterIntent = newValue }
+    }
+    var afterPlacementFileForTesting: (() throws -> Void)? {
+        get { placement.afterFile }
+        set { placement.afterFile = newValue }
+    }
+    var placementRecoveryScansForTesting: Int { placement.recoveryScans }
     private let ownerUID: UInt32
     private let reserveBytes: Int64
     private let availableBytesOverride: (@Sendable () throws -> UInt64)?
@@ -49,7 +63,7 @@ final class AttachmentPayloadStore: @unchecked Sendable {
         root: URL, ownerUID: UInt32, reserveBytes: Int64 = defaultReserveBytes,
         availableBytes: (@Sendable () throws -> UInt64)? = nil,
         maxFileBytesForTesting: Int64? = nil, maxChunkBytesForTesting: Int? = nil,
-        stagingQuota: StagingByteQuota? = nil
+        stagingQuota: StagingByteQuota? = nil, indexDirectory: URL? = nil
     ) throws {
         guard reserveBytes >= 0 else {
             throw TractandaError("unsafeAttachmentStore", "Invalid attachment free-space reserve.")
@@ -72,6 +86,11 @@ final class AttachmentPayloadStore: @unchecked Sendable {
         guard rootDescriptor >= 0 else { throw Self.posix("Cannot open canonical attachment root.") }
         defer { _ = close(rootDescriptor) }
         try Self.validateDirectory(rootDescriptor, ownerUID: ownerUID)
+        placement = PayloadPlacement(root: self.root, indexDirectory: indexDirectory, ownerUID: ownerUID) {
+            [weak self] bytes, location in
+            guard let self else { throw TractandaError("unsafeAttachmentStore", "Payload storage closed.") }
+            try self.ensureReserve(forAdditionalBytes: bytes, at: location)
+        }
     }
 
     /// Creates an empty server-owned upload stage. The upload ID is a validated UUIDv1 and is
@@ -79,20 +98,12 @@ final class AttachmentPayloadStore: @unchecked Sendable {
     func createStaging(id: String, onCreated: () -> Void = {}) throws {
         try Self.validateID(id)
         try ensureReserve(forAdditionalBytes: UInt64(Self.pathComponentLimit))
-        let payloadDirectories = try openPayloadParent(id: id, create: true)
-        defer { closeAll(payloadDirectories) }
-        var existingPayload = stat()
-        let payloadStatus = Self.payloadName(id).withCString {
-            fstatat(payloadDirectories.last!, $0, &existingPayload, AT_SYMLINK_NOFOLLOW)
-        }
-        if payloadStatus == 0 {
+        guard try resolvedPayloadPath(id) == nil else {
             throw TractandaError("identifierCollision", "Attachment ID already names a published payload.")
-        }
-        guard errno == ENOENT else {
-            throw TractandaError("unsafeAttachmentStore", "Cannot validate attachment ID availability.")
         }
         let directory = try openDirectoryChain(components: ["attachments", ".staging"], create: true)
         defer { closeAll(directory) }
+        try ensureReserve(forAdditionalBytes: UInt64(Self.pathComponentLimit), descriptor: directory.last!)
         let name = Self.stageName(id)
         let descriptor = name.withCString {
             openat(
@@ -151,7 +162,7 @@ final class AttachmentPayloadStore: @unchecked Sendable {
             throw TractandaError("uploadOffsetMismatch", "Attachment chunks must be sequential.")
         }
         if data.isEmpty { return currentSize }
-        try ensureReserve(forAdditionalBytes: UInt64(data.count))
+        try ensureReserve(forAdditionalBytes: UInt64(data.count), descriptor: descriptor)
         // Reserve before the bounded write; failures conservatively retain the charged bytes
         // until startup reconstructs actual sizes or the stage is durably disposed.
         try stagingQuota?.charge(data.count, path: ["attachments", ".staging", name])
@@ -171,7 +182,8 @@ final class AttachmentPayloadStore: @unchecked Sendable {
         let directories = try openDirectoryChain(components: ["attachments", ".staging"], create: false)
         defer { closeAll(directories) }
         let descriptor = try Self.openFile(
-            in: directories.last!, name: Self.stageName(id), flags: O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+            in: directories.last!, name: Self.stageName(id),
+            flags: O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
         defer { _ = close(descriptor) }
         let metadata = try Self.metadata(for: descriptor)
         guard Self.validStagingMetadata(metadata, allowSealed: true, ownerUID: ownerUID),
@@ -185,14 +197,36 @@ final class AttachmentPayloadStore: @unchecked Sendable {
 
     /// Publishes a verified staged payload without replacing an existing immutable attachment.
     /// Linking the same inode into the payload tree avoids an unbounded duplicate copy.
-    func publish(descriptor attachment: AttachmentDescriptor, requireVerifiedStage: Bool = false) throws {
+    func publish(
+        descriptor attachment: AttachmentDescriptor, requireVerifiedStage: Bool = false,
+        stageID: String? = nil
+    ) throws {
+        let stageID = stageID ?? attachment.attachmentID
+        try Self.validateID(stageID)
         _ = try Self.validated(attachment)
-        let payloadDirectories = try openPayloadParent(id: attachment.attachmentID, create: true)
+        try placement.publish(attachment, recover: recoverPlacement, reconcile: reconcilePlacement) {
+            path, existing in
+            if !existing {
+                try CanonicalReaderRequirement.beforePayloadPlacementPublication(
+                    root: root, ownerUID: ownerUID)
+            }
+            try publishAt(
+                descriptor: attachment, path: path, existing: existing,
+                requireVerifiedStage: requireVerifiedStage, stageID: stageID)
+        }
+    }
+
+    private func publishAt(
+        descriptor attachment: AttachmentDescriptor, path: String, existing: Bool, requireVerifiedStage: Bool,
+        stageID: String
+    ) throws {
+        let payloadDirectories = try openDirectoryChain(
+            components: Array(path.split(separator: "/").map(String.init).dropLast()), create: !existing)
         defer { closeAll(payloadDirectories) }
         let payloadParent = payloadDirectories.last!
         let payloadName = Self.payloadName(attachment.attachmentID)
         if let existing = try? Self.openFile(
-            in: payloadParent, name: payloadName, flags: O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+            in: payloadParent, name: payloadName, flags: O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
         {
             defer { _ = close(existing) }
             if requireVerifiedStage {
@@ -206,7 +240,7 @@ final class AttachmentPayloadStore: @unchecked Sendable {
             guard fsync(payloadParent) == 0 else {
                 throw Self.posix("Cannot synchronize attachment payload directory.")
             }
-            try discardStaging(id: attachment.attachmentID)
+            try discardStaging(id: stageID)
             return
         }
 
@@ -214,9 +248,9 @@ final class AttachmentPayloadStore: @unchecked Sendable {
             components: ["attachments", ".staging"], create: false)
         defer { closeAll(stagingDirectories) }
         let stagingParent = stagingDirectories.last!
-        let stageName = Self.stageName(attachment.attachmentID)
+        let stageName = Self.stageName(stageID)
         let staged = try Self.openFile(
-            in: stagingParent, name: stageName, flags: O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+            in: stagingParent, name: stageName, flags: O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
         defer { _ = close(staged) }
         let before = try Self.metadata(for: staged)
         guard Self.validStagingMetadata(before, allowSealed: true, ownerUID: ownerUID),
@@ -252,6 +286,12 @@ final class AttachmentPayloadStore: @unchecked Sendable {
             throw TractandaError(
                 "attachmentIntegrity", "Attachment stage metadata changed before publication.")
         }
+        guard try Self.metadata(for: payloadParent).device == publishedMetadata.device else {
+            throw TractandaError(
+                "unsupportedPayloadFilesystem",
+                "Private stage and current payload destination must share a filesystem for immutable no-copy publication."
+            )
+        }
         let linkResult = stageName.withCString { sourceName in
             payloadName.withCString { destinationName in
                 linkat(stagingParent, sourceName, payloadParent, destinationName, 0)
@@ -260,14 +300,15 @@ final class AttachmentPayloadStore: @unchecked Sendable {
         if linkResult != 0 {
             if errno == EEXIST,
                 let existing = try? Self.openFile(
-                    in: payloadParent, name: payloadName, flags: O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+                    in: payloadParent, name: payloadName,
+                    flags: O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
             {
                 defer { _ = close(existing) }
                 try verifyPayload(attachment, descriptor: existing, cacheResult: true)
                 guard fsync(payloadParent) == 0 else {
                     throw Self.posix("Cannot synchronize attachment payload directory.")
                 }
-                try discardStaging(id: attachment.attachmentID)
+                try discardStaging(id: stageID)
                 return
             }
             throw Self.posix("Cannot publish attachment payload.")
@@ -312,7 +353,11 @@ final class AttachmentPayloadStore: @unchecked Sendable {
             let descriptor = files.last!
             do {
                 let before = try Self.metadata(for: descriptor)
-                guard Self.validPublishedMetadata(before, descriptor: attachment, ownerUID: ownerUID) else {
+                guard
+                    Self.validPublishedMetadata(
+                        before, descriptor: attachment, ownerUID: ownerUID,
+                        archived: Self.isArchived(descriptor))
+                else {
                     throw TractandaError(
                         "attachmentIntegrity", "Attachment metadata does not match its descriptor.")
                 }
@@ -372,7 +417,10 @@ final class AttachmentPayloadStore: @unchecked Sendable {
             defer { closeAll(files) }
             let descriptor = files.last!
             let before = try Self.metadata(for: descriptor)
-            guard Self.validPublishedMetadata(before, descriptor: attachment, ownerUID: ownerUID) else {
+            guard
+                Self.validPublishedMetadata(
+                    before, descriptor: attachment, ownerUID: ownerUID, archived: Self.isArchived(descriptor))
+            else {
                 throw TractandaError(
                     "attachmentIntegrity", "Source attachment metadata changed during clone.")
             }
@@ -447,7 +495,10 @@ final class AttachmentPayloadStore: @unchecked Sendable {
     // Test-only path permits tiny, isolated symlink/corruption cases without exposing a URL publicly.
     func payloadURL(for attachmentID: String) throws -> URL {
         try Self.validateID(attachmentID)
-        return URL(fileURLWithPath: root.path + "/" + (try Self.payloadRelativePath(attachmentID)))
+        guard let path = try resolvedPayloadPath(attachmentID) else {
+            throw TractandaError("attachmentIntegrity", "Original is missing.")
+        }
+        return root.appendingPathComponent(path)
     }
 
     func stagingURLForTesting(id: String) throws -> URL {
@@ -455,22 +506,229 @@ final class AttachmentPayloadStore: @unchecked Sendable {
         return root.appendingPathComponent("attachments/.staging/\(Self.stageName(id))")
     }
 
-    private func openPayloadParent(id: String, create: Bool) throws -> [Int32] {
+    func preparePlacement() throws {
+        do { try placement.prepare(recover: recoverPlacement, reconcile: reconcilePlacement) } catch let error
+            as TractandaError where error.code == "payloadIndexRecoveryRequired"
+        {
+            try rebuildPlacement()
+        }
+    }
+
+    func rebuildPlacement() throws {
+        try placement.rebuild(recover: recoverPlacement, reconcile: reconcilePlacement)
+    }
+
+    func truncatePeerUnacknowledgedTail(stageID: String, to offset: Int64) throws {
+        try Self.validateID(stageID)
+        let chain = try openDirectoryChain(components: ["attachments", ".staging"], create: false)
+        defer { closeAll(chain) }
+        let fd = try openRegularFile(
+            in: chain.last!, name: Self.stageName(stageID),
+            flags: O_RDWR | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC, expectedMode: Self.stagingMode)
+        defer { _ = close(fd) }
+        let before = try Self.metadata(for: fd)
+        guard offset >= 0, UInt64(offset) <= before.size,
+            before.size - UInt64(offset) < UInt64(Self.maximumChunkBytes),
+            ftruncate(fd, off_t(offset)) == 0, fsync(fd) == 0,
+            try Self.metadata(for: fd).size == UInt64(offset)
+        else {
+            throw TractandaError("peerObjectCollision", "Cannot repair unacknowledged private peer tail.")
+        }
+        stagingQuota?.refund(
+            Int(before.size - UInt64(offset)), path: ["attachments", ".staging", Self.stageName(stageID)])
+    }
+
+    func peerStage(_ stageID: String, maximumBytes: Int64) throws -> PeerOriginalFile {
+        try Self.validateID(stageID)
+        let directories = try openDirectoryChain(components: ["attachments", ".staging"], create: false)
+        do {
+            let fd = try Self.openFile(
+                in: directories.last!, name: Self.stageName(stageID),
+                flags: O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+            let chain = directories + [fd]
+            do {
+                let metadata = try Self.metadata(for: fd)
+                guard maximumBytes >= 0, metadata.size <= UInt64(maximumBytes),
+                    Self.validStagingMetadata(metadata, allowSealed: true, ownerUID: ownerUID)
+                else {
+                    throw TractandaError("attachmentIntegrity", "Peer stage metadata differs.")
+                }
+                return PeerOriginalFile(
+                    metadata: metadata, descriptors: chain,
+                    read: { offset, count in
+                        try Self.readExactly(descriptor: fd, offset: offset, count: count)
+                    },
+                    validate: {
+                        guard try Self.metadata(for: fd) == metadata else {
+                            throw TractandaError("attachmentIntegrity", "Peer stage changed.")
+                        }
+                    })
+            } catch {
+                _ = close(fd)
+                throw error
+            }
+        } catch {
+            closeAll(directories)
+            throw error
+        }
+    }
+    func peerStoredFile(id: String, byteCount: Int64) throws -> PeerOriginalFile {
+        let chain = try openPayloadFile(id: id)
+        do {
+            let fd = chain.last!
+            let metadata = try Self.metadata(for: fd)
+            guard byteCount >= 0, metadata.size == UInt64(byteCount), metadata.type == .regular,
+                Self.isArchived(fd)
+                    || (metadata.uid == ownerUID && metadata.mode & 0o777 == UInt32(Self.publishedMode))
+            else {
+                throw TractandaError("attachmentIntegrity", "Peer stored original metadata differs.")
+            }
+            return PeerOriginalFile(
+                metadata: metadata, descriptors: chain,
+                read: { offset, count in try Self.readExactly(descriptor: fd, offset: offset, count: count) },
+                validate: {
+                    guard try Self.metadata(for: fd) == metadata else {
+                        throw TractandaError("attachmentIntegrity", "Peer stored original changed.")
+                    }
+                })
+        } catch {
+            closeAll(chain)
+            throw error
+        }
+    }
+
+    /// Retained descriptor for bounded peer verification; no pathname crosses the peer protocol.
+    func peerOriginal(_ attachment: AttachmentDescriptor, stageID: String? = nil) throws -> PeerOriginalFile {
+        let chain: [Int32]
+        if let stageID {
+            try Self.validateID(stageID)
+            let directories = try openDirectoryChain(components: ["attachments", ".staging"], create: false)
+            do {
+                let fd = try Self.openFile(
+                    in: directories.last!, name: Self.stageName(stageID),
+                    flags: O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+                chain = directories + [fd]
+            } catch {
+                closeAll(directories)
+                throw error
+            }
+        } else {
+            chain = try openPayloadFile(id: attachment.attachmentID)
+        }
+        do {
+            let fd = chain.last!
+            let metadata = try Self.metadata(for: fd)
+            guard metadata.size == UInt64(attachment.byteCount),
+                stageID != nil
+                    ? Self.validStagingMetadata(metadata, allowSealed: true, ownerUID: ownerUID)
+                    : Self.validPublishedMetadata(
+                        metadata, descriptor: attachment, ownerUID: ownerUID, archived: Self.isArchived(fd))
+            else {
+                throw TractandaError("attachmentIntegrity", "Peer original metadata differs.")
+            }
+            return PeerOriginalFile(
+                metadata: metadata, descriptors: chain,
+                read: { offset, count in try Self.readExactly(descriptor: fd, offset: offset, count: count) },
+                validate: {
+                    guard try Self.metadata(for: fd) == metadata else {
+                        throw TractandaError(
+                            "attachmentIntegrity", "Peer original changed during verification.")
+                    }
+                })
+        } catch {
+            closeAll(chain)
+            throw error
+        }
+    }
+    func rememberPeerVerification(_ attachment: AttachmentDescriptor, metadata: FileMetadata) {
+        putCached(attachment, metadata: metadata)
+    }
+
+    func resolvedPayloadPath(_ id: String) throws -> String? {
         try Self.validateID(id)
-        return try openDirectoryChain(components: Self.payloadDirectoryComponents(id), create: create)
+        return try placement.path(id: id, recover: recoverPlacement, reconcile: reconcilePlacement)
     }
 
     private func openPayloadFile(id: String) throws -> [Int32] {
-        let directories = try openPayloadParent(id: id, create: false)
-        let name = Self.payloadName(id)
+        guard let path = try resolvedPayloadPath(id) else {
+            throw TractandaError("attachmentIntegrity", "Attachment original is missing.")
+        }
+        return try openPayloadFile(path: path, id: id)
+    }
+
+    private func openPayloadFile(path: String, id: String) throws -> [Int32] {
+        try PayloadPlacement.validate(path, id: id)
+        let directories = try openDirectoryChain(
+            components: Array(path.split(separator: "/").map(String.init).dropLast()), create: false)
         do {
             let descriptor = try Self.openFile(
-                in: directories.last!, name: name, flags: O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+                in: directories.last!, name: Self.payloadName(id),
+                flags: O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
             return directories + [descriptor]
         } catch {
             closeAll(directories)
             throw error
         }
+    }
+
+    private func reconcilePlacement(_ attachment: AttachmentDescriptor, path: String) throws -> Bool {
+        let url = root.appendingPathComponent(path)
+        do { _ = try FileMetadata.read(at: url) } catch FileMetadataError.posix(ENOENT) { return false }
+        let descriptors = try openPayloadFile(path: path, id: attachment.attachmentID)
+        defer { closeAll(descriptors) }
+        try verifyPayload(attachment, descriptor: descriptors.last!, cacheResult: true)
+        guard fsync(descriptors[descriptors.count - 2]) == 0 else {
+            throw Self.posix("Cannot synchronize recovered original publication.")
+        }
+        return true
+    }
+
+    private func recoverPlacement(_ visit: (String, String) throws -> Void) throws {
+        func walk(_ components: [String]) throws {
+            try Task.checkCancellation()
+            let directories = try openDirectoryChain(
+                components: components, create: false, missingIsEmpty: true)
+            guard let parent = directories.last else { return }
+            defer { closeAll(directories) }
+            try POSIXDirectory.withEntries(descriptor: parent) { name in
+                let relative = components + [name]
+                let url = relative.reduce(root) { $0.appendingPathComponent($1) }
+                let metadata = try FileMetadata.read(at: url)
+                if components.count < 7 {
+                    guard metadata.type == .directory, name.count == (components.count == 2 ? 4 : 2),
+                        name.utf8.allSatisfy({ (48...57).contains($0) })
+                    else {
+                        throw TractandaError("unsafeAttachmentStore", "Unsafe payload archive directory.")
+                    }
+                    try walk(relative)
+                } else {
+                    guard name.hasSuffix(".payload") else {
+                        throw TractandaError("unsafeAttachmentStore", "Unknown payload archive file.")
+                    }
+                    let id = String(name.dropLast(8))
+                    let path = relative.joined(separator: "/")
+                    try Self.validateID(id)
+                    try PayloadPlacement.validate(path, id: id)
+                    let files = try openPayloadFile(path: path, id: id)
+                    defer { closeAll(files) }
+                    let before = try Self.metadata(for: files.last!)
+                    guard before.type == .regular, before.size <= UInt64(Self.maximumFileBytes),
+                        Self.isArchived(files.last!)
+                            || (before.uid == ownerUID && before.mode & 0o777 == UInt32(Self.publishedMode))
+                    else {
+                        throw TractandaError("attachmentIntegrity", "Unsafe recovered original metadata.")
+                    }
+                    _ = try Self.sha256(
+                        descriptor: files.last!, byteCount: before.size, chunkLimit: chunkByteLimit)
+                    guard try Self.metadata(for: files.last!) == before else {
+                        throw TractandaError("attachmentIntegrity", "Recovered original changed.")
+                    }
+                    try visit(id, path)
+                }
+                return true
+            }
+        }
+        try walk(["attachments", "payloads"])
     }
 
     private func openDirectoryChain(
@@ -494,7 +752,7 @@ final class AttachmentPayloadStore: @unchecked Sendable {
                     openat(parent, $0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
                 }
                 if child < 0 && errno == ENOENT && create {
-                    try ensureReserve(forAdditionalBytes: UInt64(Self.pathComponentLimit))
+                    try ensureReserve(forAdditionalBytes: UInt64(Self.pathComponentLimit), descriptor: parent)
                     let made = component.withCString {
                         mkdirat(parent, $0, Self.privateDirectoryMode)
                     }
@@ -542,7 +800,9 @@ final class AttachmentPayloadStore: @unchecked Sendable {
         }
     }
 
-    private func ensureReserve(forAdditionalBytes bytes: UInt64) throws {
+    private func ensureReserve(
+        forAdditionalBytes bytes: UInt64, at location: URL? = nil, descriptor: Int32? = nil
+    ) throws {
         let available: UInt64
         if let availableBytesOverride {
             do { available = try availableBytesOverride() } catch {
@@ -550,8 +810,10 @@ final class AttachmentPayloadStore: @unchecked Sendable {
             }
         } else {
             var status = statvfs()
-            guard root.path.withCString({ statvfs($0, &status) }) == 0,
-                status.f_bavail >= 0, status.f_frsize > 0
+            let target = location ?? root
+            let result =
+                descriptor.map { fstatvfs($0, &status) } ?? target.path.withCString { statvfs($0, &status) }
+            guard result == 0, status.f_bavail >= 0, status.f_frsize > 0
             else {
                 throw TractandaError("resourceLimit", "Cannot determine attachment filesystem capacity.")
             }
@@ -574,7 +836,10 @@ final class AttachmentPayloadStore: @unchecked Sendable {
         progress: @Sendable (Int64) throws -> Void = { _ in }
     ) throws {
         let before = try Self.metadata(for: descriptor)
-        guard Self.validPublishedMetadata(before, descriptor: attachment, ownerUID: ownerUID) else {
+        guard
+            Self.validPublishedMetadata(
+                before, descriptor: attachment, ownerUID: ownerUID, archived: Self.isArchived(descriptor))
+        else {
             invalidate(attachment.attachmentID)
             throw TractandaError(
                 "attachmentIntegrity", "Attachment payload metadata does not match its descriptor.")
@@ -648,27 +913,6 @@ final class AttachmentPayloadStore: @unchecked Sendable {
         }
     }
 
-    private static func payloadDirectoryComponents(_ id: String) throws -> [String] {
-        try validateID(id)
-        guard let uuid = UUID(uuidString: id), let components = uuid.version1Components else {
-            throw TractandaError("invalidAttachment", "Attachment ID must be a canonical UUIDv1.")
-        }
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
-        let date = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: components.date)
-        guard let year = date.year, (1...9999).contains(year),
-            let month = date.month, let day = date.day, let hour = date.hour, let minute = date.minute
-        else { throw TractandaError("invalidAttachment", "Attachment ID has an invalid storage timestamp.") }
-        return [
-            "attachments", "payloads", String(format: "%04d", year), String(format: "%02d", month),
-            String(format: "%02d", day), String(format: "%02d", hour), String(format: "%02d", minute),
-        ]
-    }
-
-    static func payloadRelativePath(_ id: String) throws -> String {
-        try (payloadDirectoryComponents(id) + [payloadName(id)]).joined(separator: "/")
-    }
-
     private static func stageName(_ id: String) -> String { id + ".stage" }
     private static func payloadName(_ id: String) -> String { id + ".payload" }
     private static func isSafeComponent(_ value: String) -> Bool {
@@ -683,15 +927,20 @@ final class AttachmentPayloadStore: @unchecked Sendable {
         let descriptor = name.withCString { openat(directory, $0, flags) }
         guard descriptor >= 0 else {
             throw TractandaError(
-                "attachmentIntegrity", "Attachment file is missing or is not a regular file.")
+                "attachmentIntegrity", "Attachment file is missing or is not a regular file.", osError: errno)
         }
         return descriptor
     }
 
+    private static func isArchived(_ descriptor: Int32) -> Bool {
+        var status = statvfs()
+        return fstatvfs(descriptor, &status) == 0 && status.f_flag & UInt(ST_RDONLY) != 0
+    }
+
     private static func validateDirectory(_ descriptor: Int32, ownerUID: UInt32) throws {
         let metadata = try self.metadata(for: descriptor)
-        guard metadata.type == .directory, metadata.uid == ownerUID,
-            metadata.mode & 0o077 == 0
+        guard metadata.type == .directory,
+            isArchived(descriptor) || (metadata.uid == ownerUID && metadata.mode & 0o077 == 0)
         else {
             throw TractandaError(
                 "unsafeAttachmentStore", "Attachment directories must be private and owner-owned.")
@@ -699,10 +948,12 @@ final class AttachmentPayloadStore: @unchecked Sendable {
     }
 
     private static func validPublishedMetadata(
-        _ metadata: FileMetadata, descriptor: AttachmentDescriptor, ownerUID: UInt32
+        _ metadata: FileMetadata, descriptor: AttachmentDescriptor, ownerUID: UInt32, archived: Bool = false
     ) -> Bool {
-        metadata.type == .regular && metadata.uid == ownerUID
-            && metadata.mode & 0o777 == UInt32(publishedMode)
+        metadata.type == .regular
+            && (archived
+                || (metadata.uid == ownerUID
+                    && metadata.mode & 0o777 == UInt32(publishedMode)))
             && metadata.size == UInt64(descriptor.byteCount)
             && metadata.size <= UInt64(maximumFileBytes)
     }
@@ -822,7 +1073,7 @@ extension AttachmentPayloadStore {
         defer { closeAll(directories) }
         let fd = try Self.openFile(
             in: directories.last!, name: Self.stageName(attachment.attachmentID),
-            flags: O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+            flags: O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
         defer { _ = close(fd) }
         let before = try Self.metadata(for: fd)
         guard Self.validStagingMetadata(before, allowSealed: true, ownerUID: ownerUID),
@@ -849,7 +1100,7 @@ extension AttachmentPayloadStore {
             do {
                 let fd = try Self.openFile(
                     in: directories.last!, name: Self.stageName(attachment.attachmentID),
-                    flags: O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+                    flags: O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
                 descriptors = directories + [fd]
             } catch {
                 closeAll(directories)
@@ -871,10 +1122,12 @@ extension AttachmentPayloadStore {
 
     func publishedMetadataMatches(_ attachment: AttachmentDescriptor) throws -> Bool {
         let files: [Int32]
-        do { files = try openPayloadFile(id: attachment.attachmentID) } catch { return false }
+        guard let path = try resolvedPayloadPath(attachment.attachmentID) else { return false }
+        files = try openPayloadFile(path: path, id: attachment.attachmentID)
         defer { closeAll(files) }
         return Self.validPublishedMetadata(
-            try Self.metadata(for: files.last!), descriptor: attachment, ownerUID: ownerUID)
+            try Self.metadata(for: files.last!), descriptor: attachment, ownerUID: ownerUID,
+            archived: Self.isArchived(files.last!))
     }
 
     func isStagedVerified(_ attachment: AttachmentDescriptor) throws -> Bool {
@@ -885,7 +1138,7 @@ extension AttachmentPayloadStore {
         defer { closeAll(directories) }
         let fd = try Self.openFile(
             in: directories.last!, name: Self.stageName(attachment.attachmentID),
-            flags: O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+            flags: O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
         defer { _ = close(fd) }
         let metadata = try Self.metadata(for: fd)
         return Self.validStagingMetadata(metadata, allowSealed: true, ownerUID: ownerUID)
@@ -894,10 +1147,12 @@ extension AttachmentPayloadStore {
 
     func isVerified(_ attachment: AttachmentDescriptor) throws -> Bool {
         let files: [Int32]
-        do { files = try openPayloadFile(id: attachment.attachmentID) } catch { return false }
+        guard let path = try resolvedPayloadPath(attachment.attachmentID) else { return false }
+        files = try openPayloadFile(path: path, id: attachment.attachmentID)
         defer { closeAll(files) }
         let metadata = try Self.metadata(for: files.last!)
-        return Self.validPublishedMetadata(metadata, descriptor: attachment, ownerUID: ownerUID)
+        return Self.validPublishedMetadata(
+            metadata, descriptor: attachment, ownerUID: ownerUID, archived: Self.isArchived(files.last!))
             && cached(attachment, metadata: metadata) != nil
     }
 
@@ -971,7 +1226,8 @@ extension AttachmentPayloadStore {
             let id = String(name.dropLast(5))
             try Self.validateID(id)
             let fd = try openRegularFile(
-                in: parent, name: name, flags: O_RDONLY | O_NOFOLLOW | O_CLOEXEC, expectedMode: 0o600)
+                in: parent, name: name, flags: O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC,
+                expectedMode: 0o600)
             defer { _ = close(fd) }
             let before = try Self.metadata(for: fd)
             guard before.size <= 16 * 1024 else {
@@ -1021,11 +1277,17 @@ extension AttachmentPayloadStore {
         progress: @escaping @Sendable (Int64) throws -> Void
     ) throws -> DocumentVerifiedOriginal {
         _ = try Self.validated(descriptor)
-        let chain = try openPayloadFile(id: descriptor.attachmentID)
+        guard let relative = try resolvedPayloadPath(descriptor.attachmentID) else {
+            throw TractandaError("attachmentIntegrity", "Document original is missing.")
+        }
+        let chain = try openPayloadFile(path: relative, id: descriptor.attachmentID)
         do {
             let fd = chain.last!
             let before = try Self.metadata(for: fd)
-            guard Self.validPublishedMetadata(before, descriptor: descriptor, ownerUID: ownerUID) else {
+            guard
+                Self.validPublishedMetadata(
+                    before, descriptor: descriptor, ownerUID: ownerUID, archived: Self.isArchived(fd))
+            else {
                 throw TractandaError(
                     "attachmentIntegrity", "Document original metadata differs from its descriptor.")
             }
@@ -1044,12 +1306,12 @@ extension AttachmentPayloadStore {
                 mode: after.mode, uid: after.uid, gid: after.gid,
                 modificationSeconds: after.modificationSeconds,
                 modificationNanoseconds: after.modificationNanoseconds)
-            let path = root.path + "/" + (try Self.payloadRelativePath(descriptor.attachmentID))
+            let path = root.path + "/" + relative
             return DocumentVerifiedOriginal(path: path, file: token, descriptors: chain) { [self] in
                 guard try Self.metadata(for: fd) == after else {
                     throw TractandaError("documentOriginalChanged", "Retained document original changed.")
                 }
-                let current = try openPayloadFile(id: descriptor.attachmentID)
+                let current = try openPayloadFile(path: relative, id: descriptor.attachmentID)
                 defer { closeAll(current) }
                 guard try Self.metadata(for: current.last!) == after else {
                     throw TractandaError(

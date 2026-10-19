@@ -1,6 +1,7 @@
   // This source is embedded in Kanban.html's existing closure for live and snapshot modes.
   var accessToken = '', isSaving = false, isRefreshing = false, isConnected = false;
   var pendingWrite = null, revisionsByID = new Map(), selectedViewID = configuration.viewItemID;
+  var capturePlan = null, capturePreviewGeneration = 0, capturePreparing = false;
   var projectViews = [], viewGeneration = 0, refreshGeneration = 0;
   const projectBoard = configuration.projectBoard || null;
   const pendingStorageKey = viewID => 'tractanda.pending.v4.' + (projectBoard ? 'project.' : 'view.') + viewID;
@@ -73,7 +74,8 @@
         }
       }
       const write=JSON.parse(encoded||'null');
-      if (write?.viewItemID===viewID && write.request?.operationID && (!write.method || ['TractandaItem/commit','TractandaLearning/feedback','TractandaLearning/settings'].includes(write.method))) {pendingWrite=write;dirty=true;}
+      const operationID=write?.request?.operationID||write?.request?.commitRequest?.operationID;
+      if (write?.viewItemID===viewID && operationID && (!write.method || ['TractandaItem/commit','TractandaItem/commitCapture','TractandaLearning/feedback','TractandaLearning/settings'].includes(write.method))) {pendingWrite=write;dirty=true;}
     } catch {}
   }
 
@@ -313,7 +315,7 @@
     }
   }
   async function queryRevisions(argumentsObject, state, properties) {
-    const at=argumentsObject.at||currentDate(),revisions=[];let cursor=null;
+    const at=argumentsObject.at||currentDate(),revisions=[],unresolved=[],unhydratedIDs=[];let cursor=null,conflictsAvailable=false,completeness='complete';
     for(let position=0;;) {
       // The get uses this request's query IDs, so each page is coherent and keeps
       // full editor content without the server's replay receipt.
@@ -327,18 +329,27 @@
       }
       const [query,page]=pair;
       if(query.queryState!==state||page.state!==state||page.notFound.length)return null;
-      revisions.push(...page.list);position=query.position+query.ids.length;cursor=query.nextCursor||null;
-      if(position>=query.total)return revisions;
+      const pageUnresolved=page.unresolved||[];
+      const classified=[...page.list.map(item=>item.fields?.itemID?.value||item.itemID),...pageUnresolved.map(item=>item.itemID),...(page.remainingIDs||[]),...(page.oversizedIDs||[])];
+      if(new Set(classified).size!==classified.length||classified.length!==query.ids.length||query.ids.some(id=>!classified.includes(id)))
+        throw apiError('invalidResponse','The server omitted or repeated item projection results.');
+      revisions.push(...page.list);unresolved.push(...pageUnresolved);unhydratedIDs.push(...(page.remainingIDs||[]),...(page.oversizedIDs||[]));
+      conflictsAvailable=conflictsAvailable||!!query.conflictsAvailable||pageUnresolved.length>0;
+      if(query.completeness==='unresolvedItems'||pageUnresolved.length)completeness='unresolvedItems';
+      position=query.position+query.ids.length;cursor=query.nextCursor||null;
+      if(position>=query.total)return {revisions,unresolved,unhydratedIDs,conflictsAvailable,completeness};
       if(!query.ids.length)throw apiError('invalidResponse','An incomplete query page was empty.');
     }
   }
   async function projectGraph(state) {
-    const revisions=await queryRevisions({expression:'selection == *'},state,[
+    const result=await queryRevisions({expression:'selection == *'},state,[
       'subject','isDeleted','selection','categoryParents','categoryOrder','viewDefinition',
       'filterCategories','defaultCategory','completionCategory','maintenance','sequenceStatus',
       'originalSequence','recommendedSequence','activity'
     ]);
-    return revisions===null?null:categoryGraph(revisions);
+    if(result===null)return null;
+    if(result.unresolved.length)throw Object.assign(apiError('itemUnresolved','A category could not be validated for the current board.'),{projectionNotice:true});
+    return categoryGraph(result.revisions);
   }
   async function discoverProjects(viewID,generation,snapshot) {
     const state=(await nativeCall('TractandaStore/info')).state;
@@ -369,8 +380,9 @@
         statusEntries=[...ordered,...statusEntries.filter(entry=>!seen.has(entry.id))];
       } catch { /* An unrelated/invalid optional view cannot make a category board unavailable. */ }
       const viewSort=definition.sort;
-      const revisions=await queryRevisions({at,categoryPath:[projectID,statusRootID],...(viewSort.length?{sort:viewSort}:{})},info.state);
-      if(revisions===null)continue;
+      const query=await queryRevisions({at,categoryPath:[projectID,statusRootID],...(viewSort.length?{sort:viewSort}:{})},info.state);
+      if(query===null)continue;
+      const revisions=query.revisions;
       const memberships=new Map();
       const filterIDs=categoryReferences(project.fields.filterCategories).filter(id=>graph.categories.has(id));
       const filters=new Map();
@@ -395,7 +407,7 @@
         defaultCategoryID:defaultID,completionCategoryID:completionID,originalSequence:[],recommendedSequence:[],
         categoryAxes:axes.categoryAxes,
         tasks:revisions.map(revision=>{const task=projectTask(revision,memberships.get(fieldText(revision.fields,'itemID'))||[],filters.get(fieldText(revision.fields,'itemID'))||[],[projectID]);task.axisCategoryIDs=axes.memberships.get(task.id)||{};return task;})};
-      return {data:next,revisions:new Map(revisions.map(r=>[fieldText(r.fields,'itemID'),r]))};
+      return {data:next,revisions:new Map(revisions.map(r=>[fieldText(r.fields,'itemID'),r])),projectionNotice:query.completeness==='unresolvedItems'||query.conflictsAvailable||query.unhydratedIDs.length>0,unhydratedIDs:query.unhydratedIDs};
     }
     throw apiError('stateChanged','The project board changed during refresh. Try again; an open draft is kept.');
   }
@@ -408,6 +420,8 @@
     for (let attempt=0;attempt<3;attempt++) {
       const info=await nativeCall('TractandaStore/info'),at=currentDate();
       const result=await nativeCall('TractandaItem/get',{ids:[viewID]});
+      if((result.unresolved||[]).length)throw apiError('itemUnresolved','This saved view needs projection review.');
+      if((result.remainingIDs||[]).length||(result.oversizedIDs||[]).length)throw apiError('viewUnavailable','This saved view could not be completely loaded.');
       const view=result.list[0], fields=view?.fields;
       if (!fields || fields.isDeleted?.value || !fields.viewDefinition) throw apiError('viewUnavailable','This saved view is unavailable.');
       if (result.state!==info.state) continue;
@@ -417,13 +431,25 @@
       const filterIDs=categoryReferences(fields.filterCategories);
       const categoryResult=await nativeCall('TractandaItem/get',{ids:[...new Set([...columnIDs,...filterIDs])]});
       if (categoryResult.state!==info.state) continue;
+      const requiredCategories=[...new Set([...columnIDs,...filterIDs])];
+      if((categoryResult.unresolved||[]).length)throw apiError('itemUnresolved','A saved-view section or filter category needs review.');
+      if((categoryResult.remainingIDs||[]).length||(categoryResult.oversizedIDs||[]).length)
+        throw apiError('categoryUnavailable','The saved-view categories could not be completely loaded. Retry this board refresh.');
+      if((categoryResult.notFound||[]).length)throw apiError('categoryUnavailable','A required saved-view category is unavailable.');
       const categories=new Map(categoryResult.list.filter(r=>!r.fields.isDeleted?.value && r.fields.selection).map(r=>[fieldText(r.fields,'itemID'),r]));
-      let hasChanged=false;
+      if(requiredCategories.some(id=>!categories.has(id)))throw apiError('categoryUnavailable','The complete saved-view category definition is unavailable.');
+      let hasChanged=false,projectionNotice=false;
+      const unhydratedIDs=[];
       const revisions=[];
       for(let position=0;;){
         const [query,page]=await queryPageWithRevisions({viewID,at},position,{projection:'content'});
         if(query.queryState!==info.state||page.state!==info.state||page.notFound.length){hasChanged=true;break;}
-        revisions.push(...page.list);position+=query.ids.length;
+        const unresolved=page.unresolved||[];
+        const classified=[...page.list.map(item=>item.fields?.itemID?.value||item.itemID),...unresolved.map(item=>item.itemID),...(page.remainingIDs||[]),...(page.oversizedIDs||[])];
+        if(new Set(classified).size!==classified.length||classified.length!==query.ids.length||query.ids.some(id=>!classified.includes(id)))
+          throw apiError('invalidResponse','The server omitted or repeated item projection results.');
+        revisions.push(...page.list);unhydratedIDs.push(...(page.remainingIDs||[]),...(page.oversizedIDs||[]));
+        projectionNotice=projectionNotice||unresolved.length>0||query.completeness==='unresolvedItems'||!!query.conflictsAvailable||unhydratedIDs.length>0;position=query.position+query.ids.length;
         if(position>=query.total)break;
         if(!query.ids.length)throw apiError('invalidResponse','An incomplete query page was empty.');
       }
@@ -453,7 +479,7 @@
         completionCategoryID:fields.completionCategory?.value.itemID,defaultCategoryID:fields.defaultCategory?.value.itemID,
         originalSequence:plain(fields.originalSequence)||[],recommendedSequence:plain(fields.recommendedSequence)||[],
         tasks:revisions.map(r=>{const task=projectTask(r,memberships.get(fieldText(r.fields,'itemID'))||[],filters.get(fieldText(r.fields,'itemID'))||[],categoryReferences(definition.categoryPath));task.axisCategoryIDs=axes.memberships.get(task.id)||{};return task;})});
-      return {data:next,revisions:new Map(revisions.map(r=>[fieldText(r.fields,'itemID'),r]))};
+      return {data:next,revisions:new Map(revisions.map(r=>[fieldText(r.fields,'itemID'),r])),projectionNotice,unhydratedIDs};
     }
     throw apiError('stateChanged','The view changed during refresh. Try again; an open draft is kept.');
   }
@@ -502,10 +528,18 @@
       $('board-load-error').hidden=true;$('project-counts').hidden=false;
       render();showWorkspace();
       if(resumeEditorAfterSignIn && !pendingWrite){resumeEditorAfterSignIn=false;$('task-dialog').showModal();}
-      $('connection-message').textContent=pendingWrite?'An edit needs a retry. Its original request is retained.':'Connected · changes are saved as item revisions';
+      $('connection-message').textContent=refreshed.unhydratedIDs?.length?'Some queried items could not be loaded; this board is partial. Retry refresh.':refreshed.projectionNotice?'Some accessible items need review; current readable results remain available. Use item-state/conflicts for details.':pendingWrite?'An edit needs a retry. Its original request is retained.':'Connected · changes are saved as item revisions';
       return true;
     } catch(error) {
       if (!selectionIsCurrent(viewID,generation)) return false;
+      if(error.code==='itemUnresolved') {
+        clearViewData(viewID);
+        isConnected=false;
+        $('board-load-error').textContent='Could not validate this board because its view or a category needs review. No old board rows are shown.';
+        $('board-load-error').hidden=false;$('project-counts').hidden=true;$('filter-count').textContent='Board unavailable';
+        $('connection-message').textContent='The view or a category needs review; no current board rows are shown. Use item-state/conflicts for details.';
+        return false;
+      }
       isConnected=false;clearViewData(viewID);
       const message='Could not load this board: '+(error.message||'The server read failed.');
       $('board-load-error').textContent=message;$('board-load-error').hidden=false;
@@ -564,6 +598,58 @@
     return {changes:makeLiveFields(candidate,baseRevision),unset};
   }
 
+  function liveRequest(candidate, baseRevision) {
+    const {changes,unset}=makeLiveEdit(candidate,baseRevision);
+    const request={action:baseRevision?'revise':'create',changes,unset,operationID:'web:'+crypto.randomUUID()};
+    if (baseRevision) {request.itemID=fieldText(baseRevision.fields,'itemID');request.expectedRevisionID=fieldText(baseRevision.fields,'revisionID');}
+    else request.classID='Item';
+    return request;
+  }
+
+  function invalidateCapturePreview() {
+    capturePreviewGeneration++;capturePlan=null;
+    const preview=$('capture-preview');
+    if(preview){preview.hidden=true;preview.replaceChildren();}
+  }
+
+  function captureCategoryLabel(id) {
+    const categories=[...columns(),...filters(),...(data.categoryAxes||[]).flatMap(axis=>[axis,...(axis.children||[])])];
+    return categories.find(category=>category.id===id)?.name||id;
+  }
+
+  function captureCanCommit(plan) { return !!plan && (plan.issues||[]).length===0; }
+
+  function renderCapturePreview(plan) {
+    const preview=$('capture-preview');preview.replaceChildren();preview.hidden=false;
+    for(const mention of plan.mentions||[]) {
+      const detail=mention.categoryID?captureCategoryLabel(mention.categoryID):
+        (mention.candidates||[]).map(captureCategoryLabel).join(', ');
+      let line=mention.token+(detail?' → '+detail:'');
+      if(mention.reusedBinding&&mention.dateProperty&&mention.dateValue)line+=' · Already captured; date unchanged';
+      else if(mention.dateProperty&&mention.dateValue)line+=' · '+mention.dateProperty+' = '+mention.dateValue;
+      preview.append(element('p',{text:line}));
+    }
+    for(const issue of plan.issues||[])preview.append(element('p',{class:'capture-issue',text:issue.token+': '+issue.message}));
+    if(!(plan.mentions||[]).length&&!(plan.issues||[]).length)preview.append(element('p',{text:'No category hashtags found.'}));
+    preview.dataset.canCommit=String(captureCanCommit(plan));
+  }
+
+  async function previewLiveCapture() {
+    if(!isLive||capturePreparing||isSaving||pendingWrite)return;
+    if(!$('interpret-hashtags').checked){$('capture-preview').hidden=false;$('capture-preview').textContent='Enable “Interpret #categories” to preview capture.';return;}
+    const candidate=readLiveDraftFromForm();
+    const error=completionError(candidate);if(error){$('dialog-error').textContent=error;return;}
+    const generation=++capturePreviewGeneration;capturePlan=null;capturePreparing=true;
+    $('preview-capture').disabled=true;$('capture-preview').hidden=false;$('capture-preview').textContent='Preparing capture preview…';
+    try {
+      const plan=await nativeCall('TractandaItem/prepareCapture',{request:liveRequest(candidate,editingBase)});
+      if(generation!==capturePreviewGeneration||!$('task-dialog').open)return;
+      capturePlan=plan;renderCapturePreview(plan);
+    } catch(error) {
+      if(generation===capturePreviewGeneration){$('capture-preview').hidden=false;$('capture-preview').textContent=error.message||'Could not prepare the capture preview.';}
+    } finally {capturePreparing=false;$('preview-capture').disabled=false;}
+  }
+
   function retainPendingWrite(write) {
     // This is a retry journal for one unconfirmed request, not an authoritative task database.
     sessionStorage.setItem(pendingStorageKey(write.viewItemID),JSON.stringify(write));
@@ -573,14 +659,12 @@
     if (pendingWrite) sessionStorage.removeItem(pendingStorageKey(pendingWrite.viewItemID));pendingWrite=null;dirty=false;
   }
 
-  async function saveLiveTask(candidate, baseRevision) {
+  async function saveLiveTask(candidate, baseRevision, preparedCapture = null) {
     if (isSaving || pendingWrite) {toast('Resolve the pending edit before starting another.',true);return;}
-    const {changes,unset}=makeLiveEdit(candidate,baseRevision);
-    if (!Object.keys(changes).length&&!unset.length) {$('task-dialog').close();toast('No changes to save.');return;}
-    const request={action:baseRevision?'revise':'create',changes,unset,operationID:'web:'+crypto.randomUUID()};
-    if (baseRevision) {request.itemID=fieldText(baseRevision.fields,'itemID');request.expectedRevisionID=fieldText(baseRevision.fields,'revisionID');}
-    else request.classID='Item';
-    try {retainPendingWrite({viewItemID:selectedViewID,request,candidate});}
+    const request=preparedCapture||liveRequest(candidate,baseRevision);
+    const method=preparedCapture?'TractandaItem/commitCapture':'TractandaItem/commit';
+    if(!preparedCapture&&!Object.keys(request.changes).length&&!request.unset.length) {$('task-dialog').close();toast('No changes to save.');return;}
+    try {retainPendingWrite({viewItemID:selectedViewID,method,request,candidate});}
     catch {toast('This browser could not retain the retry record. The edit has not been sent.',true);return;}
     await sendPendingWrite();
   }
@@ -607,6 +691,7 @@
       if (write.context==='learning') learningNotice=error.message;
       if (error.isDefinitive) {
         clearPendingWrite();
+        if (write.method==='TractandaItem/commitCapture') invalidateCapturePreview();
         if (error.code==='revisionConflict') {
           await refreshLiveBoard();
           if ($('task-dialog').open && write.candidate) {

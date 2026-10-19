@@ -1,0 +1,937 @@
+{
+  "arch": "arm64",
+  "baseline": {
+    "buildOS": "debian13",
+    "minimumCPU": "armv8-a",
+    "swiftABI": "6.4"
+  },
+  "component": "documents",
+  "documentExtraction": {
+    "converterPath": "bin/tractanda-document-converter",
+    "identity": {
+      "converter": "tractanda.docling-native.v2-idefics3-gelu-f32+linux-raster.26fa7c7735ee62b725fbb628e17f32f5b4f340ee47a89f89eb438bafaa886ae5",
+      "model": "ibm-granite/granite-docling-258M-mlx",
+      "modelRevision": "a8b999991fe8c521a0cec749973414eaaf823731",
+      "parser": "doctags-strict-v1",
+      "preprocessing": "opaque-rgb-content-crop-hf4561-pillow123-grid-v2",
+      "runtimeRevision": "61a4b20d4ad01b10466e8fc94c50402a9f994430"
+    },
+    "modelDirectory": "models/granite-docling-258m-mlx",
+    "modelManifestPath": "licenses/Docling/ModelAssets.json",
+    "modelManifestSHA256": "64894c93726b0b76d2eb5c20f001c61d6fc2eea1ef848b23773ba60cae9e00ef",
+    "noticePaths": [
+      "licenses/Docling/Granite-Docling-LICENSE",
+      "licenses/Docling/Granite-Docling-MODEL-NOTICE.md",
+      "licenses/Docling/Pillow-LICENSE",
+      "licenses/optional-embedding-host/vmlx-swift/LICENSE",
+      "licenses/optional-embedding-host/vmlx-swift/ACKNOWLEDGMENTS.md"
+    ],
+    "runtimePatchIdentifier": "idefics3-vision-gelu-f32-v1",
+    "runtimePatchManifestPath": "licenses/Docling/runtime-patches.json",
+    "runtimePatchManifestSHA256": "732b8d020e258b8ab5de5875f53bc3756143b089d9a1d7619f311ccbe4674635",
+    "runtimePatchPath": "licenses/Docling/vmlx-61a4b20-idefics3-gelu-f32.patch",
+    "runtimePatchSHA256": "4b45ae94cd5a9a2545025cf5165cd9e617f3c30c5a7b02e236c036ee943b9321",
+    "runtimeRepository": "osaurus-ai/vmlx-swift",
+    "workerProtocol": "tractanda.native-document-worker.v1"
+  },
+  "dynamicLoads": [
+    "lib/libBlocksRuntime.so",
+    "lib/libFoundation.so",
+    "lib/libFoundationEssentials.so",
+    "lib/libFoundationInternationalization.so",
+    "lib/libFoundationNetworking.so",
+    "lib/libFoundationXML.so",
+    "lib/lib_FoundationICU.so",
+    "lib/libblas.so.3",
+    "lib/libdispatch.so",
+    "lib/liblapack.so.3",
+    "lib/libopenblas.so.0",
+    "lib/libswiftCore.so",
+    "lib/libswiftDispatch.so",
+    "lib/libswiftGlibc.so",
+    "lib/libswiftObservation.so",
+    "lib/libswiftRegexBuilder.so",
+    "lib/libswiftSynchronization.so",
+    "lib/libswift_Builtin_float.so",
+    "lib/libswift_Concurrency.so",
+    "lib/libswift_RegexParser.so",
+    "lib/libswift_StringProcessing.so",
+    "lib/tractanda/document-native/libtractanda_docling_images.so.1",
+    "lib/tractanda/document-native/libtractanda_docling_pdf.so.1"
+  ],
+  "files": [
+    {
+      "mode": 420,
+      "path": "bin/TractandaDocuments_TractandaDocumentConverter.resources/ModelAssets.json",
+      "sha256": "64894c93726b0b76d2eb5c20f001c61d6fc2eea1ef848b23773ba60cae9e00ef",
+      "size": 2220
+    },
+    {
+      "mode": 420,
+      "path": "bin/mlx-swift_VMLXHub.resources/gpt2_tokenizer_config.json",
+      "sha256": "551e26ec611d8d0c8edc3ef72e518a38418cb71f40de1347dd486a595e1557d7",
+      "size": 234
+    },
+    {
+      "mode": 420,
+      "path": "bin/mlx-swift_VMLXHub.resources/t5_tokenizer_config.json",
+      "sha256": "e0aff0b1de9071e30d9a60a199303b6abe916a64a19932bd1c46992279b41a1f",
+      "size": 20746
+    },
+    {
+      "mode": 493,
+      "path": "bin/tractanda-document-converter",
+      "sha256": "60ef3e4d781d4d1416c1d626ed78fd4063eb53a058d7c0eda31e24296e615fbe",
+      "size": 62379624
+    },
+    {
+      "mode": 493,
+      "path": "lib/libBlocksRuntime.so",
+      "sha256": "83ba970c644d6602df9b6ebe989ccbc26727e864d6e6d801ed720d7e1615bc68",
+      "size": 71048
+    },
+    {
+      "mode": 493,
+      "path": "lib/libFoundation.so",
+      "sha256": "173beea3a23e74470524ce53540b883e127483cf0db0586129f2a4bb63346044",
+      "size": 8988552
+    },
+    {
+      "mode": 493,
+      "path": "lib/libFoundationEssentials.so",
+      "sha256": "77f05a32f7e64c4d5eed0713cd2756fd73576e7a07c7e7b336192ff907c9d944",
+      "size": 10504520
+    },
+    {
+      "mode": 493,
+      "path": "lib/libFoundationInternationalization.so",
+      "sha256": "19f04ab0b329bea2f1e8af913c6446e0e5fe69eca9311e75b7fed29cc660f072",
+      "size": 3830512
+    },
+    {
+      "mode": 493,
+      "path": "lib/libFoundationNetworking.so",
+      "sha256": "f952928d3ec062c3dcdc355fd6b1d763d9cb39c14db312dddba6bcec18a6fead",
+      "size": 1832032
+    },
+    {
+      "mode": 493,
+      "path": "lib/libFoundationXML.so",
+      "sha256": "70a35c757bb8ab98ba3f8a2a788eb3767102ea5893fbe00814a71b70fd8b7dcc",
+      "size": 507424
+    },
+    {
+      "mode": 493,
+      "path": "lib/lib_FoundationICU.so",
+      "sha256": "c6adbf736a41b1245f92957e0830c70d889e3d9e7714d7f1e81d26290352722b",
+      "size": 40616512
+    },
+    {
+      "mode": 493,
+      "path": "lib/libblas.so.3",
+      "sha256": "b25174e567e05edf8baedcb3cdc1b745c9795bc8bbb8de8a3259a1b2ff2b5839",
+      "size": 535216
+    },
+    {
+      "mode": 493,
+      "path": "lib/libdispatch.so",
+      "sha256": "4220b8ae2bb46162d525510393a50975523b5d5be7c8127b00ffbd25a2c46609",
+      "size": 465720
+    },
+    {
+      "mode": 493,
+      "path": "lib/liblapack.so.3",
+      "sha256": "f7e70d3f624883b368ba41554b3a4c74de375e31e86c29a69330f94a34338c0d",
+      "size": 5788256
+    },
+    {
+      "mode": 493,
+      "path": "lib/libopenblas.so.0",
+      "sha256": "0e8be3e56b448ddc576c5c4dd0bef7ab1d736c6c520d808b3a78e35390bde8a2",
+      "size": 19411425
+    },
+    {
+      "mode": 493,
+      "path": "lib/libswiftCore.so",
+      "sha256": "4695dc1e3fe7a85598e4cb40b5a5534efd49532d4999877172be2bf02f2a5d88",
+      "size": 9994400
+    },
+    {
+      "mode": 493,
+      "path": "lib/libswiftDispatch.so",
+      "sha256": "d30d966bc21ad2050bb9124a2d29ad38075f6f4929d5cb5dfb174ccd73e6e35d",
+      "size": 375976
+    },
+    {
+      "mode": 493,
+      "path": "lib/libswiftGlibc.so",
+      "sha256": "e09abf8ca4d4f292c78d50da45b0c0200e6d152315df292890d475adcef118e6",
+      "size": 105632
+    },
+    {
+      "mode": 493,
+      "path": "lib/libswiftObservation.so",
+      "sha256": "443fae527acbaeb4a3771c5650d07c5cb822698029a20aa10624d4894f29d445",
+      "size": 258304
+    },
+    {
+      "mode": 493,
+      "path": "lib/libswiftRegexBuilder.so",
+      "sha256": "ffb246e30b0a08fd5d61a86e13e8128485f451727a85b693eb072b5d59c58af0",
+      "size": 209320
+    },
+    {
+      "mode": 493,
+      "path": "lib/libswiftSynchronization.so",
+      "sha256": "65afbb61514cc8300aa761d917d65f5e2faff04246f637a025bffe90509ed85d",
+      "size": 136920
+    },
+    {
+      "mode": 493,
+      "path": "lib/libswift_Builtin_float.so",
+      "sha256": "e54026898e274a5c801b7023fda57394ebd3fad2cb0891cb397d4de135487ade",
+      "size": 74048
+    },
+    {
+      "mode": 493,
+      "path": "lib/libswift_Concurrency.so",
+      "sha256": "3f21b0707d68a5054ae8c12cb97234f952c664b23646c1c77f2914aaa8a42fb7",
+      "size": 1080664
+    },
+    {
+      "mode": 493,
+      "path": "lib/libswift_RegexParser.so",
+      "sha256": "cec5418b3088b30b71f270950f1aaf5d0f22c45ea6b62d1fd18f2ac860874efd",
+      "size": 1606368
+    },
+    {
+      "mode": 493,
+      "path": "lib/libswift_StringProcessing.so",
+      "sha256": "6374cfb973bd5a9b67183a7c35c9bd0b54f9aa8ad8546937d8cab7852c8f3e6e",
+      "size": 1197864
+    },
+    {
+      "mode": 420,
+      "path": "lib/tractanda/document-native-closure.json",
+      "sha256": "26fa7c7735ee62b725fbb628e17f32f5b4f340ee47a89f89eb438bafaa886ae5",
+      "size": 44191
+    },
+    {
+      "mode": 493,
+      "path": "lib/tractanda/document-native/libtractanda_docling_images.so.1",
+      "sha256": "1c502f4dbf1a6f43954d5235f0231fc22ddea12cd45d74778811c4f05d7c7ce4",
+      "size": 974240
+    },
+    {
+      "mode": 493,
+      "path": "lib/tractanda/document-native/libtractanda_docling_pdf.so.1",
+      "sha256": "189f8e1871cd520c23f194a413c9e41a008b8d1047793a77bb2c50f1d7fedd4b",
+      "size": 4757672
+    },
+    {
+      "mode": 420,
+      "path": "licenses/Docling/Granite-Docling-LICENSE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "size": 11358
+    },
+    {
+      "mode": 420,
+      "path": "licenses/Docling/Granite-Docling-MODEL-NOTICE.md",
+      "sha256": "59bfe9565b39a0804507bc1a9995c46b6fb5996d1102cfc9ecde8bdd5e6c94c3",
+      "size": 2167
+    },
+    {
+      "mode": 420,
+      "path": "licenses/Docling/ModelAssets.json",
+      "sha256": "64894c93726b0b76d2eb5c20f001c61d6fc2eea1ef848b23773ba60cae9e00ef",
+      "size": 2220
+    },
+    {
+      "mode": 420,
+      "path": "licenses/Docling/Native-THIRD-PARTY-NOTICES.txt",
+      "sha256": "1d34165a8402ddda6da2860f2e332d46f5670a348ed8cc78910fa39e79938992",
+      "size": 1185427
+    },
+    {
+      "mode": 420,
+      "path": "licenses/Docling/Pillow-LICENSE",
+      "sha256": "15181e7363dca9aed78b79bebebc7fde7f1814b8bd311ea3b87ae8ccadfc185b",
+      "size": 1457
+    },
+    {
+      "mode": 420,
+      "path": "licenses/Docling/lcms2-LICENSE",
+      "sha256": "6dbd60437f8ef91d8de1f08ad75882547fd4931bfcc3566a0735f28db1484d31",
+      "size": 1080
+    },
+    {
+      "mode": 420,
+      "path": "licenses/Docling/libjpeg-turbo-LICENSE.md",
+      "sha256": "ba6bceebcba0fdd35488477c2cca8c4632ce82c74dbfbc87d886ce6fc4433579",
+      "size": 6077
+    },
+    {
+      "mode": 420,
+      "path": "licenses/Docling/libjpeg-turbo-README.ijg",
+      "sha256": "75815e3bf6484201a3c3d17a1bbf10f2e8e3237f84df10a2357ea896db2a81d6",
+      "size": 12799
+    },
+    {
+      "mode": 420,
+      "path": "licenses/Docling/libpng-LICENSE",
+      "sha256": "bdb0a645ea18c60507d0368379b1ac5474b92255fcc2d115e07486a7672ba526",
+      "size": 5345
+    },
+    {
+      "mode": 420,
+      "path": "licenses/Docling/linux-build-provenance.json",
+      "sha256": "4cbd68d7794a2d2207b6a67c0fd3156c6a0a32214ce41a0b0b219099426ace54",
+      "size": 44368
+    },
+    {
+      "mode": 420,
+      "path": "licenses/Docling/runtime-patches.json",
+      "sha256": "732b8d020e258b8ab5de5875f53bc3756143b089d9a1d7619f311ccbe4674635",
+      "size": 725
+    },
+    {
+      "mode": 420,
+      "path": "licenses/Docling/vmlx-61a4b20-idefics3-gelu-f32.patch",
+      "sha256": "4b45ae94cd5a9a2545025cf5165cd9e617f3c30c5a7b02e236c036ee943b9321",
+      "size": 1043
+    },
+    {
+      "mode": 420,
+      "path": "licenses/Docling/zlib-LICENSE",
+      "sha256": "e32ff4e00d9d94930537635291da39e7e612703334bf6fde8c7f1686fe8a45a2",
+      "size": 1002
+    },
+    {
+      "mode": 420,
+      "path": "licenses/Granite/Gemma-Prohibited-Use-Policy.html",
+      "sha256": "8f60dad5a4261a0cb421628a52cdc728164a8e18c9126451dbe014e427805200",
+      "size": 4135
+    },
+    {
+      "mode": 420,
+      "path": "licenses/Granite/Gemma-Terms.html",
+      "sha256": "b41e065162fd9b09b078ecabd43b465e2c9bf83915485ecacd9d8ed446332ada",
+      "size": 10901
+    },
+    {
+      "mode": 420,
+      "path": "licenses/Granite/LICENSE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "size": 11358
+    },
+    {
+      "mode": 420,
+      "path": "licenses/Granite/MODEL_CARD.md",
+      "sha256": "3c47e61d962601a89027f406fe78f32f9bcdd9c73576c5204b3e70defb3e796b",
+      "size": 21421
+    },
+    {
+      "mode": 420,
+      "path": "licenses/Granite/NOTICE",
+      "sha256": "827cc7ddce57fef72902632a0a5a6d6bec3c3b09335148356f0e59352e1b7a6f",
+      "size": 665
+    },
+    {
+      "mode": 420,
+      "path": "licenses/Granite/README.md",
+      "sha256": "9a590f8ed0163247fc8242e042f403a60ffc4fd55c4933098cb23ade799b0df5",
+      "size": 1570
+    },
+    {
+      "mode": 420,
+      "path": "licenses/Swift-6.4.1-LICENSE.txt",
+      "sha256": "770af8291f708538d8ff885a0bbc4e045cd700531741c4f99528d435c14d7f55",
+      "size": 11751
+    },
+    {
+      "mode": 420,
+      "path": "licenses/eventsource/LICENSE.md",
+      "sha256": "2f9b695627d569a3ce452b2c03fdd34310df78c8ea94edfafd9ce38381e5b502",
+      "size": 1062
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/async-http-client/LICENSE.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "size": 11358
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/async-http-client/NOTICE.txt",
+      "sha256": "e5eab628baf9849380ce867d80f65ece8ff98daa48035f994714e6fe7dbdb3ce",
+      "size": 2170
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-algorithms/LICENSE.txt",
+      "sha256": "770af8291f708538d8ff885a0bbc4e045cd700531741c4f99528d435c14d7f55",
+      "size": 11751
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-asn1/LICENSE.txt",
+      "sha256": "8c6db340475136df3c1201d458fa5755698eace76e510471ecc9d857d6083dac",
+      "size": 11359
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-asn1/NOTICE.txt",
+      "sha256": "11dd3b3b783e6ec26098dd38ebc962986ea109b85447e28e62867b83bd0f8c5b",
+      "size": 1450
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-async-algorithms/LICENSE.txt",
+      "sha256": "770af8291f708538d8ff885a0bbc4e045cd700531741c4f99528d435c14d7f55",
+      "size": 11751
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-atomics/LICENSE.txt",
+      "sha256": "770af8291f708538d8ff885a0bbc4e045cd700531741c4f99528d435c14d7f55",
+      "size": 11751
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-certificates/LICENSE.txt",
+      "sha256": "8c6db340475136df3c1201d458fa5755698eace76e510471ecc9d857d6083dac",
+      "size": 11359
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-certificates/NOTICE.txt",
+      "sha256": "57d7797703d906b63c2be50d891cf70bdec307ae6f77a881638c33343f3dd195",
+      "size": 2589
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-collections/LICENSE.txt",
+      "sha256": "770af8291f708538d8ff885a0bbc4e045cd700531741c4f99528d435c14d7f55",
+      "size": 11751
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-configuration/LICENSE.txt",
+      "sha256": "8c6db340475136df3c1201d458fa5755698eace76e510471ecc9d857d6083dac",
+      "size": 11359
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-configuration/NOTICE.txt",
+      "sha256": "e7edb579b15aa8a733959cec14b244d48f11b771099382d6cfaf442af4c3b69d",
+      "size": 1618
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-crypto/LICENSE.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "size": 11358
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-crypto/NOTICE.txt",
+      "sha256": "b3ddc2ae068e76b3beb71be03c0400f90090f9469aa491bf7b1ac42320af37b8",
+      "size": 1563
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-distributed-tracing/LICENSE.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "size": 11358
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-http-structured-headers/LICENSE.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "size": 11358
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-http-types/LICENSE.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "size": 11358
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-http-types/NOTICE.txt",
+      "sha256": "eb79190094094bb6ce2b177a7ba7708f50bf873b9a2c5e6e1936a5f391b5ec0f",
+      "size": 1341
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-log/LICENSE.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "size": 11358
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-log/NOTICE.txt",
+      "sha256": "879b241d49b407215a0ad8e1c6a71c358d7b29591b090cf379d37a5f50cff918",
+      "size": 1324
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-nio-extras/LICENSE.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "size": 11358
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-nio-extras/NOTICE.txt",
+      "sha256": "722817c4c450c062f1f6e7b9df36733c0f6983aaad3e5e4aa5d76fe23d90010a",
+      "size": 1841
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-nio-http2/LICENSE.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "size": 11358
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-nio-http2/NOTICE.txt",
+      "sha256": "56b85f4571b653e82649d82a696afe841a417206a21a25afac751bcb11c2ea87",
+      "size": 2285
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-nio-ssl/LICENSE.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "size": 11358
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-nio-ssl/NOTICE.txt",
+      "sha256": "03e8ca5c65a3df21fe1ab48eef91bca7d370db56c290d8ef16eaaa09ba322abe",
+      "size": 1984
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-nio-transport-services/LICENSE.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "size": 11358
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-nio/LICENSE.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "size": 11358
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-nio/NOTICE.txt",
+      "sha256": "d25ed2452b3476c342082d11e4e8bf5459174d2836124f842b499850bcebc50e",
+      "size": 3266
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-numerics/LICENSE.txt",
+      "sha256": "770af8291f708538d8ff885a0bbc4e045cd700531741c4f99528d435c14d7f55",
+      "size": 11751
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-service-context/LICENSE.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "size": 11358
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-service-context/NOTICE.txt",
+      "sha256": "0881037b6840338ea800fdb5876540081a75d8bdd9eb8175a16f348247e8677e",
+      "size": 1284
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-service-lifecycle/LICENSE.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "size": 11358
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-service-lifecycle/NOTICE.txt",
+      "sha256": "e0583b716a12a866a2a1d7456c26a17d18e1ec70f0ecaf2c62ed77180d1db043",
+      "size": 1412
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-syntax/LICENSE.txt",
+      "sha256": "770af8291f708538d8ff885a0bbc4e045cd700531741c4f99528d435c14d7f55",
+      "size": 11751
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/swift-system/LICENSE.txt",
+      "sha256": "2245a990b635558be210fb3eb4f8a6f7a49aebc0fefbf5859146a65ddc7ddcf3",
+      "size": 11750
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/vmlx-swift/ACKNOWLEDGMENTS.md",
+      "sha256": "e838112dc077cb9499d138903d05a6843a3bb66d9ad3fba8076ad5cb8332acfb",
+      "size": 15023
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/vmlx-swift/LICENSE",
+      "sha256": "44326a4ea062241ae6fc26ee2ec90bdc81af7eb7b9d3966181b733fa69d42057",
+      "size": 1067
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/vmlx-swift/Source/Cmlx/fmt/LICENSE",
+      "sha256": "07580f2a3b35709ce703d523f447b242f6dfec7582a8c0df102c7fa2849375f8",
+      "size": 1431
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/vmlx-swift/Source/Cmlx/json/LICENSE.MIT",
+      "sha256": "86b998c792894ccb911a1cb7994f7a9652894e7a094c0b5e45be2f553f45cf14",
+      "size": 1076
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/vmlx-swift/Source/Cmlx/metal-cpp/LICENSE.txt",
+      "sha256": "f4e92c7fe2aa066e294c0da9d08683dc9fb741ee6e6debbfad99a0c96e07c1f2",
+      "size": 11344
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/vmlx-swift/Source/Cmlx/mlx-c/ACKNOWLEDGMENTS.md",
+      "sha256": "6b91480a91653156bd97b276e9cb5d2a16c3315b07e997b1ddcfd92ab8f51d0b",
+      "size": 291
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/vmlx-swift/Source/Cmlx/mlx-c/LICENSE",
+      "sha256": "44326a4ea062241ae6fc26ee2ec90bdc81af7eb7b9d3966181b733fa69d42057",
+      "size": 1067
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/vmlx-swift/Source/Cmlx/mlx/ACKNOWLEDGMENTS.md",
+      "sha256": "fbf1078b24ca057b31fef9297390bbe96e001258ecf4c0b108394c764e607799",
+      "size": 14733
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/vmlx-swift/Source/Cmlx/mlx/LICENSE",
+      "sha256": "ccfab7ccb2ea306f71531c8ca77bb55507606cd90768b1e32b8b52ab5b48cf01",
+      "size": 1066
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/vmlx-swift/Vendors/EventSource/LICENSE.md",
+      "sha256": "2f9b695627d569a3ce452b2c03fdd34310df78c8ea94edfafd9ce38381e5b502",
+      "size": 1062
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/vmlx-swift/Vendors/Jinja/LICENSE",
+      "sha256": "648b81e6c6f9975c3b6cf6d630229b6c8d6f1ddaef55f5770f576adda19f3495",
+      "size": 11347
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/vmlx-swift/Vendors/swift-huggingface/LICENSE",
+      "sha256": "4d6ad72952a8329063a71de28329b493de96cf57459e2ac217110d1a6a5f84ae",
+      "size": 11347
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/vmlx-swift/Vendors/swift-transformers/LICENSE",
+      "sha256": "648b81e6c6f9975c3b6cf6d630229b6c8d6f1ddaef55f5770f576adda19f3495",
+      "size": 11347
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/vmlx-swift/Vendors/yyjson/LICENSE",
+      "sha256": "45e384d3d52c73cba3a64d6e6c25d47cd738cd8a55c30629e3201046eda62947",
+      "size": 1084
+    },
+    {
+      "mode": 420,
+      "path": "licenses/optional-embedding-host/yyjson/LICENSE",
+      "sha256": "45e384d3d52c73cba3a64d6e6c25d47cd738cd8a55c30629e3201046eda62947",
+      "size": 1084
+    },
+    {
+      "mode": 420,
+      "path": "licenses/swift-asn1/LICENSE.txt",
+      "sha256": "8c6db340475136df3c1201d458fa5755698eace76e510471ecc9d857d6083dac",
+      "size": 11359
+    },
+    {
+      "mode": 420,
+      "path": "licenses/swift-asn1/NOTICE.txt",
+      "sha256": "11dd3b3b783e6ec26098dd38ebc962986ea109b85447e28e62867b83bd0f8c5b",
+      "size": 1450
+    },
+    {
+      "mode": 420,
+      "path": "licenses/swift-atomics/LICENSE.txt",
+      "sha256": "770af8291f708538d8ff885a0bbc4e045cd700531741c4f99528d435c14d7f55",
+      "size": 11751
+    },
+    {
+      "mode": 420,
+      "path": "licenses/swift-collections/LICENSE.txt",
+      "sha256": "770af8291f708538d8ff885a0bbc4e045cd700531741c4f99528d435c14d7f55",
+      "size": 11751
+    },
+    {
+      "mode": 420,
+      "path": "licenses/swift-crypto/LICENSE.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "size": 11358
+    },
+    {
+      "mode": 420,
+      "path": "licenses/swift-crypto/NOTICE.txt",
+      "sha256": "b3ddc2ae068e76b3beb71be03c0400f90090f9469aa491bf7b1ac42320af37b8",
+      "size": 1563
+    },
+    {
+      "mode": 420,
+      "path": "licenses/swift-log/LICENSE.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "size": 11358
+    },
+    {
+      "mode": 420,
+      "path": "licenses/swift-log/NOTICE.txt",
+      "sha256": "879b241d49b407215a0ad8e1c6a71c358d7b29591b090cf379d37a5f50cff918",
+      "size": 1324
+    },
+    {
+      "mode": 420,
+      "path": "licenses/swift-nio-ssl/LICENSE.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "size": 11358
+    },
+    {
+      "mode": 420,
+      "path": "licenses/swift-nio-ssl/NOTICE.txt",
+      "sha256": "03e8ca5c65a3df21fe1ab48eef91bca7d370db56c290d8ef16eaaa09ba322abe",
+      "size": 1984
+    },
+    {
+      "mode": 420,
+      "path": "licenses/swift-nio-ssl/VENDOR-NOTICE.md",
+      "sha256": "57f87184771791fd3abb1cad12a591b10adb8d3f9c0401333dbe07df58d33472",
+      "size": 1052
+    },
+    {
+      "mode": 420,
+      "path": "licenses/swift-nio/LICENSE.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "size": 11358
+    },
+    {
+      "mode": 420,
+      "path": "licenses/swift-nio/NOTICE.txt",
+      "sha256": "d25ed2452b3476c342082d11e4e8bf5459174d2836124f842b499850bcebc50e",
+      "size": 3266
+    },
+    {
+      "mode": 420,
+      "path": "licenses/swift-nio/llhttp-LICENSE",
+      "sha256": "ebca854e0134cd256d673627c20499f42577eb74bacf08b9f25b626a73c91277",
+      "size": 1105
+    },
+    {
+      "mode": 420,
+      "path": "licenses/swift-sdk/LICENSE",
+      "sha256": "0382b0057770ca05e9c350a50aa3b1c1fea84da0bc81d723bf00b9aa841be58a",
+      "size": 12227
+    },
+    {
+      "mode": 420,
+      "path": "licenses/swift-system/LICENSE.txt",
+      "sha256": "2245a990b635558be210fb3eb4f8a6f7a49aebc0fefbf5859146a65ddc7ddcf3",
+      "size": 11750
+    },
+    {
+      "mode": 420,
+      "path": "licenses/system-build-provenance/Apache-2.0",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "size": 11358
+    },
+    {
+      "mode": 420,
+      "path": "licenses/system-build-provenance/GPL-2",
+      "sha256": "edaef632cbb643e4e7a221717a6c441a4c1a7c918e6e4d56debc3d8739b233f6",
+      "size": 17984
+    },
+    {
+      "mode": 420,
+      "path": "licenses/system-build-provenance/GPL-3",
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+      "size": 35149
+    },
+    {
+      "mode": 420,
+      "path": "licenses/system-build-provenance/LGPL-2.1",
+      "sha256": "20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95",
+      "size": 26419
+    },
+    {
+      "mode": 420,
+      "path": "licenses/system-build-provenance/LGPL-3",
+      "sha256": "e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118",
+      "size": 7652
+    },
+    {
+      "mode": 420,
+      "path": "licenses/system-build-provenance/libgcc-s1-copyright",
+      "sha256": "20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79",
+      "size": 69004
+    },
+    {
+      "mode": 420,
+      "path": "licenses/system-build-provenance/libgfortran5-copyright",
+      "sha256": "20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79",
+      "size": 69004
+    },
+    {
+      "mode": 420,
+      "path": "licenses/system-build-provenance/libopenblas0-pthread-copyright",
+      "sha256": "e29e707ec9485952500f8b0abda2a9974f0aefba4643a069a7b9a0daba50a845",
+      "size": 20984
+    },
+    {
+      "mode": 420,
+      "path": "licenses/system-build-provenance/libstdc++6-copyright",
+      "sha256": "20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79",
+      "size": 69004
+    }
+  ],
+  "modelRevision": "a8b999991fe8c521a0cec749973414eaaf823731",
+  "patches": [
+    {
+      "path": "Packages/TractandaDocuments/RuntimePatches/vmlx-61a4b20-linux-docling.patch",
+      "sha256": "191b56c3569d3998d81a5d2eaa20776059d8aa2ef95cb64850b17d0b283a037c"
+    },
+    {
+      "path": "Packages/TractandaDocuments/RuntimePatches/vmlx-61a4b20-idefics3-gelu-f32.patch",
+      "sha256": "4b45ae94cd5a9a2545025cf5165cd9e617f3c30c5a7b02e236c036ee943b9321"
+    }
+  ],
+  "profile": "tractanda.linux-component-artifacts.v1",
+  "recipe": {
+    "path": "scripts/export-linux-ml-component.py",
+    "sha256": "a743346562d1cc43672c2d98e01ad1a4fc45a5955865ffa20757371709954771"
+  },
+  "runtimeNotices": [
+    "licenses/Docling/Granite-Docling-LICENSE",
+    "licenses/Docling/Granite-Docling-MODEL-NOTICE.md",
+    "licenses/Docling/ModelAssets.json",
+    "licenses/Docling/Native-THIRD-PARTY-NOTICES.txt",
+    "licenses/Docling/Pillow-LICENSE",
+    "licenses/Docling/lcms2-LICENSE",
+    "licenses/Docling/libjpeg-turbo-LICENSE.md",
+    "licenses/Docling/libjpeg-turbo-README.ijg",
+    "licenses/Docling/libpng-LICENSE",
+    "licenses/Docling/linux-build-provenance.json",
+    "licenses/Docling/runtime-patches.json",
+    "licenses/Docling/vmlx-61a4b20-idefics3-gelu-f32.patch",
+    "licenses/Docling/zlib-LICENSE",
+    "licenses/Granite/Gemma-Prohibited-Use-Policy.html",
+    "licenses/Granite/Gemma-Terms.html",
+    "licenses/Granite/LICENSE",
+    "licenses/Granite/MODEL_CARD.md",
+    "licenses/Granite/NOTICE",
+    "licenses/Granite/README.md",
+    "licenses/Swift-6.4.1-LICENSE.txt",
+    "licenses/eventsource/LICENSE.md",
+    "licenses/optional-embedding-host/async-http-client/LICENSE.txt",
+    "licenses/optional-embedding-host/async-http-client/NOTICE.txt",
+    "licenses/optional-embedding-host/swift-algorithms/LICENSE.txt",
+    "licenses/optional-embedding-host/swift-asn1/LICENSE.txt",
+    "licenses/optional-embedding-host/swift-asn1/NOTICE.txt",
+    "licenses/optional-embedding-host/swift-async-algorithms/LICENSE.txt",
+    "licenses/optional-embedding-host/swift-atomics/LICENSE.txt",
+    "licenses/optional-embedding-host/swift-certificates/LICENSE.txt",
+    "licenses/optional-embedding-host/swift-certificates/NOTICE.txt",
+    "licenses/optional-embedding-host/swift-collections/LICENSE.txt",
+    "licenses/optional-embedding-host/swift-configuration/LICENSE.txt",
+    "licenses/optional-embedding-host/swift-configuration/NOTICE.txt",
+    "licenses/optional-embedding-host/swift-crypto/LICENSE.txt",
+    "licenses/optional-embedding-host/swift-crypto/NOTICE.txt",
+    "licenses/optional-embedding-host/swift-distributed-tracing/LICENSE.txt",
+    "licenses/optional-embedding-host/swift-http-structured-headers/LICENSE.txt",
+    "licenses/optional-embedding-host/swift-http-types/LICENSE.txt",
+    "licenses/optional-embedding-host/swift-http-types/NOTICE.txt",
+    "licenses/optional-embedding-host/swift-log/LICENSE.txt",
+    "licenses/optional-embedding-host/swift-log/NOTICE.txt",
+    "licenses/optional-embedding-host/swift-nio-extras/LICENSE.txt",
+    "licenses/optional-embedding-host/swift-nio-extras/NOTICE.txt",
+    "licenses/optional-embedding-host/swift-nio-http2/LICENSE.txt",
+    "licenses/optional-embedding-host/swift-nio-http2/NOTICE.txt",
+    "licenses/optional-embedding-host/swift-nio-ssl/LICENSE.txt",
+    "licenses/optional-embedding-host/swift-nio-ssl/NOTICE.txt",
+    "licenses/optional-embedding-host/swift-nio-transport-services/LICENSE.txt",
+    "licenses/optional-embedding-host/swift-nio/LICENSE.txt",
+    "licenses/optional-embedding-host/swift-nio/NOTICE.txt",
+    "licenses/optional-embedding-host/swift-numerics/LICENSE.txt",
+    "licenses/optional-embedding-host/swift-service-context/LICENSE.txt",
+    "licenses/optional-embedding-host/swift-service-context/NOTICE.txt",
+    "licenses/optional-embedding-host/swift-service-lifecycle/LICENSE.txt",
+    "licenses/optional-embedding-host/swift-service-lifecycle/NOTICE.txt",
+    "licenses/optional-embedding-host/swift-syntax/LICENSE.txt",
+    "licenses/optional-embedding-host/swift-system/LICENSE.txt",
+    "licenses/optional-embedding-host/vmlx-swift/ACKNOWLEDGMENTS.md",
+    "licenses/optional-embedding-host/vmlx-swift/LICENSE",
+    "licenses/optional-embedding-host/vmlx-swift/Source/Cmlx/fmt/LICENSE",
+    "licenses/optional-embedding-host/vmlx-swift/Source/Cmlx/json/LICENSE.MIT",
+    "licenses/optional-embedding-host/vmlx-swift/Source/Cmlx/metal-cpp/LICENSE.txt",
+    "licenses/optional-embedding-host/vmlx-swift/Source/Cmlx/mlx-c/ACKNOWLEDGMENTS.md",
+    "licenses/optional-embedding-host/vmlx-swift/Source/Cmlx/mlx-c/LICENSE",
+    "licenses/optional-embedding-host/vmlx-swift/Source/Cmlx/mlx/ACKNOWLEDGMENTS.md",
+    "licenses/optional-embedding-host/vmlx-swift/Source/Cmlx/mlx/LICENSE",
+    "licenses/optional-embedding-host/vmlx-swift/Vendors/EventSource/LICENSE.md",
+    "licenses/optional-embedding-host/vmlx-swift/Vendors/Jinja/LICENSE",
+    "licenses/optional-embedding-host/vmlx-swift/Vendors/swift-huggingface/LICENSE",
+    "licenses/optional-embedding-host/vmlx-swift/Vendors/swift-transformers/LICENSE",
+    "licenses/optional-embedding-host/vmlx-swift/Vendors/yyjson/LICENSE",
+    "licenses/optional-embedding-host/yyjson/LICENSE",
+    "licenses/swift-asn1/LICENSE.txt",
+    "licenses/swift-asn1/NOTICE.txt",
+    "licenses/swift-atomics/LICENSE.txt",
+    "licenses/swift-collections/LICENSE.txt",
+    "licenses/swift-crypto/LICENSE.txt",
+    "licenses/swift-crypto/NOTICE.txt",
+    "licenses/swift-log/LICENSE.txt",
+    "licenses/swift-log/NOTICE.txt",
+    "licenses/swift-nio-ssl/LICENSE.txt",
+    "licenses/swift-nio-ssl/NOTICE.txt",
+    "licenses/swift-nio-ssl/VENDOR-NOTICE.md",
+    "licenses/swift-nio/LICENSE.txt",
+    "licenses/swift-nio/NOTICE.txt",
+    "licenses/swift-nio/llhttp-LICENSE",
+    "licenses/swift-sdk/LICENSE",
+    "licenses/swift-system/LICENSE.txt",
+    "licenses/system-build-provenance/Apache-2.0",
+    "licenses/system-build-provenance/GPL-2",
+    "licenses/system-build-provenance/GPL-3",
+    "licenses/system-build-provenance/LGPL-2.1",
+    "licenses/system-build-provenance/LGPL-3",
+    "licenses/system-build-provenance/libgcc-s1-copyright",
+    "licenses/system-build-provenance/libgfortran5-copyright",
+    "licenses/system-build-provenance/libopenblas0-pthread-copyright",
+    "licenses/system-build-provenance/libstdc++6-copyright"
+  ],
+  "runtimeRevision": "61a4b20d4ad01b10466e8fc94c50402a9f994430",
+  "sourceInputsSHA256": "056f0fd07a4c5c9d04feda8334e49ca886f9d917d0e310b8c8a3cc564c63bea7",
+  "toolchain": {
+    "clangSHA256": "712106992cb2e4abd378bb6b778c4b19e790df7948b1a3e0c0c518823ecf8cb5",
+    "swiftFrontendSHA256": "6e1dbf14d284019b284344b49968cac64921d5999cf72b3b3d8d723340e90717",
+    "swiftSHA256": "91bc542f8fd68a4b00b832ead45dbe94ec163b881e84a31ffe315c003566ea71",
+    "version": "Swift version 6.4.1 (swift-6.4.1-RELEASE)"
+  }
+}

@@ -12,7 +12,8 @@ import Foundation
 enum AttachmentFixtureCapacity {
     static let reserveBytes: Int64 = 10 * 1024 * 1024 * 1024
     static let fixtureCapBytes: UInt64 = 32 * 1024 * 1024
-    static func requireFree(at directory: URL = FileManager.default.temporaryDirectory) throws {
+    static func requireFree(at suppliedDirectory: URL? = nil) throws {
+        let directory = try suppliedDirectory ?? GuardedFixtureDirectory.parent()
         var capacity = statvfs()
         guard statvfs(directory.path, &capacity) == 0, capacity.f_frsize > 0 else {
             throw TractandaError("resourceLimit", "Cannot inspect attachment fixture capacity.")

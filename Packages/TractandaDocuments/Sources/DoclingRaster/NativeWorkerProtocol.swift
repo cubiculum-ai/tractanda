@@ -1,5 +1,9 @@
 import CoreFoundation
+#if os(Linux)
+import Glibc
+#else
 import Darwin
+#endif
 import Foundation
 import TractandaClient
 
@@ -314,7 +318,7 @@ public final class NativeWorkerLineReader {
             // stays open for subsequent requests, so consume one available POSIX read.
             var bytes = [UInt8](repeating: 0, count: min(8192, limit + 1 - pending.count))
             let count = bytes.withUnsafeMutableBytes {
-                Darwin.read(file.fileDescriptor, $0.baseAddress, $0.count)
+                read(file.fileDescriptor, $0.baseAddress, $0.count)
             }
             if count < 0, errno == EINTR { continue }
             guard count >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }

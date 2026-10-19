@@ -36,6 +36,17 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
         return FileManager.default.temporaryDirectory.appendingPathComponent(
             "resumable-upload-" + Identifier.make())
     }
+    private func fixtureStore(
+        _ root: URL, accounts: any AccountDirectory = SystemAccountDirectory(),
+        policy: AttachmentUploadPolicy = AttachmentUploadPolicy()
+    ) throws -> ItemStore {
+        if !FileManager.default.fileExists(atPath: root.path) {
+            _ = try ItemStore.initializeFresh(root: root, accounts: accounts)
+        }
+        return try ItemStore(
+            root: root, accounts: accounts, attachmentUploadPolicy: policy,
+            revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+    }
     private func intent(_ revision: Revision, bytes: Data, count: Int64? = nil) -> AttachmentUploadRequest {
         AttachmentUploadRequest(
             itemID: revision.itemID, expectedRevisionID: revision.revisionID,
@@ -59,7 +70,7 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
     func testSlidingIdleRetentionAndLostChunkReplySurviveRestart() throws {
         let directory = try root()
         defer { try? FileManager.default.removeItem(at: directory) }
-        var store: ItemStore? = try ItemStore(root: directory)
+        var store: ItemStore? = try fixtureStore(directory)
         let base = try create(XCTUnwrap(store))
         let bytes = Data("sixsix".utf8)
         let operation = intent(base, bytes: bytes)
@@ -76,7 +87,7 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
         // Lost acknowledgement: the identical chunk is accepted and renews idle retention.
         _ = try XCTUnwrap(store).appendAttachment(uploadID: id, offset: 0, data: bytes.prefix(3))
         store = nil
-        store = try ItemStore(root: directory)
+        store = try fixtureStore(directory)
         store?.attachmentClockForTesting = { start.addingTimeInterval(10500) }
         let restarted = try XCTUnwrap(store).beginAttachment(operation)
         XCTAssertEqual(restarted.uploadID, id)
@@ -84,7 +95,7 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
         _ = try XCTUnwrap(store).appendAttachment(uploadID: id, offset: 3, data: bytes.suffix(3))
         let committed = try XCTUnwrap(store).finishAttachment(uploadID: id)
         store = nil
-        store = try ItemStore(root: directory)
+        store = try fixtureStore(directory)
         XCTAssertEqual(
             try XCTUnwrap(store).beginAttachment(operation).committed?.revisionID,
             committed.revision.revisionID)
@@ -96,10 +107,16 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
     func testAddressableMetadataAndActualByteQuotaUseNoLargeFixture() throws {
         let directory = try root()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let store = try ItemStore(
-            root: directory, attachmentUploadPolicy: AttachmentUploadPolicy(maximumStagedBytes: 20 * 1024))
+        // Publish the canonical base before applying the deliberately tiny append-only quota.
+        let base: Revision = try {
+            let initialized = try fixtureStore(directory)
+            return try create(initialized)
+        }()
+        try FileManager.default.removeItem(at: directory.appendingPathComponent("index"))
+        let store = try ItemStore.openInitialized(root: directory,
+            attachmentUploadPolicy: AttachmentUploadPolicy(maximumStagedBytes: 20 * 1024,
+                minimumFreeBytes: AttachmentFixtureCapacity.reserveBytes))
         store.attachmentClockForTesting = { Date(timeIntervalSince1970: 1_700_000_000) }
-        let base = try create(store)
         let request = intent(base, bytes: Data("unused".utf8), count: .max)
         let service = ItemService(store: store)
         let client = TractandaCore.ItemClient(transport: { service.handle($0, peerUID: getuid()) })
@@ -134,7 +151,7 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
         let upload: AttachmentUploadResult
         let operation: AttachmentUploadRequest
         do {
-            let store = try ItemStore(root: directory)
+            let store = try fixtureStore(directory)
             operation = intent(try create(store), bytes: bytes)
             upload = try store.beginAttachment(operation)
             _ = try store.appendAttachment(uploadID: XCTUnwrap(upload.uploadID), offset: 0, data: bytes)
@@ -173,6 +190,7 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
     func testSingletonRestrictionPreventsBlockingFallbackWhileMetadataBatchesWork() async throws {
         let directory = try root()
         defer { try? FileManager.default.removeItem(at: directory) }
+        _ = try ItemStore.initializeFresh(root: directory)
         let coordinator = try await ServiceCoordinator(opening: directory)
         let batch = try JSONSerialization.data(withJSONObject: [
             "using": [ItemService.capability],
@@ -235,7 +253,7 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
         let accounts = Accounts()
         let upload: AttachmentUploadResult
         do {
-            let store = try ItemStore(root: directory, accounts: accounts)
+            let store = try fixtureStore(directory, accounts: accounts)
             _ = try store.configureAccess(
                 .object(["profile": .text(AccessConfiguration.profile), "groups": .list([.text("staff")])]),
                 operationID: "access")
@@ -275,9 +293,10 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(try JSON.decode(TractandaError.self, finishDenied).code, "forbidden")
         await coordinator.close()
         let storage = try AttachmentPayloadStore(root: directory, ownerUID: getuid())
-        XCTAssertFalse(
-            FileManager.default.fileExists(
-                atPath: try storage.payloadURL(for: upload.attachment.attachmentID).path))
+        // Reconstruct from files too: a denied publication must leave no indexed original or
+        // unreferenced physical orphan, rather than inventing a UUID-derived missing pathname.
+        try storage.rebuildPlacement()
+        XCTAssertNil(try storage.resolvedPayloadPath(upload.attachment.attachmentID))
     }
     func testColdOriginalReadSharesHashTaskAndRechecksHistoricalPermission() async throws {
         let directory = try root()
@@ -287,7 +306,7 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
         let itemID: String
         let revisionID: String
         do {
-            let store = try ItemStore(root: directory)
+            let store = try fixtureStore(directory)
             let revision = try create(store)
             let upload = try store.beginAttachment(intent(revision, bytes: bytes))
             descriptor = upload.attachment
@@ -328,7 +347,7 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
         defer { try? FileManager.default.removeItem(at: directory) }
         let id: String
         do {
-            let store = try ItemStore(root: directory)
+            let store = try fixtureStore(directory)
             let revision = try create(store)
             let bad = AttachmentUploadRequest(
                 itemID: revision.itemID, expectedRevisionID: revision.revisionID, operationID: "bad",
@@ -359,7 +378,7 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
     func testTemporaryCopyGuardPreservesCommittedReplayAndLegacyNetworkRejectsHeavyCalls() throws {
         let directory = try root()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let store = try ItemStore(root: directory)
+        let store = try fixtureStore(directory)
         let revision = try create(store)
         let bytes = Data("copy".utf8)
         let upload = try store.beginAttachment(intent(revision, bytes: bytes))
@@ -396,7 +415,7 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
         for cleanup in ["abort", "expiry"] {
             let directory = try root()
             defer { try? FileManager.default.removeItem(at: directory) }
-            var store: ItemStore? = try ItemStore(root: directory)
+            var store: ItemStore? = try fixtureStore(directory)
             let bytes = Data("partial".utf8)
             let operation = intent(try create(XCTUnwrap(store)), bytes: bytes)
             let upload = try XCTUnwrap(store).beginAttachment(operation)
@@ -418,7 +437,7 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
                 FileManager.default.fileExists(
                     atPath: directory.appendingPathComponent("attachments/.uploads/" + id + ".json").path))
             store = nil
-            store = try ItemStore(root: directory)
+            store = try fixtureStore(directory)
             let resumed = try XCTUnwrap(store).beginAttachment(operation)
             XCTAssertNotEqual(resumed.uploadID, id)
             XCTAssertEqual(resumed.offset, 0)
@@ -434,7 +453,7 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
         let id: String
         let otherID: String
         do {
-            let store = try ItemStore(root: directory)
+            let store = try fixtureStore(directory)
             let revision = try create(store)
             operation = intent(revision, bytes: bytes)
             let upload = try store.beginAttachment(operation)
@@ -478,7 +497,7 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
         let operation: AttachmentUploadRequest
         let id: String
         do {
-            let store = try ItemStore(root: directory)
+            let store = try fixtureStore(directory)
             let bytes = Data("tiny publication gap".utf8)
             operation = intent(try create(store), bytes: bytes)
             let upload = try store.beginAttachment(operation)

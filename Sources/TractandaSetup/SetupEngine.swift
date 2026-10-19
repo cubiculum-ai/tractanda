@@ -10,18 +10,33 @@ import TractandaCore
 #endif
 
 /// The macOS preview reuses daemon. It owns installation receipts and software, while
-/// canonical data remains service-owned and survives uninstall. Linux packaging is deferred.
+/// canonical data remains service-owned and survives uninstall. Linux program files are dpkg-owned;
+/// its public installation path requires the committed complete package transaction.
 public final class SetupEngine {
     public let roots: SetupRoots
+    var serviceBackend: SetupServiceBackend {
+        var backend = SetupServiceBackend(roots: roots, runner: runner)
+        backend.allowFixtureRuntimeRoot = !trustedOwnership
+        return backend
+    }
     let runner: any SetupProcessRunning
     let rootCheck: () -> Bool
     let trustedOwnership: Bool
     let readinessCheck: ((String, String, Int) throws -> Void)?
+    let peerStatusCall: (String, String) throws -> PeerOperatorRuntimeStatus
     let semanticCall: (String, String, String, [String: Any]) throws -> [String: Any]
+    // Internal fixture seams, never command-line overrides or canonical authority.
+    var packageOwnerIdentity: () throws -> SetupPackageOwner = { try SetupPackageOwner.current() }
+    var packageOwnerIsLive: (SetupPackageOwner) -> Bool = { $0.isLive() }
+    var packageAuthenticationReadiness: ((InstallationReceipt) throws -> Void)?
+    var packageStartPolicy: ((String) throws -> Bool)?
+    var packagePreparedVerification: ((InstallationReceipt, String, String) throws -> Void)?
+    var packageDefinitionMutation: ((String, SetupServiceRole, Bool) throws -> Void)?
 
     public init(
         roots: SetupRoots = SetupRoots(), runner: any SetupProcessRunning = FoundationProcessRunner(),
         rootCheck: @escaping () -> Bool = { getuid() == 0 }, trustedOwnership: Bool = true,
+        peerStatusCall: ((String, String) throws -> PeerOperatorRuntimeStatus)? = nil,
         readinessCheck: ((String, String, Int) throws -> Void)? = nil,
         semanticCall: ((String, String, String, [String: Any]) throws -> [String: Any])? = nil
     ) {
@@ -30,6 +45,9 @@ public final class SetupEngine {
         self.rootCheck = rootCheck
         self.trustedOwnership = trustedOwnership
         self.readinessCheck = readinessCheck
+        self.peerStatusCall = peerStatusCall ?? { socket, user in
+            try SetupNativeClient(socket: socket, serverUser: user).peerRuntimeStatus()
+        }
         self.semanticCall =
             semanticCall ?? { socket, user, method, arguments in
                 try SetupNativeClient(socket: socket, serverUser: user).call(method, arguments)
@@ -38,6 +56,9 @@ public final class SetupEngine {
 
     public func plan(_ options: SetupOptions) throws -> SetupPlan {
         try options.validate()
+        if roots.platform == .macos, options.storeSelection != .unconfigured {
+            throw SetupError("Linux store selection cannot be planned for macOS.")
+        }
         try ServerConnection(
             socketPath: roots.runtime.appendingPathComponent(options.name).appendingPathComponent(
                 "server.sock"
@@ -62,17 +83,52 @@ public final class SetupEngine {
                     "Initialize an empty store or optional owner-private sample data",
                     "Register boot-time system LaunchDaemons",
                     "Verify native/HTTP readiness before publishing client connection settings",
-                ] : ["Linux installer is in development; no installation actions are supported yet"])
+                    try peerPlanAction(options),
+                ] : [
+                    "Require a committed complete architecture-specific Debian package",
+                    "Use the existing daemon account; create no accounts",
+                    "Choose standalone initialization or validate independently pinned prepared-replica adoption",
+                    "Register owned systemd services with a protected package startup guard",
+                    "Verify native, authentication, bundled component and peer configuration readiness",
+                ])
     }
 
     public func install(_ options: SetupOptions, upgrade: Bool = false) throws {
-        try requireRootAndPlatform()
+        if roots.platform == .linux {
+            try requireLinuxPackageRoot()
+            try requireNoPendingPackageMutation()
+            guard let state = try readPackageState(), state.phase == .committed,
+                let incoming = state.incoming,
+                incoming.manifestSHA256 == (try installedPackageCompatibility()).manifestSHA256,
+                options.bundle.standardizedFileURL.path == packagePayload.path else {
+                throw SetupError("Install the complete verified .deb before selecting or reconfiguring a Linux instance.")
+            }
+            if try readReceipt(options.name) == nil, options.storeSelection == .unconfigured {
+                throw SetupError("Choose --first-source or --adopt-prepared with independent store/replica pins; package installation never chooses for a joining host.")
+            }
+            try install(options, upgrade: upgrade, packageOperationID: nil, explicitLinux: true)
+        } else {
+            guard options.storeSelection == .unconfigured else { throw SetupError("Explicit Linux store selection is unavailable on macOS.") }
+            try install(options, upgrade: upgrade, packageOperationID: nil)
+        }
+    }
+
+    func installForPackage(_ options: SetupOptions, operationID: String) throws {
+        try install(options, upgrade: true, packageOperationID: operationID)
+    }
+
+    private func install(_ options: SetupOptions, upgrade: Bool, packageOperationID: String?, explicitLinux: Bool = false) throws {
+        if packageOperationID != nil || explicitLinux { try requireLinuxPackageRoot() }
+        else { try requireRootAndPlatform(); try requireNoPendingPackageMutation() }
         try options.validate()
         try ServerConnection(
             socketPath: roots.runtime.appendingPathComponent(options.name).appendingPathComponent(
                 "server.sock"
             ).path
         ).validate()
+        let capturedPeerBytes: Data?
+        if case .replace(let input) = options.peerRuntime { capturedPeerBytes = try capturePeerConfiguration(input) }
+        else { capturedPeerBytes = nil }
         let plannedReceipt = try readReceipt(options.name)
         let dataParent =
             plannedReceipt.map { URL(fileURLWithPath: $0.store).deletingLastPathComponent() } ?? roots.data
@@ -92,11 +148,28 @@ public final class SetupEngine {
             }
         }
         try ensureRootDirectory(roots.configuration)
-        try withInstallerLock {
+        try withPackageInstallerLock(packageOperationID) {
             let oldClientRelease = try currentClientRelease()
             let previous = try readReceipt(options.name)
             guard previous == plannedReceipt else {
                 throw SetupError("Installation state changed; retry the command.")
+            }
+            if roots.platform == .linux {
+                guard try sha256(packagePayload.appendingPathComponent("bundle-manifest.json")) == digest,
+                    try verifyBundle(at: packagePayload) == manifest else { throw SetupError("Active package changed before installation serialization.") }
+                if let previous {
+                    switch options.storeSelection {
+                    case .unconfigured: break
+                    case .standalone:
+                        guard previous.preparedStoreID == nil else {
+                            throw SetupError("A prepared replica cannot be reclassified as a standalone source.")
+                        }
+                    case let .prepared(storeID, replicaID):
+                        guard previous.preparedStoreID == storeID, previous.preparedReplicaID == replicaID else {
+                            throw SetupError("Prepared identity selection differs from the retained installation pins.")
+                        }
+                    }
+                }
             }
             if let previous, previous.state == .active, previous.manifestSHA256 != digest, !upgrade {
                 throw SetupError("This instance already has another release. Use upgrade.")
@@ -126,13 +199,19 @@ public final class SetupEngine {
                 try previous
                 ?? InstallationReceipt(
                     options: options, roots: roots, owner: owner, release: release, manifestSHA256: digest)
+            let peerTransition = try preparePeerTransition(previous: previous, options: options,
+                captured: capturedPeerBytes, uid: account.uid)
+            receipt.peerRuntimeConfiguration = peerTransition.desired
+            receipt.peerRuntimePrevious = peerTransition.previous
             if previous == nil {
-                for path in [
-                    receipt.store, receipt.indexDirectory,
-                    URL(fileURLWithPath: receipt.socket).deletingLastPathComponent().path,
-                ] {
-                    guard !exists(URL(fileURLWithPath: path)) else {
-                        throw SetupError("Refusing to adopt an existing path: \(path)")
+                if roots.platform == .linux, case let .prepared(storeID, replicaID) = options.storeSelection {
+                    try prepareExplicitReplicaAdoption(&receipt, storeID: storeID, replicaID: replicaID, uid: account.uid)
+                } else {
+                    for path in [receipt.store, receipt.indexDirectory,
+                        URL(fileURLWithPath: receipt.socket).deletingLastPathComponent().path] {
+                        guard !exists(URL(fileURLWithPath: path)) else {
+                            throw SetupError("Refusing to adopt an existing path: \(path)")
+                        }
                     }
                 }
                 guard !exists(definitionURL(options.name)) else {
@@ -180,6 +259,7 @@ public final class SetupEngine {
             receipt.manifestSHA256 = digest
             receipt.releases[release.path] = digest
             receipt.state = .preparing
+            if explicitLinux { receipt.packageSetupOwner = try packageOwnerIdentity() }
             if !receipt.initialized {
                 try writeReceipt(receipt)
                 let executable = release.appendingPathComponent("bin/tractanda-setup").path
@@ -206,6 +286,16 @@ public final class SetupEngine {
             var profilesPublished = false
             var clientsPublished = false
             do {
+                // Durable desired/prior commitments precede publication. Old daemon is stopped
+                // and the canonical writer guard is acquired before changing its loaded file.
+                try writeReceipt(receipt)
+                try unload(receipt.instance)
+                try requireCanonicalReader(receipt, quiescent: true)
+                if receipt.peerRuntimeConfiguration != nil {
+                    try publishPeerBytes(peerTransition.bytes, replacing: peerTransition.currentBytes,
+                        instance: receipt.instance, uid: account.uid)
+                }
+                try replaceAuthenticationRegistration(&receipt)
                 try replaceEmbeddingRegistration(&receipt)
                 try replaceRegistration(&receipt)
                 try waitUntilReady(receipt)
@@ -225,10 +315,18 @@ public final class SetupEngine {
                 try publishClientLink(receipt)
                 clientsPublished = true
                 try publishTUICommand()
+                if receipt.peerRuntimeConfiguration == nil {
+                    try publishPeerBytes(nil, replacing: peerTransition.currentBytes,
+                        instance: receipt.instance, uid: account.uid)
+                }
+                _ = try ownedPeerBytes(receipt.peerRuntimeConfiguration, instance: receipt.instance, uid: account.uid)
                 receipt.state = .active
+                receipt.packageSetupOwner = nil
+                receipt.peerRuntimePrevious = nil
                 receipt.embeddingPreviousConfiguration = nil
                 try writeReceipt(receipt)
             } catch {
+                receipt.peerRuntimePrevious = peerTransition.previous
                 var semanticRollbackError: Error?
                 if let oldSemanticConfiguration {
                     do {
@@ -244,11 +342,26 @@ public final class SetupEngine {
                 }
                 try? unload(receipt.instance)
                 try? unloadEmbedding(receipt)
-                if profilesPublished { try? restoreGlobalProfiles(oldProfiles) }
-                if clientsPublished {
-                    try? setClientRelease(oldClientRelease)
-                    try? removeTUICommandIfUnused()
+                try? unloadAuthentication(receipt)
+                if roots.platform == .linux {
+                    receipt.state = .preparing
+                    receipt.packageSetupOwner = nil
+                    receipt.recoveryReason = "Package configuration failed against the actual dpkg-owned payload; no old program was restored. " + error.localizedDescription
+                    if let semanticRollbackError { receipt.recoveryReason! += " Semantic recovery also failed: " + semanticRollbackError.localizedDescription }
+                    try writeReceipt(receipt)
+                    throw SetupError(receipt.recoveryReason!)
                 }
+                do {
+                    if let previous, previous.state == .active {
+                        try requireCanonicalReader(previous, quiescent: true)
+                    }
+                } catch {
+                    try blockCanonicalRollback(&receipt, error: error)
+                    throw SetupError(
+                        "Installation failed; canonical compatibility blocks rollback. Services remain stopped, the preparing receipt and all data/backups are retained. "
+                            + error.localizedDescription)
+                }
+                if profilesPublished { try? restoreGlobalProfiles(oldProfiles) }
                 if let semanticRollbackError {
                     let serverDisabled = removeOwnedRegistration(
                         definition, expectedSHA256: receipt.definitionSHA256)
@@ -267,11 +380,31 @@ public final class SetupEngine {
                         "Installation failed and semantic configuration rollback also failed; services were left stopped and this preparing receipt retains the recovery snapshot for an explicit retry. \(definitions) \(error.localizedDescription) \(semanticRollbackError.localizedDescription)"
                     )
                 }
+                do {
+                    try restorePeerConfiguration(receipt, uid: account.uid)
+                } catch {
+                    let reason = try blockPeerConfigurationRecovery(&receipt)
+                    throw SetupError(reason + " " + error.localizedDescription)
+                }
                 try restoreRegistrationSnapshot(
                     &receipt, previous: previous, release: release, digest: digest,
                     oldDefinition: oldDefinition, oldEmbeddingDefinition: oldEmbeddingDefinition)
+                if clientsPublished {
+                    do {
+                        try setClientRelease(oldClientRelease)
+                        try removeTUICommandIfUnused()
+                    } catch {
+                        try? unload(receipt.instance)
+                        try? unloadEmbedding(receipt)
+                        var stopped = try readReceipt(receipt.instance) ?? receipt
+                        try blockCanonicalRollback(&stopped, error: error)
+                        throw SetupError(
+                            "Shared client rollback blocked; target services remain stopped and data/backups are retained. "
+                                + error.localizedDescription)
+                    }
+                }
                 throw SetupError(
-                    "Installation did not become ready; registrations were rolled back and data retained. \(error.localizedDescription)"
+                    "Installation did not become ready; registrations were rolled back and data retained. \((error as? TractandaError)?.description ?? error.localizedDescription)"
                 )
             }
         }
@@ -290,11 +423,18 @@ public final class SetupEngine {
     }
 
     /// Restore precisely the previously owned definitions and receipt after candidate startup fails.
-    /// Caller stops candidate processes and restores profiles/client links before entering here.
+    /// Caller stops candidate processes first; client repinning happens only after this guarded restoration.
     func restoreRegistrationSnapshot(
         _ receipt: inout InstallationReceipt, previous: InstallationReceipt?, release: URL, digest: String,
         oldDefinition: Data?, oldEmbeddingDefinition: Data?
     ) throws {
+        guard roots.platform == .macos else {
+            receipt.state = .preparing
+            receipt.recoveryReason = "Linux package configuration failed; programs are dpkg-owned. Keep services stopped, retry package configuration or install an older compatible .deb."
+            try writeReceipt(receipt)
+            throw SetupError(receipt.recoveryReason!)
+        }
+        if let previous, previous.state == .active { try requireCanonicalReader(previous, quiescent: true) }
         let definition = definitionURL(receipt.instance)
         let embeddingDefinition = embeddingDefinitionURL(receipt.instance)
         if let oldDefinition {
@@ -311,8 +451,14 @@ public final class SetupEngine {
             var rollback = previous
             rollback.releases[release.path] = digest
             try writeReceipt(rollback)
-            try? loadEmbedding(previous)
-            try? load(previous.instance)
+            do {
+                try loadEmbedding(previous)
+                try load(previous.instance)
+            } catch {
+                try? unload(previous.instance); try? unloadEmbedding(previous)
+                _ = try blockPeerConfigurationRecovery(&rollback)
+                throw SetupError("Previous service could not restart safely; owned boot registrations were disabled. " + error.localizedDescription)
+            }
         } else {
             receipt.state = .preparing
             receipt.embeddingDefinitionSHA256 = oldEmbeddingDefinition.map {
@@ -331,42 +477,83 @@ public final class SetupEngine {
         guard exists(url) else { return true }
         guard let expectedSHA256, (try? sha256(url)) == expectedSHA256 else { return false }
         do {
+            if roots.platform == .linux {
+                let owned = try installationReceipts().flatMap { receipt in
+                    [(receipt.instance, SetupServiceRole.server), (receipt.instance, SetupServiceRole.embeddings)]
+                }.first { serviceBackend.definitionURL($0.0, role: $0.1) == url }
+                guard let (instance, role) = owned else { return false }
+                try serviceBackend.disable(instance, role: role)
+            }
             try FileManager.default.removeItem(at: url)
+            try serviceBackend.reload()
             return !exists(url)
         } catch { return false }
     }
 
     public func start(_ options: SetupOptions) throws {
         try control(options) { receipt in
-            try loadEmbedding(receipt)
-            try waitForEmbedding(receipt)
-            try load(receipt.instance)
-            try waitUntilReady(receipt)
+            do {
+                try verifyPeerConfigurationForLoad(receipt)
+                try loadAuthentication(receipt)
+                try loadEmbedding(receipt)
+                try waitForEmbedding(receipt)
+                try load(receipt.instance)
+                try waitUntilReady(receipt)
+                try verifyPeerConfigurationForLoad(receipt)
+            } catch {
+                try? unload(receipt.instance); try? unloadEmbedding(receipt); try? unloadAuthentication(receipt)
+                var stopped = receipt
+                _ = try blockPeerConfigurationRecovery(&stopped)
+                throw error
+            }
         }
     }
     public func stop(_ options: SetupOptions) throws {
-        try control(options) { receipt in
+        try control(options, stopping: true) { receipt in
             try unload(receipt.instance)
             try unloadEmbedding(receipt)
+            try unloadAuthentication(receipt)
         }
     }
     public func restart(_ options: SetupOptions) throws {
         try control(options) { receipt in
             try unload(receipt.instance)
             try unloadEmbedding(receipt)
-            try loadEmbedding(receipt)
-            try waitForEmbedding(receipt)
-            try load(receipt.instance)
-            try waitUntilReady(receipt)
+            try unloadAuthentication(receipt)
+            do {
+                try verifyPeerConfigurationForLoad(receipt)
+                try loadAuthentication(receipt)
+                try loadEmbedding(receipt)
+                try waitForEmbedding(receipt)
+                try load(receipt.instance)
+                try waitUntilReady(receipt)
+                try verifyPeerConfigurationForLoad(receipt)
+            } catch {
+                try? unload(receipt.instance); try? unloadEmbedding(receipt); try? unloadAuthentication(receipt)
+                var stopped = receipt
+                _ = try blockPeerConfigurationRecovery(&stopped)
+                throw error
+            }
         }
     }
     public func status(_ options: SetupOptions) throws -> String {
+        try requireNoPeerConfigurationAction(options)
         try options.validate()
-        guard roots.platform == .macos else { throw SetupError("Linux installation is in development.") }
-        return try runner.run("/bin/launchctl", ["print", label(options.name)], environment: [:]).output
+        if roots.platform == .linux {
+            try requireLinuxPackageRoot()
+            guard let receipt = try readReceipt(options.name) else {
+                throw SetupError("There is no owned installation receipt.")
+            }
+            try verifyRegistration(receipt)
+        }
+        return try serviceBackend.status(options.name)
     }
 
     public func uninstall(_ options: SetupOptions) throws {
+        guard roots.platform == .macos else {
+            throw SetupError("Linux program files belong to dpkg; use package removal, which preserves canonical data.")
+        }
+        try requireNoPeerConfigurationAction(options)
         try requireRootAndPlatform()
         try options.validate()
         try withInstallerLock {
@@ -387,8 +574,13 @@ public final class SetupEngine {
                 }
                 _ = try verifyBundle(at: url)
             }
+            let account = try SystemAccountDirectory().user(named: roots.platform.serviceUser)
+            guard receipt.peerRuntimePrevious == nil else { throw SetupError("Finish peer configuration recovery before uninstall.") }
+            let peerBytes = try ownedPeerBytes(receipt.peerRuntimeConfiguration, instance: receipt.instance, uid: account.uid)
             try unload(receipt.instance)
             try unloadEmbedding(receipt)
+            try publishPeerBytes(nil, replacing: peerBytes, instance: receipt.instance, uid: account.uid)
+            receipt.peerRuntimeConfiguration = nil
             let definition = definitionURL(receipt.instance)
             if exists(definition) { try FileManager.default.removeItem(at: definition) }
             if receipt.embedding != nil && exists(embeddingDefinitionURL(receipt.instance)) {
@@ -411,14 +603,20 @@ public final class SetupEngine {
         }
     }
 
-    func control(_ options: SetupOptions, action: (InstallationReceipt) throws -> Void) throws {
-        try requireRootAndPlatform()
+    func control(_ options: SetupOptions, stopping: Bool = false, action: (InstallationReceipt) throws -> Void) throws {
+        if roots.platform == .linux { try requireLinuxPackageRoot() }
+        else { try requireRootAndPlatform() }
         try options.validate()
+        try requireNoPeerConfigurationAction(options)
         try withInstallerLock {
-            guard let receipt = try readReceipt(options.name), receipt.state == .active else {
+            guard let receipt = try readReceipt(options.name), receipt.state == .active || stopping && roots.platform == .linux else {
                 throw SetupError("This instance is not fully installed.")
             }
             try verifyRegistration(receipt)
+            if roots.platform == .linux, !stopping {
+                try requireNoPendingPackageMutation()
+                try packageRuntimeGuard(options.name)
+            }
             try action(receipt)
         }
     }
@@ -457,7 +655,7 @@ public final class SetupEngine {
     func requireRootAndPlatform() throws {
         guard rootCheck() else { throw SetupError("Run the installer through sudo.") }
         guard roots.platform == .macos else {
-            throw SetupError("Linux installation is in development; the first installer targets macOS.")
+            throw SetupError("Linux package lifecycle integration is not yet available; Setup must not mutate dpkg-owned programs.")
         }
     }
     func resolvedOwner(_ options: SetupOptions) throws -> String {
@@ -470,14 +668,23 @@ public final class SetupEngine {
         }
         return identity.name
     }
+    func requirePackageRelease(_ release: String) throws {
+        if roots.platform == .linux {
+            let active = roots.software.appendingPathComponent("current")
+            guard release == active.path, !isLink(active) else {
+                throw SetupError("Linux installation receipts must identify the fixed dpkg-owned active program directory.")
+            }
+        }
+    }
     func releaseURL(_ options: SetupOptions, manifest: BundleManifest, digest: String) -> URL {
-        roots.software.appendingPathComponent("releases")
+        if roots.platform == .linux { return roots.software.appendingPathComponent("current") }
+        return roots.software.appendingPathComponent("releases")
             .appendingPathComponent(manifest.version + "-" + digest.prefix(12))
     }
     func definitionURL(_ name: String) -> URL {
-        roots.launchDefinitions.appendingPathComponent("ai.tractanda.server.\(name).plist")
+        serviceBackend.definitionURL(name)
     }
-    func label(_ name: String) -> String { "system/ai.tractanda.server." + name }
+    func label(_ name: String) -> String { serviceBackend.label(name) }
     func receiptURL(_ name: String) -> URL {
         roots.configuration.appendingPathComponent("receipts/" + name + ".json")
     }
@@ -488,29 +695,44 @@ public final class SetupEngine {
         }
     }
     func load(_ name: String) throws {
-        let current = try runner.run("/bin/launchctl", ["print", label(name)], environment: [:])
-        if current.status != 0 {
-            try successful("/bin/launchctl", ["bootstrap", "system", definitionURL(name).path])
+        guard let receipt = try readReceipt(name) else { throw SetupError("Owned registration proof is missing.") }
+        try verifyPeerConfigurationForLoad(receipt)
+        if roots.platform == .linux {
+            // A verified owned publication may be newer than the manager's loaded definition.
+            // Refresh before asking isRunning to reject foreign/stale effective state.
+            try verifyRegistration(receipt)
+            try serviceBackend.reload()
         }
+        if try !serviceBackend.isRunning(name) {
+            try requireCanonicalReader(receipt, quiescent: true)
+        }
+        try serviceBackend.load(name, enableAtBoot: !(try packageStartupIsConfiguring(name)))
     }
     func unload(_ name: String) throws {
-        let current = try runner.run("/bin/launchctl", ["print", label(name)], environment: [:])
-        if current.status == 0 { try successful("/bin/launchctl", ["bootout", label(name)]) }
+        try serviceBackend.unload(name)
     }
     func replaceRegistration(_ receipt: inout InstallationReceipt) throws {
         let bytes = try serviceDefinition(receipt)
         try unload(receipt.instance)
-        try writeProtected(bytes, to: definitionURL(receipt.instance), mode: 0o644)
+        try requireCanonicalReader(receipt, quiescent: true)
+        if roots.platform == .linux {
+            try publishPackageDefinition(bytes, role: .server, receipt: &receipt)
+        } else { try writeProtected(bytes, to: definitionURL(receipt.instance), mode: 0o644) }
         receipt.definitionSHA256 = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
         try writeReceipt(receipt)
         try load(receipt.instance)
     }
     func serviceDefinition(_ receipt: InstallationReceipt) throws -> Data {
+        try requirePackageRelease(receipt.release)
         var arguments = [
             URL(fileURLWithPath: receipt.release).appendingPathComponent("bin/tractanda").path,
             "daemon", receipt.store, receipt.socket, "--index-directory", receipt.indexDirectory,
             "--managed", "--http-port", String(receipt.port),
         ]
+        if let peer = receipt.peerRuntimeConfiguration {
+            try peer.validate(path: peerConfigurationURL(receipt.instance).path)
+            arguments += ["--peer-runtime-configuration", peer.path]
+        }
         if let document = receipt.documentExtraction {
             guard document == .pinned else { throw SetupError("Unsupported document receipt.") }
             let scratch = try documentStatePaths(receipt)
@@ -525,6 +747,13 @@ public final class SetupEngine {
             let status = receipt.board["statusRootID"]
         {
             arguments += ["--project-root", projects, "--status-root", status, "--project", project]
+        }
+        if roots.platform == .linux {
+            var environment: [String: String] = [:]
+            if let node = receipt.uuidNode { environment["TRACTANDA_UUID_NODE"] = node }
+            environment["TRACTANDA_AUTH_SOCKET"] = "/run/tractanda-auth-" + receipt.instance + "/auth.sock"
+            return try serviceBackend.systemdDefinition(instance: receipt.instance, role: .server,
+                arguments: arguments, environment: environment)
         }
         var dictionary: [String: Any] = [
             "Label": "ai.tractanda.server." + receipt.instance, "ProgramArguments": arguments,
@@ -578,6 +807,7 @@ public final class SetupEngine {
         }
         if let readinessCheck {
             try readinessCheck(receipt.socket, roots.platform.serviceUser, receipt.port)
+            try verifyPeerReadiness(receipt, status: peerStatusCall(receipt.socket, roots.platform.serviceUser))
             return
         }
         let deadline = ProcessInfo.processInfo.systemUptime + 45
@@ -593,7 +823,10 @@ public final class SetupEngine {
                 else {
                     throw SetupError("Service identity or admission policy differs from the installation.")
                 }
+                try verifyCanonicalReadiness(receipt, info: info)
+                try verifySelectedReplicaIdentity(receipt)
                 try verifyDocumentReadiness(receipt, info: info)
+                try verifyPeerReadiness(receipt, status: peerStatusCall(receipt.socket, roots.platform.serviceUser))
                 let http = try runner.run(
                     "/usr/bin/curl",
                     [

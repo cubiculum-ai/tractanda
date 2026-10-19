@@ -204,10 +204,10 @@ final class SemanticService {
     private var reconciledStoreState: String?
     private var epoch = 0
 
-    private let queryLifetime: TimeInterval = 120
+    private let pendingQueryLifetimeForTesting: TimeInterval?
     private let queryLifetimeClock: @Sendable () -> Date
     private let retryDelay: TimeInterval = 5
-    private let maximumQueries = 64
+    private let maximumQueries = SemanticConfiguration.maximumPendingQueries
 
     init(
         store: ItemStore,
@@ -219,6 +219,7 @@ final class SemanticService {
         self.storage = storage ?? SemanticMemoryStorage()
         hasInjectedStorage = storage != nil
         queryLifetimeClock = { Date() }
+        pendingQueryLifetimeForTesting = nil
         self.embed = embed
         configurations = SemanticConfigurationStore(storeRoot: store.root)
     }
@@ -227,6 +228,7 @@ final class SemanticService {
         store: ItemStore,
         storage: SemanticVectorStorage? = nil,
         queryLifetimeClock: @escaping @Sendable () -> Date,
+        pendingQueryLifetimeForTesting: TimeInterval? = nil,
         embed: @escaping @Sendable (SemanticConfiguration, [String], Bool) async throws -> [[Double]] =
             SemanticService.defaultEmbed
     ) {
@@ -234,6 +236,7 @@ final class SemanticService {
         self.storage = storage ?? SemanticMemoryStorage()
         hasInjectedStorage = storage != nil
         self.queryLifetimeClock = queryLifetimeClock
+        self.pendingQueryLifetimeForTesting = pendingQueryLifetimeForTesting
         self.embed = embed
         configurations = SemanticConfigurationStore(storeRoot: store.root)
     }
@@ -456,7 +459,8 @@ final class SemanticService {
             viewID: viewID,
             limit: limit,
             createdAt: createdAt,
-            expiresAt: createdAt.addingTimeInterval(queryLifetime),
+            expiresAt: createdAt.addingTimeInterval(
+                pendingQueryLifetimeForTesting ?? configuration.pendingQueryLifetimeSeconds),
             evaluatedAt: evaluatedAt,
             timeZone: timeZone)
         try forEachEligibleSnapshot(query, configuration: configuration) { _ in }
@@ -544,6 +548,11 @@ final class SemanticService {
         return queryResponse(query, state: "ready", results: result, partialCoverage: partial)
     }
 
+    static func completedQueryExpiry(pendingExpiry: Date, consumedAt: Date) -> Date? {
+        guard pendingExpiry > consumedAt else { return nil }
+        return consumedAt.addingTimeInterval(SemanticConfiguration.completedQueryRetentionSeconds)
+    }
+
     private func queryResponse(
         _ query: SemanticQuery, state: String, results: [Any]? = nil, partialCoverage: Bool? = nil
     ) -> [String: Any] {
@@ -589,11 +598,17 @@ final class SemanticService {
         }
         for completed in mailbox.takeCompleted() {
             if let queryID = completed.queryID {
-                if queryJobs[queryID] == completed.jobID {
-                    queryJobs.removeValue(forKey: queryID)
-                    queryTasks.removeValue(forKey: queryID)
-                }
-                guard completed.epoch == epoch else { continue }
+                guard queryJobs[queryID] == completed.jobID else { continue }
+                queryJobs.removeValue(forKey: queryID)
+                queryTasks.removeValue(forKey: queryID)
+                let consumedAt = queryLifetimeClock()
+                guard completed.epoch == epoch, var query = queries[queryID],
+                    let expiry = Self.completedQueryExpiry(pendingExpiry: query.expiresAt, consumedAt: consumedAt)
+                else { continue }
+                // Retention starts when this completion is consumed, not when
+                // the asynchronous provider returned. Never revive expired pending work.
+                query.expiresAt = expiry
+                queries[queryID] = query
                 if completed.failed {
                     queryFailures.insert(queryID)
                     continue

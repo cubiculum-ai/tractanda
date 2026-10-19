@@ -7,11 +7,11 @@ python3 scripts/release-macos.py release --notes 'Describe the completed change'
 python3 scripts/release-macos.py status
 ```
 
-For a live display, open `http://127.0.0.1:48730/` on the signing Mac. Background releases start or reuse this local observer. Start it independently with `python3 scripts/release-macos.py dashboard`; `status --watch` follows the same state in Terminal and `status --json` returns a concise machine-readable observation. The dashboard shows completed stages as N of M (currently 12), elapsed time, controller/child presence, recent log activity and upload stream-read progress when the OS exposes it. The total comes from the release plan, with each candidate retaining its planned stages; upload substeps do not increase it, and stages are not weighted by duration. A live process is not proof of progress; unavailable observations are labelled accordingly. Upload percentages describe local file consumption, with remote acceptance established only when publication verifies the assets. Quiet CI/notarization waits do not by themselves mean a stall. A confirmed missing/reused controller PID is reported as interrupted.
+For a live display, open `http://127.0.0.1:48730/` on the signing Mac. Background releases start or reuse this local observer. Start it independently with `python3 scripts/release-macos.py dashboard`; `status --watch` follows the same state in Terminal and `status --json` returns a concise machine-readable observation. The dashboard shows completed stages as N of M (14 for the current delivery contract; historical candidates retain their recorded plan), elapsed time, controller/child presence, recent log activity and upload stream-read progress when the OS exposes it. The total comes from the release plan, with each candidate retaining its planned stages; upload substeps do not increase it, and stages are not weighted by duration. A live process is not proof of progress; unavailable observations are labelled accordingly. Upload percentages describe local file consumption, with remote acceptance established only when publication verifies the assets. Quiet CI/notarization waits do not by themselves mean a stall. A confirmed missing/reused controller PID is reported as interrupted.
 
 The observer binds only to loopback and exposes filtered status rather than configuration, notes, credentials or raw log contents. It is a native local utility with no model or scheduled agent. Closing the page does not stop a release. A changed observer script takes effect after restarting that observer process; it never requires interrupting the release controller.
 
-`release` prepares and runs the entire workflow. `--background` starts a detached local process writing `work/release-pipeline/runner.log`; it uses no agent, tokens, or scheduler. Omit it to run in the foreground. Resume an interrupted candidate with `run --background`. The separate `prepare` command remains available when a review pause is useful.
+`release` prepares and runs the Mac build through a deliberate pre-install authorization pause, then install/health through a separate cluster acceptance pause. Both real Linux package sets must be attached before artifact sealing; publication requires the separate acceptance action below. `--background` starts a detached local process writing `work/release-pipeline/runner.log`; it uses no agent, tokens, or scheduler. Omit it to run in the foreground. Resume an interrupted candidate with `run --background`. The separate `prepare` command remains available when a review pause is useful.
 
 Source review and binary releases are separate. A source-only change can be committed, pushed as a pull request and merged after its checks without running this release workflow, changing `VERSION`, rebuilding packages or deploying services. The installed release and its sealed artifacts remain unchanged until the maintainer requests a release.
 
@@ -62,3 +62,74 @@ Use Python 3.11+ on the signing Mac. Keep machine-specific paths and signing ide
 The core executables, embedding host and native document converter are rebuilt from the sealed source. The prepared `documentModelDirectory` must contain the pinned 14-asset Granite Docling model validated by `scripts/validate-docling-model.py`. The converter uses a separate complete SwiftPM graph and the guarded pinned runtime patch; packaging verifies its profile, model assets, resource inventory and notices. The release build runs multilingual retrieval and vector checks against the newly built helper. Packaging verifies its `--describe` profile and every model asset hash; model/tokenizer notices come from the same reviewed source. Prepare the pinned model directory with `sh scripts/download-granite-runtime-assets.sh DESTINATION`. This preview supports a guarded upgrade from an installer-owned Qwen or prior Granite runtime profile to the pinned Granite profile and rebuilds its derived vector index; unrelated/custom semantic configurations require explicit reconfiguration. Signing keys stay in Keychain. Release logs, prepared payloads, configuration and checkpoint state remain under ignored `work/release-pipeline`; they are not source publication inputs. The bundle manifest records the source commit so source, packages and the active release can be reconciled.
 
 Select the full Xcode installation with `xcode-select`, sign into its Accounts settings, and make the team's valid Developer ID Application and Installer certificates available. The script checks those identities before preparing a release; Xcode manages account authentication during upload. No separate `notarytool` profile, app-specific password, or credential extraction is used. Account renewal and acceptance of changed Apple agreements remain account-holder actions in Xcode or Apple's developer site. See [Apple's notarization overview](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution).
+
+
+## Linux artifacts and the pre-publication cluster stop
+
+These source changes do not start a release. After the explicit release boundary, use `prepare` to seal the final version/commit, build the real full amd64 and arm64 packages from that sealed checkout, then attach them before running the artifact stage. Current native runtime/component builds are verification inputs; they are not final versioned Linux core payloads. Keep useful warm objects, but do not rename an older package or change a receipt to make it match a new version.
+
+```sh
+python3 scripts/release-macos.py prepare --notes 'Concrete completed changeset'
+python3 scripts/release-macos.py attach-linux --linux-assets /absolute/linux-release-inputs.json
+python3 scripts/release-macos.py run --background
+```
+
+The input JSON uses profile `tractanda.release-linux-input.v1` and an `assets` list containing exactly these six fields for **each** of `amd64` and `arm64`:
+
+```json
+{
+  "profile": "tractanda.release-linux-input.v1",
+  "assets": [
+    {
+      "arch": "amd64",
+      "package": "/absolute/amd64/tractanda.deb",
+      "bundleManifest": "/absolute/amd64/bundle/bundle-manifest.json",
+      "bundleBuildReceipt": "/absolute/amd64/bundle/lib/tractanda/linux-bundle-build.json",
+      "producerSourceInputs": "/absolute/amd64/work/source-inputs.json",
+      "producerResult": "/absolute/amd64/work/result.json"
+    },
+    {
+      "arch": "arm64",
+      "package": "/absolute/arm64/tractanda.deb",
+      "bundleManifest": "/absolute/arm64/bundle/bundle-manifest.json",
+      "bundleBuildReceipt": "/absolute/arm64/bundle/lib/tractanda/linux-bundle-build.json",
+      "producerSourceInputs": "/absolute/arm64/work/source-inputs.json",
+      "producerResult": "/absolute/arm64/work/result.json"
+    }
+  ]
+}
+```
+
+Each package requires its existing adjacent `.deb.inventory.json` from the real Debian builder. Admission checks the package version/architecture/bytes/hash, the actual full bundle identity and manifest/inventory commitments, and the manifest-bound bundle-build receipt. It reconstructs the producer's existing normalized source commitment from `files`, `componentManifests`, `toolchain`, `buildEnvironment` and fixed build flags. Source paths, modes, sizes and hashes must equal the candidate's own existing `source_rows()` capture; component approvals must equal its finite admitted registry entries. Matching a version or an operator statement alone does not establish sealed core source. Component admission and actual native/model/lifecycle evidence remain their existing separate gates.
+
+The controller keeps bound candidate-owned copies and small receipts. The published names are `tractanda_DEBIANVERSION_amd64.deb` and `tractanda_DEBIANVERSION_arm64.deb` (for example `tractanda_0.1.0~poc.15-1_amd64.deb`). Both join the same `SHA256SUMS`, private `/private/tmp` upload snapshot, GitHub asset-digest verification and interrupted-upload resume used by the Mac downloads. No APT host, signing key or second publisher is created. Missing/duplicate architectures, altered inputs, wrong source/manifest commitments and conflicting remote assets fail closed.
+
+New candidates have fourteen planned stages. `install-authorization` stops after the sealed/notarized Mac and both Linux artifacts exist, **before** managed Mac installation. This lets all builds finish before the first Raven maintenance stop, full backup/restore verification and one-time canonical conversion. The pipeline performs no conversion itself. Later releases verify the existing canonical cluster initialization and retained evidence; they must not rerun the development converter merely to satisfy this gate.
+
+```sh
+python3 scripts/release-macos.py install-template > /absolute/install-authorization.json
+# Perform/verify the Raven backup and canonical initialization in the admitted order.
+python3 scripts/release-macos.py allow-install \
+  --candidate EXACT_CANDIDATE_ID --evidence /absolute/install-authorization.json
+python3 scripts/release-macos.py run --background
+```
+
+The install template requires the actual Raven StoreID/ReplicaID UUIDv1 pins and two explicit PASS verifications (`raven-backup-and-restore`, `canonical-cluster-initialization`) with persistent nonsecret receipt hashes. Its candidate binding also includes the configured Mac software root and instance, so changing the installation target invalidates it. Repeating `run` without `allow-install` cannot install anything. The managed upgrade retains its existing notarization/signing/backup gates after authorization.
+
+After installation and fresh Mac health, `cluster-acceptance` pauses separately before push, CI and publication. The runner records `status=paused` and the corresponding exact candidate ID/reason. Repeating `run` rechecks the applicable evidence and local health; it never turns missing evidence into approval. The existing completed poc.14 state and its historical twelve-step plan are unchanged. An unfinished legacy candidate must be explicitly revised into this delivery contract.
+
+Use the root-reviewed [initial Raven/Stash runbook](../outputs/verification/cluster-2026-10-19/INITIAL-DEPLOYMENT-READINESS.md) for live ordering and its authorization gates. Preserve/verify the full Raven backup before the one-time stopped conversion, stage the proper Raven candidate/runtime, install the **AMD64** package on Stash, prepare only its empty target, finish SSH activation/source registration with CLOSED and child reap, then adopt the activated target and load its managed runtime. Complete actual reads/writes in both directions under current permissions. This pipeline performs none of those operations automatically and does not grant additional live authorization.
+
+```sh
+python3 scripts/release-macos.py cluster-template > /absolute/cluster-acceptance.json
+# Complete the actual ordered checks and fill their retained nonsecret evidence references.
+python3 scripts/release-macos.py accept-cluster \
+  --candidate EXACT_CLUSTER_CANDIDATE_ID --evidence /absolute/cluster-acceptance.json
+python3 scripts/release-macos.py run --background
+```
+
+The template is deliberately unaccepted: all checks start `PENDING`, identity pins and evidence lists are empty. Supply the actual distinct lowercase UUIDv1 StoreID and Raven/Stash ReplicaIDs, keeping Raven's pins identical to the install authorization, and exactly the listed checks in backup/initialization/activation-before-adoption order. Each check needs explicit `PASS`, a timezone-qualified **verification completion** time in chronological order, and one or more retained absolute nonsecret receipt paths with exact SHA256 values. For `canonical-cluster-initialization`, the first delivery performs the authorized one-time conversion; later deliveries verify the existing initialization and its retained evidence. A new verification time does not rewrite the historical initialization receipt or imply that conversion ran again. Never put private keys, target envelopes or passwords into this JSON. Preserve evidence files unchanged after acceptance; if they change or disappear, resume stops.
+
+`accept-cluster` is a deliberate local operator action recording candidate/version/commit/tree, the signed Mac bundle and all Mac/Linux artifact/producer commitments. It records the caller UID and acceptance time. It is an operator attestation backed by retained receipt hashes, not independent cryptographic proof that a remote cluster converged. A subsequent `run` still rechecks local live health, artifact bytes and evidence before advancing. Acceptance does not itself push or publish.
+
+Revising a candidate archives its Linux inputs/install authorization/cluster acceptance evidence and clears all delivery bindings; build and attach the real revised packages and repeat acceptance. Changed version/source/tree/manifest/assets also invalidate the candidate ID. The existing safeguards against revising an installed/published candidate remain: this gate does not authorize replacing a live candidate merely to repair source. Preserve its state and use the established explicit repair/new-candidate procedure.

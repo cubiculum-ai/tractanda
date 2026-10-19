@@ -4,6 +4,7 @@ Portable Swift 6.4 client and presentation behavior for Tractanda's **experiment
 
 - `ItemTransport` sends one UTF-8 native method envelope asynchronously.
 - `ItemClient` validates responses, returns consistent server-ordered pages, and submits guarded immutable revisions.
+- Explicit `prepareCapture(CapturePreparation)` / `commitCapture(CapturePlan)` authoring calls use shared server interpretation and retain the frozen plan for retries. Ordinary commits do not parse hashtags. See the [capture/API contract](../../docs/api.md#explicit-inline-capture).
 - `ItemEditorDraft` patches only edited fields and preserves unknown metadata. Class changes request retyping without replacing item identity.
 - `ItemWorkspace` owns selection, category paths, paging, editing and retry state on `MainActor`. Views perform writes only from explicit actions.
 - `PendingEditStore` records a frozen request before sending. Restoring a pending edit never submits it. Existing items are reauthorized before recovered content is displayed.

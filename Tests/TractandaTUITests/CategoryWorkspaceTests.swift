@@ -74,7 +74,9 @@ final class CategoryWorkspaceTests: XCTestCase {
         var state = CategoryPreviewState()
         let first = state.begin(path: [], position: 0)
         let second = state.begin(path: [], position: 0)
-        let page = CategoryPreviewPage(rows: [], position: 0, total: 0, queryState: "state")
+        let page = CategoryPreviewPage(
+            rows: [], position: 0, total: 0, queryState: "state", consumedCount: 0,
+            unresolvedCount: 1, unhydratedCount: 0, incomplete: true, conflictsAvailable: true)
         state.accept(page, generation: first)
         XCTAssertEqual(state.status, .loading)
         state.fail(TractandaError("offline", "down"), generation: second)

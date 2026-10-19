@@ -8,6 +8,8 @@ struct ItemPage: Decodable {
     let queryState: String
     let nextCursor: String?
     let previousCursor: String?
+    let completeness: String?
+    let conflictsAvailable: Bool?
 }
 
 struct WorkspaceSection {
@@ -15,8 +17,13 @@ struct WorkspaceSection {
     let items: [Revision]
     let position: Int
     let total: Int
+    let consumedCount: Int
     let nextCursor: String?
     let previousCursor: String?
+    let unresolved: [ItemUnresolvedState]
+    let unhydratedIDs: [String]
+    let completeness: String?
+    let conflictsAvailable: Bool
 }
 struct WorkspaceRow {
     enum Content {
@@ -49,6 +56,7 @@ final class Workspace {
     var collapsedSectionIDs: Set<String> = []
     private(set) var sections: [WorkspaceSection] = []
     private(set) var queryState: String?
+    private(set) var projectionNotice: String?
     private(set) var categoryNavigation: CategoryHierarchy?
     private(set) var categoryMemberships: [String: [String: [String]]] = [:]
     private(set) var categoryMembershipLabels: [String: [String: String]] = [:]
@@ -72,7 +80,7 @@ final class Workspace {
             }
             if section.position > 0 { append(.previousPage) }
             for item in section.items { append(.item(item)) }
-            if section.position + section.items.count < section.total { append(.nextPage) }
+            if section.position + section.consumedCount < section.total { append(.nextPage) }
             return rows
         }
     }
@@ -194,6 +202,7 @@ final class Workspace {
         categoryNavigation = nil
         categoryMemberships = [:]
         categoryMembershipLabels = [:]
+        projectionNotice = nil
     }
 
     func showSemanticSearch(_ items: [Revision]) {
@@ -202,7 +211,8 @@ final class Workspace {
         sections = [
             WorkspaceSection(
                 category: nil, items: items, position: 0, total: items.count,
-                nextCursor: nil, previousCursor: nil)
+                consumedCount: items.count, nextCursor: nil, previousCursor: nil,
+                unresolved: [], unhydratedIDs: [], completeness: nil, conflictsAvailable: false)
         ]
     }
 
@@ -255,12 +265,16 @@ final class Workspace {
         struct Response: Decodable {
             let list: [Revision]
             let notFound: [String]
+            let unresolved: [ItemUnresolvedState]?
             let state: String
         }
         let result = try JSON.decode(
             Response.self, client.call("TractandaItem/get", arguments: ["ids": page.ids]))
         guard result.state == page.queryState, result.notFound.isEmpty else {
             throw TractandaError("stateChanged", "Items changed while marking; refresh first.")
+        }
+        guard (result.unresolved ?? []).isEmpty else {
+            throw TractandaError("itemUnresolved", "A section item needs review; no partial group was marked.")
         }
         let byID = Dictionary(uniqueKeysWithValues: result.list.map { ($0.itemID, $0) })
         guard page.ids.allSatisfy({ byID[$0] != nil }) else {
@@ -276,6 +290,7 @@ final class Workspace {
         struct Response: Decodable {
             let list: [Revision]
             let notFound: [String]
+            let unresolved: [ItemUnresolvedState]?
             let state: String
             let remainingIDs: [String]?
             let oversizedIDs: [String]?
@@ -299,22 +314,22 @@ final class Workspace {
                                 category: category, position: position, limit: limit, cursor: cursor))
                         let page = try JSON.decode(ItemPage.self, pair.query)
                         let result = try JSON.decode(Response.self, pair.get)
-                        guard (result.remainingIDs ?? []).isEmpty, (result.oversizedIDs ?? []).isEmpty else {
-                            throw TractandaError(
-                                "responseTooLarge", "The get response contains continuation IDs.")
-                        }
                         return (page, result)
                     } catch let error as TractandaError where error.code == "responseTooLarge" && limit > 1 {
                         return try queryAndGet(position, limit: max(1, limit / 2), cursor: cursor)
                     }
                 }
                 func loadSectionPage(at start: Int, cursor initialCursor: String?) throws
-                    -> (ItemPage, [Revision])
+                    -> (ItemPage, [Revision], Int, [ItemUnresolvedState], [String], Bool, Bool)
                 {
                     var pageIDs: [String] = []
                     var itemsByID: [String: Revision] = [:]
+                    var unresolvedByID: [String: ItemUnresolvedState] = [:]
+                    var unhydratedIDs = Set<String>()
                     var pageState: String?
                     var total = 0
+                    var completeness = false
+                    var conflictsAvailable = false
                     var firstPage: ItemPage?
                     var lastPage: ItemPage?
                     var continuation = initialCursor
@@ -338,13 +353,24 @@ final class Workspace {
                         pageState = page.queryState
                         total = page.total
                         let returnedIDs = result.list.map(\.itemID)
-                        guard returnedIDs.count == page.ids.count,
-                            Set(returnedIDs).count == returnedIDs.count,
-                            Set(returnedIDs) == Set(page.ids)
+                        let unresolved = result.unresolved ?? []
+                        let remainingIDs = result.remainingIDs ?? []
+                        let oversizedIDs = result.oversizedIDs ?? []
+                        let classifiedIDs = returnedIDs + unresolved.map(\.itemID) + remainingIDs + oversizedIDs
+                        guard Set(classifiedIDs).count == classifiedIDs.count,
+                            Set(classifiedIDs) == Set(page.ids)
                         else {
-                            throw TractandaError("protocolError", "Get results do not match query IDs.")
+                            throw TractandaError("protocolError", "Get results omit or repeat query IDs.")
                         }
                         let byID = Dictionary(uniqueKeysWithValues: result.list.map { ($0.itemID, $0) })
+                        unresolvedByID.merge(
+                            Dictionary(uniqueKeysWithValues: unresolved.map { ($0.itemID, $0) })) { _, newer in
+                                newer
+                            }
+                        completeness = completeness || page.completeness == "unresolvedItems"
+                        conflictsAvailable = conflictsAvailable || (page.conflictsAvailable ?? false)
+                        unhydratedIDs.formUnion(remainingIDs)
+                        unhydratedIDs.formUnion(oversizedIDs)
                         if reverse {
                             pageIDs.insert(contentsOf: page.ids, at: 0)
                         } else {
@@ -369,15 +395,22 @@ final class Workspace {
                             position: reverse ? lastPage?.position ?? start : firstPage?.position ?? start,
                             total: total, queryState: pageState,
                             nextCursor: reverse ? firstPage?.nextCursor : lastPage?.nextCursor,
-                            previousCursor: reverse ? lastPage?.previousCursor : firstPage?.previousCursor),
-                        pageIDs.compactMap { itemsByID[$0] }
+                            previousCursor: reverse ? lastPage?.previousCursor : firstPage?.previousCursor,
+                            completeness: completeness ? "unresolvedItems" : firstPage?.completeness,
+                            conflictsAvailable: conflictsAvailable),
+                        pageIDs.compactMap { itemsByID[$0] }, pageIDs.count,
+                        pageIDs.compactMap { unresolvedByID[$0] },
+                        pageIDs.filter { unhydratedIDs.contains($0) },
+                        completeness || !unhydratedIDs.isEmpty, conflictsAvailable
                     )
                 }
                 let cursor = cursors.indices.contains(index) ? cursors[index] : nil
-                var (page, pageItems) = try loadSectionPage(at: offset, cursor: cursor)
+                var (page, pageItems, consumedCount, unresolved, unhydratedIDs, incomplete, conflictsAvailable) =
+                    try loadSectionPage(at: offset, cursor: cursor)
                 if offset > 0 && page.ids.isEmpty {
                     offset = 0
-                    (page, pageItems) = try loadSectionPage(at: 0, cursor: nil)
+                    (page, pageItems, consumedCount, unresolved, unhydratedIDs, incomplete, conflictsAvailable) =
+                        try loadSectionPage(at: 0, cursor: nil)
                 }
                 if let initialState, initialState != page.queryState {
                     throw TractandaError("stateChanged", "Items changed; refresh from the first page.")
@@ -386,15 +419,28 @@ final class Workspace {
                 loaded.append(
                     WorkspaceSection(
                         category: category, items: pageItems, position: page.position,
-                        total: page.total, nextCursor: page.nextCursor, previousCursor: page.previousCursor))
+                        total: page.total, consumedCount: consumedCount, nextCursor: page.nextCursor,
+                        previousCursor: page.previousCursor, unresolved: unresolved,
+                        unhydratedIDs: unhydratedIDs,
+                        completeness: incomplete ? "unresolvedItems" : page.completeness,
+                        conflictsAvailable: conflictsAvailable))
             }
+            let unresolvedIDs = Set(loaded.flatMap { $0.unresolved.map(\.itemID) })
+            let hasProjectionWarning = !unresolvedIDs.isEmpty
+                || loaded.contains { $0.completeness == "unresolvedItems" || $0.conflictsAvailable }
             let navigation = try categoryPath.isEmpty ? nil : CategoryHierarchy(self.categories())
             if navigation != nil, try client.state() != initialState {
                 throw TractandaError("stateChanged", "Categories changed while loading. Refresh the view.")
             }
             sections = loaded
+            let hasUnhydrated = loaded.contains { !$0.unhydratedIDs.isEmpty }
+            projectionNotice = hasUnhydrated
+                ? "Some queried items could not be loaded; this page may be partial. Retry refresh."
+                : hasProjectionWarning
+                ? "Some accessible items need review; current readable rows remain visible. Use item-state/conflicts."
+                : nil
             let roots = Array(Set(columns.compactMap(\.categoryRootID))).sorted()
-            if !roots.isEmpty {
+            if !roots.isEmpty && !loaded.flatMap(\.items).isEmpty {
                 guard let evaluatedAt = Timestamp.parse(queryDate) else {
                     throw TractandaError("invalidArguments", "Invalid query timestamp.")
                 }
@@ -421,11 +467,24 @@ final class Workspace {
             sectionCategories = categories
             queryState = initialState
         } catch {
+            if let failure = error as? TractandaError, failure.code == "itemUnresolved" {
+                projectionNotice =
+                    "A category could not be validated; no current items are shown. Use item-state/conflicts."
+                sections = []
+                sectionCategories = []
+                excludedCategoryNames = []
+                categoryNavigation = nil
+                categoryMemberships = [:]
+                categoryMembershipLabels = [:]
+                queryState = nil
+                return
+            }
             sections = []
             excludedCategoryNames = []
             categoryNavigation = nil
             categoryMemberships = [:]
             categoryMembershipLabels = [:]
+            projectionNotice = nil
             throw error
         }
     }
@@ -433,7 +492,7 @@ final class Workspace {
     func loadPage(in sectionIndex: Int, forward: Bool) throws {
         guard sections.indices.contains(sectionIndex) else { return }
         var positions = sections.map(\.position)
-        let step = forward ? max(1, sections[sectionIndex].items.count) : Self.pageSize
+        let step = forward ? max(1, sections[sectionIndex].consumedCount) : Self.pageSize
         positions[sectionIndex] = max(0, positions[sectionIndex] + (forward ? step : -step))
         var cursors = [String?](repeating: nil, count: sections.count)
         var previousCursors = Array(repeating: false, count: sections.count)
@@ -731,6 +790,11 @@ struct ItemDraft {
     var className: TextBuffer
     var rule: TextBuffer
     var parentIDs: [String] = []
+    var captureEnabled = false
+    var captureAliases: TextBuffer
+    var captureDateProperty: TextBuffer
+    var captureDateOffset: TextBuffer
+    var captureDateTimeZone: TextBuffer
 
     init(base: Revision? = nil, categories: [String] = [], isCategory: Bool = false) throws {
         self.base = base
@@ -741,6 +805,12 @@ struct ItemDraft {
         className = TextBuffer(base?.classID ?? "Item")
         rule = TextBuffer(
             base?.fields["selection"]?.map?["expression"]?.string ?? (isCategory ? "itemID == \"\"" : ""))
+        captureAliases = TextBuffer(
+            (base?.fields["captureAliases"]?.array ?? []).compactMap(\.string).joined(separator: "\n"))
+        let captureDate = base?.fields["captureDate"]?.map ?? [:]
+        captureDateProperty = TextBuffer(captureDate["property"]?.string ?? "")
+        captureDateOffset = TextBuffer(String(captureDate["dayOffset"]?.integerValue ?? 1))
+        captureDateTimeZone = TextBuffer(captureDate["timeZone"]?.string ?? "UTC")
         guard
             [subject.text, body.text, rule.text].allSatisfy({ $0.utf8.count <= TerminalInput.maximumPaste })
         else {
@@ -783,6 +853,30 @@ struct ItemDraft {
         if base == nil && !parentIDs.isEmpty {
             changes["categoryParents"] = .list(parentIDs.map { .reference(ItemReference($0)) })
         }
+        if isCategory {
+            let aliases = captureAliases.text
+                .split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+                .filter { !$0.isEmpty }
+            let oldAliases = base?.fields["captureAliases"]?.array ?? []
+            let newAliases = aliases.map(ItemValue.text)
+            if aliases.isEmpty {
+                if base?.fields["captureAliases"] != nil { unset.append("captureAliases") }
+            } else if oldAliases != newAliases {
+                changes["captureAliases"] = .list(newAliases)
+            }
+            let oldDate = base?.fields["captureDate"]
+            if captureDateProperty.text.isEmpty {
+                if oldDate != nil { unset.append("captureDate") }
+            } else if let offset = Int64(captureDateOffset.text), (-1200...1200).contains(offset) {
+                var fields = base?.fields["captureDate"]?.map ?? [:]
+                fields["property"] = .text(captureDateProperty.text)
+                fields["dayOffset"] = .integer(offset)
+                fields["timeZone"] = .text(
+                    captureDateTimeZone.text.isEmpty ? "UTC" : captureDateTimeZone.text)
+                let value = ItemValue.object(fields)
+                if oldDate != value { changes["captureDate"] = value }
+            }
+        }
         let isRetype = base != nil && className.text != base?.classID
         if base != nil, changes.isEmpty, unset.isEmpty, !isRetype { return nil }
         return CommitRequest(
@@ -795,7 +889,23 @@ struct ItemDraft {
 
 /// Frozen pending intent: retries never silently receive a new operation ID or revision guard.
 final class PendingEdit {
-    let request: CommitRequest
-    init(_ request: CommitRequest) { self.request = request }
-    func send(using client: ItemClient) throws -> CommitResult { try client.commit(request) }
+    enum Write: Sendable {
+        case request(CommitRequest)
+        case capture(CapturePlan)
+    }
+    let write: Write
+    var request: CommitRequest {
+        switch write {
+        case .request(let request): request
+        case .capture(let plan): plan.commitRequest
+        }
+    }
+    init(_ request: CommitRequest) { write = .request(request) }
+    init(_ plan: CapturePlan) { write = .capture(plan) }
+    func send(using client: ItemClient) throws -> CommitResult {
+        guard case .request = write else {
+            throw TractandaError("captureAsync", "Capture writes use the asynchronous client.")
+        }
+        return try client.commit(request)
+    }
 }

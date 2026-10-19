@@ -1,5 +1,7 @@
 /// Versioned native behavior contracts. Presence declares API support, not configuration or permission.
 public enum ServerFeature: String, Sendable {
+    case revisionProjection = "tractanda.revision-projection.v1"
+    case inlineCapture = "tractanda.inline-capture.v1"
     case asynchronousStoreRebuild = "tractanda.store-rebuild.v2"
     case runtimeIdentity = "tractanda.runtime-identity.v1"
     case semanticJobTiming = "tractanda.semantic-job-timing.v1"

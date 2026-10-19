@@ -1,4 +1,8 @@
+#if os(Linux)
+import Glibc
+#else
 import Darwin
+#endif
 import DoclingRaster
 import Foundation
 import MLX
@@ -39,6 +43,13 @@ private final class ProtocolWriter {
 /// One trusted Core-bound descriptor and model context; durable state belongs to Core.
 enum NativeDocumentWorker {
     static func main(_ args: [String]) async {
+#if os(Linux)
+        await Device.withDefaultDevice(.cpu) { await run(args) }
+#else
+        await run(args)
+#endif
+    }
+    private static func run(_ args: [String]) async {
         // Reserve protocol stdout first, before any runtime operations can print.
         let protocolFD = dup(STDOUT_FILENO)
         guard protocolFD >= 0, fcntl(protocolFD, F_SETFD, FD_CLOEXEC) == 0,
@@ -99,7 +110,7 @@ enum NativeDocumentWorker {
                         }
                         let expected = try expectedWeights(model)
                         try writer!.progress("modelLoad", request: request, pageCount: session.pageCount)
-                        let loaded = try await VLMModelFactory.shared.load(
+                        var loaded = try await VLMModelFactory.shared.load(
                             from: model, using: #huggingFaceTokenizerLoader())
                         let actual = Dictionary(
                             uniqueKeysWithValues: loaded.model.parameters().flattened().map {
@@ -111,6 +122,7 @@ enum NativeDocumentWorker {
                         }!.1
                         try require(vision.dtype == .bfloat16, "Loaded vision weights are not BF16.")
                         loaded.model.train(false)
+                        loaded.processor = NativeDocumentInput(tokenizer: loaded.tokenizer, traceDirectory: nil, comparisonDirectory: nil)
                         context = loaded
                         try writer!.progress("modelReady", request: request, pageCount: session.pageCount)
                     } catch {
@@ -183,7 +195,7 @@ enum NativeDocumentWorker {
                     try? writer.frame(fields, pageCount: 0)
                 }
             } else {
-                Darwin.close(protocolFD)
+                close(protocolFD)
             }
             // Binding parse failures cannot safely fabricate a fully bound error frame.
             FileHandle.standardError.write(Data(("\(code): native worker failed.\n").utf8))
@@ -200,7 +212,7 @@ enum NativeDocumentWorker {
     private static func boundedBinding(_ path: String) throws -> Data {
         let fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else { throw NativeWorkerProtocol.invalid() }
-        defer { Darwin.close(fd) }
+        defer { close(fd) }
         var metadata = stat()
         guard fstat(fd, &metadata) == 0, metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
             metadata.st_size > 0, metadata.st_size <= NativeWorkerProtocol.requestBytes
@@ -220,11 +232,11 @@ enum NativeDocumentWorker {
             data, binding: writer.binding, outstanding: nil, pageCount: pageCount)
         let fd = open(output.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
         guard fd >= 0 else { throw NativeWorkerProtocol.invalid() }
-        defer { Darwin.close(fd) }
+        defer { close(fd) }
         try FileHandle(fileDescriptor: fd, closeOnDealloc: false).write(contentsOf: data + Data([10]))
         guard fsync(fd) == 0 else { throw NativeWorkerProtocol.invalid() }
         let directory = open(output.deletingLastPathComponent().path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
-        defer { if directory >= 0 { Darwin.close(directory) } }
+        defer { if directory >= 0 { close(directory) } }
         guard directory >= 0, fsync(directory) == 0 else { throw NativeWorkerProtocol.invalid() }
     }
     private static func convertPage(

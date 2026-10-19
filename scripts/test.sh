@@ -9,6 +9,7 @@ sh scripts/check-style.sh
 if command -v node >/dev/null 2>&1; then
     node scripts/test-kanban-order.js
     node scripts/test-kanban-loading.js
+    node scripts/test-inline-capture-web.js
 else
     echo 'Node.js unavailable; browser logic checks must run on the macOS release host.'
 fi

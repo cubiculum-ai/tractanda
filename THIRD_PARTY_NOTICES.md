@@ -18,6 +18,10 @@ Tractanda's first-party license does not replace dependency licenses. Package so
 
 Exact revisions and repository URLs are in `Package.resolved`. The complete upstream license/notice texts copied from these dependency checkouts are retained under `LICENSES/`; the table is a navigation aid, not a replacement for those terms.
 
+## Standalone peer TLS package
+
+`Packages/TractandaPeerTLS` contains tracked production sources from Apple SwiftNIO SSL revision `15e0b9e495786807272dd4891fa4bac76aa43034`, bundling BoringSSL `8eb25be6fa18d475291122887a7bccd3762ff236`. It preserves the upstream Apache-2.0 LICENSE/NOTICE and component source headers; exact copies and provenance are in [LICENSES/swift-nio-ssl](LICENSES/swift-nio-ssl/). Three marked Swift additions expose package-only imported-PSK configuration and authentication facts; the diff and file hashes are in the package's `Vendor/` directory. BoringSSL C/C++ sources are unchanged. The first-party wrapper/tests/scripts retain Tractanda's root license. This standalone package is not yet a dependency of the root application or an enabled peer listener.
+
 ## SQLite and Vec1
 
 SQLite is supplied by the operating system/package manager. Its FTS5 facility and SQLite-origin Vec1 are under SQLite's public-domain dedication. `Sources/CTractandaVec1/Vendor/vec1.c` retains its original public-domain statement and provenance comment. The surrounding portability wrapper is Tractanda code. No database or vector/model index is distributed as source content.

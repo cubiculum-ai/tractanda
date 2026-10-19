@@ -1,0 +1,46 @@
+{
+  "status": "SOURCE_PROVENANCE_NOT_RUNTIME_ADMISSION",
+  "pdfium": {
+    "url": "https://pdfium.googlesource.com/pdfium",
+    "revision": "f51279699cb59754d1f49aef10eb8e825fe56532",
+    "profile": "nonV8/nonXFA/AGG/embeddedICU/bundledFreeType; no GPU, Python runtime or external renderer service",
+    "license": "Root LICENSE contains BSD notice and Apache2 terms; retain complete exact selected third-party notices"
+  },
+  "standaloneSources": [
+    {
+      "name": "zlib",
+      "revision": "da607da739fa6047df13e66a2af6b8bec7c2a498"
+    },
+    {
+      "name": "libpng",
+      "revision": "cd952f49f95bb27154ae77dbb103032d95f6e580"
+    },
+    {
+      "name": "libjpeg-turbo",
+      "revision": "c85e6b905bf237038faa936dab160ebfc5da0344"
+    },
+    {
+      "name": "lcms2",
+      "revision": "21c582a594fe5279f90c0b93437c398f93bf62b0",
+      "maintainerArchiveSHA256": "bfc54f7bab59fbc921012014a8032e4cba4abd46db47d46b76416a8c0b2815c8"
+    }
+  ],
+  "cpuABIApproval": {
+    "buildRevision": "ebdaeefa62db7c40f27cacb0eb034db3a5cdb849",
+    "sourcePath": "config/compiler_cpu_abi.gn",
+    "beforeSHA256": "64796f42db27b2e143c7f69ddc3bae1c25dfce16cb86e5d9a72eec4d823b1554",
+    "afterSHA256": "42a931a5ae897dd2cf009b8db8edcd1dc6704614012fda869c9da63809ee5b1d",
+    "patchPath": "Packages/TractandaDocuments/NativeDependencies/pdfium-f512-x64-sse2.patch",
+    "patchSHA256": "c131eb53c0e1849544145387043f53087a3a49724ca33c6fe89263b68e47fd16"
+  },
+  "reviewedNativeRecipe": {
+    "path": "scripts/build-docling-linux-native.py",
+    "sha256": "6a93ea934cf65bb7460dce46cb4d9a1c47ae94e2aff7017b662ca7d788d7c7db"
+  },
+  "nativeClosureContract": "lib/tractanda/document-native-closure.json; exact expected digest remains unadmitted until native behavior/closure review",
+  "privateSONAMEs": [
+    "libtractanda_docling_pdf.so.1",
+    "libtractanda_docling_images.so.1"
+  ],
+  "rasterABIHeaderSHA256": "9d3e8d1dee76063788aa3d425790d5c5e2e63b289c89aa41e80202048d0875cf"
+}

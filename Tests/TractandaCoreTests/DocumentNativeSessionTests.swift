@@ -92,8 +92,47 @@ final class DocumentNativeSessionTests: XCTestCase {
             intent: fixture.2.intent, original: original, configuration: fixture.3,
             expectedExecutableSHA256: DocumentProcess.executableSHA256(fixture.3.executablePath),
             files: fixture.4,
-            root: fixture.1.root, budgets: budgets ?? DocumentWorkerBudgets(), cancellation: .init())
+            root: fixture.1.root, budgets: budgets ?? DocumentWorkerBudgets(), cancellation: .init(),
+            runtimeVerifier: { _ in })
     }
+    func testInjectedVerifierRunsAndFailurePreventsWorkerLaunch() throws {
+        let fixture = try fixture(mode: "normal")
+        defer { try? FileManager.default.removeItem(at: fixture.0) }
+        let original = try fixture.2.verifyOriginal(cancellation: .init())
+        XCTAssertThrowsError(try DocumentNativeSession(
+            intent: fixture.2.intent, original: original, configuration: fixture.3,
+            expectedExecutableSHA256: DocumentProcess.executableSHA256(fixture.3.executablePath),
+            files: fixture.4, root: fixture.1.root, budgets: DocumentWorkerBudgets(), cancellation: .init(),
+            runtimeVerifier: { _ in throw TractandaError("fixtureVerifierRejected", "Injected verifier called") })) {
+                XCTAssertEqual(($0 as? TractandaError)?.code, "fixtureVerifierRejected")
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.0.appendingPathComponent("worker-pid").path))
+        // A successful explicit verifier still exercises the real fake-process
+        // handshake/protocol path; none of the executable/original checks are skipped.
+        let current = try session(fixture)
+        XCTAssertEqual(current.pageCount, 129)
+        try current.close()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.0.appendingPathComponent("worker-pid").path))
+    }
+
+#if os(Linux)
+    func testProductionConstructorRejectsInvalidClosureBeforeWorkerLaunch() throws {
+        guard try DocumentLinuxRuntimeClosure.compiledCurrentDigest() != nil else {
+            throw XCTSkip("Requires the finite production Linux profile")
+        }
+        let fixture = try fixture(mode: "normal")
+        defer { try? FileManager.default.removeItem(at: fixture.0) }
+        let original = try fixture.2.verifyOriginal(cancellation: .init())
+        XCTAssertThrowsError(try DocumentNativeSession(
+            intent: fixture.2.intent, original: original, configuration: fixture.3,
+            expectedExecutableSHA256: DocumentProcess.executableSHA256(fixture.3.executablePath),
+            files: fixture.4, root: fixture.1.root, budgets: DocumentWorkerBudgets(), cancellation: .init())) {
+                XCTAssertEqual(($0 as? TractandaError)?.code, "documentConverter")
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.0.appendingPathComponent("worker-pid").path))
+    }
+#endif
+
     func test129PageInspectionAndSequentialOutcomesUseOneLazyContext() throws {
         let fixture = try fixture(mode: "normal")
         defer { try? FileManager.default.removeItem(at: fixture.0) }
@@ -192,7 +231,8 @@ final class DocumentNativeSessionTests: XCTestCase {
                 intent: fixture.2.intent, original: original, configuration: fixture.3,
                 expectedExecutableSHA256: DocumentProcess.executableSHA256(fixture.3.executablePath),
                 files: files,
-                root: fixture.1.root, budgets: DocumentWorkerBudgets(), cancellation: .init())
+                root: fixture.1.root, budgets: DocumentWorkerBudgets(), cancellation: .init(),
+                runtimeVerifier: { _ in })
             XCTAssertGreaterThan(quota.usedBytes, baseline)
             try current.close()
         }

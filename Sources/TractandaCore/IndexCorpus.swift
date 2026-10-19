@@ -134,6 +134,21 @@ private struct IndexTextSourceIdentity: Encodable {
 
 /// Only bounded canonical ordinary values are hashed. No document source string is assembled.
 enum IndexCorpusPlan {
+    static func document(_ document: PageCorpusDocumentPlan) throws -> IndexCorpusComponentPlan {
+        let key = PageCorpusInput.digest(
+            try JSON.encode(
+                IndexDocumentSourceIdentity(
+                    layout: PageCorpusBinding.layoutName, source: document.source,
+                    identity: document.identity, extractedAt: document.extractedAt,
+                    rootSHA256: document.rootSHA256, pageCount: document.pageCount,
+                    encodedBytes: document.totalEncodedBytes, coverage: document.coverage,
+                    inlinePages: document.inlinePages)))
+        return .init(
+            sourceKey: "document:" + key, kind: "document", attachmentID: document.attachmentID,
+            overlay: .init(
+                attachmentID: document.attachmentID, representationID: document.representationID,
+                contentID: document.savedContent?.contentID))
+    }
     static func ordinaryFingerprint(_ revision: Revision) throws -> String {
         var digest = SHA256()
         func part(_ data: Data) {
@@ -199,20 +214,7 @@ enum IndexCorpusPlan {
                         contentID: nil)))
         }
         for document in input.documents {
-            let key = PageCorpusInput.digest(
-                try JSON.encode(
-                    IndexDocumentSourceIdentity(
-                        layout: PageCorpusBinding.layoutName, source: document.source,
-                        identity: document.identity, extractedAt: document.extractedAt,
-                        rootSHA256: document.rootSHA256, pageCount: document.pageCount,
-                        encodedBytes: document.totalEncodedBytes, coverage: document.coverage,
-                        inlinePages: document.inlinePages)))
-            result.append(
-                .init(
-                    sourceKey: "document:" + key, kind: "document", attachmentID: document.attachmentID,
-                    overlay: .init(
-                        attachmentID: document.attachmentID, representationID: document.representationID,
-                        contentID: document.savedContent?.contentID)))
+            result.append(try Self.document(document))
         }
         guard result.count <= 1 + 2 * AttachmentDescriptor.maximumAttachments else {
             throw TractandaError(
@@ -429,7 +431,9 @@ extension ItemIndex {
                 retainedEncodedBytes: writer.retainedEncodedBytes(workID)))
         try writer.transaction {
             var pending: Int64 = 0
-            try writer.rows("SELECT count(*) FROM (SELECT 1 FROM corpus_work LIMIT 64)") {
+            try writer.rows(
+                "SELECT count(*) FROM (SELECT 1 FROM corpus_work WHERE kind!='peer-document' LIMIT 64)"
+            ) {
                 pending = sqlite3_column_int64($0, 0)
             }
             guard pending < 64 else {
@@ -708,21 +712,7 @@ extension IndexCorpusPlan {
                         contentID: nil)))
         }
         for value in documents {
-            let document = try PageCorpusDocumentPlan(document: value)
-            let key = PageCorpusInput.digest(
-                try JSON.encode(
-                    IndexDocumentSourceIdentity(
-                        layout: PageCorpusBinding.layoutName, source: document.source,
-                        identity: document.identity, extractedAt: document.extractedAt,
-                        rootSHA256: document.rootSHA256, pageCount: document.pageCount,
-                        encodedBytes: document.totalEncodedBytes, coverage: document.coverage,
-                        inlinePages: document.inlinePages)))
-            plans.append(
-                .init(
-                    sourceKey: "document:" + key, kind: "document", attachmentID: document.attachmentID,
-                    overlay: .init(
-                        attachmentID: document.attachmentID, representationID: document.representationID,
-                        contentID: document.savedContent?.contentID)))
+            plans.append(try document(PageCorpusDocumentPlan(document: value)))
         }
         return plans
     }
@@ -735,7 +725,7 @@ extension ItemIndex {
         let statement = try corpusPrepare(sql, values)
         defer { sqlite3_finalize(statement) }
         while true {
-            let status = sqlite3_step(statement)
+            let status = catalogueStep(statement)
             if status == SQLITE_DONE { return }
             guard status == SQLITE_ROW else {
                 throw TractandaError("indexError", "Corpus index operation failed.")
@@ -1007,7 +997,9 @@ extension ItemIndex {
             }
             if let retentionID {
                 var pending: Int64 = 0
-                try corpusRows("SELECT count(*) FROM (SELECT 1 FROM corpus_work LIMIT 64)") {
+                try corpusRows(
+                    "SELECT count(*) FROM (SELECT 1 FROM corpus_work WHERE kind!='peer-document' LIMIT 64)"
+                ) {
                     pending = sqlite3_column_int64($0, 0)
                 }
                 guard pending < 64 else {
@@ -1173,8 +1165,8 @@ extension ItemIndex {
             try execute("UPDATE corpus_gc_cursor SET generation_id=? WHERE singleton=1", [cursor])
             for owner in owners {
                 try execute(
-                    "DELETE FROM corpus_work WHERE id=? AND kind='discard' AND NOT EXISTS (SELECT 1 FROM corpus_generation WHERE owner_work_id=?)",
-                    [owner, owner])
+                    "DELETE FROM corpus_work WHERE id=? AND (kind='discard' OR (kind='peer-document' AND NOT EXISTS (SELECT 1 FROM corpus_work_generation WHERE work_id=?))) AND NOT EXISTS (SELECT 1 FROM corpus_generation WHERE owner_work_id=?)",
+                    [owner, owner, owner])
             }
             corpusGCStatsForTesting.unitsDeleted = removed
             try boundary()
@@ -1526,6 +1518,370 @@ struct IndexedCorpusRetainedWork: Sendable {
     let retainedEncodedBytes: Int64
 }
 
+struct PeerDocumentCorpusToken: Codable, Equatable {
+    let workID: String
+    let generationID: String
+    let sourceKey: String
+    let reusable: Bool
+}
+
+extension ItemIndex {
+    /// No head link is installed here. Verified page text remains hidden until normal policy
+    /// admission publishes its actual current head and existing corpus_link overlays.
+    func beginPeerDocumentCorpus(
+        packageID: String, document: AttachmentDocumentRepresentation,
+        boundary: (IndexCorpusWriteBatch) throws -> Void
+    ) throws -> PeerDocumentCorpusToken {
+        guard !packageID.isEmpty, packageID.utf8.count <= 4096, !packageID.utf8.contains(0) else {
+            throw TractandaError("resourceLimit", "Invalid peer corpus owner scope.")
+        }
+        guard let content = document.content else {
+            throw TractandaError("indexError", "Expected paged corpus source.")
+        }
+        let plan = try IndexCorpusPlan.document(PageCorpusDocumentPlan(document: document))
+        var token: PeerDocumentCorpusToken?
+        try corpusRows(
+            "SELECT o.work,o.generation,o.source_key,g.state FROM peer_document_corpus_owner o JOIN corpus_work w ON w.id=o.work AND w.kind='peer-document' JOIN corpus_generation g ON g.id=o.generation AND g.source_key=o.source_key AND g.kind='document' JOIN corpus_work_generation r ON r.work_id=w.id AND r.generation_id=g.id WHERE o.package=? AND o.content=?",
+            [packageID, content.contentID]
+        ) { row in
+            guard try corpusText(row, 2) == plan.sourceKey else {
+                throw TractandaError("peerObjectCollision", "Peer corpus source identity differs.")
+            }
+            let state = try corpusText(row, 3)
+            guard state == "writing" || state == "ready" else {
+                throw TractandaError("indexError", "Peer corpus generation is unavailable.")
+            }
+            token = try .init(
+                workID: corpusText(row, 0), generationID: corpusText(row, 1),
+                sourceKey: plan.sourceKey, reusable: state == "ready")
+        }
+        if let token { return token }
+        let work = try UUID.makeVersion1().uuidString.lowercased()
+        let source = String(
+            decoding: try JSON.encode([
+                "package": packageID, "content": content.contentID,
+                "sourceKey": plan.sourceKey,
+            ]), as: UTF8.self)
+        let workBytes = try IndexCorpusEncoding.work(work, "peer-document", source)
+        try boundary(
+            .init(
+                phase: .before, workID: work, estimatedAdditionalBytes: 65536,
+                units: 0, pendingEncodedBytes: workBytes))
+        try requireGraphCapacity(additionalBytes: 65536)
+        try execute(
+            "INSERT INTO corpus_work VALUES (?,'peer-document',?,?)", [work, source, String(workBytes)])
+        let component: IndexedCorpusComponent
+        let reusable: Bool
+        if let ready = try readyCorpusComponent(plan.sourceKey) {
+            guard ready.kind == "document", ready.unitCount >= 0, ready.byteCount >= 0 else {
+                throw TractandaError("indexError", "Reusable peer corpus generation differs.")
+            }
+            component = ready
+            reusable = true
+        } else {
+            let id = try UUID.makeVersion1().uuidString.lowercased()
+            let header = try IndexCorpusEncoding.generation(
+                id, plan.sourceKey, "document", "writing", 0, 0, work)
+            try execute(
+                "INSERT INTO corpus_generation VALUES (?,?,?,'writing',0,0,?,?,?)",
+                [id, plan.sourceKey, "document", work, String(header), String(header)])
+            try execute("INSERT OR IGNORE INTO corpus_gc_candidate VALUES (?)", [id])
+            component = .init(
+                generationID: id, sourceKey: plan.sourceKey, kind: "document", unitCount: 0, byteCount: 0)
+            reusable = false
+        }
+        try execute("INSERT INTO corpus_work_generation VALUES (?,?)", [work, component.generationID])
+        let progressed = try peerCorpusProgressTime(Date())
+        try execute(
+            "INSERT INTO peer_document_corpus_owner VALUES (?,?,?,?,?,?)",
+            [packageID, content.contentID, plan.sourceKey, work, component.generationID, progressed])
+        let ownerBytes = try JSON.encode([
+            "package": packageID, "content": content.contentID,
+            "source_key": plan.sourceKey, "work": work, "generation": component.generationID,
+            "progressed": progressed,
+        ]).count
+        try execute(
+            "UPDATE corpus_work SET encoded_bytes=encoded_bytes+? WHERE id=?", [String(ownerBytes), work])
+        return .init(
+            workID: work, generationID: component.generationID, sourceKey: plan.sourceKey, reusable: reusable)
+    }
+    func appendPeerDocumentCorpus(
+        _ unit: PageCorpusUnit, token: PeerDocumentCorpusToken,
+        boundary: (IndexCorpusWriteBatch) throws -> Void
+    ) throws {
+        guard !token.reusable, unit.spans.count <= 512, unit.text.utf8.count <= 64 * 1024 else {
+            throw TractandaError("indexError", "Invalid peer corpus page window.")
+        }
+        let origin = String(decoding: try JSON.encode(unit.origin), as: UTF8.self)
+        var previous: String?
+        try corpusRows(
+            "SELECT u.id,u.byte_start,u.byte_count,u.origin,p.text FROM corpus_unit u JOIN page_text_index p ON p.rowid=u.id WHERE u.generation_id=? AND u.ordinal=?",
+            [token.generationID, String(unit.ordinal)]
+        ) { row in
+            guard sqlite3_column_int64(row, 1) == unit.byteStart,
+                sqlite3_column_int64(row, 2) == Int64(unit.text.utf8.count),
+                try corpusText(row, 3) == origin, try corpusText(row, 4) == unit.text
+            else {
+                throw TractandaError("peerObjectCollision", "Retained peer corpus ordinal differs.")
+            }
+            previous = try corpusText(row, 0)
+        }
+        if let previous {
+            var position = 0
+            try corpusRows(
+                "SELECT block_index,start,end,box FROM corpus_span WHERE unit_id=? ORDER BY block_index LIMIT 513",
+                [previous]
+            ) { row in
+                guard position < unit.spans.count else {
+                    throw TractandaError("indexError", "Peer corpus spans differ.")
+                }
+                let span = unit.spans[position]
+                let box = try span.box.map { String(decoding: try JSON.encode($0), as: UTF8.self) }
+                let stored = sqlite3_column_type(row, 3) == SQLITE_NULL ? nil : try corpusText(row, 3)
+                guard sqlite3_column_int64(row, 0) == span.blockIndex,
+                    sqlite3_column_int64(row, 1) == span.unitByteStart,
+                    sqlite3_column_int64(row, 2) == span.unitByteEnd, box == stored
+                else {
+                    throw TractandaError("indexError", "Peer corpus spans differ.")
+                }
+                position += 1
+            }
+            guard position == unit.spans.count else {
+                throw TractandaError("indexError", "Peer corpus span is missing.")
+            }
+            return
+        }
+        var count: Int64 = -1
+        var bytes: Int64 = -1
+        var header: Int64 = 0
+        var encoded: Int64 = 0
+        try corpusRows(
+            "SELECT unit_count,byte_count,header_bytes,encoded_bytes FROM corpus_generation WHERE id=? AND state='writing' AND owner_work_id=?",
+            [token.generationID, token.workID]
+        ) { row in
+            count = sqlite3_column_int64(row, 0)
+            bytes = sqlite3_column_int64(row, 1)
+            header = sqlite3_column_int64(row, 2)
+            encoded = sqlite3_column_int64(row, 3)
+        }
+        guard count == unit.ordinal, bytes == unit.byteStart else {
+            throw TractandaError("indexError", "Peer corpus prefix is incomplete.")
+        }
+        let nextCount = try PageCorpusEmitter.add(count, 1)
+        let nextBytes = try PageCorpusEmitter.add(bytes, Int64(unit.text.utf8.count))
+        let unitBytes = try IndexCorpusEncoding.unit(
+            token.generationID, count, bytes, unit.text, unit.origin, unit.spans)
+        let nextHeader = try IndexCorpusEncoding.generation(
+            token.generationID, token.sourceKey,
+            "document", "writing", nextCount, nextBytes, token.workID)
+        let pending = try PageCorpusEmitter.add(unitBytes, nextHeader - header)
+        let estimate = try PageCorpusEmitter.add(pending, 65536).multipliedReportingOverflow(by: 4)
+        guard !estimate.overflow, estimate.partialValue >= 0 else {
+            throw TractandaError("resourceLimit", "Peer corpus growth overflow.")
+        }
+        try boundary(
+            .init(
+                phase: .before, workID: token.workID, estimatedAdditionalBytes: estimate.partialValue,
+                units: 1, pendingEncodedBytes: pending))
+        try requireGraphCapacity(additionalBytes: UInt64(estimate.partialValue))
+        try execute(
+            "INSERT INTO corpus_unit(generation_id,ordinal,byte_start,byte_count,origin,encoded_bytes) VALUES (?,?,?,?,?,?)",
+            [
+                token.generationID, String(count), String(bytes), String(unit.text.utf8.count), origin,
+                String(unitBytes),
+            ])
+        var id: String?
+        try corpusRows(
+            "SELECT id FROM corpus_unit WHERE generation_id=? AND ordinal=?",
+            [token.generationID, String(count)]
+        ) { id = try corpusText($0, 0) }
+        guard let id else { throw TractandaError("indexError", "Peer corpus unit missing after insert.") }
+        try execute("INSERT INTO page_text_index(rowid,text) VALUES (?,?)", [id, unit.text])
+        for span in unit.spans {
+            try Task.checkCancellation()
+            if let box = span.box {
+                try execute(
+                    "INSERT INTO corpus_span VALUES (?,?,?,?,?)",
+                    [
+                        id, String(span.blockIndex), String(span.unitByteStart), String(span.unitByteEnd),
+                        String(decoding: JSON.encode(box), as: UTF8.self),
+                    ])
+            } else {
+                try execute(
+                    "INSERT INTO corpus_span VALUES (?,?,?,?,NULL)",
+                    [id, String(span.blockIndex), String(span.unitByteStart), String(span.unitByteEnd)])
+            }
+        }
+        try execute(
+            "UPDATE corpus_generation SET unit_count=?,byte_count=?,header_bytes=?,encoded_bytes=? WHERE id=?",
+            [
+                String(nextCount), String(nextBytes), String(nextHeader),
+                String(try PageCorpusEmitter.add(encoded, pending)), token.generationID,
+            ])
+    }
+    func finishPeerDocumentCorpus(_ token: PeerDocumentCorpusToken, units: Int64, bytes: Int64) throws {
+        if token.reusable { return }
+        if let ready = try readyCorpusComponent(token.sourceKey), ready.generationID != token.generationID {
+            guard ready.unitCount == units, ready.byteCount == bytes else {
+                throw TractandaError("indexError", "Concurrent peer corpus source totals differ.")
+            }
+            try execute(
+                "DELETE FROM corpus_work_generation WHERE work_id=? AND generation_id=?",
+                [token.workID, token.generationID])
+            try execute(
+                "INSERT OR IGNORE INTO corpus_work_generation VALUES (?,?)",
+                [token.workID, ready.generationID])
+            try execute(
+                "UPDATE peer_document_corpus_owner SET generation=? WHERE work=?",
+                [ready.generationID, token.workID])
+            return
+        }
+        var actual = false
+        try corpusRows(
+            "SELECT 1 FROM corpus_generation WHERE id=? AND source_key=? AND state='writing' AND unit_count=? AND byte_count=?",
+            [token.generationID, token.sourceKey, String(units), String(bytes)]
+        ) { _ in actual = true }
+        guard actual else { throw TractandaError("indexError", "Peer corpus totals differ from traversal.") }
+        let header = try IndexCorpusEncoding.generation(
+            token.generationID, token.sourceKey, "document", "ready", units, bytes, token.workID)
+        try execute(
+            "UPDATE corpus_generation SET state='ready',encoded_bytes=encoded_bytes-header_bytes+?,header_bytes=? WHERE id=?",
+            [String(header), String(header), token.generationID])
+    }
+    func peerDocumentCorpusReady(_ document: AttachmentDocumentRepresentation) throws -> Bool {
+        let plan = try IndexCorpusPlan.document(PageCorpusDocumentPlan(document: document))
+        return try readyCorpusComponent(plan.sourceKey) != nil
+    }
+    private func peerCorpusProgressTime(_ now: Date) throws -> String {
+        let seconds = now.timeIntervalSince1970
+        guard seconds.isFinite, seconds >= 0, seconds < Double(Int64.max) else {
+            throw TractandaError("indexError", "Corpus progress time is unavailable.")
+        }
+        return String(format: "%020lld", Int64(seconds))
+    }
+    /// Only the caller's genuine bounded traversal/inspection progress renews this idle
+    /// cache lifetime. Repeated ready/no-progress calls do not keep abandoned pins alive.
+    func touchPeerDocumentCorpus(_ token: PeerDocumentCorpusToken, now: Date = Date()) throws {
+        try execute(
+            "UPDATE peer_document_corpus_owner SET progressed=? WHERE work=? AND generation=?",
+            [try peerCorpusProgressTime(now), token.workID, token.generationID])
+    }
+    func peerDocumentCorpusOwner(_ workID: String) throws -> (package: String, progressed: Double)? {
+        var result: (String, Double)?
+        var initialized = false
+        try corpusRows(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='peer_document_corpus_owner'"
+        ) { _ in initialized = true }
+        guard initialized else { return nil }
+        try initializePeerDocumentSchema()
+        try corpusRows(
+            "SELECT package,progressed FROM peer_document_corpus_owner WHERE work=? LIMIT 1", [workID]
+        ) {
+            let value = try corpusText($0, 1)
+            guard value.isEmpty || (value.count == 20 && value.allSatisfy(\.isNumber)),
+                let seconds = Double(value.isEmpty ? "0" : value), seconds.isFinite, seconds >= 0
+            else { throw TractandaError("indexError", "Corpus progress time changed.") }
+            result = try (corpusText($0, 0), seconds)
+        }
+        if result?.1 == 0 {
+            // A pre-progress disposable row gets the fixed-width timestamp metadata once,
+            // within this bounded work lookup; existing user/canonical bytes are untouched.
+            let zero = String(repeating: "0", count: 20)
+            let fieldBytes = try JSON.encode(["progressed": zero]).count - 2
+            try execute(
+                "UPDATE corpus_work SET encoded_bytes=encoded_bytes+? WHERE id=? AND EXISTS (SELECT 1 FROM peer_document_corpus_owner WHERE work=? AND progressed='')",
+                [String(fieldBytes + 1), workID, workID])
+            try execute(
+                "UPDATE peer_document_corpus_owner SET progressed=? WHERE work=? AND progressed=''",
+                [zero, workID])
+        }
+        return result
+    }
+    func expirePeerDocumentCorpus(_ workID: String, now: Date = Date()) throws -> [IndexedCorpusRetainedWork]
+    {
+        guard let owner = try peerDocumentCorpusOwner(workID),
+            now.timeIntervalSince1970 - owner.progressed >= 3600
+        else { return [] }
+        return try completePeerDocumentCorpus(packageID: owner.package, workID: workID, limit: 1)
+    }
+    /// Called after applied history, outside publication's visibility transaction. A bounded
+    /// window retires pins; unlinked derived bytes remain owned/charged until indexed GC.
+    func completePeerDocumentCorpus(packageID: String, workID: String? = nil, limit: Int = 128) throws
+        -> [IndexedCorpusRetainedWork]
+    {
+        guard (1...128).contains(limit) else {
+            throw TractandaError("resourceLimit", "Invalid peer corpus cleanup window.")
+        }
+        // Metadata-only bootstrap can become applied before any document traversal creates
+        // its disposable progress tables. No table means no document-owned pins to retire.
+        var initialized = false
+        try corpusRows(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='peer_document_corpus_owner'"
+        ) { _ in initialized = true }
+        guard initialized else { return [] }
+        var rows: [(String, String, String)] = []
+        try corpusRows(
+            "SELECT content,work,generation FROM peer_document_corpus_owner WHERE package=?"
+                + (workID == nil ? "" : " AND work=?") + " ORDER BY content LIMIT ?",
+            [packageID] + (workID.map { [$0] } ?? []) + [String(limit)]
+        ) { row in
+            rows.append(try (corpusText(row, 0), corpusText(row, 1), corpusText(row, 2)))
+        }
+        var observed: [IndexedCorpusRetainedWork] = []
+        for (content, work, generation) in rows {
+            try Task.checkCancellation()
+            var priorOwner: String?
+            try execute("SAVEPOINT peer_document_corpus_release")
+            do {
+                try retireCorpusWork(work)
+                // A later accepted package can reuse a ready generation left by an applied
+                // held package. Once head-linked it is canonical derived state; detach its
+                // retired owner too, rather than leaving an unreachable work header charged.
+                try corpusRows(
+                    "SELECT g.owner_work_id FROM corpus_generation g JOIN corpus_work w ON w.id=g.owner_work_id WHERE g.id=? AND w.kind IN ('peer-document','discard') AND EXISTS (SELECT 1 FROM corpus_link l WHERE l.generation_id=g.id) AND NOT EXISTS (SELECT 1 FROM corpus_work_generation r WHERE r.work_id=w.id)",
+                    [generation]
+                ) { priorOwner = try corpusText($0, 0) }
+                if let priorOwner {
+                    try execute("UPDATE corpus_generation SET owner_work_id=NULL WHERE id=?", [generation])
+                    try execute(
+                        "DELETE FROM corpus_work WHERE id=? AND NOT EXISTS (SELECT 1 FROM corpus_generation WHERE owner_work_id=?)",
+                        [priorOwner, priorOwner])
+                }
+                try execute(
+                    "DELETE FROM peer_document_corpus_owner WHERE package=? AND content=?",
+                    [packageID, content])
+                try execute("RELEASE peer_document_corpus_release")
+            } catch {
+                try? execute("ROLLBACK TO peer_document_corpus_release")
+                try? execute("RELEASE peer_document_corpus_release")
+                throw error
+            }
+            observed.append(
+                try .init(
+                    workID: work, kind: "peer-document", retainedEncodedBytes: corpusRetainedBytes(work)))
+            if let priorOwner, priorOwner != work {
+                observed.append(
+                    try .init(
+                        workID: priorOwner, kind: "peer-document",
+                        retainedEncodedBytes: corpusRetainedBytes(priorOwner)))
+            }
+            try corpusRows(
+                "SELECT owner_work_id FROM corpus_generation WHERE id=? AND owner_work_id IS NOT NULL",
+                [generation]
+            ) { row in
+                let successor = try corpusText(row, 0)
+                if successor != work {
+                    observed.append(
+                        try .init(
+                            workID: successor, kind: "peer-document",
+                            retainedEncodedBytes: corpusRetainedBytes(successor)))
+                }
+            }
+        }
+        return observed
+    }
+}
+
 extension IndexCorpusSQL {
     func retainedEncodedBytes(_ workID: String) throws -> Int64 {
         var bytes: Int64 = 0
@@ -1626,15 +1982,17 @@ extension ItemIndex {
         }
         if remains {
             var source: String?
-            try corpusRows("SELECT source FROM corpus_work WHERE id=?", [workID]) {
+            var kind = "discard"
+            try corpusRows("SELECT source,kind FROM corpus_work WHERE id=?", [workID]) {
                 source = try corpusText($0, 0)
+                if try corpusText($0, 1) == "peer-document" { kind = "peer-document" }
             }
             guard let source else {
                 throw TractandaError("indexError", "Retained corpus debt lost its work header.")
             }
             try execute(
-                "UPDATE corpus_work SET kind='discard',encoded_bytes=? WHERE id=?",
-                [String(try IndexCorpusEncoding.work(workID, "discard", source)), workID])
+                "UPDATE corpus_work SET kind=?,encoded_bytes=? WHERE id=?",
+                [kind, String(try IndexCorpusEncoding.work(workID, kind, source)), workID])
         } else {
             try execute("DELETE FROM corpus_work WHERE id=?", [workID])
         }

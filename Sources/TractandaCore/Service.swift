@@ -86,7 +86,8 @@ struct PreparedPooledQuery: Sendable {
                         }
                         let fields = try JSON.decode(
                             [String: ItemValue].self, Data(fieldsJSON.utf8))
-                        let revision = try Revision(fields: fields)
+                        let revision = try Revision(
+                            fields: fields, formatVersion: fields["revisionAncestry"] == nil ? 1 : 2)
                         guard revision.itemID == id else {
                             throw TractandaError("indexError", "Pooled candidate identity differs.")
                         }
@@ -147,6 +148,8 @@ struct PreparedPooledGet: Sendable {
     let argumentsJSON: Data
     let rows: [ItemIndex.CatalogueRow]
     let notFound: [String]
+    let unresolved: [ItemUnresolvedState]
+    let stateTokens: [String: String]
     let authority: PooledReadAuthority
     let root: URL
     let ownerUID: UInt32
@@ -197,7 +200,7 @@ struct PreparedPooledHistory: Sendable {
     let callID: String
     let argumentsJSON: Data
     let itemID: String
-    let headRevisionID: String
+    let stateToken: String
     let position: Int
     let limit: Int
     let authority: PooledReadAuthority
@@ -216,87 +219,39 @@ struct PreparedPooledHistory: Sendable {
         let lease = try pool.lease(principal: authority.principals, cancellation: cancellation)
         defer { lease.finish() }
         afterLease?()
-        let capturedCount = try lease.withReadTransaction { () -> Int in
-            let snapshot = try lease.query(
-                "SELECT items.revision,(SELECT COUNT(*) FROM revision_catalog WHERE item=?) "
-                    + "FROM items WHERE items.id=?",
-                bindings: [.text(itemID), .text(itemID)],
-                limits: .init(maximumRows: 1, maximumBytes: 512), cancellation: cancellation)
-            guard snapshot.count == 1, snapshot[0].count == 2,
-                case .text(let currentHead) = snapshot[0][0],
-                case .integer(let count) = snapshot[0][1],
-                let result = Int(exactly: count), result > 0
-            else { throw TractandaError("recoveryError", "Historical admission snapshot is invalid.") }
-            guard currentHead == headRevisionID else {
-                throw TractandaError("stateChanged", "History head changed before SQL admission.")
-            }
-            return result
-        }
-        afterSnapshot?()
-        func parent(of revisionID: String?) throws -> String? {
-            guard let revisionID else { return nil }
-            let rows = try lease.query(
-                "SELECT parent FROM revision_catalog WHERE revision=? AND item=?",
-                bindings: [.text(revisionID), .text(itemID)],
-                limits: .init(maximumRows: 1, maximumBytes: 256), cancellation: cancellation)
-            guard rows.count == 1, rows[0].count == 1 else {
-                throw TractandaError("recoveryError", "Historical parent is unavailable.")
-            }
-            switch rows[0][0] {
-            case .null: return nil
-            case .text(let parent): return parent
-            default: throw TractandaError("recoveryError", "Historical parent is invalid.")
-            }
-        }
-        func fullRow(_ revisionID: String) throws -> ItemIndex.CatalogueRow {
-            let values = try lease.query(
-                "SELECT revision,item,path,parent,actor,operation,size,inode,uid,mode,"
-                    + "mtime_seconds,mtime_nanoseconds,digest,created_at "
-                    + "FROM revision_catalog WHERE revision=? AND item=?",
-                bindings: [.text(revisionID), .text(itemID)],
-                limits: .init(maximumRows: 1, maximumBytes: 2 * 1024), cancellation: cancellation)
-            guard values.count == 1 else {
-                throw TractandaError("recoveryError", "Historical page row is unavailable.")
-            }
-            return try ItemIndex.CatalogueRow.fromPooledValues(values[0])
-        }
-        var current: String? = headRevisionID
-        var slow: String? = headRevisionID
-        var fast: String? = headRevisionID
-        var total = 0
+        var capturedCount = 0
         var rows: [ItemIndex.CatalogueRow] = []
-        var serializedBytes = 0
-        while current != nil {
-            try Task.checkCancellation()
-            try lease.withReadTransaction {
-                for _ in 0..<batchLimit {
-                    guard let revisionID = current else { break }
-                    let next = try parent(of: revisionID)
-                    if total >= position && rows.count < limit {
-                        let row = try fullRow(revisionID)
-                        guard row.size <= UInt64(maximumSerializedBytes - serializedBytes) else {
-                            throw TractandaError(
-                                "resourceLimit", "History page exceeds its byte window.")
-                        }
-                        serializedBytes += Int(row.size)
-                        rows.append(row)
+        try lease.withReadTransaction {
+            let snapshot = try lease.query(
+                "SELECT json_extract(c.state,'$.stateToken'),p.ordinal FROM current_projection c JOIN recovery_item_progress p ON p.item=c.item WHERE c.item=? AND c.dirty=0",
+                bindings: [.text(itemID)], limits: .init(maximumRows: 1, maximumBytes: 4096),
+                cancellation: cancellation)
+            guard snapshot.count == 1, snapshot[0].count == 2,
+                case .text(let token) = snapshot[0][0], token == stateToken,
+                case .integer(let count) = snapshot[0][1], let total = Int(exactly: count), total > 0
+            else {
+                throw TractandaError("stateChanged", "History item context changed before SQL admission.")
+            }
+            capturedCount = total
+            if position < total {
+                let selected = try lease.query(
+                    "SELECT revision,item,path,parent,actor,operation,size,inode,uid,mode,mtime_seconds,mtime_nanoseconds,digest,created_at,modified_at,provenance FROM revision_catalog WHERE item=? ORDER BY modified_ticks DESC,revision DESC LIMIT ? OFFSET ?",
+                    bindings: [.text(itemID), .integer(Int64(limit)), .integer(Int64(position))],
+                    limits: .init(maximumRows: limit, maximumBytes: ItemIndex.cataloguePageByteWindow),
+                    cancellation: cancellation)
+                var bytes = 0
+                for values in selected {
+                    let row = try ItemIndex.CatalogueRow.fromPooledValues(values)
+                    guard row.itemID == itemID, row.size <= UInt64(maximumSerializedBytes - bytes) else {
+                        throw TractandaError(
+                            "resourceLimit", "History page exceeds its complete byte window.")
                     }
-                    guard total < Int.max else {
-                        throw TractandaError("resourceLimit", "History count overflowed.")
-                    }
-                    total += 1
-                    current = next
-                    slow = try parent(of: slow)
-                    fast = try parent(of: try parent(of: fast))
-                    if let slow, slow == fast {
-                        throw TractandaError("recoveryError", "Historical chain contains a cycle.")
-                    }
+                    bytes += Int(row.size)
+                    rows.append(row)
                 }
             }
         }
-        guard total == capturedCount else {
-            throw TractandaError("recoveryError", "Historical catalogue has disconnected rows.")
-        }
+        afterSnapshot?()
         // Release the read lease before filesystem hydration; the owner rechecks the
         // current head/authority and immutable catalogue rows before delivery.
         lease.finish()
@@ -305,13 +260,13 @@ struct PreparedPooledHistory: Sendable {
             return try PooledCanonicalRecord.read(row: $0, root: root, ownerUID: ownerUID)
         }
         return .init(
-            rows: rows, records: records, total: total)
+            rows: rows, records: records, total: capturedCount)
     }
 }
 
 extension ItemIndex.CatalogueRow {
     fileprivate static func fromPooledValues(_ values: [SQLiteReadValue]) throws -> Self {
-        guard values.count == 14 else {
+        guard values.count == 16 else {
             throw TractandaError("indexError", "Pooled catalogue row has wrong width.")
         }
         func text(_ index: Int) -> String? {
@@ -324,7 +279,7 @@ extension ItemIndex.CatalogueRow {
         }
         guard let revision = text(0), let item = text(1), let path = text(2),
             let actor = text(4), let operation = text(5), let digestHex = text(12),
-            let createdAt = text(13), digestHex.count == 64,
+            let createdAt = text(13), let modifiedAt = text(14), digestHex.count == 64,
             let size = number(6), size >= 0, let inode = number(7), inode >= 0,
             let uid = number(8), let owner = UInt32(exactly: uid),
             let modeValue = number(9), let mode = UInt32(exactly: modeValue),
@@ -336,6 +291,16 @@ extension ItemIndex.CatalogueRow {
         case .null: parent = nil
         case .text(let value): parent = value
         default: throw TractandaError("indexError", "Pooled catalogue parent is invalid.")
+        }
+        let provenance: RevisionProvenance?
+        switch values[15] {
+        case .null: provenance = nil
+        case .text(let json):
+            guard json.utf8.count <= RevisionProvenance.maximumBytes else {
+                throw TractandaError("indexError", "Pooled ancestry exceeds its byte window.")
+            }
+            provenance = try RevisionProvenance(value: JSON.decode(ItemValue.self, Data(json.utf8)))
+        default: throw TractandaError("indexError", "Pooled ancestry is invalid.")
         }
         var digest = Data()
         var cursor = digestHex.startIndex
@@ -351,7 +316,8 @@ extension ItemIndex.CatalogueRow {
             revisionID: revision, itemID: item, path: path, parentID: parent,
             actor: actor, operationID: operation, size: UInt64(size), inode: UInt64(inode),
             uid: owner, mode: mode, modificationSeconds: seconds,
-            modificationNanoseconds: nanoseconds, digest: digest, createdAt: createdAt)
+            modificationNanoseconds: nanoseconds, digest: digest, createdAt: createdAt,
+            modifiedAt: modifiedAt, provenance: provenance)
     }
 }
 
@@ -840,7 +806,8 @@ public final class ItemService {
             ]
             let selected: Set<String>
             switch projection {
-            case .content: selected = Set(revision.fields.keys).subtracting(["requestIdentity"])
+            case .content:
+                selected = Set(revision.fields.keys).subtracting(["requestIdentity", "revisionAncestry"])
             case .summary: selected = identity.union(["subject", "referenceLabels"])
             case .properties(let names): selected = identity.union(names)
             case .full: selected = []
@@ -850,6 +817,30 @@ public final class ItemService {
         }
         return try object(revision)
     }
+    private func dictionaryObject<T: Encodable>(_ value: T) throws -> [String: Any] {
+        guard let result = try object(value) as? [String: Any] else {
+            throw TractandaError("invalidResponse", "Expected a native response object.")
+        }
+        return result
+    }
+    private func requireRevisionProjectionFeature() throws {
+        guard store.revisionProjectionEnabled else {
+            throw TractandaError("unsupportedFeature", "Revision projection is not enabled.")
+        }
+    }
+    private func queryCompleteness(_ payload: [String: Any], method: String) throws -> [String: Any] {
+        guard
+            [
+                "TractandaItem/query", "TractandaSemantic/search", "TractandaSemantic/results",
+                "TractandaCategory/memberships", "TractandaLearning/suggest", "TractandaLearning/categories",
+            ].contains(method)
+        else { return payload }
+        let status = try store.queryProjectionCompleteness()
+        var result = payload
+        result["completeness"] = status.completeness
+        result["conflictsAvailable"] = status.conflictsAvailable
+        return result
+    }
     private func boundedGet(
         ids: [String], projection: RetrievalProjection, maxBytes: Int
     ) throws -> [String: Any] {
@@ -857,59 +848,93 @@ public final class ItemService {
             throw TractandaError("invalidArguments", "maxBytes permits at most 64 requested ids.")
         }
         var list: [Any] = []
+        var unresolved: [Any] = []
         var notFound: [String] = []
         var oversized: [String] = []
-        func response(_ remaining: ArraySlice<String>) -> [String: Any] {
-            [
-                "list": list, "notFound": notFound, "state": store.state,
+        var returnedRevisions: [Revision] = []
+        func response(_ remaining: ArraySlice<String>) throws -> [String: Any] {
+            var result: [String: Any] = [
+                "list": list, "unresolved": unresolved, "notFound": notFound, "state": store.state,
                 "remainingIDs": Array(remaining), "oversizedIDs": oversized,
             ]
+            let dispositions = try store.historicalDispositions(for: returnedRevisions)
+            if !dispositions.isEmpty { result["historicalDispositions"] = try object(dispositions) }
+            return result
         }
-        func fits(_ result: [String: Any]) throws -> Bool {
-            try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]).count
+        func fits(_ value: [String: Any]) throws -> Bool {
+            try JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys]).count
                 <= maxBytes
         }
         for index in ids.indices {
             let id = ids[index]
             let suffix = ids[ids.index(after: index)...]
+            let priorList = list
+            let priorUnresolved = unresolved
+            let priorMissing = notFound
+            let priorRevisions = returnedRevisions
+            var value: Any?
+            var unresolvedValue = false
+            var returnedRevision: Revision?
             do {
                 let revision = try store.get(id)
-                let value = try projectedRevision(revision, projection: projection)
-                var candidate = list
-                candidate.append(value)
-                let prior = list
-                list = candidate
-                if try fits(response(suffix)) { continue }
-                list = prior
-                let alone: [String: Any] = [
-                    "list": [value], "notFound": [], "state": store.state,
-                    "remainingIDs": [], "oversizedIDs": [],
-                ]
-                if try fits(alone) {
-                    let result = response(ids[index...])
-                    guard !list.isEmpty, try fits(result) else {
-                        throw TractandaError(
-                            "responseTooLarge",
-                            "maxBytes cannot return this ID with its continuation; retry that ID alone or use a narrower projection."
-                        )
-                    }
-                    return result
-                }
-                oversized.append(id)
-                if try fits(response(suffix)) { continue }
-                throw TractandaError(
-                    "responseTooLarge", "maxBytes cannot contain the required continuation envelope.")
+                value = try projectedRevision(revision, projection: projection)
+                returnedRevision = revision
+            } catch let error as TractandaError where error.code == "itemUnresolved" {
+                let state = try store.itemState(id)
+                value = try object(
+                    ItemUnresolvedState(
+                        itemID: id, status: state.status, stateToken: state.stateToken,
+                        resource: state.resource))
+                unresolvedValue = true
             } catch let error as TractandaError where error.code == "notFound" || error.code == "forbidden" {
                 notFound.append(id)
-                if try fits(response(suffix)) { continue }
-                throw TractandaError(
-                    "responseTooLarge", "maxBytes cannot contain the required continuation envelope.")
             }
+            if let value {
+                if unresolvedValue {
+                    unresolved.append(value)
+                } else {
+                    list.append(value)
+                    if let returnedRevision { returnedRevisions.append(returnedRevision) }
+                }
+            }
+            if try fits(response(suffix)) { continue }
+            list = priorList
+            unresolved = priorUnresolved
+            notFound = priorMissing
+            returnedRevisions = priorRevisions
+            if let value {
+                var alone: [String: Any] = [
+                    "list": unresolvedValue ? [] : [value],
+                    "unresolved": unresolvedValue ? [value] : [], "notFound": [], "remainingIDs": [],
+                    "oversizedIDs": [], "state": store.state,
+                ]
+                if let returnedRevision {
+                    let dispositions = try store.historicalDispositions(for: [returnedRevision])
+                    if !dispositions.isEmpty { alone["historicalDispositions"] = try object(dispositions) }
+                }
+                if try !fits(alone) {
+                    oversized.append(id)
+                    guard try fits(response(suffix)) else {
+                        throw TractandaError(
+                            "responseTooLarge", "maxBytes cannot hold the required continuation envelope.")
+                    }
+                    continue
+                }
+            }
+            let continued = try response(ids[index...])
+            guard !list.isEmpty || !unresolved.isEmpty || !notFound.isEmpty || !oversized.isEmpty,
+                try fits(continued)
+            else {
+                throw TractandaError(
+                    "responseTooLarge",
+                    "Retry this ID alone or use a narrower projection; maxBytes cannot hold its continuation."
+                )
+            }
+            return continued
         }
-        let result = response([])
+        let result = try response([])
         guard try fits(result) else {
-            throw TractandaError(
-                "responseTooLarge", "maxBytes cannot contain the required continuation envelope.")
+            throw TractandaError("responseTooLarge", "maxBytes cannot hold its complete envelope.")
         }
         return result
     }
@@ -1231,6 +1256,18 @@ public final class ItemService {
                         "editing": "ordinary sibling presentation order",
                     ],
                     ["name": "selection", "kind": "object", "editing": "ordinary category criterion"],
+                    [
+                        "name": "captureAliases", "kind": "list of text",
+                        "editing": "optional category authoring names",
+                    ],
+                    [
+                        "name": "captureDate", "kind": "object",
+                        "editing": "category date-only property/dayOffset/timeZone",
+                    ],
+                    [
+                        "name": "inlineCaptureBindings", "kind": "object",
+                        "editing": "additive authoring provenance; explicit reset",
+                    ],
                     ["name": "categoryOverrides", "kind": "object", "editing": "ordinary include/exclude"],
                     ["name": "sortOrder", "kind": "integer", "editing": "optional explicit-view metadata"],
                     [
@@ -1262,6 +1299,10 @@ public final class ItemService {
                         "name": "requestIdentity", "kind": "text",
                         "editing": "server-owned and withheld by content projection",
                     ],
+                    [
+                        "name": "revisionAncestry", "kind": "object",
+                        "editing": "server-owned canonical provenance, withheld by content projection",
+                    ],
                 ],
                 "note":
                     "These are field conventions; arbitrary top-level keys and tagged values remain supported. "
@@ -1273,6 +1314,18 @@ public final class ItemService {
     }
     private func execute(_ method: String, _ args: [String: Any], uid: UInt32) throws -> [String: Any] {
         switch method {
+        case "TractandaItem/prepareCapture":
+            try check(args, allowed: ["request", "at"])
+            return try object(store.prepareCapture(decode(CapturePreparation.self, args), actorUID: uid))
+                as! [String: Any]
+        case "TractandaItem/commitCapture":
+            try check(
+                args,
+                allowed: [
+                    "request", "evaluatedAt", "commitRequest", "categoryRevisionIDs", "mentions", "issues",
+                ])
+            return try object(store.commitCapture(decode(CapturePlan.self, args), actorUID: uid))
+                as! [String: Any]
         case "Core/echo": return args
         case "TractandaSemantic/status":
             try check(args, allowed: [])
@@ -1421,9 +1474,53 @@ public final class ItemService {
                     action: action, operationID: string(args, "operationID"),
                     modelID: args["modelID"] as? String,
                     actorUID: uid)) as! [String: Any]
+        case "TractandaItem/state":
+            try requireRevisionProjectionFeature()
+            try check(args, allowed: ["ids", "maxBytes"])
+            let ids = try strings(args, "ids")
+            guard (1...64).contains(ids.count), Set(ids).count == ids.count else {
+                throw TractandaError("invalidArguments", "ids must contain 1–64 distinct UUIDs.")
+            }
+            let maximum = try integer(args, "maxBytes", default: 65_536, range: 8_192...524_288)
+            var states: [ItemState] = []
+            var missing: [String] = []
+            var oversized: [String] = []
+            for position in ids.indices {
+                do {
+                    let state = try store.itemState(ids[position])
+                    let candidate = ItemStateResult(
+                        list: states + [state], notFound: missing,
+                        remainingIDs: Array(ids.dropFirst(position + 1)), oversizedIDs: oversized,
+                        state: store.state)
+                    if try JSON.encode(candidate).count <= maximum {
+                        states.append(state)
+                    } else if try JSON.encode(
+                        ItemStateResult(list: [state], notFound: [], state: store.state)
+                    ).count > maximum {
+                        oversized.append(ids[position])
+                    } else {
+                        return try dictionaryObject(
+                            ItemStateResult(
+                                list: states, notFound: missing,
+                                remainingIDs: Array(ids.dropFirst(position)), oversizedIDs: oversized,
+                                state: store.state))
+                    }
+                } catch let error as TractandaError
+                    where error.code == "notFound" || error.code == "forbidden"
+                {
+                    missing.append(ids[position])
+                }
+            }
+            return try dictionaryObject(
+                ItemStateResult(
+                    list: states, notFound: missing,
+                    oversizedIDs: oversized, state: store.state))
         case "TractandaItem/get":
             try check(args, allowed: ["ids", "projection", "properties", "maxBytes"])
             let ids = try strings(args, "ids")
+            guard ids.count <= 64 else {
+                throw TractandaError("invalidArguments", "Get accepts at most 64 requested IDs.")
+            }
             let projection = try retrievalProjection(args)
             if args["maxBytes"] != nil {
                 return try boundedGet(
@@ -1431,11 +1528,14 @@ public final class ItemService {
                     maxBytes: integer(args, "maxBytes", default: 8_192, range: 8_192...524_288))
             }
             var list: [Any] = []
+            var returnedRevisions: [Revision] = []
             var notFound: [String] = []
+            var unresolved: [ItemUnresolvedState] = []
             var retainedBytes = 0
             for id in ids {
                 do {
-                    let value = try projectedRevision(store.get(id), projection: projection)
+                    let revision = try store.get(id)
+                    let value = try projectedRevision(revision, projection: projection)
                     let size = try JSONSerialization.data(
                         withJSONObject: value, options: [.fragmentsAllowed]
                     ).count
@@ -1446,14 +1546,29 @@ public final class ItemService {
                     }
                     retainedBytes += size
                     list.append(value)
+                    returnedRevisions.append(revision)
+                } catch let error as TractandaError where error.code == "itemUnresolved" {
+                    let state = try store.itemState(id)
+                    let summary = ItemUnresolvedState(
+                        itemID: id, status: state.status,
+                        stateToken: state.stateToken, resource: state.resource)
+                    let size = try JSON.encode(summary).count
+                    guard size <= 8 * 1024 * 1024 - 16 * 1024 - retainedBytes else {
+                        throw TractandaError("responseTooLarge", "Use fewer requested IDs.")
+                    }
+                    retainedBytes += size
+                    unresolved.append(summary)
                 } catch let error as TractandaError
                     where error.code == "notFound" || error.code == "forbidden"
                 { notFound.append(id) }
             }
-            return [
-                "list": list,
+            var result: [String: Any] = [
+                "list": list, "unresolved": try unresolved.map { try object($0) },
                 "notFound": notFound, "state": store.state,
             ]
+            let dispositions = try store.historicalDispositions(for: returnedRevisions)
+            if !dispositions.isEmpty { result["historicalDispositions"] = try object(dispositions) }
+            return result
         case "TractandaItem/extractedTextUnit":
             throw TractandaError(
                 "extractedTextUnitsRequireCoordinator",
@@ -1743,6 +1858,43 @@ public final class ItemService {
                         attachmentID: string(args, "attachmentID"), operationID: string(args, "operationID")))
             )
                 as! [String: Any]
+        case "TractandaItem/conflicts":
+            try requireRevisionProjectionFeature()
+            try check(args, allowed: ["limit", "cursor", "maxBytes"])
+            let limit = try integer(args, "limit", default: 64, range: 1...256)
+            let maximum = try integer(args, "maxBytes", default: 65_536, range: 8_192...524_288)
+            let after = try args["cursor"].map { _ in try string(args, "cursor") }
+            let states = try store.readableUnresolvedStates(after: after, limit: limit)
+            var retained: [ItemState] = []
+            for value in states {
+                let candidate = ItemConflictPage(
+                    list: retained + [value], nextCursor: value.itemID, state: store.state)
+                guard try JSON.encode(candidate).count <= maximum else {
+                    guard !retained.isEmpty else {
+                        throw TractandaError(
+                            "responseTooLarge",
+                            "Conflict state exceeds maxBytes; use state retrieval for its bounded resource result."
+                        )
+                    }
+                    return try dictionaryObject(
+                        ItemConflictPage(
+                            list: retained, nextCursor: retained.last!.itemID, state: store.state))
+                }
+                retained.append(value)
+            }
+            return try dictionaryObject(
+                ItemConflictPage(
+                    list: retained, nextCursor: states.count == limit ? retained.last?.itemID : nil,
+                    state: store.state))
+        case "TractandaItem/resolveConflict":
+            try requireRevisionProjectionFeature()
+            try check(
+                args,
+                allowed: [
+                    "itemID", "expectedStateToken", "reviewedFrontier", "changes", "unset", "operationID",
+                ])
+            return try dictionaryObject(
+                store.resolveConflict(decode(ResolveConflictRequest.self, args), actorUID: uid))
         case "TractandaItem/commit":
             try check(
                 args,
@@ -1762,19 +1914,24 @@ public final class ItemService {
             let limit = try integer(args, "limit", default: 100, range: 1...256)
             let page = try store.historyPageBounded(
                 string(args, "itemID"), position: position, limit: limit)
-            return [
+            var result: [String: Any] = [
                 "list": try page.list.map {
                     try projectedRevision($0, projection: retrievalProjection(args))
                 },
                 "total": page.total,
             ]
+            let dispositions = try store.historicalDispositions(for: page.list)
+            if !dispositions.isEmpty { result["historicalDispositions"] = try object(dispositions) }
+            return result
         case "TractandaRevision/get":
             try check(args, allowed: ["itemID", "revisionID", "projection", "properties"])
-            return [
-                "revision": try projectedRevision(
-                    store.get(string(args, "itemID"), revisionID: string(args, "revisionID")),
-                    projection: retrievalProjection(args))
+            let revision = try store.get(string(args, "itemID"), revisionID: string(args, "revisionID"))
+            var result: [String: Any] = [
+                "revision": try projectedRevision(revision, projection: retrievalProjection(args))
             ]
+            let dispositions = try store.historicalDispositions(for: [revision])
+            if !dispositions.isEmpty { result["historicalDispositions"] = try object(dispositions) }
+            return result
         case "TractandaItem/resolve":
             try check(args, allowed: ["itemID", "revisionID", "path", "segments", "at"])
             guard (args["path"] == nil) != (args["segments"] == nil) else {
@@ -1824,6 +1981,8 @@ public final class ItemService {
             try check(args, allowed: [])
             return [
                 "features": [
+                    ServerFeature.revisionProjection.rawValue,
+                    ServerFeature.inlineCapture.rawValue,
                     ServerFeature.runtimeIdentity.rawValue, ServerFeature.asynchronousStoreRebuild.rawValue,
                     ServerFeature.semanticJobTiming.rawValue,
                     ServerFeature.categoryMembershipSort.rawValue,
@@ -1837,6 +1996,9 @@ public final class ItemService {
                     ServerFeature.attachmentDocumentContent.rawValue,
                     ServerFeature.documentJobs.rawValue,
                 ].filter {
+                    if $0 == ServerFeature.revisionProjection.rawValue {
+                        return store.revisionProjectionEnabled
+                    }
                     if $0 == ServerFeature.documentJobs.rawValue { return requiresAsyncDocumentJobs }
                     if $0 == ServerFeature.extractedTextUnits.rawValue { return hasExtractedTextUnitRoute }
                     return requiresAsyncAttachmentIntegrity
@@ -1845,6 +2007,8 @@ public final class ItemService {
                             ServerFeature.asynchronousStoreRebuild.rawValue,
                         ].contains($0)
                 },
+                "canonicalFormats": try JSONSerialization.jsonObject(
+                    with: JSON.encode(CanonicalFormatSupport.current)),
                 "server": try JSONSerialization.jsonObject(with: JSON.encode(RuntimeIdentity.current)),
                 "state": store.state, "ownerUID": store.ownerUID, "queryProfile": SpotlightQuery.profile,
                 "binding": "local experimental; not JMAP conformant", "capability": Self.capability,
@@ -2098,8 +2262,10 @@ public final class ItemService {
             let admitted = try store.preparePooledGet(ids)
             var bytes = 0
             var resourceLimited = false
+            bytes = try JSON.encode(admitted.unresolved).count + JSON.encode(admitted.notFound).count
+            resourceLimited = bytes > store.pooledRecordByteLimit
             for row in admitted.rows {
-                guard row.size <= UInt64(store.pooledRecordByteLimit - bytes) else {
+                guard !resourceLimited, row.size <= UInt64(store.pooledRecordByteLimit - bytes) else {
                     resourceLimited = true
                     break
                 }
@@ -2109,6 +2275,8 @@ public final class ItemService {
                 callID: callID, argumentsJSON: argumentsJSON,
                 rows: resourceLimited ? [] : admitted.rows,
                 notFound: resourceLimited ? [] : admitted.notFound,
+                unresolved: resourceLimited ? [] : admitted.unresolved,
+                stateTokens: admitted.stateTokens,
                 authority: authority, root: store.root,
                 ownerUID: store.ownerUID, resourceLimited: resourceLimited)
         }
@@ -2121,7 +2289,7 @@ public final class ItemService {
         try store.withAccess(forUID: peerUID) {
             guard store.isCanonicalTrusted,
                 let current = try store.pooledReadAuthority(), current == prepared.authority,
-                try store.verifyPooledGet(records, rows: prepared.rows)
+                try store.verifyPooledGet(records, rows: prepared.rows, stateTokens: prepared.stateTokens)
             else { return nil }
             do {
                 guard !prepared.resourceLimited else {
@@ -2132,10 +2300,13 @@ public final class ItemService {
                         with: prepared.argumentsJSON) as? [String: Any]
                 else { throw TractandaError("invalidRequest", "Pooled get arguments changed.") }
                 let projection = try retrievalProjection(args)
-                let result: [String: Any] = [
+                var result: [String: Any] = [
                     "list": try records.map { try projectedRevision($0.revision, projection: projection) },
-                    "notFound": prepared.notFound, "state": current.state,
+                    "notFound": prepared.notFound,
+                    "unresolved": try prepared.unresolved.map { try object($0) }, "state": current.state,
                 ]
+                let dispositions = try store.historicalDispositions(for: records.map(\.revision))
+                if !dispositions.isEmpty { result["historicalDispositions"] = try object(dispositions) }
                 let response = try JSONSerialization.data(
                     withJSONObject: [
                         "methodResponses": [["TractandaItem/get", result, prepared.callID]],
@@ -2164,6 +2335,8 @@ public final class ItemService {
     }
 
     func preparePooledHistory(_ data: Data, peerUID: UInt32) throws -> PreparedPooledHistory? {
+        // Retired authority history uses the bounded verified serial union; raw locators are not pooled catalogue rows.
+        if store.authorityIntakeEnabled { return nil }
         guard data.count <= 8 * 1024 * 1024,
             let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
             Set(request.keys) == ["using", "methodCalls"],
@@ -2182,10 +2355,10 @@ public final class ItemService {
         let argumentsJSON = try JSONSerialization.data(withJSONObject: args)
         return try store.withAccess(forUID: peerUID) {
             guard let authority = try store.pooledReadAuthority() else { return nil }
-            let headID = try store.preparePooledHistory(itemID)
+            let stateToken = try store.preparePooledHistory(itemID)
             return PreparedPooledHistory(
                 callID: callID, argumentsJSON: argumentsJSON, itemID: itemID,
-                headRevisionID: headID, position: position, limit: limit,
+                stateToken: stateToken, position: position, limit: limit,
                 authority: authority, root: store.root, ownerUID: store.ownerUID,
                 maximumSerializedBytes: store.pooledRecordByteLimit,
                 batchLimit: store.pooledHistoryBatchLimit)
@@ -2199,7 +2372,7 @@ public final class ItemService {
             guard store.isCanonicalTrusted,
                 let current = try store.pooledReadAuthority(), current == prepared.authority,
                 try store.verifyPooledHistory(
-                    result, itemID: prepared.itemID, headRevisionID: prepared.headRevisionID)
+                    result, itemID: prepared.itemID, stateToken: prepared.stateToken)
             else { return nil }
             do {
                 guard
@@ -2207,12 +2380,15 @@ public final class ItemService {
                         with: prepared.argumentsJSON) as? [String: Any]
                 else { throw TractandaError("invalidRequest", "Pooled history arguments changed.") }
                 let projection = try retrievalProjection(args)
-                let payload: [String: Any] = [
+                var payload: [String: Any] = [
                     "list": try result.records.map {
                         try projectedRevision($0.revision, projection: projection)
                     },
                     "total": result.total,
                 ]
+                let dispositions = try store.historicalDispositions(
+                    for: result.records.map(\.revision))
+                if !dispositions.isEmpty { payload["historicalDispositions"] = try object(dispositions) }
                 let response = try JSONSerialization.data(
                     withJSONObject: [
                         "methodResponses": [["TractandaItem/history", payload, prepared.callID]],
@@ -2263,7 +2439,7 @@ public final class ItemService {
                     let args = try JSONSerialization.jsonObject(
                         with: prepared.argumentsJSON) as? [String: Any]
                 else { throw TractandaError("invalidRequest", "Pooled query arguments changed.") }
-                let result: [String: Any] = [
+                var result: [String: Any] = [
                     "ids": page.ids, "position": prepared.position, "total": page.total,
                     "queryState": current.state, "evaluatedAt": prepared.evaluatedAtString,
                     "nextCursor": try makeInitialCursor(
@@ -2273,6 +2449,7 @@ public final class ItemService {
                         timeZone: prepared.timeZone, digest: prepared.queryDigest),
                     "previousCursor": NSNull(),
                 ]
+                result = try queryCompleteness(result, method: "TractandaItem/query")
                 let response = try JSONSerialization.data(
                     withJSONObject: [
                         "methodResponses": [["TractandaItem/query", result, prepared.callID]],
@@ -2364,10 +2541,11 @@ public final class ItemService {
                 guard try store.verifyImmutableReadSnapshot(prepared.snapshot) else { return nil }
                 let currentState = store.state
                 guard currentState == page.state else { return nil }
-                let result: [String: Any] = [
+                var result: [String: Any] = [
                     "ids": page.ids, "position": prepared.query.position, "total": page.total,
                     "queryState": currentState, "evaluatedAt": Timestamp.format(page.evaluatedAt),
                 ]
+                result = try queryCompleteness(result, method: "TractandaItem/query")
                 let response = try JSONSerialization.data(
                     withJSONObject: [
                         "methodResponses": [["TractandaItem/query", result, prepared.callID]],
@@ -2478,7 +2656,8 @@ public final class ItemService {
                     args.removeValue(forKey: key)
                     args[name] = value
                 }
-                let response: [Any] = [method, try execute(method, args, uid: peerUID), id]
+                let payload = try queryCompleteness(try execute(method, args, uid: peerUID), method: method)
+                let response: [Any] = [method, payload, id]
                 let size = try JSONSerialization.data(withJSONObject: response).count
                 guard size <= responseBudget - retainedResponseBytes else {
                     throw TractandaError(

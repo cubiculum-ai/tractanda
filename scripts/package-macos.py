@@ -48,9 +48,9 @@ def copy_tree(source, target):
     shutil.copytree(source, target, dirs_exist_ok=True)
 
 
-def embedding_descriptor(host, model_directory):
+def embedding_descriptor(host, model_directory, runner=None):
     """Require the actual helper's pinned profile and exact verified model inputs."""
-    profile = json.loads(run(str(host), '--describe'))
+    profile = json.loads((run if runner is None else runner)(str(host), '--describe'))
     if (profile.get('alias') != 'tractanda-granite-embedding-311m-multilingual-r2-vmlx-fp32-44399559'
             or profile.get('modelRevision') != '44399559930365213510b1ee2eb15ded83374f0e'
             or profile.get('vmlxRevision') != '61a4b20d4ad01b10466e8fc94c50402a9f994430'
@@ -374,7 +374,8 @@ def main():
                           'size': path.stat().st_size, 'mode': path.stat().st_mode & 0o777})
     manifest = {'profile': 'tractanda.bundle.v1', 'version': args.version,
                 'sourceCommit': run('git', '-C', str(root), 'rev-parse', 'HEAD').strip(), 'platform': 'macos',
-                'arch': 'arm64', 'files': files}
+                'arch': 'arm64', 'files': files,
+                'canonicalFormats': json.loads(run(str(output / 'bin/tractanda-setup'), '--canonical-format-support'))}
     if embedding:
         manifest['embedding'] = embedding
     if document:

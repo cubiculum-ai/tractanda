@@ -7,6 +7,8 @@ struct DocumentNativeSessionFailure: Error {
     let timeoutMessage: String?
 }
 
+typealias DocumentRuntimeVerifier = @Sendable (DocumentConverterConfiguration) throws -> Void
+
 /// One retained source and lazily loaded model context. Caller owns one outstanding request.
 final class DocumentNativeSession {
     let binding: NativeDocumentBinding
@@ -20,12 +22,21 @@ final class DocumentNativeSession {
     private var progress = DocumentMeaningfulProgress()
     private(set) var ended = false
 
+    /// Production constructors always select this verifier. Only internal
+    /// dependency injection in explicit @testable fixtures replaces it.
+    static func verifyRuntime(_ configuration: DocumentConverterConfiguration) throws {
+#if os(Linux)
+        try DocumentLinuxRuntimeClosure.preflightIfAdmitted(configuration)
+#endif
+    }
+
     init(
         intent: DocumentJobIntent, original: DocumentVerifiedOriginal,
         configuration: DocumentConverterConfiguration,
         expectedExecutableSHA256: String, files: DocumentContentFiles, root: URL,
         budgets: DocumentWorkerBudgets, cancellation: DocumentConversionCancellation,
-        expectedPageCount: Int64? = nil
+        expectedPageCount: Int64? = nil,
+        runtimeVerifier: DocumentRuntimeVerifier = DocumentNativeSession.verifyRuntime
     ) throws {
         try original.check()
         try cancellation.check()
@@ -48,6 +59,7 @@ final class DocumentNativeSession {
         let inspection = DocumentWorkerDeadline(budgets: budgets, phase: .inspect)
         do {
             try files.writeImmutable(data, path: path, maximumBytes: NativeWorkerProtocol.requestBytes)
+            try runtimeVerifier(configuration)
             let child = try DocumentOwnedProcess(
                 executable: configuration.executablePath,
                 arguments: [
@@ -145,7 +157,7 @@ final class DocumentNativeSession {
                     let total = try NativeWorkerProtocol.integer(object["total"] as Any)
                     let meaningful = try progress.observe(phase: phase, completed: completed, total: total)
                     if phase == "modelReady", deadline.phase == .modelLoad { deadline.begin(.page) }
-                    deadline.observe(meaningful: meaningful)
+                    deadline.observe(meaningful: meaningful, workerPhase: phase)
                     try observe(phase, completed, total)
                 case "error":
                     throw TractandaError(

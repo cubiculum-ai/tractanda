@@ -23,6 +23,13 @@
 #include <grp.h>
 #include <sys/statvfs.h>
 #include <dirent.h>
+#include <time.h>
+#ifdef __APPLE__
+#include <sys/acl.h>
+#include <libproc.h>
+#else
+#include <sys/xattr.h>
+#endif
 #include <security/pam_appl.h>
 #include <uuid/uuid.h>
 #include <pthread.h>
@@ -385,6 +392,14 @@ void *tractanda_directory_open(const char *path) {
     return opendir(path);
 }
 
+void *tractanda_directory_open_fd(int32_t descriptor) {
+    int copied = fcntl(descriptor, F_DUPFD_CLOEXEC, 0);
+    if (copied < 0) return NULL;
+    DIR *directory = fdopendir(copied);
+    if (!directory) close(copied);
+    return directory;
+}
+
 int tractanda_directory_next(void *directory, char *name, size_t capacity) {
     if (!directory || !name || capacity < 2) { errno = EINVAL; return -1; }
     errno = 0;
@@ -633,6 +648,342 @@ int tractanda_receive_frame(int fd, void **bytes, uint32_t *count) {
     *bytes = buffer; *count = length; return 0;
 }
 
+void tractanda_private_free(void *bytes, uint32_t count) {
+    if (bytes) {
+        volatile unsigned char *cursor = bytes;
+        while (count--) *cursor++ = 0;
+        free(bytes);
+    }
+}
+static uint64_t private_now(void) {
+    struct timespec value;
+    if (clock_gettime(CLOCK_MONOTONIC, &value) != 0) return 0;
+    return (uint64_t)value.tv_sec * 1000000000ull + (uint64_t)value.tv_nsec;
+}
+/* Enrollment supervisor only: actual image, never argv[0] or a mutable launch alias. */
+int tractanda_current_executable(char *buffer, uint32_t capacity) {
+    if (!buffer || capacity < 2 || capacity > 16384) { errno = EINVAL; return -1; }
+    memset(buffer, 0, capacity);
+#ifdef __APPLE__
+    int amount = proc_pidpath(getpid(), buffer, capacity);
+    if (amount <= 0) return -1;
+    if ((uint32_t)amount >= capacity || strnlen(buffer, capacity) >= capacity) { errno = ENAMETOOLONG; return -1; }
+#else
+    ssize_t amount = readlink("/proc/self/exe", buffer, capacity - 1);
+    if (amount <= 0) return -1;
+    if ((uint32_t)amount >= capacity - 1) { errno = ENAMETOOLONG; return -1; }
+    buffer[amount] = 0;
+#endif
+    if (buffer[0] != '/') { errno = EINVAL; return -1; }
+    return 0;
+}
+/* One CLOCK_MONOTONIC cutoff covers connect and all subsequent bounded frame IO. */
+int tractanda_private_connect_until(const char *path, uint64_t deadline) {
+    struct sockaddr_un address;
+    uint64_t now = private_now();
+    if (!now || now >= deadline) { errno = ETIMEDOUT; return -1; }
+    if (deadline - now > 20000000000ull) { errno = EINVAL; return -1; }
+    if (socket_address(path, &address) != 0) return -1;
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    int flags = fcntl(fd, F_GETFL), descriptor_flags = fcntl(fd, F_GETFD);
+    if (flags < 0 || descriptor_flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0 ||
+        fcntl(fd, F_SETFD, descriptor_flags | FD_CLOEXEC) != 0) goto failure;
+    socket_options(fd);
+    if (connect(fd, (struct sockaddr *)&address, sizeof(address)) != 0) {
+        if (errno != EINPROGRESS) goto failure; /* Includes immediate bounded AF_UNIX backlog rejection. */
+        for (;;) {
+            now = private_now();
+            if (!now || now >= deadline) { errno = ETIMEDOUT; goto failure; }
+            struct pollfd event = { fd, POLLOUT, 0 };
+            int ready = poll(&event, 1, (int)((deadline - now + 999999ull) / 1000000ull));
+            if (ready < 0 && errno == EINTR) continue;
+            if (ready <= 0) { if (!ready) errno = ETIMEDOUT; goto failure; }
+            int connection_error = 0; socklen_t length = sizeof(connection_error);
+            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &connection_error, &length) != 0) goto failure;
+            if (length != sizeof(connection_error)) { errno = EIO; goto failure; }
+            if (connection_error) { errno = connection_error; goto failure; }
+            break;
+        }
+    }
+    now = private_now();
+    if (!now || now >= deadline) { errno = ETIMEDOUT; goto failure; }
+    return fd;
+failure: {
+    int saved = errno; close(fd); errno = saved; return -1;
+    }
+}
+uint64_t tractanda_private_io_begin(int fd) {
+    int flags = fcntl(fd, F_GETFL);
+    int descriptor_flags = fcntl(fd, F_GETFD);
+    uint64_t now = private_now();
+    if (flags < 0 || descriptor_flags < 0 || !now ||
+        fcntl(fd, F_SETFD, descriptor_flags | FD_CLOEXEC) != 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) return 0;
+    return now + 20000000000ull;
+}
+static int private_io(int fd, void *data, size_t count, int writing, uint64_t deadline) {
+    unsigned char *cursor = data;
+    while (count) {
+        uint64_t now = private_now();
+        if (!now || now >= deadline) { errno = ETIMEDOUT; return -1; }
+        if (deadline - now > 20000000000ull) { errno = EINVAL; return -1; }
+        int timeout = (int)((deadline - now + 999999ull) / 1000000ull);
+        struct pollfd event = { fd, writing ? POLLOUT : POLLIN, 0 };
+        int ready = poll(&event, 1, timeout);
+        if (ready < 0 && errno == EINTR) continue;
+        if (ready <= 0) { if (!ready) errno = ETIMEDOUT; return -1; }
+        ssize_t n;
+        if (writing) {
+#ifdef MSG_NOSIGNAL
+            n = send(fd, cursor, count, MSG_NOSIGNAL);
+#else
+            n = send(fd, cursor, count, 0);
+#endif
+        } else n = recv(fd, cursor, count, 0);
+        if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+        if (n <= 0) { if (!n) errno = ECONNRESET; return -1; }
+        cursor += n; count -= (size_t)n;
+    }
+    return 0;
+}
+int tractanda_private_send_frame(int fd, const void *bytes, uint32_t count, uint64_t deadline) {
+    if (!bytes || !count || count > 16384) { errno = EMSGSIZE; return -1; }
+    uint32_t header = htonl(count);
+    if (private_io(fd, &header, sizeof(header), 1, deadline) != 0) return -1;
+    return private_io(fd, (void *)bytes, count, 1, deadline);
+}
+int tractanda_private_send_begin(int fd, const void *bytes, uint32_t count, uint64_t deadline) {
+    if (!bytes || !count || count > 16384) { errno = EMSGSIZE; return -1; }
+    uint32_t header = htonl(count | 0x80000000u);
+    if (private_io(fd, &header, sizeof(header), 1, deadline) != 0) return -1;
+    return private_io(fd, (void *)bytes, count, 1, deadline);
+}
+int tractanda_private_receive_frame(int fd, void **bytes, uint32_t *count, uint32_t maximum, uint64_t deadline) {
+    if (!bytes || !count || !maximum || maximum > 135184) { errno = EINVAL; return -1; }
+    *bytes = NULL; *count = 0;
+    uint32_t header;
+    if (private_io(fd, &header, sizeof(header), 0, deadline) != 0) return -1;
+    uint32_t length = ntohl(header);
+    if (!length || length > maximum) { errno = EMSGSIZE; return -1; }
+    void *buffer = malloc(length);
+    if (!buffer) return -1;
+    if (private_io(fd, buffer, length, 0, deadline) != 0) {
+        int saved = errno; tractanda_private_free(buffer, length); errno = saved; return -1;
+    }
+    *bytes = buffer; *count = length; return 0;
+}
+static int private_no_acl(int fd) {
+#ifdef __APPLE__
+    errno = 0;
+    acl_t acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED);
+    // Darwin reports an absent FILESEC_ACL property as NULL/ENOENT. The caller
+    // verifies this same open regular file, including nlink, before and after.
+    if (!acl) { if (errno == ENOENT) { errno = 0; return 0; } return -1; }
+    int valid = acl_valid(acl);
+    acl_entry_t entry;
+    errno = 0;
+    int first = valid == 0 ? acl_get_entry(acl, ACL_FIRST_ENTRY, &entry) : 0;
+    int empty = valid == 0 && first == -1 && errno == EINVAL;
+    acl_free(acl);
+    if (!empty) { errno = EACCES; return -1; }
+#else
+    ssize_t length = fgetxattr(fd, "system.posix_acl_access", NULL, 0);
+    if (length >= 0 || errno != ENODATA) { errno = EACCES; return -1; }
+#endif
+    errno = 0; return 0;
+}
+/* Fixed helper trust only. Deny-only macOS home ACLs do not grant mutation. */
+static int helper_no_write_acl(int fd) {
+#ifdef __APPLE__
+    errno = 0; acl_t acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED);
+    if (!acl) { if (errno == ENOENT) { errno = 0; return 0; } return -1; }
+    if (acl_valid(acl) != 0) { acl_free(acl); errno = EACCES; return -1; }
+    acl_entry_t entry; int which = ACL_FIRST_ENTRY, result, count = 0;
+    errno = 0;
+    while ((result = acl_get_entry(acl, which, &entry)) == 0) {
+        which = ACL_NEXT_ENTRY;
+        acl_tag_t tag;
+        if (++count > 128 || acl_get_tag_type(entry, &tag) != 0) goto denied;
+        if (tag == ACL_EXTENDED_DENY) continue;
+        if (tag != ACL_EXTENDED_ALLOW) goto denied;
+        acl_permset_t permissions;
+        if (acl_get_permset(entry, &permissions) != 0) goto denied;
+        const acl_perm_t writes[] = { ACL_WRITE_DATA, ACL_APPEND_DATA, ACL_DELETE,
+            ACL_DELETE_CHILD, ACL_WRITE_ATTRIBUTES, ACL_WRITE_EXTATTRIBUTES,
+            ACL_WRITE_SECURITY, ACL_CHANGE_OWNER };
+        for (size_t i = 0; i < sizeof(writes) / sizeof(writes[0]); ++i)
+            if (acl_get_perm_np(permissions, writes[i]) != 0) goto denied;
+    }
+    if (result != -1 || errno != EINVAL) goto denied;
+    acl_free(acl); errno = 0; return 0;
+denied:
+    acl_free(acl); errno = EACCES; return -1;
+#else
+    /* Conservative access-ACL refusal; no new Linux ACL library or policy inference. */
+    return private_no_acl(fd);
+#endif
+}
+/* Read-only ACL gate for an already opened managed peer configuration/parent. */
+int tractanda_peer_configuration_no_mutation_acl(int fd) { return helper_no_write_acl(fd); }
+static int validate_enrollment_executable(const char *path, int root_only, const char *basename) {
+    size_t length;
+    if (!path || path[0] != '/' || !(length = strnlen(path, 4097)) || length > 4096) { errno = EINVAL; return -1; }
+    char copy[4097]; memcpy(copy, path, length + 1);
+    int directory = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (directory < 0) return -1;
+    char *state = NULL, *part = strtok_r(copy + 1, "/", &state);
+    if (!part) { close(directory); errno = EINVAL; return -1; }
+    int count = 0;
+    while (part) {
+        char *next = strtok_r(NULL, "/", &state);
+        if (++count > 256 || !strcmp(part, ".") || !strcmp(part, "..") ||
+            (!next && strcmp(part, basename))) { errno = EACCES; goto failed; }
+        int fd = openat(directory, part, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK | (next ? O_DIRECTORY : 0));
+        if (fd < 0) goto failed;
+        struct stat metadata;
+        if (fstat(fd, &metadata) != 0) { int saved = errno; close(fd); errno = saved; goto failed; }
+        int trusted_owner = metadata.st_uid == 0 || (!root_only && metadata.st_uid == geteuid());
+        int kind = next ? S_ISDIR(metadata.st_mode) : S_ISREG(metadata.st_mode);
+        int mutable_mode = metadata.st_mode & 0022;
+        if (!trusted_owner || !kind || (!next && !(metadata.st_mode & 0111)) ||
+            (mutable_mode && !(next && (metadata.st_mode & S_ISVTX))) || helper_no_write_acl(fd) != 0) {
+            close(fd); errno = EACCES; goto failed;
+        }
+        close(directory); directory = fd; part = next;
+    }
+    close(directory); return 0;
+failed: {
+    int saved = errno; close(directory); errno = saved; return -1;
+    }
+}
+int tractanda_validate_enrollment_helper(const char *path, int root_only) {
+    return validate_enrollment_executable(path, root_only, "tractanda-setup");
+}
+int tractanda_validate_enrollment_ssh(void) {
+    return validate_enrollment_executable("/usr/bin/ssh", 1, "ssh");
+}
+static int capture_peer_fd(int fd, void **bytes, uint32_t *count, uint32_t minimum, uint32_t maximum, int private_input, void (*after_stat)(void *), void *test_context) {
+    struct stat before, after;
+    void *buffer = NULL; uint32_t size = 0;
+    if (fstat(fd, &before) != 0) return -1;
+    if (!S_ISREG(before.st_mode) || before.st_nlink != 1 || before.st_size < minimum ||
+        (uint64_t)before.st_size > maximum || (private_input && (before.st_uid != geteuid() ||
+        ((before.st_mode & 07777) != 0600 && (before.st_mode & 07777) != 0400)))) { errno = EACCES; return -1; }
+    if (private_input && private_no_acl(fd) != 0) return -1;
+    if (after_stat) after_stat(test_context); // Synchronous test boundary; never retained.
+    size = (uint32_t)before.st_size; buffer = malloc(size ? size : 1);
+    if (!buffer) return -1;
+    size_t offset = 0; int interrupted = 0;
+    while (offset < size) {
+        ssize_t n = pread(fd, (char *)buffer + offset, size - offset, (off_t)offset);
+        if (n < 0 && errno == EINTR && ++interrupted <= 16) continue;
+        if (n <= 0) { if (!n) errno = EIO; goto fail; }
+        offset += (size_t)n;
+    }
+    unsigned char extra;
+    ssize_t more = pread(fd, &extra, 1, size);
+    if (more < 0) goto fail;
+    if (more != 0) { errno = EAGAIN; goto fail; }
+    if (fstat(fd, &after) != 0 || (private_input && private_no_acl(fd) != 0)) goto fail;
+#ifdef __APPLE__
+#define PRIVATE_MTIME(s) ((s).st_mtimespec)
+#define PRIVATE_CTIME(s) ((s).st_ctimespec)
+#else
+#define PRIVATE_MTIME(s) ((s).st_mtim)
+#define PRIVATE_CTIME(s) ((s).st_ctim)
+#endif
+    if (before.st_dev != after.st_dev || before.st_ino != after.st_ino || before.st_size != after.st_size ||
+        before.st_uid != after.st_uid || before.st_gid != after.st_gid || before.st_mode != after.st_mode ||
+        before.st_nlink != after.st_nlink || PRIVATE_MTIME(before).tv_sec != PRIVATE_MTIME(after).tv_sec ||
+        PRIVATE_MTIME(before).tv_nsec != PRIVATE_MTIME(after).tv_nsec ||
+        PRIVATE_CTIME(before).tv_sec != PRIVATE_CTIME(after).tv_sec ||
+        PRIVATE_CTIME(before).tv_nsec != PRIVATE_CTIME(after).tv_nsec) { errno = EAGAIN; goto fail; }
+#undef PRIVATE_MTIME
+#undef PRIVATE_CTIME
+    *bytes = buffer; *count = size; return 0;
+fail: {
+    int saved = errno ? errno : EIO;
+    tractanda_private_free(buffer, size); errno = saved; return -1;
+    }
+}
+static int capture_peer_at(int parent, const char *name, void **bytes, uint32_t *count,
+                           uint32_t minimum, uint32_t maximum, int private_input, void (*after_stat)(void *), void *test_context) {
+    *bytes = NULL; *count = 0;
+    int fd = openat(parent, name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return errno == ENOENT ? 1 : -1; // Only this actual final open can report absence.
+    int result = capture_peer_fd(fd, bytes, count, minimum, maximum, private_input, after_stat, test_context);
+    if (result == 0) {
+        struct stat held, named;
+        if (fstat(fd, &held) != 0 || fstatat(parent, name, &named, AT_SYMLINK_NOFOLLOW) != 0 ||
+            held.st_dev != named.st_dev || held.st_ino != named.st_ino) {
+            tractanda_private_free(*bytes, *count); *bytes = NULL; *count = 0; errno = EAGAIN; result = -1;
+        }
+    }
+    int saved = errno; close(fd); errno = saved; return result;
+}
+static int capture_peer_file(const char *path, void **bytes, uint32_t *count, uint32_t minimum, uint32_t maximum, int private_input, void (*after_stat)(void *), void *test_context) {
+    if (!path || path[0] != '/' || !bytes || !count || strlen(path) > 4096) { errno = EINVAL; return -1; }
+    *bytes = NULL; *count = 0;
+    char *copy = strdup(path);
+    if (!copy) return -1;
+    int parent = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC), result = -1, saved;
+    char *state = NULL, *name = strtok_r(copy, "/", &state);
+    if (parent < 0 || !name) { if (parent >= 0) errno = EINVAL; goto done; }
+    while (name) {
+        char *next = strtok_r(NULL, "/", &state);
+        if (!next) { result = capture_peer_at(parent, name, bytes, count, minimum, maximum, private_input, after_stat, test_context); break; }
+        int child = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        saved = errno; close(parent); parent = child; errno = saved;
+        if (parent < 0) break;
+        name = next;
+    }
+done:
+    saved = errno; if (parent >= 0) close(parent); free(copy); errno = saved; return result;
+}
+int tractanda_capture_private_credential(const char *path, void **bytes, uint32_t *count) {
+    int result = capture_peer_file(path, bytes, count, 36, 4096, 1, NULL, NULL);
+    return result == 1 ? -1 : result;
+}
+// Only trusted local callers choose an artifact bound. No daemon wire request supplies a path.
+int tractanda_capture_private_artifact(const char *path, void **bytes, uint32_t *count, uint32_t maximum) {
+    if (!maximum || maximum > 1048576) { errno = EINVAL; return -1; }
+    return capture_peer_file(path, bytes, count, 0, maximum, 1, NULL, NULL);
+}
+int tractanda_capture_private_artifact_at(int parent, const char *name, void **bytes, uint32_t *count, uint32_t maximum) {
+    if (!bytes || !count || !maximum || maximum > 1048576 || !name || !*name || strchr(name, '/') ||
+        !strcmp(name, ".") || !strcmp(name, "..")) { errno = EINVAL; return -1; }
+    return capture_peer_at(parent, name, bytes, count, 0, maximum, 1, NULL, NULL);
+}
+int tractanda_capture_peer_preparation(const char *path, void **bytes, uint32_t *count) {
+    int result = capture_peer_file(path, bytes, count, 1, 4096, 0, NULL, NULL);
+    return result == 1 ? -1 : result;
+}
+int tractanda_capture_private_artifact_for_testing(const char *path, void **bytes, uint32_t *count,
+        uint32_t maximum, void (*after_stat)(void *), void *context) {
+    if (!maximum || maximum > 1048576) { errno = EINVAL; return -1; }
+    return capture_peer_file(path, bytes, count, 0, maximum, 1, after_stat, context);
+}
+int tractanda_open_private_directory(const char *path) {
+    if (!path || path[0] != '/' || strlen(path) > 4096) { errno = EINVAL; return -1; }
+    char *copy = strdup(path);
+    if (!copy) return -1;
+    int fd = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC), saved;
+    char *state = NULL;
+    for (char *name = strtok_r(copy, "/", &state); name; name = strtok_r(NULL, "/", &state)) {
+        if (fd < 0) break;
+        int child = openat(fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        saved = errno; close(fd); fd = child; errno = saved;
+    }
+    free(copy);
+    if (fd < 0) return -1;
+    struct stat info;
+    if (fstat(fd, &info) != 0 || !S_ISDIR(info.st_mode) || info.st_uid != geteuid() ||
+        (info.st_mode & 07777) != 0700 || private_no_acl(fd) != 0) {
+        saved = errno ? errno : EACCES; close(fd); errno = saved; return -1;
+    }
+    return fd;
+}
+
 int tractanda_publish_directory_at(int source_parent, const char *source, int target_parent, const char *target) {
     if (!source || !target || !*source || !*target || strchr(source, '/') || strchr(target, '/') ||
         !strcmp(source, ".") || !strcmp(source, "..") || !strcmp(target, ".") || !strcmp(target, "..")) {
@@ -647,6 +998,41 @@ int tractanda_publish_directory_at(int source_parent, const char *source, int ta
     errno = ENOTSUP;
     return -1;
 #endif
+}
+
+// Caller-only atomic private artifact publication. The parent was traversed without
+// symlinks; no daemon request supplies any path to this function.
+int tractanda_write_private_artifact_at(int parent, const char *temporary, const char *target,
+                                       const void *bytes, uint32_t count) {
+    if ((!bytes && count) || count > 1048576 || !temporary || !target || !*temporary || !*target ||
+        strchr(temporary, '/') || strchr(target, '/') || !strcmp(target, ".") || !strcmp(target, "..") ||
+        !strcmp(temporary, ".") || !strcmp(temporary, "..")) { errno = EINVAL; return -1; }
+    struct stat directory, held, named;
+    if (fstat(parent, &directory) != 0 || !S_ISDIR(directory.st_mode) || directory.st_uid != geteuid() ||
+        (directory.st_mode & 07777) != 0700 || private_no_acl(parent) != 0) { errno = EACCES; return -1; }
+    struct statvfs capacity;
+    if (fstatvfs(parent, &capacity) != 0 || !capacity.f_frsize ||
+        (uint64_t)capacity.f_bavail > UINT64_MAX / capacity.f_frsize ||
+        (uint64_t)capacity.f_bavail * capacity.f_frsize < count) { errno = ENOSPC; return -1; }
+    int fd = openat(parent, temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0) return -1;
+    int result = -1, saved = 0, published = 0;
+    if (fstat(fd, &held) != 0 || !S_ISREG(held.st_mode) || held.st_uid != geteuid() || held.st_nlink != 1 ||
+        (held.st_mode & 07777) != 0600 || private_no_acl(fd) != 0) { errno = EACCES; goto done; }
+    if (write_bytes(fd, bytes, count, 0) != 0 || fchmod(fd, 0400) != 0 || fsync(fd) != 0 || private_no_acl(fd) != 0) goto done;
+    if (fstatat(parent, temporary, &named, AT_SYMLINK_NOFOLLOW) != 0 ||
+        fstat(fd, &held) != 0 || named.st_dev != held.st_dev || named.st_ino != held.st_ino ||
+        held.st_nlink != 1 || held.st_size != count) { errno = EAGAIN; goto done; }
+    // RENAME_EXCL/RENAME_NOREPLACE also works for regular files, and avoids the
+    // link/unlink crash window leaving two names for a supposedly single-link key.
+    if (tractanda_publish_directory_at(parent, temporary, parent, target) != 0) goto done;
+    published = 1;
+    result = fsync(parent) == 0 ? 0 : 1; //1=published, acknowledgment/durability uncertain.
+done:
+    saved = errno;
+    if (!published && fstat(fd, &held) == 0 && fstatat(parent, temporary, &named, AT_SYMLINK_NOFOLLOW) == 0 &&
+        named.st_dev == held.st_dev && named.st_ino == held.st_ino) (void)unlinkat(parent, temporary, 0);
+    close(fd); errno = saved; return result;
 }
 
 

@@ -35,6 +35,10 @@ struct MarkedItems {
 
 enum CommitFailure {
     static func isDefinitive(_ error: TractandaError) -> Bool {
+        isDefinitive(error.code)
+    }
+
+    static func isDefinitive(_ code: String) -> Bool {
         [
             "revisionConflict", "forbidden", "notFound", "operationMismatch", "limit",
             "unsupportedQuery", "notCategory", "notView", "unknownClass", "abstractClass",
@@ -44,7 +48,9 @@ enum CommitFailure {
             "categoryCycle", "invalidCategory",
             "invalidReferenceLabel",
             "invalidLearningSettings", "invalidLearningFeedback", "itemDeleted",
-        ].contains(error.code)
+            "invalidCapture", "captureLimit", "captureReviewRequired", "captureChanged",
+            "dateOverrideConflict",
+        ].contains(code)
     }
 }
 

@@ -74,7 +74,8 @@ struct PooledCanonicalRecord: Sendable {
             revision.supersedes == row.parentID,
             revision.fields["actor"]?.string == row.actor,
             revision.fields["operationID"]?.string == row.operationID,
-            revision.fields["createdAt"]?.dateString == row.createdAt
+            revision.fields["createdAt"]?.dateString == row.createdAt,
+            revision.modifiedAt == row.modifiedAt, try revision.provenance == row.provenance
         else { throw PooledCanonicalRecordError.identityMismatch }
         return Self(
             revision: revision, metadata: after, archived: archived,
@@ -82,19 +83,8 @@ struct PooledCanonicalRecord: Sendable {
     }
 
     private static func canonicalRelativePath(row: ItemIndex.CatalogueRow) -> String? {
-        guard (try? Identifier.validate(row.itemID)) != nil,
-            (try? Identifier.validate(row.revisionID)) != nil,
-            let created = Timestamp.parse(row.createdAt)
-        else { return nil }
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
-        let parts = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: created)
-        guard let year = parts.year, let month = parts.month, let day = parts.day,
-            let hour = parts.hour, let minute = parts.minute
-        else { return nil }
-        return String(
-            format: "items/%04d/%02d/%02d/%02d/%02d/%@/%@.tractanda",
-            year, month, day, hour, minute, row.itemID, row.revisionID)
+        CanonicalRecordPath.validate(row.path, itemID: row.itemID, revisionID: row.revisionID)
+            ? row.path : nil
     }
 
     /// Opens the canonical root and every record path component without following symlinks.

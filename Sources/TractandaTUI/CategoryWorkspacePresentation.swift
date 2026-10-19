@@ -147,7 +147,9 @@ enum CategoryWorkspacePresentation {
             : "\(manager.preview.position + 1)–\(manager.preview.position + manager.preview.rows.count)/\(manager.preview.total)"
         let rightHeading =
             manager.rightMode == .items
-            ? " Items · \(range)" + (navigatorActive || previewFocused ? "" : " · focused")
+            ? " Items · \(range)"
+                + (manager.preview.projectionNotice ? " · some results need attention" : "")
+                + (navigatorActive || previewFocused ? "" : " · focused")
             : " Edit item / Category" + (navigatorActive || previewFocused ? "" : " · focused")
         output.append(combine(searchRow, line(rightHeading, style: .header)))
 
@@ -213,7 +215,11 @@ enum CategoryWorkspacePresentation {
             case .failed(let message):
                 rightRows.append(line(" Preview failed: " + message, style: rightStyle))
             case .loaded where manager.preview.rows.isEmpty:
-                rightRows.append(line(" No matching items.", style: rightStyle))
+                rightRows.append(
+                    line(
+                        manager.preview.projectionNotice
+                            ? " Some results need attention; item-state/conflicts."
+                            : " No matching items.", style: rightStyle))
             case .loaded:
                 rightRows.append(
                     line(
@@ -240,9 +246,12 @@ enum CategoryWorkspacePresentation {
                 line(" It has no editable category record.", style: rightStyle),
             ]
         } else if let inspector = manager.inspector {
-            let labels = ["Subject", "Body / note", "Class ↔", "Category rule"]
+            let labels = [
+                "Subject", "Body / note", "Class ↔", "Category rule", "Capture aliases",
+                "Capture date property", "Day offset", "IANA timezone",
+            ]
             let labelWidth = rightWidth - textWidth
-            let focus = min(3, max(0, inspector.focus))
+            let focus = min(inspector.fields.count - 1, max(0, inspector.focus))
             func display(_ field: Int, multiline: Bool = false) -> [TextBuffer.DisplayLine] {
                 inspector.fields[field].displayLines(
                     columns: textWidth, marked: field == focus, flatten: !multiline,
@@ -274,7 +283,7 @@ enum CategoryWorkspacePresentation {
                     field, value: values.first(where: \.containsCursor) ?? values[0], label: labels[field])
             }
             if bodyHeight < 9 {
-                let values = display(focus, multiline: focus == 1 || focus == 3)
+                let values = display(focus, multiline: inspector.isMultiline(focus))
                 let caret = values.firstIndex(where: \.containsCursor) ?? 0
                 let maximum = max(0, values.count - bodyHeight)
                 let start = min(maximum, max(0, manager.inspectorScroll ?? (caret - bodyHeight + 1)))
@@ -282,6 +291,23 @@ enum CategoryWorkspacePresentation {
                 for (offset, value) in values.dropFirst(start).prefix(bodyHeight).enumerated() {
                     rightRows.append(fieldRow(focus, value: value, label: offset == 0 ? labels[focus] : nil))
                 }
+            } else if focus >= 4 {
+                rightRows.append(single(0))
+                rightRows.append(single(2))
+                rightRows.append(single(3))
+                let aliases = display(4, multiline: true)
+                let aliasRows = 2
+                let maximum = max(0, aliases.count - aliasRows)
+                let caret = aliases.firstIndex(where: \.containsCursor) ?? 0
+                let start = min(
+                    maximum, max(0, focus == 4 ? manager.inspectorScroll ?? (caret - aliasRows + 1) : 0))
+                if focus == 4 { inspectorViewport = (4, start, maximum) }
+                for (offset, value) in aliases.dropFirst(start).prefix(aliasRows).enumerated() {
+                    rightRows.append(fieldRow(4, value: value, label: offset == 0 ? labels[4] : nil))
+                }
+                for field in 5..<inspector.fields.count { rightRows.append(single(field)) }
+                let parent = manager.selectedPath.dropLast().last.map(title) ?? "All items"
+                rightRows.append(line(" Parent: \(parent)", style: rightStyle))
             } else {
                 rightRows.append(single(0))
                 let expandedField = focus == 3 ? 3 : 1
@@ -307,6 +333,7 @@ enum CategoryWorkspacePresentation {
                 }
                 rightRows.append(single(2))
                 if expandedField != 3 { rightRows.append(single(3)) }
+                for field in 4..<inspector.fields.count { rightRows.append(single(field)) }
                 let parent = manager.selectedPath.dropLast().last.map(title) ?? "All items"
                 let parentCount = inspector.base.fields["categoryParents"]?.array?.count ?? 0
                 rightRows.append(
@@ -338,7 +365,7 @@ enum CategoryWorkspacePresentation {
                 text += "PgUp Previous"
                 hits.append(MouseHit(columns: 1..<text.count, target: .categoryPreviewPrevious))
             }
-            if manager.preview.position + manager.preview.rows.count < manager.preview.total {
+            if manager.preview.position + manager.preview.consumedCount < manager.preview.total {
                 if text.count > 1 { text += " · " }
                 let start = text.count
                 text += "PgDn Next"

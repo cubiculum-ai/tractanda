@@ -1,0 +1,41 @@
+{
+  "identifier": "tractanda-linux-docling-profile-v1",
+  "runtimeBaseRevision": "61a4b20d4ad01b10466e8fc94c50402a9f994430",
+  "requiresExistingGELUPatch": true,
+  "patchFile": "vmlx-61a4b20-linux-docling.patch",
+  "patchSHA256": "191b56c3569d3998d81a5d2eaa20776059d8aa2ef95cb64850b17d0b283a037c",
+  "protectedIdeficsRegionSHA256": "e5e2e1aacd2f3c7de6240c6e0e3707990d6d2213163e232996ea5fb86a029c5d",
+  "files": [
+    {
+      "sourcePath": "Libraries/MLXLMCommon/Cache/DiskCache.swift",
+      "beforeSHA256": "911698a174c2b431581479804357764213b1ff1da5d858bc8d7a86423050db27",
+      "afterSHA256": "8df6e9a87b2cbb5ae25d8c627d4b8a817039ca235d4a589cb9eae12075be5c8a"
+    },
+    {
+      "sourcePath": "Libraries/MLXLMCommon/Cache/DiskCacheIndexSchema.swift",
+      "beforeSHA256": "86be8507d5c8c7cac72e147df2eb06493d7fde597adf068c88e966daf981958f",
+      "afterSHA256": "d8218a1ddf4b8fe2ceba66e4fd80c2519a61b8a782971cf0869471c4024adbe8"
+    },
+    {
+      "sourcePath": "Libraries/MLXLMCommon/Cache/DiskCacheVolumeSnapshot.swift",
+      "beforeSHA256": "6df8e0134f923ff860fc48c51036527204ddc9ca8b6b92b100ae21e5f8ae0407",
+      "afterSHA256": "32508075217986cb39921dc248da41118d754dd760acb67d68281322eca6612a"
+    },
+    {
+      "sourcePath": "Libraries/MLXVLM/LinuxVLMModelFactory.swift",
+      "beforeSHA256": null,
+      "afterSHA256": "59a8a80d3593a1fd2406552c6e37e0b277c651f11a38837bbbe717a9546f0557"
+    },
+    {
+      "sourcePath": "Libraries/MLXVLM/Models/Idefics3.swift",
+      "beforeSHA256": "2f775ea1f6362b7b8f94b83a8e20515f288e05f20ba9a5697e17ed387ed9bf2c",
+      "afterSHA256": "502efcbbec1cc0cb8cc6d044b0896e5784ffc3f581451ca7a9bd62e5279f11ed"
+    },
+    {
+      "sourcePath": "Package.swift",
+      "beforeSHA256": "94f62ec40b7f1cc1eaf8a35b2d9424a185231d49a1ec19424bcbd7c8416b1629",
+      "afterSHA256": "ca3e6c008c428e277703949f3ea9f4a1369630f2ef6d8e29e9da913937b9b11a"
+    }
+  ],
+  "status": "STAGED_SOURCE_ONLY_NOT_RUNTIME_ADMISSION"
+}

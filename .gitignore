@@ -51,6 +51,11 @@ node_modules/
 /agenda*/
 *.pdf
 *.PDF
+!/Packages/TractandaDocuments/Tests/DoclingRasterTests/Fixtures/three-pages.pdf
+
+# The Docling raster suite uses one generated three-page vector PDF fixture.
+# Keep all other PDFs ignored as private/reference inputs.
+
 
 # Unreleased framework and model experiments, including downloaded third-party assets.
 /experiments/
@@ -63,6 +68,9 @@ node_modules/
 
 # Local static-site output.
 /_site/
+
+# Generated Facelift metadata cache; do not publish local cache records.
+/.facelift/cache/
 
 # Private local test artifacts and development receipts.
 /Tests/work/

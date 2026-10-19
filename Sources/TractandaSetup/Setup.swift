@@ -48,9 +48,11 @@ public struct BundleManifest: Codable, Equatable, Sendable {
     public let files: [File]
     public let embedding: EmbeddingPayload?
     public let documentExtraction: DocumentExtractionPayload?
+    public let canonicalFormats: CanonicalFormatSupport?
     public init(
         profile: String = Self.profile, version: String, platform: String, arch: String, files: [File],
-        embedding: EmbeddingPayload? = nil, documentExtraction: DocumentExtractionPayload? = nil
+        embedding: EmbeddingPayload? = nil, documentExtraction: DocumentExtractionPayload? = nil,
+        canonicalFormats: CanonicalFormatSupport? = nil
     ) {
         self.profile = profile
         self.version = version
@@ -59,6 +61,7 @@ public struct BundleManifest: Codable, Equatable, Sendable {
         self.files = files
         self.embedding = embedding
         self.documentExtraction = documentExtraction
+        self.canonicalFormats = canonicalFormats
     }
 
     public func validate() throws {
@@ -99,11 +102,10 @@ public struct BundleManifest: Codable, Equatable, Sendable {
         else {
             throw SetupError("Bundle is missing the Tractanda web resource bundle.")
         }
+        try canonicalFormats?.validate()
         try embedding?.validate(files: files)
         if let documentExtraction {
-            guard platform == "macos", arch == "arm64" else {
-                throw SetupError("Bundled document extraction requires macOS arm64.")
-            }
+            try documentExtraction.validatePlatform(platform: platform, arch: arch)
             try documentExtraction.validate(files: files)
         } else if files.contains(where: {
             $0.path == "bin/tractanda-document-converter"
@@ -132,7 +134,7 @@ public enum SetupPlatform: String, Codable, Sendable {
             .linux
         #endif
     }
-    public var serviceUser: String { self == .macos ? "daemon" : "tractanda" }
+    public var serviceUser: String { "daemon" }
 }
 
 /// Root locations are explicit so fixtures never touch host data. Callers may change only data
@@ -152,7 +154,7 @@ public struct SetupRoots: Sendable {
         commands: URL? = nil
     ) {
         self.platform = platform
-        self.commands = commands ?? URL(fileURLWithPath: "/usr/local/bin", isDirectory: true)
+        self.commands = commands ?? URL(fileURLWithPath: platform == .linux ? "/usr/bin" : "/usr/local/bin", isDirectory: true)
         switch platform {
         case .macos:
             self.software =
@@ -182,7 +184,7 @@ public struct SetupRoots: Sendable {
             self.configuration = configuration ?? URL(fileURLWithPath: "/etc/tractanda", isDirectory: true)
             self.launchDefinitions =
                 launchDefinitions ?? URL(fileURLWithPath: "/etc/systemd/system", isDirectory: true)
-            self.runtime = runtime ?? URL(fileURLWithPath: "/run", isDirectory: true)
+            self.runtime = runtime ?? URL(fileURLWithPath: "/run/tractanda", isDirectory: true)
             self.data = data ?? URL(fileURLWithPath: "/var/lib/tractanda/stores", isDirectory: true)
             self.indexes = indexes ?? URL(fileURLWithPath: "/var/cache/tractanda/indexes", isDirectory: true)
         }
@@ -205,6 +207,18 @@ public protocol SetupProcessRunning: Sendable {
 
 public struct SetupOptions: Equatable, Sendable {
     public enum Mode: String, Sendable { case empty, sample }
+    public enum StoreSelection: Equatable, Sendable {
+        case unconfigured
+        case standalone
+        case prepared(storeID: String, replicaID: String)
+    }
+    public let storeSelection: StoreSelection
+    public enum PeerRuntimeAction: Equatable, Sendable {
+        case preserve
+        case replace(URL)
+        case disable
+    }
+    public let peerRuntime: PeerRuntimeAction
     public let name: String
     public let owner: String?
     public let mode: Mode
@@ -213,7 +227,8 @@ public struct SetupOptions: Equatable, Sendable {
     public let uuidNode: String?
     public init(
         name: String = "default", owner: String? = nil, mode: Mode = .empty, port: Int = 48_728,
-        bundle: URL, uuidNode: String? = nil
+        bundle: URL, uuidNode: String? = nil, peerRuntime: PeerRuntimeAction = .preserve,
+        storeSelection: StoreSelection = .unconfigured
     ) {
         self.name = name
         self.owner = owner
@@ -221,6 +236,8 @@ public struct SetupOptions: Equatable, Sendable {
         self.port = port
         self.bundle = bundle
         self.uuidNode = uuidNode
+        self.peerRuntime = peerRuntime
+        self.storeSelection = storeSelection
     }
     func validate() throws {
         guard name.utf8.count <= 32, !name.isEmpty,
@@ -230,6 +247,13 @@ public struct SetupOptions: Equatable, Sendable {
             throw SetupError("Instance name or port is invalid.")
         }
         if let owner, !validAccountName(owner) { throw SetupError("Account name is invalid.") }
+        if case let .prepared(storeID, replicaID) = storeSelection {
+            guard mode != .sample, storeID != replicaID,
+                [storeID, replicaID].allSatisfy({ value in
+                    guard let uuid = UUID(uuidString: value) else { return false }
+                    return uuid.version1Components != nil && uuid.uuidString.lowercased() == value
+                }) else { throw SetupError("Prepared adoption requires distinct canonical UUIDv1 store/replica pins and cannot seed sample content.") }
+        }
         if let uuidNode {
             let compact = uuidNode.replacingOccurrences(of: ":", with: "")
             guard compact.count == 12, compact.utf8.allSatisfy(asciiHex) else {
@@ -265,8 +289,11 @@ public struct DocumentExtractionPayload: Codable, Equatable, Sendable {
     public let runtimePatchSHA256: String
     public let noticePaths: [String]
 
-    public static let pinned = Self(
-        converterPath: "bin/tractanda-document-converter", identity: DocumentConverterIdentity(),
+    public static let pinned = descriptor(identity: DocumentConverterIdentity())
+
+    private static func descriptor(identity: DocumentConverterIdentity) -> Self {
+        Self(
+        converterPath: "bin/tractanda-document-converter", identity: identity,
         workerProtocol: "tractanda.native-document-worker.v1",
         modelDirectory: "models/granite-docling-258m-mlx",
         modelManifestPath: "licenses/Docling/ModelAssets.json",
@@ -283,6 +310,22 @@ public struct DocumentExtractionPayload: Codable, Equatable, Sendable {
             "licenses/optional-embedding-host/vmlx-swift/LICENSE",
             "licenses/optional-embedding-host/vmlx-swift/ACKNOWLEDGMENTS.md",
         ])
+    }
+
+    func validatePlatform(platform: String, arch: String) throws {
+        let expected: String?
+        if platform == "macos", arch == "arm64" {
+            expected = "tractanda.docling-native.v2-idefics3-gelu-f32"
+        } else if platform == "linux" {
+            expected = DocumentConverterIdentity.approvedLinuxConverter(architecture: arch)
+        } else {
+            expected = nil
+        }
+        guard let expected, identity.converter == expected else {
+            throw SetupError("Document payload is not the finite current profile for its platform/architecture.")
+        }
+        try identity.validate()
+    }
 
     static let assetNames: Set<String> = [
         "README.md", "config.json", "preprocessor_config.json", "processor_config.json",
@@ -292,18 +335,29 @@ public struct DocumentExtractionPayload: Codable, Equatable, Sendable {
     ]
 
     func validate(files: [BundleManifest.File]) throws {
-        guard self == Self.pinned else { throw SetupError("Unsupported document payload descriptor.") }
+        try identity.validate()
+        guard self == Self.descriptor(identity: identity) else { throw SetupError("Unsupported document payload descriptor.") }
         guard Set(files.map(\.path)).count == files.count else {
             throw SetupError("Duplicate document inventory paths.")
         }
         let entries = Dictionary(uniqueKeysWithValues: files.map { ($0.path, $0) })
+        let linuxPrefix = "tractanda.docling-native.v2-idefics3-gelu-f32+linux-raster."
+        if identity.converter.hasPrefix(linuxPrefix) {
+            let digest = String(identity.converter.dropFirst(linuxPrefix.count))
+            guard entries["lib/tractanda/document-native-closure.json"]?.sha256 == digest,
+                entries["lib/tractanda/document-native/libtractanda_docling_pdf.so.1"] != nil,
+                entries["lib/tractanda/document-native/libtractanda_docling_images.so.1"] != nil else {
+                throw SetupError("Linux document payload is missing its exact native closure or private providers.")
+            }
+        }
         guard let converter = entries[converterPath], converter.mode & 0o111 != 0,
             entries[modelManifestPath]?.sha256 == modelManifestSHA256,
             entries[runtimePatchManifestPath]?.sha256 == runtimePatchManifestSHA256,
             entries[runtimePatchPath]?.sha256 == runtimePatchSHA256,
             noticePaths.allSatisfy({ entries[$0] != nil }),
             files.contains(where: {
-                $0.path.hasPrefix("bin/TractandaDocuments_TractandaDocumentConverter.bundle/")
+                ($0.path.hasPrefix("bin/TractandaDocuments_TractandaDocumentConverter.bundle/")
+                    || $0.path.hasPrefix("bin/TractandaDocuments_TractandaDocumentConverter.resources/"))
                     && $0.path.hasSuffix("/ModelAssets.json") && $0.sha256 == modelManifestSHA256
             })
         else { throw SetupError("Document payload is missing its converter, resources, or pinned notices.") }

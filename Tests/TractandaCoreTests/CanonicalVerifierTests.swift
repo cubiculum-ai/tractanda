@@ -301,9 +301,10 @@ final class CanonicalVerifierTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
             "tractanda-verifier-coordinator-\(Identifier.make())")
         defer { try? FileManager.default.removeItem(at: root) }
+        _ = try ItemStore.initializeFresh(root: root)
         let coordinator = try await ServiceCoordinator(opening: root)
         await coordinator.startCanonicalVerification(every: .seconds(3600))
         await coordinator.close()
-        _ = try ItemStore(root: root)
+        _ = try ItemStore.openInitialized(root: root)
     }
 }

@@ -9,13 +9,21 @@ public struct Revision: Codable, Equatable, Sendable {
     public var supersedes: String? { fields["supersedes"]?.string }
     public var isDeleted: Bool { fields["isDeleted"]?.booleanValue == true }
     public var modifiedAt: String { fields["modifiedAt"]!.dateString! }
+    public var provenance: RevisionProvenance? {
+        get throws { try fields["revisionAncestry"].map { try RevisionProvenance(value: $0) } }
+    }
     public init(fields: [String: ItemValue], formatVersion: Int = 1) throws {
         self.formatVersion = formatVersion
         self.fields = fields
         try validate()
     }
     public func validate() throws {
-        guard formatVersion == 1 else { throw TractandaError("unsupportedFormat", "Unknown record format.") }
+        guard formatVersion == 1 || formatVersion == 2 else {
+            throw TractandaError("unsupportedFormat", "Unknown record format.")
+        }
+        guard (formatVersion == 2) == (fields["revisionAncestry"] != nil) else {
+            throw TractandaError("invalidRecord", "Format 1 is legacy; format 2 requires canonical ancestry.")
+        }
         for name in ["itemID", "revisionID", "classID", "actor", "operationID", "requestIdentity"] {
             guard let value = fields[name]?.string, !value.isEmpty else {
                 throw TractandaError("invalidRecord", "Missing/invalid \(name).")
@@ -53,6 +61,7 @@ public struct Revision: Codable, Equatable, Sendable {
         if let deleted = fields["isDeleted"], deleted.booleanValue == nil {
             throw TractandaError("invalidRecord", "isDeleted must be Boolean.")
         }
+        try provenance?.validate(in: fields)
     }
     private enum CodingKeys: String, CodingKey { case formatVersion, fields }
     public init(from decoder: any Decoder) throws {

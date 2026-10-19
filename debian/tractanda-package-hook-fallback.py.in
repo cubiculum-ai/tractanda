@@ -1,0 +1,554 @@
+#!/usr/bin/python3
+"""Finite Debian hook fallback. It proves OS custody only; it never reads canonical authority."""
+import fcntl
+import hashlib
+import json
+import os
+import pwd
+import platform
+import re
+import stat
+import subprocess
+import sys
+import uuid
+
+STATE = "/etc/tractanda/package-transaction.json"
+RECEIPTS = "/etc/tractanda/receipts"
+ACTIVE = "/opt/tractanda/current"
+UNIT_DIR = "/etc/systemd/system"
+ROLES = ("server", "embeddings", "authentication")
+MAX_BYTES = 1_048_576
+DESCRIPTOR_KEYS = {
+    "profile", "manifestSHA256", "version", "arch", "canonicalFormats", "semanticProfile", "upgrade",
+}
+STATE_REQUIRED = {"profile", "operationID", "phase", "instances", "startupPermitted"}
+STATE_ALLOWED = STATE_REQUIRED | {"original", "incoming", "observed", "owner", "recoveryReason"}
+INSTANCE_KEYS = {
+    "name", "originalManifestSHA256", "wasRunning", "wasEnabled",
+    "embeddingWasRunning", "authenticationWasRunning",
+}
+UNIT_PROPERTIES = {
+    "LoadState", "ActiveState", "FragmentPath", "DropInPaths",
+    "NeedDaemonReload", "MainPID", "UnitFileState",
+}
+
+def refuse(message):
+    raise SystemExit("tractanda package fallback: " + message)
+
+def root_directory_chain(path):
+    if not path.startswith("/"):
+        refuse("protected parent is not absolute")
+    current = "/"
+    for component in path.split("/")[1:]:
+        if not component:
+            continue
+        current = os.path.join(current, component)
+        metadata = os.lstat(current)
+        if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != 0
+                or metadata.st_mode & 0o022):
+            refuse("protected directory ancestry is not root-owned and stable")
+
+def unique_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            refuse("duplicate JSON key")
+        value[key] = item
+    return value
+
+def read_private_regular(path, maximum=MAX_BYTES, private=True):
+    root_directory_chain(os.path.dirname(path))
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0
+                or (stat.S_IMODE(before.st_mode) != 0o600 if private else bool(before.st_mode & 0o022))
+                or before.st_nlink != 1
+                or before.st_size <= 0 or before.st_size > maximum):
+            refuse("protected file has unsafe type, owner, mode or size")
+        data = bytearray()
+        while len(data) <= maximum:
+            block = os.read(fd, min(65_536, maximum + 1 - len(data)))
+            if not block:
+                break
+            data.extend(block)
+        after = os.fstat(fd)
+        identity = lambda item: (
+            item.st_dev, item.st_ino, item.st_size, item.st_mtime_ns, item.st_ctime_ns)
+        if len(data) != before.st_size or len(data) > maximum or identity(before) != identity(after):
+            refuse("protected file changed while reading")
+        return bytes(data)
+    finally:
+        os.close(fd)
+
+def decode_object(data, required=None, allowed=None):
+    try:
+        value = json.loads(data, object_pairs_hook=unique_object)
+    except SystemExit:
+        raise
+    except Exception as error:
+        refuse("invalid bounded JSON: " + type(error).__name__)
+    if type(value) is not dict:
+        refuse("JSON value is not an object")
+    if required is not None and not required <= set(value):
+        refuse("required JSON fields are missing")
+    if allowed is not None and not set(value) <= allowed:
+        refuse("unknown JSON fields are present")
+    return value
+
+def valid_digest(value):
+    return type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+def valid_instance(value):
+    return (type(value) is str and value.isascii() and 1 <= len(value) <= 32
+            and value[0] != "-" and value[-1] != "-"
+            and all(character.isalnum() or character == "-" for character in value))
+
+def run_systemctl(arguments, allow_not_found=False):
+    try:
+        result = subprocess.run(
+            ["/usr/bin/systemctl", *arguments], stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, timeout=10, check=False)
+    except Exception as error:
+        refuse("cannot prove systemd state: " + type(error).__name__)
+    if result.returncode != 0:
+        fields = {}
+        for line in result.stdout.splitlines():
+            key, separator, value = line.partition("=")
+            if not separator or key in fields:
+                refuse("systemd error state is malformed")
+            fields[key] = value
+        if (not allow_not_found or set(fields) != UNIT_PROPERTIES
+                or fields["LoadState"] != "not-found" or fields["ActiveState"] != "inactive"
+                or fields["MainPID"] != "0" or fields["FragmentPath"] or fields["DropInPaths"]
+                or fields["NeedDaemonReload"] not in ("", "no")
+                or fields["UnitFileState"] not in ("", "not-found", "disabled")):
+            refuse("systemd state query failed")
+    return result.stdout
+
+def listed_units(arguments):
+    names = set()
+    for line in run_systemctl(arguments).splitlines():
+        fields = line.split()
+        if (not fields or fields[0] in names or not fields[0].startswith("tractanda-")
+                or not fields[0].endswith(".service")):
+            refuse("managed-unit inventory is malformed")
+        names.add(fields[0])
+    return names
+
+def hash_owned_unit(path, expected):
+    root_directory_chain(os.path.dirname(path))
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_nlink != 1
+                or before.st_mode & 0o022 or not valid_digest(expected)):
+            refuse("unit file is not a protected receipt-bound regular file")
+        digest = hashlib.sha256()
+        while True:
+            block = os.read(fd, 65_536)
+            if not block:
+                break
+            digest.update(block)
+        after = os.fstat(fd)
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+                after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+            refuse("unit file changed while hashing")
+        if digest.hexdigest() != expected:
+            refuse("unit file differs from its receipt hash")
+    finally:
+        os.close(fd)
+
+def hash_payload_file(path, expected_size, expected_mode):
+    root_directory_chain(os.path.dirname(path))
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_nlink != 1
+                or stat.S_IMODE(before.st_mode) != expected_mode or before.st_mode & 0o022
+                or before.st_size != expected_size):
+            refuse("active payload file differs from its protected manifest metadata")
+        digest = hashlib.sha256()
+        while True:
+            block = os.read(fd, 1_048_576)
+            if not block:
+                break
+            digest.update(block)
+        after = os.fstat(fd)
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+                after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+            refuse("active payload file changed while hashing")
+        return digest.hexdigest()
+    finally:
+        os.close(fd)
+
+def verify_helper(arguments):
+    if len(arguments) != 2 or os.geteuid() != 0:
+        refuse("helper admission requires root and one fixed helper path")
+    expected_path = os.path.join(ACTIVE, "bin", "tractanda-setup")
+    if arguments[1] != expected_path:
+        refuse("helper path differs from the fixed active package path")
+    root_directory_chain(ACTIVE)
+    manifest_path = os.path.join(ACTIVE, "bundle-manifest.json")
+    raw = read_private_regular(manifest_path, 16 * 1024 * 1024, private=False)
+    manifest = decode_object(raw)
+    machine = platform.machine().lower()
+    host_arch = "arm64" if machine in ("aarch64", "arm64") else "x86_64" if machine in ("x86_64", "amd64") else ""
+    if (manifest.get("profile") != "tractanda.bundle.v1" or manifest.get("platform") != "linux"
+            or manifest.get("arch") != host_arch or not isinstance(manifest.get("files"), list)
+            or len(manifest["files"]) > 20_000):
+        refuse("active bundle manifest is not a supported Linux payload")
+    entries = [entry for entry in manifest["files"]
+               if type(entry) is dict and entry.get("path") == "bin/tractanda-setup"]
+    if len(entries) != 1:
+        refuse("active bundle manifest does not uniquely declare Setup")
+    entry = entries[0]
+    size, mode, digest = entry.get("size"), entry.get("mode"), entry.get("sha256")
+    if (type(size) is not int or size <= 0 or size > 8 * 1024 * 1024 * 1024
+            or type(mode) is not int or mode & 0o111 == 0 or mode & 0o022
+            or not valid_digest(digest)):
+        refuse("active Setup manifest entry is invalid")
+    if hash_payload_file(expected_path, size, mode) != digest:
+        refuse("active Setup executable hash differs from its protected manifest")
+    manifest_digest = hashlib.sha256(raw).hexdigest()
+    commitments = set()
+    state_present = False
+    try:
+        os.lstat(STATE)
+        state_present = True
+        state = decode_object(read_private_regular(STATE), STATE_REQUIRED, STATE_ALLOWED)
+        try:
+            operation = uuid.UUID(state["operationID"])
+        except Exception:
+            refuse("package transaction operation ID is invalid")
+        if (state.get("profile") != "tractanda.package-transaction.v1"
+                or operation.version != 1 or state["operationID"] != str(operation)
+                or state.get("phase") not in (
+                    "quiescing", "quiesced", "awaitingUnpack", "configuring", "failed", "committed", "removed")
+                or type(state.get("instances")) is not list or len(state["instances"]) > 1024
+                or type(state.get("startupPermitted")) is not list):
+            refuse("package transaction profile differs")
+        for key in ("original", "incoming", "observed"):
+            value = state.get(key)
+            if value is not None:
+                if type(value) is not dict or not valid_digest(value.get("manifestSHA256")):
+                    refuse("package transaction compatibility commitment is invalid")
+                commitments.add(value["manifestSHA256"])
+    except FileNotFoundError:
+        pass
+    try:
+        directory = os.lstat(RECEIPTS)
+    except FileNotFoundError:
+        directory = None
+    if directory is not None:
+        root_directory_chain(os.path.dirname(RECEIPTS))
+        if not stat.S_ISDIR(directory.st_mode) or directory.st_uid != 0 or directory.st_mode & 0o022:
+            refuse("receipt directory has unsafe custody")
+        names = os.listdir(RECEIPTS)
+        if len(names) > 1024:
+            refuse("receipt inventory exceeds its bound")
+        receipt_digests = set()
+        for filename in names:
+            if not filename.endswith(".json") or not valid_instance(filename[:-5]):
+                refuse("receipt inventory contains an unknown entry")
+            receipt = decode_object(read_private_regular(os.path.join(RECEIPTS, filename)))
+            if (receipt.get("instance") != filename[:-5]
+                    or not valid_digest(receipt.get("manifestSHA256"))):
+                refuse("receipt manifest commitment is invalid")
+            receipt_digests.add(receipt["manifestSHA256"])
+        if state_present:
+            if not receipt_digests <= commitments:
+                refuse("receipt manifest is outside the transaction's original/incoming/observed commitments")
+        else:
+            if len(receipt_digests) != 1:
+                refuse("untracked receipts do not share one package manifest")
+            commitments.update(receipt_digests)
+    if commitments and manifest_digest not in commitments:
+        refuse("active manifest has no package-state or receipt commitment")
+    return 0
+
+def inspect_units(instances, receipts):
+    expected = {"tractanda-" + role + "-" + name + ".service"
+                for name in instances for role in ROLES}
+    listed = listed_units((
+        "list-units", "--all", "--no-legend", "--plain", "--full",
+        "--type=service", "tractanda-*.service"))
+    enabled = listed_units(("list-unit-files", "--no-legend", "--no-pager", "tractanda-*.service"))
+    if not listed <= expected or not enabled <= expected:
+        refuse("unowned managed unit exists")
+    property_argument = "--property=LoadState,ActiveState,FragmentPath,DropInPaths,NeedDaemonReload,MainPID,UnitFileState"
+    for name in instances:
+        receipt = receipts[name]
+        hashes = {
+            "server": receipt.get("definitionSHA256"),
+            "embeddings": receipt.get("embeddingDefinitionSHA256"),
+            "authentication": receipt.get("authenticationDefinitionSHA256"),
+        }
+        for role, expected_hash in hashes.items():
+            unit = "tractanda-" + role + "-" + name + ".service"
+            output = run_systemctl(("show", unit, "--no-pager", property_argument), allow_not_found=True)
+            fields = {}
+            for line in output.splitlines():
+                key, separator, value = line.partition("=")
+                if not separator or key in fields:
+                    refuse("systemd state is incomplete or duplicated")
+                fields[key] = value
+            if set(fields) != UNIT_PROPERTIES or fields["MainPID"] != "0" or fields["DropInPaths"]:
+                refuse("managed unit has a process or unknown override")
+            path = os.path.join(UNIT_DIR, unit)
+            if fields["LoadState"] == "not-found":
+                if (fields["ActiveState"] != "inactive" or fields["FragmentPath"]
+                        or fields["UnitFileState"] not in ("", "not-found", "disabled")):
+                    refuse("missing unit has contradictory state")
+            elif (fields["LoadState"] != "loaded" or fields["ActiveState"] not in ("inactive", "failed")
+                    or fields["NeedDaemonReload"] != "no" or fields["UnitFileState"] != "disabled"
+                    or fields["FragmentPath"] != path):
+                refuse("unit is not owned, stopped and disabled")
+            try:
+                metadata = os.lstat(path)
+            except FileNotFoundError:
+                metadata = None
+            if metadata is not None:
+                hash_owned_unit(path, expected_hash)
+            elif expected_hash is not None:
+                refuse("receipt-owned unit definition disappeared")
+            dropins = path + ".d"
+            try:
+                drop_metadata = os.lstat(dropins)
+            except FileNotFoundError:
+                drop_metadata = None
+            if drop_metadata is not None and (
+                    not stat.S_ISDIR(drop_metadata.st_mode) or os.listdir(dropins)):
+                refuse("unit drop-in directory is not empty")
+
+def private_directory(path, daemon_uid):
+    root_directory_chain(os.path.dirname(path))
+    metadata = os.lstat(path)
+    if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != daemon_uid
+            or stat.S_IMODE(metadata.st_mode) != 0o700):
+        refuse("store or index is not a private daemon-owned directory")
+
+def receipt_instance_paths(receipt, name, daemon_uid):
+    paths = []
+    roots = []
+    for key in ("store", "indexDirectory"):
+        path = receipt.get(key)
+        if (type(path) is not str or not path.startswith("/") or path == "/"
+                or os.path.normpath(path) != path or "\x00" in path
+                or os.path.basename(path) != name):
+            refuse("receipt path is not normalized and instance-bound")
+        parent = os.path.dirname(path)
+        if parent == "/":
+            refuse("receipt root must not be the filesystem root")
+        paths.append(path)
+        roots.append(parent)
+    first, second = roots
+    if (first == second or first.startswith(second + "/")
+            or second.startswith(first + "/")):
+        refuse("receipt store and index roots overlap")
+    for path in paths:
+        private_directory(path, daemon_uid)
+    return paths
+
+def read_receipts(instances):
+    root_directory_chain(os.path.dirname(RECEIPTS))
+    try:
+        directory = os.lstat(RECEIPTS)
+    except FileNotFoundError:
+        if instances:
+            refuse("transaction names instances but receipts are absent")
+        return {}
+    if not stat.S_ISDIR(directory.st_mode) or directory.st_uid != 0 or directory.st_mode & 0o022:
+        refuse("receipt directory has unsafe custody")
+    if len(instances) > 1024 or set(os.listdir(RECEIPTS)) != {name + ".json" for name in instances}:
+        refuse("receipt inventory differs from transaction")
+    try:
+        daemon_uid = pwd.getpwnam("daemon").pw_uid
+    except KeyError:
+        refuse("existing daemon account is missing")
+    receipts = {}
+    for name in instances:
+        receipt = decode_object(read_private_regular(os.path.join(RECEIPTS, name + ".json")))
+        if (receipt.get("version") != 1 or receipt.get("instance") != name
+                or receipt.get("release") != ACTIVE or not valid_digest(receipt.get("manifestSHA256"))
+                or type(receipt.get("initialized")) is not bool
+                or receipt.get("state") not in ("preparing", "active", "removed")):
+            refuse("receipt is not a recognized dpkg-owned registration")
+        if ("packageDefinitions" in receipt
+                and receipt["packageDefinitions"] not in (None, {})):
+            refuse("owned service-definition publication is pending native recovery")
+        receipt_instance_paths(receipt, name, daemon_uid)
+        lock_path = os.path.join(receipt["store"], ".writer.lock")
+        lock_info = os.lstat(lock_path)
+        if (not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid != daemon_uid
+                or stat.S_IMODE(lock_info.st_mode) != 0o600 or lock_info.st_nlink != 1):
+            refuse("existing private writer lock has unsafe custody")
+        fd = os.open(lock_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            refuse("canonical writer lock is held")
+        finally:
+            os.close(fd)
+        receipts[name] = receipt
+    return receipts
+
+def safe_state():
+    state = decode_object(read_private_regular(STATE), STATE_REQUIRED, STATE_ALLOWED)
+    try:
+        operation = uuid.UUID(state["operationID"])
+    except Exception:
+        refuse("transaction operation ID is invalid")
+    if (state["profile"] != "tractanda.package-transaction.v1" or operation.version != 1
+            or state["operationID"] != str(operation) or state["phase"] not in (
+                "quiesced", "awaitingUnpack", "failed", "removed", "committed")
+            or state["startupPermitted"] != [] or state.get("owner") is not None
+            or type(state["instances"]) is not list or len(state["instances"]) > 1024):
+        refuse("transaction is not a recognized quiescent state")
+    instances = {}
+    for entry in state["instances"]:
+        if (type(entry) is not dict or set(entry) != INSTANCE_KEYS
+                or not valid_instance(entry.get("name"))
+                or not valid_digest(entry.get("originalManifestSHA256"))
+                or any(type(entry.get(key)) is not bool for key in (
+                    "wasRunning", "wasEnabled", "embeddingWasRunning", "authenticationWasRunning"))
+                or entry["name"] in instances):
+            refuse("transaction instance record is malformed")
+        instances[entry["name"]] = entry
+    receipts = read_receipts(set(instances))
+    allowed_manifests = {
+        entry["originalManifestSHA256"] for entry in instances.values()
+    }
+    for key in ("original", "incoming", "observed"):
+        declaration = state.get(key)
+        if declaration is not None:
+            if type(declaration) is not dict or not valid_digest(declaration.get("manifestSHA256")):
+                refuse("transaction payload commitment is malformed")
+            allowed_manifests.add(declaration["manifestSHA256"])
+    if any(receipts[name]["manifestSHA256"] != entry["originalManifestSHA256"]
+           and receipts[name]["manifestSHA256"] not in allowed_manifests
+           for name, entry in instances.items()):
+        refuse("receipt manifest is outside original/incoming/observed package commitments")
+    inspect_units(set(instances), receipts)
+    return state
+
+def validate_descriptor(path):
+    allowed = DESCRIPTOR_KEYS | {"embedding", "documentExtraction"}
+    descriptor = decode_object(read_private_regular(path, 65_536), DESCRIPTOR_KEYS, allowed)
+    if (descriptor["profile"] != "tractanda.linux-package.v1"
+            or not valid_digest(descriptor["manifestSHA256"])
+            or descriptor["arch"] not in ("x86_64", "arm64")
+            or type(descriptor["canonicalFormats"]) is not dict
+            or type(descriptor["version"]) is not str or not descriptor["version"]
+            or len(descriptor["version"].encode()) > 80
+            or type(descriptor["semanticProfile"]) is not str
+            or not descriptor["semanticProfile"] or len(descriptor["semanticProfile"].encode()) > 128
+            or descriptor["upgrade"] not in ("compatible", "coordinated-maintenance")):
+        refuse("incoming package descriptor is invalid")
+    if any(key in descriptor and type(descriptor[key]) is not dict
+           for key in ("embedding", "documentExtraction")):
+        refuse("bundled feature descriptor has an invalid shape")
+    return descriptor
+
+def write_state(state):
+    encoded = (json.dumps(state, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode()
+    if len(encoded) > MAX_BYTES:
+        refuse("transaction exceeds its bound")
+    parent = os.path.dirname(STATE)
+    root_directory_chain(parent)
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    temporary = os.path.join(parent, ".package-transaction.fallback." + str(os.getpid()))
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        with os.fdopen(fd, "wb", closefd=False) as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(fd)
+        os.replace(temporary, STATE)
+        os.fsync(parent_fd)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        os.close(fd)
+        os.close(parent_fd)
+
+def fallback(arguments):
+    if os.geteuid() != 0 or not arguments:
+        refuse("root custody and a finite fallback action are required")
+    action = arguments[0]
+    if action == "verify-helper":
+        return verify_helper(arguments)
+    if action == "preinst":
+        if len(arguments) != 3 or arguments[1] not in ("install", "upgrade"):
+            refuse("invalid preinst fallback arguments")
+        lifecycle, descriptor_path = arguments[1], arguments[2]
+        descriptor = validate_descriptor(descriptor_path)
+        try:
+            os.lstat(STATE)
+            has_state = True
+        except FileNotFoundError:
+            has_state = False
+        if not has_state:
+            if lifecycle != "install" or os.path.lexists(ACTIVE) or os.path.lexists(RECEIPTS):
+                refuse("only a clean first install may proceed without an old helper")
+            if listed_units(("list-units", "--all", "--no-legend", "--plain", "--full", "--type=service", "tractanda-*.service")):
+                refuse("matching managed service exists")
+            if listed_units(("list-unit-files", "--no-legend", "--no-pager", "tractanda-*.service")):
+                refuse("matching managed unit file exists")
+            return 0
+        state = safe_state()
+        if state["phase"] not in ("quiesced", "awaitingUnpack", "failed", "removed"):
+            refuse("retained state is not eligible for missing-helper unpack")
+        state["incoming"] = descriptor
+        state["phase"] = "awaitingUnpack"
+        state["startupPermitted"] = []
+        state["owner"] = None
+        state["recoveryReason"] = "guarded-missing-helper-pre-unpack"
+        write_state(state)
+        return 0
+    if action in ("prerm-upgrade", "postrm", "abort-remove"):
+        if len(arguments) != 1:
+            refuse("invalid validation-only arguments")
+        try:
+            os.lstat(STATE)
+        except FileNotFoundError:
+            if action in ("postrm", "abort-remove"):
+                live = listed_units(("list-units", "--all", "--no-legend", "--plain", "--full", "--type=service", "tractanda-*.service"))
+                files = listed_units(("list-unit-files", "--no-legend", "--no-pager", "tractanda-*.service"))
+                if not live and not files:
+                    return 0
+            refuse("validation-only hook has no captured package state")
+        state = safe_state()
+        if action == "prerm-upgrade" and state["phase"] not in (
+                "quiesced", "awaitingUnpack", "failed", "removed"):
+            refuse("upgrade fallback lacks previously captured quiescent intent")
+        if action == "abort-remove" and state["phase"] not in (
+                "quiesced", "awaitingUnpack", "failed", "removed"):
+            refuse("abort-remove fallback lacks previously captured quiescent intent")
+        return 0
+    if action == "remove":
+        if len(arguments) != 1:
+            refuse("invalid remove fallback arguments")
+        state = safe_state()
+        state["phase"] = "removed"
+        state["startupPermitted"] = []
+        state["owner"] = None
+        state["recoveryReason"] = "guarded-missing-helper-remove"
+        write_state(state)
+        return 0
+    refuse("unknown fallback action")
+
+def main():
+    try:
+        return fallback(sys.argv[1:])
+    except SystemExit:
+        raise
+    except Exception as error:
+        refuse("cannot prove safe package handoff: " + type(error).__name__)
+
+if __name__ == "__main__":
+    sys.exit(main())
+

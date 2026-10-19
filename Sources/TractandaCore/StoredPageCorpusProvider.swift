@@ -8,6 +8,12 @@ struct StoredPageCorpusProvider: PageCorpusPageProvider {
         document: PageCorpusDocumentPlan,
         visit: (DocumentStoredPage) throws -> Void
     ) throws {
+        try forEachEncodedPage(document: document) { page, _ in try visit(page) }
+    }
+    func forEachEncodedPage(
+        document: PageCorpusDocumentPlan,
+        visit: (DocumentStoredPage, Int) throws -> Void
+    ) throws {
         if document.isIncoming {
             guard let incoming, document.representationID == nil, document.savedContent == nil,
                 document.source == incoming.source, document.identity == incoming.identity,
@@ -20,7 +26,7 @@ struct StoredPageCorpusProvider: PageCorpusPageProvider {
                 throw TractandaError(
                     "documentIntegrity", "Incoming corpus provider differs from its sealed job.")
             }
-            try contents.forEachPreparedJobPage(incoming, visit)
+            try contents.forEachEncodedPreparedJobPage(incoming, visit)
         } else {
             guard let reference = document.savedContent else {
                 throw TractandaError(
@@ -37,7 +43,7 @@ struct StoredPageCorpusProvider: PageCorpusPageProvider {
                 throw TractandaError(
                     "documentIntegrity", "Saved corpus plan differs from its authenticated manifest.")
             }
-            try contents.forEachPage(reference, visit)
+            try contents.forEachEncodedPage(reference, visit)
         }
     }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import XCTest
 
 @testable import TractandaCore
@@ -73,6 +74,102 @@ final class PageCorpusAllocationTests: XCTestCase {
         XCTAssertThrowsError(try ledger.include(entry(3, kind: .symbolicLink, blocks: 0)))
         XCTAssertThrowsError(try PageCorpusAllocation.rounded(.max, allocationUnit: 65536))
         XCTAssertThrowsError(try PageCorpusAllocation.rounded(1, allocationUnit: 0))
+    }
+    func testMaximumRecordHintRemainsReservationWithoutBecomingOperatorCharge() throws {
+        let hint: Int64 = 16 * 1024 * 1024
+        let usage = PageCorpusAllocationUsage(logicalBytes: 1024, allocatedBytes: 1024, inodeCount: 1)
+        XCTAssertEqual(
+            try PageCorpusAllocation.check(
+                usage, maximumBytes: 128 * 1024, additionalBytes: 1024, allocationUnit: hint), hint)
+        let policy = try PageCorpusSpoolPolicy(
+            maximumBytes: 128 * 1024, minimumFreeBytes: 10 * 1024 * 1024 * 1024)
+        XCTAssertEqual(try policy.reservation(additionalBytes: 1024, allocationUnit: hint), hint)
+        let needed = UInt64(policy.minimumFreeBytes + hint)
+        XCTAssertThrowsError(try policy.checkAvailable(needed - 1, reservedGrowth: hint))
+        XCTAssertNoThrow(try policy.checkAvailable(needed, reservedGrowth: hint))
+        XCTAssertThrowsError(try policy.reservation(additionalBytes: 128 * 1024 + 1, allocationUnit: hint))
+        XCTAssertThrowsError(try policy.reservation(additionalBytes: 1, allocationUnit: 0))
+    }
+    func testBoundedEstimateAndActualOverageKeepIndependentPhysicalAndLogicalLimits() throws {
+        let cap: Int64 = 128 * 1024
+        for usage in [
+            PageCorpusAllocationUsage(logicalBytes: 1024, allocatedBytes: cap - 100, inodeCount: 1),
+            PageCorpusAllocationUsage(logicalBytes: cap - 100, allocatedBytes: 1024, inodeCount: 1),
+        ] {
+            XCTAssertThrowsError(
+                try PageCorpusAllocation.check(
+                    usage, maximumBytes: cap, additionalBytes: 101, allocationUnit: 16 * 1024 * 1024))
+        }
+        for usage in [
+            PageCorpusAllocationUsage(logicalBytes: 1024, allocatedBytes: cap + 1, inodeCount: 1),
+            PageCorpusAllocationUsage(logicalBytes: cap + 1, allocatedBytes: 1024, inodeCount: 1),
+        ] {
+            XCTAssertThrowsError(
+                try PageCorpusAllocation.check(
+                    usage, maximumBytes: cap, additionalBytes: 0, allocationUnit: 16 * 1024 * 1024))
+        }
+    }
+    func testSharedStagingStillReceivesTheFullRoundedFilesystemReservation() throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let unit = try PageCorpusAllocation.allocationUnit(at: root)
+        let rounded = try PageCorpusAllocation.rounded(1024, allocationUnit: unit)
+        let observed = Mutex<Int64>(-1)
+        let policy = try PageCorpusSpoolPolicy(
+            maximumBytes: 128 * 1024, minimumFreeBytes: 10 * 1024 * 1024 * 1024,
+            availableBytes: { UInt64(10 * 1024 * 1024 * 1024 + rounded) },
+            stagingBoundary: { _, growth in observed.withLock { $0 = growth } })
+        try policy.check(at: root, additionalBytes: 1024)
+        XCTAssertEqual(observed.withLock { $0 }, rounded)
+    }
+    func testPostWriteLogicalOverageDiscardsOnlyTheOwnedStageBeforePublication() throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let canary = root.appendingPathComponent("canary")
+        try Data("retain".utf8).write(to: canary)
+        let fields: [String: ItemValue] = [
+            "itemID": .text(try UUID.makeVersion1().uuidString.lowercased()),
+            "revisionID": .text(try UUID.makeVersion1().uuidString.lowercased()), "classID": .text("Item"),
+            "schemaVersion": .integer(1), "createdAt": .date(Timestamp.now()),
+            "modifiedAt": .date(Timestamp.now()), "actor": .text("fixture"),
+            "operationID": .text("fixture"), "requestIdentity": .text("fixture"),
+            "body": .text("tiny body"),
+        ]
+        let input = try PageCorpusInput(
+            storeID: UUID.makeVersion1().uuidString.lowercased(), revision: Revision(fields: fields))
+        struct Provider: PageCorpusPageProvider {
+            func forEachPage(document: PageCorpusDocumentPlan, visit: (DocumentStoredPage) throws -> Void)
+                throws
+            {}
+        }
+        let injected = Mutex(false)
+        let policy = try PageCorpusSpoolPolicy(
+            maximumBytes: 256 * 1024, minimumFreeBytes: 10 * 1024 * 1024 * 1024,
+            stagingBoundary: { directory, growth in
+                guard directory != root, growth == 0,
+                    injected.withLock({ value in
+                        if value { return false }
+                        value = true
+                        return true
+                    })
+                else { return }
+                // A real bounded post-write sidecar, not a disk-fill or sparse-size heuristic.
+                guard
+                    FileManager.default.createFile(
+                        atPath: directory.appendingPathComponent("owned-sidecar").path,
+                        contents: Data(repeating: 0, count: 257 * 1024),
+                        attributes: [.posixPermissions: 0o600])
+                else { throw TractandaError("fixture", "Cannot create owned sidecar") }
+            })
+        XCTAssertThrowsError(
+            try PageCorpusProjection.prepare(input: input, provider: Provider(), root: root, policy: policy)
+        ) {
+            XCTAssertEqual(($0 as? TractandaError)?.code, "resourceLimit")
+        }
+        XCTAssertTrue(injected.withLock { $0 })
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(atPath: root.path), ["canary"])
+        XCTAssertEqual(try Data(contentsOf: canary), Data("retain".utf8))
     }
     func testDescriptorRelativeScanCountsOwnedAuxiliariesAndDoesNotFollowSymlinks() throws {
         let root = try root()

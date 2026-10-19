@@ -74,6 +74,20 @@ final class DocumentContentStore: @unchecked Sendable {
     private let files: DocumentContentFiles
     private let root: URL
     private let ownerUID: UInt32
+    private var placement: DocumentPlacement!
+    var placementArrivalMinuteForTesting: () throws -> String {
+        get { placement.arrivalMinute }
+        set { placement.arrivalMinute = newValue }
+    }
+    var afterPlacementIntentForTesting: (() throws -> Void)? {
+        get { placement.afterIntent }
+        set { placement.afterIntent = newValue }
+    }
+    var afterPlacementTreeForTesting: (() throws -> Void)? {
+        get { placement.afterFile }
+        set { placement.afterFile = newValue }
+    }
+    var placementRecoveryScansForTesting: Int { placement.recoveryScans }
     var afterDirectoryRenameForTesting: (() throws -> Void)? {
         get { files.afterDirectoryRenameForTesting }
         set { files.afterDirectoryRenameForTesting = newValue }
@@ -93,19 +107,26 @@ final class DocumentContentStore: @unchecked Sendable {
 
     init(
         root: URL, ownerUID: UInt32, minimumFreeBytes: Int64 = AttachmentPayloadStore.defaultReserveBytes,
-        availableBytes: (@Sendable () throws -> UInt64)? = nil, stagingQuota: StagingByteQuota? = nil
+        availableBytes: (@Sendable () throws -> UInt64)? = nil, stagingQuota: StagingByteQuota? = nil,
+        indexDirectory: URL? = nil
     ) {
-        self.root = root
+        self.root = root.standardizedFileURL.resolvingSymlinksInPath()
         self.ownerUID = ownerUID
         files = DocumentContentFiles(
-            root: root, ownerUID: ownerUID, minimumFreeBytes: minimumFreeBytes,
+            root: self.root, ownerUID: ownerUID, minimumFreeBytes: minimumFreeBytes,
             availableBytes: availableBytes, stagingQuota: stagingQuota
         )
+        placement = DocumentPlacement(root: self.root, indexDirectory: indexDirectory, ownerUID: ownerUID) {
+            [weak self] bytes, location in
+            guard let self else { throw TractandaError("documentIntegrity", "Document storage closed.") }
+            try self.files.requireCapacity(bytes, at: location)
+        }
     }
     func begin(
         source: AttachmentDocumentSource, identity: DocumentConverterIdentity,
         extractedAt: String = Timestamp.now(), maximumWriteBytes: Int64 = .max
     ) throws -> DocumentContentWriter {
+        try preparePlacement()
         try source.validate()
         try identity.validate()
         guard Timestamp.parse(extractedAt) != nil, maximumWriteBytes > 0 else {
@@ -122,6 +143,7 @@ final class DocumentContentStore: @unchecked Sendable {
         id: String, source: AttachmentDocumentSource, identity: DocumentConverterIdentity,
         extractedAt: String
     ) throws -> [String] {
+        try preparePlacement()
         try Identifier.validate(id)
         guard UUID(uuidString: id)?.version1Components != nil else {
             throw integrity("Job stage identity must be UUIDv1.")
@@ -186,6 +208,11 @@ final class DocumentContentStore: @unchecked Sendable {
         try reference.validate()
         let data = try files.read(
             path: try directory(reference.contentID) + ["manifest.json"], maximumBytes: Self.maximumNodeBytes)
+        return try decodeManifest(data, reference: reference)
+    }
+    private func decodeManifest(_ data: Data, reference: DocumentContentReference) throws -> DocumentManifest
+    {
+        try reference.validate()
         guard digest(data) == reference.manifestSHA256 else {
             throw integrity("Document manifest checksum changed.")
         }
@@ -196,6 +223,7 @@ final class DocumentContentStore: @unchecked Sendable {
             manifest.rootSHA256 == reference.rootSHA256, manifest.pageCount == reference.pageCount,
             manifest.totalEncodedBytes == reference.totalEncodedBytes,
             manifest.coverage == reference.coverage,
+            UUID(uuidString: manifest.publicationID)?.version1Components != nil,
             Timestamp.parse(manifest.extractedAt) != nil, (0...8).contains(manifest.rootLevel),
             manifest.rootByteCount > 0, manifest.rootByteCount <= Self.maximumNodeBytes
         else {
@@ -259,8 +287,14 @@ final class DocumentContentStore: @unchecked Sendable {
         }
         var total: Int64 = 0
         var counts = [Int64](repeating: 0, count: 5)
-        try forEachPage(reference, boundary: boundary) { page in
-            let sum = total.addingReportingOverflow(Int64(try JSON.encode(page).count))
+        try visitClosure(
+            base: directory(reference.contentID),
+            rootEntry: .init(
+                ordinal: 0, firstPage: 1, lastPage: manifest.pageCount,
+                byteCount: manifest.rootByteCount, sha256: manifest.rootSHA256),
+            level: manifest.rootLevel, source: source, identity: identity, boundary: boundary
+        ) { page, encodedCount in
+            let sum = total.addingReportingOverflow(Int64(encodedCount))
             guard !sum.overflow else { throw integrity("Saved document byte count overflowed.") }
             total = sum.partialValue
             counts[try statusIndex(page.status)] += 1
@@ -365,21 +399,30 @@ final class DocumentContentStore: @unchecked Sendable {
     )
         throws
     {
+        try forEachEncodedPage(reference, boundary: boundary) { page, _ in try visit(page) }
+    }
+    func forEachEncodedPage(
+        _ reference: DocumentContentReference, boundary: () throws -> Void = {},
+        _ visit: (DocumentStoredPage, Int) throws -> Void
+    ) throws {
         let manifest = try manifest(reference)
         let rootEntry = DocumentHashEntry(
             ordinal: 0, firstPage: 1, lastPage: manifest.pageCount,
             byteCount: manifest.rootByteCount, sha256: manifest.rootSHA256)
         try visitClosure(
             base: directory(reference.contentID), rootEntry: rootEntry, level: manifest.rootLevel,
-            source: manifest.source, identity: manifest.identity, boundary: boundary, visit: visit)
+            source: manifest.source, identity: manifest.identity, boundary: boundary,
+            visit: visit)
     }
     private func visitClosure(
         base: [String], rootEntry: DocumentHashEntry, level: Int,
         source: AttachmentDocumentSource, identity: DocumentConverterIdentity,
-        boundary: () throws -> Void = {}, visit: (DocumentStoredPage) throws -> Void
+        boundary: () throws -> Void = {}, part: () throws -> Void = {},
+        visit: (DocumentStoredPage, Int) throws -> Void
     ) throws {
         try Task.checkCancellation()
         try boundary()
+        try part()
         let data = try files.read(
             path: base + nodePath(level: level, ordinal: rootEntry.ordinal),
             maximumBytes: Self.maximumNodeBytes)
@@ -400,8 +443,9 @@ final class DocumentContentStore: @unchecked Sendable {
             if level > 0 {
                 try visitClosure(
                     base: base, rootEntry: entry, level: level - 1, source: source, identity: identity,
-                    boundary: boundary, visit: visit)
+                    boundary: boundary, part: part, visit: visit)
             } else {
+                try part()
                 let bytes = try files.read(
                     path: base + pagePath(entry.ordinal), maximumBytes: Self.maximumPageBytes)
                 guard Int64(bytes.count) == entry.byteCount, digest(bytes) == entry.sha256 else {
@@ -410,7 +454,7 @@ final class DocumentContentStore: @unchecked Sendable {
                 let page = try DocumentValue.strictDecode(DocumentStoredPage.self, data: bytes)
                 try validate(page, source: source, identity: identity)
                 guard page.pageNumber == entry.ordinal else { throw integrity("Saved page number changed.") }
-                try visit(page)
+                try visit(page, bytes.count)
             }
         }
     }
@@ -421,9 +465,9 @@ final class DocumentContentStore: @unchecked Sendable {
         try visitClosure(
             base: prepared.stage, rootEntry: prepared.rootEntry, level: prepared.rootLevel,
             source: prepared.source, identity: prepared.identity
-        ) { page in
+        ) { page, encodedCount in
             let expected = pages.addingReportingOverflow(1)
-            let sum = bytes.addingReportingOverflow(Int64(try JSON.encode(page).count))
+            let sum = bytes.addingReportingOverflow(Int64(encodedCount))
             guard !expected.overflow, !sum.overflow, page.pageNumber == expected.partialValue else {
                 throw integrity("Prepared document closure count overflowed or changed.")
             }
@@ -496,17 +540,16 @@ final class DocumentContentStore: @unchecked Sendable {
     }
     /// Caller must reconcile immutable committed operation first; this removes only its uncommitted candidate.
     func discardJob(stage: [String], prepared: PreparedDocumentContent?) throws {
+        try files.requireMutableDocumentPath(stage)
         if let prepared, let reference = try publishedJobReference(prepared) {
-            let path = try directory(reference.contentID)
-            if try files.readIfPresent(path: path + ["manifest.json"], maximumBytes: Self.maximumNodeBytes)
-                != nil
-            {
+            if let path = try resolvedDirectory(reference.contentID) {
                 let manifest = try manifest(reference)
                 guard manifest.source == prepared.source, manifest.identity == prepared.identity,
                     manifest.publicationID == stage.last!
                 else { throw integrity("Uncommitted job manifest changed.") }
+                try files.removeUncommittedContent(path)
+                try placement.forget(id: reference.contentID, path: path.joined(separator: "/"))
             }
-            try files.removeUncommittedContent(path)
         }
         try files.removePrivateTree(stage)
         try files.removeJobPublicationReceipt(id: stage.last!)
@@ -546,6 +589,7 @@ final class DocumentContentStore: @unchecked Sendable {
             byteCount: prepared.byteCount, coverage: prepared.coverage)
     }
     fileprivate func write(_ data: Data, stage: [String], path: [String]) throws {
+        try files.requireMutableDocumentPath(stage)
         if let existing = try files.readIfPresent(path: stage + path, maximumBytes: Self.maximumPageBytes) {
             guard existing == data else { throw integrity("Replayed page or proof node changed.") }
             try files.synchronizeDirectory(Array((stage + path).dropLast()))
@@ -603,27 +647,324 @@ final class DocumentContentStore: @unchecked Sendable {
         let reference = try DocumentContentReference(
             contentID: manifest.contentID, manifestSHA256: digest(bytes), rootSHA256: rootEntry.sha256,
             pageCount: rootEntry.lastPage, totalEncodedBytes: byteCount, coverage: coverage)
-        let destination = try directory(manifest.contentID)
-        // A durable sibling receipt survives directory rename and uncertain fsync replies.
-        if let existing = try? files.read(
-            path: destination + ["manifest.json"], maximumBytes: Self.maximumNodeBytes)
+        // The private local writer alone creates its manifest. Exact import below never rewrites it.
+        if try files.readIfPresent(
+            path: stage + nodePath(level: rootLevel, ordinal: 0), maximumBytes: Self.maximumNodeBytes) != nil
         {
-            guard existing == bytes else {
-                throw integrity("Document identity already names different content.")
+            if let existing = try files.readIfPresent(
+                path: stage + ["manifest.json"], maximumBytes: Self.maximumNodeBytes)
+            {
+                guard existing == bytes else { throw integrity("Private publication manifest changed.") }
+            } else {
+                try files.writeImmutable(bytes, path: stage + ["manifest.json"])
             }
-            try files.synchronizePublication(stage, to: destination)
-            return reference
         }
-        if let existing = try files.readIfPresent(
-            path: stage + ["manifest.json"], maximumBytes: Self.maximumNodeBytes)
-        {
-            guard existing == bytes else { throw integrity("Private publication manifest changed.") }
-        } else {
-            try files.writeImmutable(bytes, path: stage + ["manifest.json"])
-        }
-        try beforeDirectoryPublicationForTesting?()
-        try files.publishDirectory(stage, to: destination)
+        try publishExact(stage: stage, reference: reference, manifestBytes: bytes)
         return reference
+    }
+
+    /// Internal storage entry point only. It preserves foreign identities/bytes; callers must
+    /// separately close canonical source/current authority before publishing any item reference.
+    func publishExact(stage: [String], reference: DocumentContentReference, manifestBytes: Data) throws {
+        try files.requireMutableDocumentPath(stage)
+        guard stage.count == 3, stage.prefix(2) == ["documents", ".staging"],
+            UUID(uuidString: stage[2])?.version1Components != nil,
+            manifestBytes.count <= Self.maximumNodeBytes
+        else { throw integrity("Invalid exact document stage.") }
+        _ = try decodeManifest(manifestBytes, reference: reference)
+        try placement.publish(reference, recover: recoverPlacement, reconcile: reconcilePlacement) {
+            path, existing in
+            let destination = path.split(separator: "/").map(String.init)
+            if existing {
+                let raw = try files.read(
+                    path: destination + ["manifest.json"], maximumBytes: Self.maximumNodeBytes)
+                guard raw == manifestBytes else {
+                    throw integrity("Document identity already names different bytes.")
+                }
+                _ = try validateTree(base: destination, reference: reference, synchronize: true)
+                try files.synchronizePublication(stage, to: destination)
+            } else {
+                guard
+                    try files.read(path: stage + ["manifest.json"], maximumBytes: Self.maximumNodeBytes)
+                        == manifestBytes
+                else { throw integrity("Exact stage manifest differs.") }
+                _ = try validateTree(base: stage, reference: reference, synchronize: true)
+                try CanonicalReaderRequirement.beforeDocumentPlacementPublication(
+                    root: root, ownerUID: ownerUID)
+                try beforeDirectoryPublicationForTesting?()
+                try files.publishDirectory(stage, to: destination)
+            }
+        }
+    }
+
+    func beginPeerInspection(base: [String], parkable: Bool = false) throws -> DocumentContentFiles.PeerTreeInspection {
+        try files.peerTreeInspection(base, parkable: parkable)
+    }
+    func validatePeerPage(
+        _ data: Data, source: AttachmentDocumentSource, identity: DocumentConverterIdentity,
+        number: Int64
+    ) throws -> DocumentStoredPage {
+        guard data.count <= Self.maximumPageBytes else {
+            throw integrity("Peer page exceeds its representation budget.")
+        }
+        let page = try DocumentValue.strictDecode(DocumentStoredPage.self, data: data)
+        try validate(page, source: source, identity: identity)
+        guard page.pageNumber == number else { throw integrity("Peer page number differs from its address.") }
+        return page
+    }
+    func peerManifestBytes(_ reference: DocumentContentReference, budget: PeerOriginalReadBudget) throws
+        -> Data
+    {
+        try reference.validate()
+        let path = try directory(reference.contentID) + ["manifest.json"]
+        let file = try files.peerDocumentPartFile(path: path, maximumBytes: Self.maximumNodeBytes)
+        try budget.requireWorkingSet(bytes: file.metadata.size, steps: 1, label: "One document manifest")
+        let data = try files.read(
+            path: path,
+            maximumBytes: Self.maximumNodeBytes, readBudget: budget.charge)
+        _ = try decodeManifest(data, reference: reference)
+        return data
+    }
+    func peerManifestDescriptor(_ reference: DocumentContentReference) throws -> PeerPackage.Object {
+        try reference.validate()
+        let path = try directory(reference.contentID) + ["manifest.json"]
+        let file = try files.peerDocumentPartFile(path: path, maximumBytes: Self.maximumNodeBytes)
+        let object = PeerPackage.Object(
+            kind: .document, id: reference.contentID,
+            length: Int(file.metadata.size), sha256: reference.manifestSHA256, part: .manifest)
+        try object.validate()
+        return object
+    }
+    func validatePeerManifest(_ data: Data, reference: DocumentContentReference) throws -> DocumentManifest {
+        try decodeManifest(data, reference: reference)
+    }
+    func peerRootMetadata(_ base: [String]) throws -> FileMetadata {
+        try FileMetadata.read(at: base.reduce(root) { $0.appendingPathComponent($1) })
+    }
+    /// Resolve a typed canonical part through bounded proofs without reading a target page body.
+    func peerExpectedPart(
+        _ reference: DocumentContentReference, part: PeerPackage.DocumentPart,
+        budget: PeerOriginalReadBudget
+    ) throws -> PeerPackage.Object {
+        try part.validate()
+        let data = try peerManifestBytes(reference, budget: budget)
+        if part == .manifest {
+            return .init(
+                kind: .document, id: reference.contentID, length: data.count,
+                sha256: reference.manifestSHA256, part: part)
+        }
+        let manifest = try decodeManifest(data, reference: reference)
+        let base = try directory(reference.contentID)
+        var level = manifest.rootLevel
+        var edge = DocumentHashEntry(
+            ordinal: 0, firstPage: 1, lastPage: manifest.pageCount,
+            byteCount: manifest.rootByteCount, sha256: manifest.rootSHA256)
+        while true {
+            try budget.step()
+            let address = PeerPackage.DocumentPart(role: .node, level: level, ordinal: edge.ordinal)
+            if address == part {
+                let result = PeerPackage.Object(
+                    kind: .document, id: reference.contentID, length: Int(edge.byteCount),
+                    sha256: edge.sha256, part: part)
+                try result.validate()
+                return result
+            }
+            let raw = try files.read(
+                path: base + address.relativePath, maximumBytes: Self.maximumNodeBytes,
+                readBudget: budget.charge)
+            guard raw.count == Int(edge.byteCount), digest(raw) == edge.sha256 else {
+                throw integrity("Peer proof bytes changed.")
+            }
+            let node = try DocumentValue.strictDecode(DocumentHashNode.self, data: raw)
+            try node.validate()
+            guard node.level == level, node.ordinal == edge.ordinal,
+                node.entries.first?.firstPage == edge.firstPage, node.entries.last?.lastPage == edge.lastPage
+            else {
+                throw integrity("Peer proof range changed.")
+            }
+            if level == 0 {
+                guard part.role == .page,
+                    let entry = node.entries.first(where: { $0.ordinal == part.ordinal })
+                else {
+                    throw integrity("Peer document part is unreachable.")
+                }
+                let result = PeerPackage.Object(
+                    kind: .document, id: reference.contentID, length: Int(entry.byteCount),
+                    sha256: entry.sha256, part: part)
+                try result.validate()
+                return result
+            }
+            let child: DocumentHashEntry?
+            if part.role == .page {
+                child = node.entries.first { $0.firstPage <= part.ordinal && part.ordinal <= $0.lastPage }
+            } else {
+                guard part.role == .node, part.level < level else {
+                    throw integrity("Peer node level is unreachable.")
+                }
+                var ordinal = part.ordinal
+                for _ in part.level..<(level - 1) { ordinal /= 128 }
+                child = node.entries.first { $0.ordinal == ordinal }
+            }
+            guard let child else { throw integrity("Peer document part is unreachable.") }
+            edge = child
+            level -= 1
+        }
+    }
+    func peerPartFile(base: [String], object: PeerPackage.Object) throws -> PeerOriginalFile {
+        try object.validate()
+        guard object.kind == .document, let part = object.part else { throw integrity("Invalid peer part.") }
+        return try files.peerDocumentPartFile(path: base + part.relativePath, maximumBytes: object.length)
+    }
+    func freezePeerStage(_ stage: [String], reference: DocumentContentReference) throws {
+        try files.freezePeerStage(stage, reference: reference)
+    }
+    /// Completion and publication occur in this one synchronous owner operation. A previously
+    /// completed inspection cannot be retained as a reusable readiness token across operations.
+    func stepFrozenPeerPublication(
+        stage: [String], reference: DocumentContentReference, manifestBytes: Data,
+        inspection: DocumentContentFiles.PeerTreeInspection, expectedParts: Int64,
+        budget: PeerOriginalReadBudget, inspect: ([String], PeerOriginalFile) throws -> Void,
+        beforePublication: () throws -> Void
+    ) throws -> Bool {
+        guard !inspection.complete,
+            let frozen = try files.frozenPeerStage(stage, readBudget: budget.charge),
+            frozen.reference == reference
+        else {
+            throw integrity("Peer publication requires its closed stage and a fresh inspection step.")
+        }
+        _ = try decodeManifest(manifestBytes, reference: reference)
+        let finalBytes = manifestBytes.count + (try JSON.encode(frozen).count)
+        try budget.requireWorkingSet(
+            bytes: UInt64(finalBytes), steps: 1, label: "Final document publication metadata")
+        guard
+            try budget.reservingReadBytes(
+                finalBytes,
+                {
+                    try inspection.step(budget: budget, synchronize: true, inspect: inspect)
+                })
+        else { return false }
+        guard inspection.count == expectedParts else {
+            throw integrity("Peer tree contains missing or extra parts.")
+        }
+        try beforePublication()
+        try placement.publish(reference, recover: recoverPlacement, reconcile: reconcilePlacement) {
+            path, existing in
+            let destination = path.split(separator: "/").map(String.init)
+            guard inspection.base == (existing ? destination : stage) else {
+                throw TractandaError(
+                    "peerDocumentLocationChanged", "Document publication location changed; inspect it again.")
+            }
+            let raw = try files.read(
+                path: inspection.base + ["manifest.json"], maximumBytes: Self.maximumNodeBytes,
+                readBudget: budget.charge)
+            guard raw == manifestBytes else { throw integrity("Closed peer manifest changed.") }
+            try inspection.checkRoot()
+            if existing {
+                try files.synchronizePublication(stage, to: destination)
+            } else {
+                try CanonicalReaderRequirement.beforeDocumentPlacementPublication(
+                    root: root, ownerUID: ownerUID)
+                try beforeDirectoryPublicationForTesting?()
+                try beforePublication()
+                try files.publishDirectory(
+                    stage, to: destination, frozenReference: reference, readBudget: budget.charge)
+            }
+        }
+        return true
+    }
+
+    private func validateTree(
+        base: [String], reference: DocumentContentReference, synchronize: Bool
+    ) throws -> DocumentManifest {
+        let data = try files.read(path: base + ["manifest.json"], maximumBytes: Self.maximumNodeBytes)
+        let manifest = try decodeManifest(data, reference: reference)
+        var parts: Int64 = 1
+        var pages: Int64 = 0
+        var bytes: Int64 = 0
+        var counts = [Int64](repeating: 0, count: 5)
+        try visitClosure(
+            base: base,
+            rootEntry: .init(
+                ordinal: 0, firstPage: 1, lastPage: manifest.pageCount,
+                byteCount: manifest.rootByteCount, sha256: manifest.rootSHA256),
+            level: manifest.rootLevel, source: manifest.source, identity: manifest.identity,
+            part: {
+                let next = parts.addingReportingOverflow(1)
+                guard !next.overflow else { throw self.integrity("Document part count overflowed.") }
+                parts = next.partialValue
+            },
+            visit: { page, encodedCount in
+                let next = pages.addingReportingOverflow(1)
+                let total = bytes.addingReportingOverflow(Int64(encodedCount))
+                guard !next.overflow, !total.overflow, page.pageNumber == next.partialValue else {
+                    throw integrity("Document page coverage is not contiguous or addressable.")
+                }
+                pages = next.partialValue
+                bytes = total.partialValue
+                counts[try statusIndex(page.status)] += 1
+            })
+        let coverage = try DocumentCoverage(
+            converted: counts[0], unsupported: counts[1], truncated: counts[2], timedOut: counts[3],
+            failed: counts[4])
+        guard pages == reference.pageCount, bytes == reference.totalEncodedBytes,
+            coverage == reference.coverage,
+            try files.inspectDocumentTree(base, synchronize: synchronize) == parts
+        else { throw integrity("Complete document tree differs from its canonical closure.") }
+        return manifest
+    }
+
+    func preparePlacement() throws {
+        do { try placement.prepare(recover: recoverPlacement, reconcile: reconcilePlacement) } catch let error
+            as TractandaError where error.code == "documentIndexRecoveryRequired"
+        { try rebuildPlacement() }
+    }
+    func rebuildPlacement() throws {
+        try placement.rebuild(recover: recoverPlacement, reconcile: reconcilePlacement)
+    }
+    private func recoveredReference(_ data: Data, id: String) throws -> DocumentContentReference {
+        let manifest = try DocumentValue.strictDecode(DocumentManifest.self, data: data)
+        guard manifest.contentID == id else { throw integrity("Document archive identity differs.") }
+        let reference = try DocumentContentReference(
+            contentID: id, manifestSHA256: digest(data), rootSHA256: manifest.rootSHA256,
+            pageCount: manifest.pageCount, totalEncodedBytes: manifest.totalEncodedBytes,
+            coverage: manifest.coverage)
+        _ = try decodeManifest(data, reference: reference)
+        return reference
+    }
+    private func reconcilePlacement(_ reference: DocumentContentReference, path: String) throws -> Bool {
+        let base = path.split(separator: "/").map(String.init)
+        guard
+            try files.readIfPresent(path: base + ["manifest.json"], maximumBytes: Self.maximumNodeBytes)
+                != nil
+        else { return false }
+        _ = try validateTree(base: base, reference: reference, synchronize: true)
+        try files.synchronizeDirectory(Array(base.dropLast()))
+        return true
+    }
+    private func recoverPlacement(_ visit: (String, String) throws -> Void) throws {
+        func walk(_ base: [String]) throws {
+            try Task.checkCancellation()
+            try files.withDirectoryEntries(path: base) { name in
+                let path = base + [name]
+                if base.count < 7 {
+                    guard name.count == (base.count == 2 ? 4 : 2),
+                        name.utf8.allSatisfy({ (48...57).contains($0) })
+                    else { throw integrity("Unsafe document archive directory.") }
+                    try walk(path)
+                } else {
+                    let relative = path.joined(separator: "/")
+                    try DocumentPlacement.validate(relative, id: name)
+                    let data = try files.read(
+                        path: path + ["manifest.json"], maximumBytes: Self.maximumNodeBytes)
+                    let reference = try recoveredReference(data, id: name)
+                    _ = try validateTree(base: path, reference: reference, synchronize: true)
+                    try files.synchronizeDirectory(Array(path.dropLast()))
+                    try visit(name, relative)
+                }
+                return true
+            }
+        }
+        try walk(["documents", "content"])
     }
     fileprivate func validate(
         _ page: DocumentStoredPage, source: AttachmentDocumentSource, identity: DocumentConverterIdentity,
@@ -658,21 +999,19 @@ final class DocumentContentStore: @unchecked Sendable {
         ["nodes", String(level), String(ordinal / 128), String(ordinal) + ".json"]
     }
     func directory(_ id: String) throws -> [String] {
-        try Identifier.validate(id)
-        guard let components = UUID(uuidString: id)?.version1Components else {
-            throw integrity("Content ID is not UUIDv1.")
+        guard let path = try resolvedDirectory(id) else {
+            throw integrity("Saved document content is missing.")
         }
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
-        let date = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: components.date)
-        guard let year = date.year, (1...9999).contains(year), let month = date.month, let day = date.day,
-            let hour = date.hour, let minute = date.minute
-        else { throw integrity("Content ID has an invalid storage date.") }
-        return [
-            "documents", "content", String(format: "%04d", year), String(format: "%02d", month),
-            String(format: "%02d", day), String(format: "%02d", hour), String(format: "%02d", minute), id,
-        ]
+        return path
     }
+    private func resolvedDirectory(_ id: String) throws -> [String]? {
+        _ = try AuthorityRecord.persistentID(.text(id))
+        guard let path = try placement.path(id: id, recover: recoverPlacement, reconcile: reconcilePlacement)
+        else { return nil }
+        try DocumentPlacement.validate(path, id: id)
+        return path.split(separator: "/").map(String.init)
+    }
+    func peerDirectory(_ id: String) throws -> [String]? { try resolvedDirectory(id) }
     func pageURLForTesting(_ reference: DocumentContentReference, number: Int64) throws -> URL {
         (try directory(reference.contentID) + pagePath(number)).reduce(root) { $0.appendingPathComponent($1) }
     }
@@ -831,12 +1170,14 @@ extension DocumentContentStore {
         intent: DocumentJobIntent, original: DocumentVerifiedOriginal,
         configuration: DocumentConverterConfiguration, executableSHA256: String,
         budgets: DocumentWorkerBudgets, cancellation: DocumentConversionCancellation,
-        expectedPageCount: Int64?
+        expectedPageCount: Int64?,
+        runtimeVerifier: DocumentRuntimeVerifier = DocumentNativeSession.verifyRuntime
     ) throws -> DocumentNativeSession {
         try DocumentNativeSession(
             intent: intent, original: original, configuration: configuration,
             expectedExecutableSHA256: executableSHA256, files: files, root: root, budgets: budgets,
-            cancellation: cancellation, expectedPageCount: expectedPageCount)
+            cancellation: cancellation, expectedPageCount: expectedPageCount,
+            runtimeVerifier: runtimeVerifier)
     }
 }
 
@@ -845,6 +1186,12 @@ extension DocumentContentStore {
     func forEachPreparedJobPage(
         _ prepared: PreparedDocumentContent,
         _ visit: (DocumentStoredPage) throws -> Void
+    ) throws {
+        try forEachEncodedPreparedJobPage(prepared) { page, _ in try visit(page) }
+    }
+    func forEachEncodedPreparedJobPage(
+        _ prepared: PreparedDocumentContent,
+        _ visit: (DocumentStoredPage, Int) throws -> Void
     ) throws {
         if try files.readIfPresent(
             path: prepared.stage + nodePath(level: prepared.rootLevel, ordinal: 0),
@@ -869,7 +1216,7 @@ extension DocumentContentStore {
             else {
                 throw TractandaError("documentIntegrity", "Prepared corpus publication binding changed.")
             }
-            try forEachPage(reference, visit)
+            try forEachEncodedPage(reference, visit)
         }
     }
 }

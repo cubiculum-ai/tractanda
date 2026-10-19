@@ -51,7 +51,7 @@ final class ConnectionTests: XCTestCase {
     }
 
     private func root() throws -> URL {
-        let root = URL(fileURLWithPath: "/tmp").appendingPathComponent(
+        let root = (try GuardedFixtureDirectory.parent()).appendingPathComponent(
             "tc-" + String(Identifier.make().prefix(8)))
         try FileManager.default.createDirectory(
             at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -264,6 +264,43 @@ final class ConnectionTests: XCTestCase {
                 "--http-port", "1", "--http-port", "2",
             ])
         XCTAssertThrowsError(try ManagedServer.nativeProgramArguments(for: duplicateHTTP))
+    }
+
+    func testManagedPeerRuntimeOptionIsExactOptionalAndBounded() throws {
+        let base = ["/tmp/tractanda", "daemon", "/tmp/store", "/tmp/project.sock", "--managed", "--no-http"]
+        let valid = ManagedServer.Registration(
+            name: "project", storePath: "/tmp/store", binaryPath: "/tmp/tractanda",
+            definitionPath: "/tmp/unit", logPath: "/tmp/log",
+            connection: ServerConnection(socketPath: "/tmp/project.sock"),
+            nativeProgramArguments: base + ["--peer-runtime-config", "/etc/tractanda/peer-runtime.json"])
+        XCTAssertEqual(try ManagedServer.nativeProgramArguments(for: valid), valid.nativeProgramArguments)
+
+        let boardIDs = (0..<3).map { _ in Identifier.make() }
+        let maximum = ManagedServer.Registration(
+            name: "project", storePath: "/tmp/store", binaryPath: "/tmp/tractanda",
+            definitionPath: "/tmp/unit", logPath: "/tmp/log",
+            connection: ServerConnection(socketPath: "/tmp/project.sock"),
+            nativeProgramArguments: [
+                "/tmp/tractanda", "daemon", "/tmp/store", "/tmp/project.sock", "--managed",
+                "--http-port", "48728", "--project-root", boardIDs[0], "--status-root", boardIDs[1],
+                "--project", boardIDs[2], "--peer-runtime-config", "/tmp/peer.json",
+            ])
+        XCTAssertEqual(maximum.nativeProgramArguments?.count, 15)
+        XCTAssertEqual(try ManagedServer.nativeProgramArguments(for: maximum), maximum.nativeProgramArguments)
+
+        for invalidArguments in [
+            base + ["--peer-runtime-config"],
+            base + ["--peer-runtime-config", "relative.json"],
+            base + ["--peer-runtime-config", "/tmp/first.json", "--peer-runtime-config", "/tmp/second.json"],
+            base + ["--unknown", "/tmp/value"],
+        ] {
+            let invalid = ManagedServer.Registration(
+                name: "project", storePath: "/tmp/store", binaryPath: "/tmp/tractanda",
+                definitionPath: "/tmp/unit", logPath: "/tmp/log",
+                connection: ServerConnection(socketPath: "/tmp/project.sock"),
+                nativeProgramArguments: invalidArguments)
+            XCTAssertThrowsError(try ManagedServer.nativeProgramArguments(for: invalid))
+        }
     }
 
     func testUnavailableUnmanagedConnectionDoesNotCreateAStore() throws {

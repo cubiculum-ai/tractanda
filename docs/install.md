@@ -62,6 +62,8 @@ Use the installed setup executable with `status`, `start`, `stop` or `restart` a
 sudo "/Users/Shared/Library/Application Support/Tractanda/current/bin/tractanda-setup" restart --name default
 ```
 
+The Setup `status` command reports the macOS LaunchDaemon state. In source builds with peer support, `tractanda peer status` reads the running daemon's nonsecret loaded peer-runtime and synchronization state; it does not start a service or check remote cluster convergence.
+
 To upgrade, unpack the new bundle and run its installer:
 
 ```sh
@@ -69,6 +71,8 @@ sudo ./bin/tractanda-setup upgrade --bundle . --name default
 ```
 
 Upgrade preserves the existing database, owner and connection settings. It verifies copied files, switches service definitions and the stable client link, and restores the previous registrations if startup fails. Prototype data formats may require an explicit migration or an index rebuild; backward compatibility is not promised before 1.0.
+
+The current source build also accepts `--peer-runtime-configuration INPUT_JSON` or `--disable-peer-runtime` on `plan`, `install` and `upgrade` only. Supply at most one. Omitting both preserves the configuration recorded for that instance; a new instance with no configuration remains disabled. The replacement input is a bounded, regular JSON file containing nonsecret endpoint and synchronization settings. `plan` validates and reports the proposed replacement or disable action without applying it; install and upgrade publish the chosen settings as a protected, per-instance service configuration. Disabling removes only that runtime configuration and leaves canonical pairings and private credentials intact. During install or upgrade, Setup checks the daemon's loaded status against the managed receipt before completing; a failed transition follows its existing rollback or recovery path. These options are source-only and are not present in installed or published poc.14. Linux installation and the Linux Setup status command remain unsupported.
 
 Uninstall using:
 
@@ -130,3 +134,11 @@ page ceiling. The current 1024-token/page output budget, quotas and coverage fai
 visible; arbitrary original size does not imply unlimited generated text. Linux document runtime
 packaging and managed startup remain in development. Source edits do not install or activate a
 release; a release/deployment still requires an explicit request.
+
+## Canonical reader compatibility
+
+New signed bundles declare canonical reader/writer formats and semantic compatibility levels; the running service reports the same declaration in `TractandaStore/info`. API feature or executable version names do not substitute for this declaration. Verified legacy bundles without it are treated as format-1 readers. The private `canonical-reader.json` requirement belongs to the logical StoreID, survives backup/restore, and advances durably before any format-2 record is published. It never moves backward or rewrites historical content. The source internal authority-intake mode raises reader level 3 and `tractanda.authority.v1` before authority persistence affects eligibility, while item MIME remains version 2. Such data always requires authority enforcement or a stopped, explicit failure; disabling the mode never permits linear fallback. Later unsupported review/control semantics fail closed. This source-only capability does not authorize installing or enabling intake.
+
+Setup establishes missing compatibility proof from a bounded inventory while the writer is stopped and its root lock is held. Before rollback, reload or client repinning it checks the current requirement again. Shared clients must also cover what every registered writer can publish, so another store cannot raise its requirement just after the check. An uninstall target is excluded only after its writer has stopped and its registration is gone. Unknown proof or an incompatible old reader leaves the target stopped with a preparing receipt and recovery reason. Keep live data and verified backups intact and retry with a compatible bundle; never restore a backup over writes accepted during the failed attempt.
+
+The activation wrapper independently prevents an old service restart when its declared support does not cover the store. Backup copies preserve the original requirement bytes; the live requirement may only gain formats, levels or capabilities while retaining the same StoreID. A failed restoration retains a durable stopped recovery receipt and removes only exactly owned definitions. This guard is implemented in source; it does not authorize installation, rollback or deployment outside an explicit release request.

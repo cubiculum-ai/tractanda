@@ -2,15 +2,22 @@
 """Tiny offline tests for the operator-only canonical upgrade checkpoint."""
 import contextlib
 import copy
+import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
 import platform
+import plistlib
 import pwd
 import subprocess
+import shutil
+import stat
 import tempfile
+import sys
 import unittest
+import uuid
+from types import SimpleNamespace
 from unittest.mock import patch
 
 SPEC = importlib.util.spec_from_file_location('activation', Path(__file__).with_name('activate-release.py'))
@@ -25,17 +32,41 @@ def metadata(path):
 
 
 class CheckpointTests(unittest.TestCase):
+    store_identity_name = '.tractanda-store-identity.json'
+    replica_identity_name = '.tractanda-replica-identity.json'
+    reader_requirement_name = 'canonical-reader.json'
+    store_id = '11111111-1111-1111-8111-111111111111'
+    replica_id = '22222222-2222-1222-8222-222222222222'
+
     def fixture(self):
         temporary = tempfile.TemporaryDirectory(prefix='activation-checkpoint-')
         root = Path(temporary.name).resolve()
         store = root / 'store'
         store.mkdir(mode=0o700)
-        for name in ('items/one.tractanda', 'attachments/payloads/original',
-                     'documents/content/page.json', '.tractanda-store-identity.json',
-                     'settings.json', 'document-jobs/pending/record.json', '.writer.lock'):
+        files = ('items/one.tractanda', 'attachments/payloads/original',
+                 'documents/content/page.json', self.store_identity_name,
+                 self.replica_identity_name, self.reader_requirement_name, 'settings.json',
+                 'document-jobs/pending/record.json', '.writer.lock')
+        for name in files:
             path = store / name
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text('synthetic-' + name)
+            if name == self.store_identity_name:
+                contents = {'formatVersion': 1, 'storeID': self.store_id}
+                path.write_text(json.dumps(contents, sort_keys=True) + '\n')
+            elif name == self.replica_identity_name:
+                contents = {'formatVersion': 1, 'storeID': self.store_id, 'replicaID': self.replica_id}
+                path.write_text(json.dumps(contents, sort_keys=True) + '\n')
+                for value in (contents['storeID'], contents['replicaID']):
+                    parsed = uuid.UUID(value)
+                    self.assertEqual(parsed.version, 1)
+                    self.assertEqual(parsed.variant, uuid.RFC_4122)
+            elif name == self.reader_requirement_name:
+                contents = {'profile': activation.format_guard.MARKER_PROFILE,
+                            'storeID': self.store_id, 'minimumReaderLevel': 1,
+                            'recordFormats': [1], 'capabilities': []}
+                path.write_text(json.dumps(contents, sort_keys=True) + '\n')
+            else:
+                path.write_text('synthetic-' + name)
             path.chmod(0o600)
         self.addCleanup(temporary.cleanup)
         return root, store
@@ -43,13 +74,18 @@ class CheckpointTests(unittest.TestCase):
     def test_full_inventory_and_immutable_original_page_identity_settings_preservation(self):
         _, store = self.fixture()
         before = activation.inventory(store, metadata)
-        self.assertEqual(len([x for x in before['entries'].values() if x['kind'] == 'file']), 7)
+        self.assertEqual(len([x for x in before['entries'].values() if x['kind'] == 'file']), 9)
         for name in ('items/one.tractanda', 'attachments/payloads/original',
-                     'documents/content/page.json', '.tractanda-store-identity.json', 'settings.json'):
+                     'documents/content/page.json', self.store_identity_name,
+                     self.replica_identity_name, self.reader_requirement_name, 'settings.json'):
             after = copy.deepcopy(before)
             after['entries'][name]['sha256'] = 'changed'
             with self.assertRaises(RuntimeError):
                 activation.require_preserved(before, after)
+        missing_replica_identity = copy.deepcopy(before)
+        del missing_replica_identity['entries'][self.replica_identity_name]
+        with self.assertRaises(RuntimeError):
+            activation.require_preserved(before, missing_replica_identity)
         after = copy.deepcopy(before)
         del after['entries']['document-jobs/pending/record.json']
         after['entries']['.writer.lock']['sha256'] = 'operational'
@@ -116,6 +152,262 @@ class CheckpointTests(unittest.TestCase):
             with self.assertRaises(BlockingIOError):
                 with activation.existing_writer_lock(store):
                     pass
+
+    def test_checkpoint_admits_reader_after_stop_before_lock_and_restores_on_rejection(self):
+        root, store = self.fixture()
+        events = []
+
+        @contextlib.contextmanager
+        def lock(_):
+            events.append('lock')
+            try:
+                yield
+            finally:
+                events.append('unlock')
+
+        def inspect(_):
+            events.append('inventory')
+            return {}
+
+        def copier(*_):
+            events.append('copy')
+            return root / 'backup.json'
+
+        activation.checkpoint_backup(
+            store, root / 'backup', lambda: events.append('stop'), lambda: events.append('restore'),
+            lock=lock, inspect=inspect, copier=copier,
+            admit_reader=lambda: events.append('admit'))
+        self.assertEqual(events, ['stop', 'admit', 'lock', 'inventory', 'copy', 'unlock'])
+
+        events.clear()
+        with self.assertRaisesRegex(RuntimeError, 'reader incompatible'):
+            activation.checkpoint_backup(
+                store, root / 'rejected', lambda: events.append('stop'), lambda: events.append('restore'),
+                lock=lock, inspect=inspect, copier=copier,
+                admit_reader=lambda: (events.append('admit'), (_ for _ in ()).throw(RuntimeError('reader incompatible'))))
+        self.assertEqual(events, ['stop', 'admit', 'restore'])
+
+    def test_reader_marker_change_requires_monotonic_requirement_proof(self):
+        _, store = self.fixture()
+        before = activation.inventory(store, metadata)
+        prior = activation.format_guard.load_requirement(store)
+        marker = store / self.reader_requirement_name
+        raised = dict(prior, minimumReaderLevel=2, recordFormats=[1, 2])
+        marker.write_text(json.dumps(raised, sort_keys=True) + '\n')
+        after = activation.inventory(store, metadata)
+        changed = activation.require_preserved(
+            before, after, reader_change=lambda: activation.format_guard.require_monotonic(
+                prior, activation.format_guard.load_requirement(store)))
+        self.assertEqual(changed, [self.reader_requirement_name])
+
+        prior = activation.format_guard.load_requirement(store)
+        marker.write_text(json.dumps(dict(prior, minimumReaderLevel=1, recordFormats=[1]), sort_keys=True) + '\n')
+        regressed = activation.inventory(store, metadata)
+        with self.assertRaisesRegex(RuntimeError, 'moved backward'):
+            activation.require_preserved(
+                after, regressed, reader_change=lambda: activation.format_guard.require_monotonic(
+                    prior, activation.format_guard.load_requirement(store)))
+
+    def test_tiny_backup_retains_store_and_reader_marker_bytes(self):
+        root, store = self.fixture()
+        before = activation.inventory(store, metadata)
+        destination = root / 'verified-backup'
+
+        class FinishedCopy:
+            returncode = 0
+            def poll(self): return 0
+            def wait(self): return 0
+
+        def copy_runner(arguments, **_):
+            shutil.copytree(arguments[-2], arguments[-1])
+            return FinishedCopy()
+
+        with patch.object(activation.subprocess, 'Popen', side_effect=copy_runner), \
+                patch.object(activation, 'acl_text_fd', return_value=''):
+            proof = activation.copy_backup(
+                store, destination, before,
+                available=lambda _: activation.BACKUP_RESERVE + before['copyEstimateBytes'] + 1,
+                metadata=metadata)
+        self.assertEqual(json.loads(proof.read_text())['status'], 'verified')
+        backup_store = destination / 'store'
+        for name in (self.store_identity_name, self.replica_identity_name, self.reader_requirement_name):
+            self.assertEqual((backup_store / name).read_bytes(), (store / name).read_bytes())
+
+    def test_incompatible_or_unbound_old_reader_cannot_reach_service_restart(self):
+        root, store = self.fixture()
+        marker = store / self.reader_requirement_name
+        marker.write_text(json.dumps({
+            'profile': activation.format_guard.MARKER_PROFILE, 'storeID': self.store_id,
+            'minimumReaderLevel': 2, 'recordFormats': [1, 2], 'capabilities': [],
+        }) + '\n')
+        release = root / 'old-release'
+        client = release / 'bin' / 'tractanda'
+        client.parent.mkdir(parents=True)
+        client.write_bytes(b'legacy reader')
+        manifest = release / 'bundle-manifest.json'
+        manifest.write_text(json.dumps({'files': [{
+            'path': 'bin/tractanda', 'sha256': hashlib.sha256(client.read_bytes()).hexdigest(),
+        }]}) + '\n')  # Verified legacy manifest defaults to format 1.
+        definition = root / 'old-service.plist'
+        definition.write_bytes(plistlib.dumps({
+            'ProgramArguments': [str(client), 'daemon', str(store), '/tmp/fixture.sock'],
+        }))
+        with patch.object(activation.subprocess, 'run') as run:
+            with self.assertRaisesRegex(RuntimeError, 'newer reader'):
+                activation.restore_service(
+                    'fixture', definition, activation.digest(definition), client, '/tmp/fixture.sock',
+                    hashlib.sha256(manifest.read_bytes()).hexdigest())
+            run.assert_not_called()
+            marker.write_text(json.dumps({
+                'profile': activation.format_guard.MARKER_PROFILE, 'storeID': self.store_id,
+                'minimumReaderLevel': 1, 'recordFormats': [1], 'capabilities': [],
+            }) + '\n')
+            with self.assertRaisesRegex(RuntimeError, 'binding is missing or changed'):
+                activation.restore_service(
+                    'fixture', definition, activation.digest(definition), client, '/tmp/fixture.sock', None)
+            run.assert_not_called()
+
+    def test_preparing_receipt_stops_before_any_activation_or_service_subprocess(self):
+        root, _ = self.fixture()
+        real_path_type = activation.Path
+        managed_root = Path('/Users/Shared/Library/Application Support/Tractanda')
+        fake_root = root / 'managed'
+        receipt_path = fake_root / 'receipts' / 'production.json'
+        receipt_path.parent.mkdir(parents=True)
+        receipt_path.write_text(json.dumps({'state': 'preparing'}))
+        receipt_path.chmod(0o600)
+
+        def mapped_path(value, *args, **kwargs):
+            raw = os.fspath(value)
+            prefix = os.fspath(managed_root)
+            if raw == prefix or raw.startswith(prefix + os.sep):
+                raw = os.fspath(fake_root) + raw[len(prefix):]
+            return real_path_type(raw, *args, **kwargs)
+
+        original_lstat = real_path_type.lstat
+        def receipt_lstat(path, *args, **kwargs):
+            if path == receipt_path:
+                return SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0)
+            return original_lstat(path, *args, **kwargs)
+
+        arguments = [
+            'activate-release.py', '--bundle', str(root / 'unused-bundle'),
+            '--software-root', str(managed_root), '--instance', 'production',
+            '--manifest-sha256', '0' * 64, '--package', str(root / 'unused.pkg'),
+            '--package-sha256', '0' * 64,
+        ]
+        with patch.object(real_path_type, 'lstat', new=receipt_lstat), \
+                patch.object(activation, 'Path', mapped_path), \
+                patch.object(activation.platform, 'system', return_value='Darwin'), \
+                patch.object(activation.os, 'geteuid', return_value=0), \
+                patch.object(sys, 'argv', arguments), \
+                patch.object(activation.subprocess, 'run') as run:
+            with self.assertRaisesRegex(ValueError, 'existing active installations'):
+                activation.main()
+            run.assert_not_called()
+
+    def test_stopped_recovery_binds_receipt_and_preserves_unowned_definition(self):
+        root, store = self.fixture()
+        release = root / 'release'
+        definition = root / 'service.plist'
+        definition.write_bytes(plistlib.dumps({'ProgramArguments': ['fixture']}))
+        expected_definition = activation.digest(definition)
+        receipt_path = root / 'receipt.json'
+        expected = {
+            'instance': 'fixture', 'manifestSHA256': 'a' * 64,
+            'release': str(release), 'state': 'active', 'definitionSHA256': expected_definition,
+        }
+        receipt_path.write_text(json.dumps(expected) + '\n')
+        receipt_path.chmod(0o600)
+        backup = root / 'backup'
+        backup.mkdir()
+        (backup / 'one.bin').write_bytes(b'backup bytes')
+
+        changed_receipt = dict(expected, manifestSHA256='b' * 64)
+        receipt_path.write_text(json.dumps(changed_receipt) + '\n')
+        changed_bytes = receipt_path.read_bytes()
+        with patch.object(activation.subprocess, 'run') as run:
+            with self.assertRaisesRegex(RuntimeError, 'Receipt changed'):
+                activation.retain_stopped_recovery(
+                    receipt_path, expected, definition, expected_definition, 'incompatible reader')
+            run.assert_not_called()
+        self.assertEqual(receipt_path.read_bytes(), changed_bytes)
+        self.assertTrue(definition.exists())
+
+        receipt_path.write_text(json.dumps(expected) + '\n')
+        definition.write_bytes(plistlib.dumps({'ProgramArguments': ['externally changed']}))
+        unowned_definition = definition.read_bytes()
+        with patch.object(activation.subprocess, 'run') as run, \
+                patch.object(activation.subprocess, 'check_output') as check_output:
+            activation.retain_stopped_recovery(
+                receipt_path, expected, definition, expected_definition, 'incompatible reader')
+            run.assert_not_called()
+            check_output.assert_not_called()
+        updated = json.loads(receipt_path.read_text())
+        self.assertEqual(updated['state'], 'preparing')
+        self.assertIsNone(updated['definitionSHA256'])
+        self.assertEqual(definition.read_bytes(), unowned_definition)
+        self.assertEqual((backup / 'one.bin').read_bytes(), b'backup bytes')
+        self.assertEqual((store / 'items/one.tractanda').read_bytes(), b'synthetic-items/one.tractanda')
+
+    def test_stopped_recovery_boots_out_owned_writer_and_preserves_live_store_and_backup(self):
+        root, store = self.fixture()
+        release = root / 'previous-release'
+        definition = root / 'service.plist'
+        definition.write_bytes(plistlib.dumps({'ProgramArguments': [
+            str(release / 'bin/tractanda'), 'daemon', str(store), '/tmp/fixture.sock',
+        ]}))
+        expected_definition = activation.digest(definition)
+        receipt_path = root / 'receipt.json'
+        expected = {
+            'instance': 'fixture', 'manifestSHA256': 'c' * 64,
+            'release': str(release), 'state': 'active', 'definitionSHA256': expected_definition,
+        }
+        receipt_path.write_text(json.dumps(expected) + '\n')
+        receipt_path.chmod(0o600)
+        backup = root / 'backup'
+        backup.mkdir()
+        (backup / 'checkpoint.bin').write_bytes(b'original backup')
+        store_before = {
+            path.relative_to(store).as_posix(): path.read_bytes()
+            for path in store.rglob('*') if path.is_file()
+        }
+        backup_before = (backup / 'checkpoint.bin').read_bytes()
+        label = 'system/ai.tractanda.server.fixture'
+        run_calls = []
+        def run(arguments, **_):
+            run_calls.append(arguments)
+            if arguments[:3] == ['/bin/launchctl', 'print', label]:
+                return SimpleNamespace(returncode=0)
+            if arguments[:3] == ['/bin/launchctl', 'bootout', label]:
+                return SimpleNamespace(returncode=0)
+            if arguments[:2] == ['/bin/ps', '-p']:
+                return SimpleNamespace(returncode=1)
+            raise AssertionError('Unexpected subprocess: ' + repr(arguments))
+
+        def check_output(arguments, **_):
+            if arguments[:3] == ['/bin/launchctl', 'print', label]:
+                return 'service\n    pid = 4321\n'
+            if arguments[:2] == ['/bin/ps', '-p']:
+                return 'Mon Jan  1 00:00:00 2026 ' + str(release / 'bin/tractanda') + ' daemon\n'
+            raise AssertionError('Unexpected subprocess: ' + repr(arguments))
+
+        with patch.object(activation.subprocess, 'run', side_effect=run), \
+                patch.object(activation.subprocess, 'check_output', side_effect=check_output):
+            activation.retain_stopped_recovery(
+                receipt_path, expected, definition, expected_definition, 'rollback reader is too old')
+
+        self.assertEqual([call[1] for call in run_calls], ['print', 'bootout', '-p'])
+        self.assertFalse(definition.exists())
+        stopped = json.loads(receipt_path.read_text())
+        self.assertEqual(stopped['state'], 'preparing')
+        self.assertIsNone(stopped['definitionSHA256'])
+        self.assertIn('rollback reader is too old', stopped['recoveryReason'])
+        self.assertEqual({
+            path.relative_to(store).as_posix(): path.read_bytes()
+            for path in store.rglob('*') if path.is_file()
+        }, store_before)
+        self.assertEqual((backup / 'checkpoint.bin').read_bytes(), backup_before)
 
     def test_explicit_semantic_change_keeps_metadata_and_records_hashes(self):
         _, store = self.fixture()
@@ -192,6 +484,9 @@ class CheckpointTests(unittest.TestCase):
         recorded = json.loads(proof.read_text())
         self.assertEqual(recorded['status'], 'verified')
         self.assertEqual(recorded['inventory']['entries'], before['entries'])
+        self.assertEqual(
+            (root / 'backup' / 'store' / self.replica_identity_name).read_bytes(),
+            (store / self.replica_identity_name).read_bytes())
         self.assertEqual(proof.stat().st_mode & 0o777, 0o600)
         self.assertEqual(proof.parent.stat().st_mode & 0o777, 0o700)
         self.assertLess(before['logicalBytes'], 4096)

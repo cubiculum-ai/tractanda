@@ -10,8 +10,7 @@ import XCTest
 #endif
 
 final class DocumentPackagingTests: XCTestCase {
-    private func inventory() throws -> [BundleManifest.File] {
-        let pinned = DocumentExtractionPayload.pinned
+    private func inventory(_ pinned: DocumentExtractionPayload = .pinned) throws -> [BundleManifest.File] {
         var records: [BundleManifest.File] = []
         for path in [pinned.converterPath] + pinned.noticePaths {
             records.append(
@@ -35,6 +34,15 @@ final class DocumentPackagingTests: XCTestCase {
                 .init(
                     path: pinned.modelDirectory + "/" + name,
                     sha256: String(repeating: "2", count: 64), size: 10, mode: 0o644))
+        }
+        let prefix = "tractanda.docling-native.v2-idefics3-gelu-f32+linux-raster."
+        if pinned.identity.converter.hasPrefix(prefix) {
+            records.append(.init(path: "lib/tractanda/document-native-closure.json",
+                sha256: String(pinned.identity.converter.dropFirst(prefix.count)), size: 100, mode: 0o644))
+            for provider in ["pdf", "images"] {
+                records.append(.init(path: "lib/tractanda/document-native/libtractanda_docling_" + provider + ".so.1",
+                    sha256: String(repeating: "3", count: 64), size: 100, mode: 0o755))
+            }
         }
         return records
     }
@@ -71,6 +79,46 @@ final class DocumentPackagingTests: XCTestCase {
                 DocumentExtractionPayload.self,
                 from: JSONSerialization.data(withJSONObject: json))
             XCTAssertThrowsError(try payload.validate(files: inventory()))
+        }
+    }
+
+    func testFiniteLinuxDocumentPlatformAndResources() throws {
+        for arch in ["x86_64", "arm64"] {
+            let converter = try XCTUnwrap(DocumentConverterIdentity.approvedLinuxConverter(architecture: arch))
+            var object = try XCTUnwrap(JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(DocumentExtractionPayload.pinned)) as? [String: Any])
+            var identity = try XCTUnwrap(object["identity"] as? [String: String])
+            identity["converter"] = converter
+            object["identity"] = identity
+            let payload = try JSONDecoder().decode(DocumentExtractionPayload.self,
+                from: JSONSerialization.data(withJSONObject: object))
+            XCTAssertNoThrow(try payload.validatePlatform(platform: "linux", arch: arch))
+            XCTAssertThrowsError(try payload.validatePlatform(platform: "macos", arch: "arm64"))
+            XCTAssertThrowsError(try payload.validatePlatform(platform: "linux", arch: "riscv64"))
+            let wrongArch = arch == "arm64" ? "x86_64" : "arm64"
+            XCTAssertThrowsError(try payload.validatePlatform(platform: "linux", arch: wrongArch))
+            let resources = try inventory(payload).map { row in
+                BundleManifest.File(path: row.path.replacingOccurrences(of:
+                    "TractandaDocuments_TractandaDocumentConverter.bundle/", with:
+                    "TractandaDocuments_TractandaDocumentConverter.resources/"),
+                    sha256: row.sha256, size: row.size, mode: row.mode)
+            }
+            XCTAssertNoThrow(try payload.validate(files: resources))
+            for missing in ["document-native-closure.json", "libtractanda_docling_pdf.so.1", "libtractanda_docling_images.so.1", "ModelAssets.json"] {
+                XCTAssertThrowsError(try payload.validate(files: resources.filter { !$0.path.hasSuffix("/" + missing) }))
+            }
+            let wrongClosure = resources.map { row in
+                BundleManifest.File(path: row.path,
+                    sha256: row.path == "lib/tractanda/document-native-closure.json" ? String(repeating: "0", count: 64) : row.sha256,
+                    size: row.size, mode: row.mode)
+            }
+            XCTAssertThrowsError(try payload.validate(files: wrongClosure))
+            identity["converter"] = "tractanda.docling-native.v2-idefics3-gelu-f32+linux-raster." + String(repeating: "0", count: 64)
+            object["identity"] = identity
+            let unknown = try JSONDecoder().decode(DocumentExtractionPayload.self,
+                from: JSONSerialization.data(withJSONObject: object))
+            XCTAssertThrowsError(try unknown.validatePlatform(platform: "linux", arch: arch))
+            XCTAssertThrowsError(try unknown.validate(files: resources))
         }
     }
 
@@ -194,6 +242,13 @@ final class DocumentPackagingTests: XCTestCase {
         func run(_ executable: String, _ arguments: [String], environment: [String: String]) throws
             -> ProcessResult
         {
+            if let bootstrap = arguments.firstIndex(of: "--bootstrap-store") {
+                do {
+                    _ = try ItemStore(
+                        root: URL(fileURLWithPath: arguments[bootstrap + 1]),
+                        indexDirectory: URL(fileURLWithPath: arguments[bootstrap + 2]))
+                }
+            }
             guard executable == "/bin/launchctl" else { return ProcessResult(status: 0) }
             switch arguments.first {
             case "print": return ProcessResult(status: jobs.contains(arguments[1]) ? 0 : 1)
@@ -250,6 +305,7 @@ final class DocumentPackagingTests: XCTestCase {
             let runner = LifecycleRunner()
             let installer = SetupEngine(
                 roots: roots, runner: runner, rootCheck: { true }, trustedOwnership: false,
+                peerStatusCall: { _, _ in try .init(state: .disabled, synchronization: .init(state: .disabled)) },
                 readinessCheck: { _, _, _ in })
             try installer.install(options)
             try body(installer, options, runner)
@@ -300,6 +356,18 @@ final class DocumentPackagingTests: XCTestCase {
         }
     }
 
+    func testReadinessFailurePreservesUnderlyingProtocolError() throws {
+        try lifecycle { engine, options, runner in
+            let failing = SetupEngine(
+                roots: engine.roots, runner: runner, rootCheck: { true }, trustedOwnership: false,
+                peerStatusCall: { _, _ in try .init(state: .disabled, synchronization: .init(state: .disabled)) },
+                readinessCheck: { _, _, _ in throw TractandaError("fixtureReadiness", "Exact readiness cause") })
+            XCTAssertThrowsError(try failing.install(options, upgrade: true)) { error in
+                XCTAssertTrue(String(describing: error).contains("fixtureReadiness: Exact readiness cause"))
+            }
+        }
+    }
+
     func testFailedCandidateRegistrationRestoresDocumentReceiptOrPriorAbsence() throws {
         for hadDocuments in [false, true] {
             try lifecycle { installer, options, runner in
@@ -316,7 +384,10 @@ final class DocumentPackagingTests: XCTestCase {
                 try Data("canonical retained".utf8).write(to: canonical)
                 var candidate = previous
                 candidate.release = installer.roots.software.appendingPathComponent("releases/candidate").path
-                candidate.manifestSHA256 = String(repeating: "a", count: 64)
+                try FileManager.default.copyItem(
+                    at: URL(fileURLWithPath: previous.release), to: URL(fileURLWithPath: candidate.release))
+                candidate.manifestSHA256 = try installer.sha256(
+                    URL(fileURLWithPath: candidate.release).appendingPathComponent("bundle-manifest.json"))
                 candidate.releases[candidate.release] = candidate.manifestSHA256
                 candidate.documentExtraction = .pinned
                 try installer.prepareDocumentState(&candidate, uid: getuid())

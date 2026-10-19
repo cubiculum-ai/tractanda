@@ -15,7 +15,9 @@ concurrency:
 jobs:
   linux:
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    # The source suite contains slow native Swift tests on shared CI hardware.
+    # This remains finite and may still be limited by the CI provider.
+    timeout-minutes: 360
     # Official Swift 6.4.0 Debian 13 (Trixie) multiarch image; supports amd64 and arm64/v8.
     container:
       image: docker.io/library/swift@sha256:c90a484cbd45ff768e05bfdb2a73c4cc8978de0d940d8eb2cf68fcede6bad8f8

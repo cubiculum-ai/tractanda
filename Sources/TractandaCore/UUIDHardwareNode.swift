@@ -16,10 +16,10 @@ public struct UUIDHardwareNode: Sendable, Encodable {
         (0..<6).map { String(format: "%02x", (node >> ((5 - $0) * 8)) & 0xFF) }.joined(separator: ":")
     }
 
-    private static let cached: Result<UUIDHardwareNode, any Error> = Result { try discover() }
+    private static let cache = UUIDHardwareNodeCache()
 
     /// Fixed for the process lifetime. Containers can receive their host's permanent MAC explicitly.
-    public static func current() throws -> UUIDHardwareNode { try cached.get() }
+    public static func current() throws -> UUIDHardwareNode { try cache.current(discover: discover) }
 
     private static func isHardwareAddress(_ node: UInt64) -> Bool {
         node > 0 && node < (1 << 48) && node & (3 << 40) == 0
@@ -100,5 +100,21 @@ public struct UUIDHardwareNode: Sendable, Encodable {
             "uuidNodeUnavailable",
             "No permanent hardware MAC is available. Configure TRACTANDA_UUID_NODE with the issuer host's hardware MAC; no randomized substitute is selected."
         )
+    }
+}
+
+/// Discovery may fail before the OS exposes its permanent interfaces. Retry a
+/// failure, but serialize discovery and retain the first success for this issuer.
+final class UUIDHardwareNodeCache: @unchecked Sendable {
+    private let lock = NSLock()
+    private var selected: UUIDHardwareNode?
+
+    func current(discover: () throws -> UUIDHardwareNode) throws -> UUIDHardwareNode {
+        lock.lock()
+        defer { lock.unlock() }
+        if let selected { return selected }
+        let node = try discover()
+        selected = node
+        return node
     }
 }

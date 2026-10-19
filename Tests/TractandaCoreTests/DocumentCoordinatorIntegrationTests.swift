@@ -90,14 +90,21 @@ final class DocumentCoordinatorIntegrationTests: XCTestCase {
         let attached: Revision
         let descriptor: AttachmentDescriptor
         do {
-            let store = try AttachmentFixtureCapacity.makeStore(
-                root: root, accounts: accounts ?? SystemAccountDirectory())
+            let selectedAccounts: any AccountDirectory
+            if let accounts { selectedAccounts = accounts }
+            else { selectedAccounts = SystemAccountDirectory() }
+            let initialAccess = accounts == nil ? nil : ItemValue.object([
+                "profile": .text(AccessConfiguration.profile), "groups": .list([.text("staff")]),
+            ])
+            _ = try ItemStore.initializeFresh(
+                root: root, accounts: selectedAccounts, initialAccessConfiguration: initialAccess)
+            let store = try ItemStore(
+                root: root, accounts: selectedAccounts,
+                attachmentUploadPolicy: .init(minimumFreeBytes: AttachmentFixtureCapacity.reserveBytes),
+                revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            try store.setAttachmentReserveForTesting(AttachmentFixtureCapacity.reserveBytes)
             var changes: [String: ItemValue] = [:]
             if accounts != nil {
-                _ = try store.configureAccess(
-                    .object([
-                        "profile": .text(AccessConfiguration.profile), "groups": .list([.text("staff")]),
-                    ]), operationID: "admit")
                 changes["permissions"] = .object([
                     "profile": .text(ItemPermissions.profile), "owner": .text("admin"),
                     "group": .text("staff"), "mode": .integer(0o660), "acl": .object([:]),
@@ -176,7 +183,8 @@ final class DocumentCoordinatorIntegrationTests: XCTestCase {
     func testMockedCapacityAndSmallOversizedOutputOrLogFailClosed() async throws {
         let fixture = try fixture(delay: 0)
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
-        let store = try AttachmentFixtureCapacity.makeStore(root: fixture.storeRoot)
+        let store = try ItemStore.openInitialized(root: fixture.storeRoot)
+        try store.setAttachmentReserveForTesting(AttachmentFixtureCapacity.reserveBytes)
         try fixture.configuration.validate(storeRoot: fixture.storeRoot, indexDirectory: store.indexDirectory)
         guard
             case .prepared(let snapshot) = try store.prepareAttachmentDocument(

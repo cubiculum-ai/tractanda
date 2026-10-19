@@ -87,6 +87,8 @@ private struct Picker {
 }
 private enum FormPurpose {
     case item(ItemDraft)
+    case captureReview(CapturePlan)
+    case capturePreparing
     case filter
     case search
     case saveView(replacing: Bool)
@@ -132,7 +134,7 @@ private struct Form {
     var focus = 0
     var scrollOffset: Int?
     func isMultiline(_ index: Int) -> Bool {
-        if case .item = purpose { return index == 1 }
+        if case .item(let draft) = purpose { return index == 1 || (draft.isCategory && index == 4) }
         return false
     }
 }
@@ -426,6 +428,11 @@ public final class TerminalApplication {
     private var activeWorkspace: PrimaryWorkspace = .views
     private var suspendedForm: Form?
     private let categoryPreviewLoader: CategoryPreviewLoader?
+    private let captureActionLoader: CaptureActionLoader?
+    private var captureCommitRunning = false
+    private var completedCaptureResult: CommitResult?
+    private var captureDraftForm: Form?
+    private var capturePreviewGate = CapturePreviewGate()
     private var categoryPreviewGeneration = 0
     private var categoryPageSelection: (generation: Int, value: CategoryPageSelection)?
     private var categoryDirtyAction: CategoryDirtyAction?
@@ -514,6 +521,7 @@ public final class TerminalApplication {
         client: ItemClient, journal: RecoveryJournal, viewID: String? = nil, itemsOnly: Bool = false,
         viewPreferencesURL: URL? = nil, appearanceURL: URL? = nil, keymap: Keymap = .standard,
         previewConnection: ServerConnection? = nil, itemSearchLoader: ItemSearchLoader? = nil,
+        captureActionLoader: CaptureActionLoader? = nil,
         functionKeys: FunctionKeyDisplay = .automatic, mouseEnabled: Bool = true
     )
         throws
@@ -532,6 +540,8 @@ public final class TerminalApplication {
         self.functionKeys = functionKeys
         self.isMouseEnabled = mouseEnabled
         categoryPreviewLoader = previewConnection.map(CategoryPreviewLoader.init(connection:))
+        self.captureActionLoader =
+            captureActionLoader ?? previewConnection.map(CaptureActionLoader.init(connection:))
         if let operation = try journal.loadOperation() {
             switch operation {
             case .single(let request):
@@ -543,6 +553,10 @@ public final class TerminalApplication {
             case .learning(let edit):
                 pendingLearning = edit
                 status = "Recovered unconfirmed learning edit. R retries exactly; Q keeps recovery."
+            case .capture(let plan):
+                pending = PendingEdit(plan)
+                status =
+                    "Recovered unconfirmed hashtag capture. R retries the exact prepared plan; Q keeps recovery."
             }
         }
         if let viewID { try workspace.openView(client.revision(for: viewID)) }
@@ -604,7 +618,9 @@ public final class TerminalApplication {
             needsRender = needsRender || columns != newColumns || rows != newRows
             columns = newColumns
             rows = newRows
-            if categoryPreviewLoader?.hasDelivery() == true || itemSearchLoader?.hasDelivery() == true {
+            if categoryPreviewLoader?.hasDelivery() == true || itemSearchLoader?.hasDelivery() == true
+                || captureActionLoader?.hasDelivery() == true
+            {
                 needsRender = true
             }
             if refreshClock() { needsRender = true }
@@ -1458,7 +1474,16 @@ public final class TerminalApplication {
             return
         }
         mouse.cancel()
-        form?.scrollOffset = nil
+        if let form, case .captureReview = form.purpose {
+            // Review is a reader: navigation must scroll its retained viewport, never its text caret.
+            let navigation = keymap.command(for: key, in: .reader)
+            if keyContext == .form, captureScrollDelta(navigation) != nil {
+                handleForm(key, command: navigation)
+                return
+            }
+        } else {
+            form?.scrollOffset = nil
+        }
         let searchCommand = keymap.command(for: key, in: keyContext)
         if searchCommand == .filter, viewDefinitionDraft == nil,
             [.browser, .viewWorkspace, .categories].contains(keyContext)
@@ -2878,6 +2903,8 @@ public final class TerminalApplication {
                 "Semantic ready · top matches · \(page.items.count) items"
                 + (page.partialCoverage ? " · partial coverage" : "")
                 + (page.omitted > 0 ? " · \(page.omitted) stale/unavailable passages omitted" : "")
+                + (!page.unhydratedIDs.isEmpty ? " · some results could not be loaded; matches are partial"
+                    : !page.unresolved.isEmpty ? " · some results need review; readable matches remain" : "")
                 + " · Esc returns; A clears"
         case .failed(let message):
             clearSearchDelivery()
@@ -3104,10 +3131,22 @@ public final class TerminalApplication {
         form = Form(
             purpose: .item(draft),
             title: base == nil ? (isCategory ? "New category" : "New item") : "Edit item",
-            fields: [draft.subject, draft.body, draft.className, draft.rule],
-            labels: [
-                "Subject", "Body / note", "Class (choose with arrows)", "Category rule (blank disables)",
-            ])
+            fields: isCategory
+                ? [
+                    draft.subject, draft.body, draft.className, draft.rule, draft.captureAliases,
+                    draft.captureDateProperty, draft.captureDateOffset, draft.captureDateTimeZone,
+                ]
+                : [draft.subject, draft.body, draft.className, draft.rule, TextBuffer("No")],
+            labels: isCategory
+                ? [
+                    "Subject", "Body / note", "Class (choose with arrows)", "Category rule",
+                    "Capture aliases (one per line)", "Capture date property", "Day offset",
+                    "IANA timezone",
+                ]
+                : [
+                    "Subject", "Body / note", "Class (choose with arrows)", "Category rule (blank disables)",
+                    "Interpret #hashtags (arrows)",
+                ])
         status = "Editing an unsaved draft. Ctrl-S saves; Esc cancels."
     }
 
@@ -3339,6 +3378,62 @@ public final class TerminalApplication {
         restoreCategoryPageSelection(generation: delivery.generation)
     }
 
+    private func consumeCaptureDelivery() {
+        if capturePreviewGate.isPreparing {
+            // A menu or nested settings form owns the screen until its preparing form resumes.
+            guard !isMenuOpen, let form, case .capturePreparing = form.purpose else { return }
+        }
+        guard let delivery = captureActionLoader?.take() else { return }
+        switch delivery.outcome {
+        case .prepared(let plan):
+            guard capturePreviewGate.accept(delivery.generation) else { return }
+            captureCommitRunning = false
+            guard plan.canCommit else {
+                form = captureReviewForm(plan)
+                status = "Capture needs correction. No changes were written; Esc returns to the draft."
+                return
+            }
+            form = captureReviewForm(plan)
+            status = "Review server-resolved categories and dates. Save accepts this exact plan; Esc returns."
+        case .committed(let result):
+            captureCommitRunning = false
+            completedCaptureResult = result
+            sendPending()
+        case .failure(let failure):
+            captureCommitRunning = false
+            if pending != nil {
+                if CommitFailure.isDefinitive(failure.code) {
+                    do {
+                        try journal.clear()
+                        pending = nil
+                        form = captureDraftForm
+                        captureDraftForm = nil
+                        status =
+                            "Capture rejected (\(failure.code)); draft retained. Refresh and prepare again."
+                    } catch {
+                        status = "Capture rejected, but its recovery record could not be cleared: \(error)"
+                    }
+                } else {
+                    status =
+                        "Unconfirmed hashtag capture: R retries the same prepared plan; Q keeps recovery. \(failure.message)"
+                }
+            } else {
+                guard capturePreviewGate.accept(delivery.generation) else { return }
+                form = captureDraftForm
+                captureDraftForm = nil
+                status = "Capture preview failed; no changes were written. Draft retained. \(failure.message)"
+            }
+        }
+    }
+
+    private func captureReviewForm(_ plan: CapturePlan) -> Form {
+        let body = CaptureReviewPresentation.text(for: plan)
+        return Form(
+            purpose: .captureReview(plan),
+            title: plan.canCommit ? "Review hashtag capture" : "Capture needs correction",
+            fields: [TextBuffer(body)], labels: ["Server preview"])
+    }
+
     private func selectCategoryWorkspacePath(
         _ path: [Revision], position: Int = 0, selection: CategoryPageSelection? = nil
     ) {
@@ -3522,7 +3617,10 @@ public final class TerminalApplication {
                     categoryPreviewFocused = true
                 } else {
                     manager.focus = .right
-                    if manager.rightMode == .category { manager.inspector?.focus = 3 }
+                    if manager.rightMode == .category {
+                        let lastField = max(0, (manager.inspector?.fields.count ?? 1) - 1)
+                        manager.inspector?.focus = lastField
+                    }
                 }
             } else if manager.rightMode == .category, var inspector = manager.inspector {
                 if inspector.focus == 0 {
@@ -3557,7 +3655,7 @@ public final class TerminalApplication {
             keymap.command(for: key, in: .text) != nil, var inspector = manager.inspector
         {
             inspector.fields[inspector.focus].handle(
-                key, multiline: inspector.focus == 1 || inspector.focus == 3,
+                key, multiline: inspector.isMultiline(inspector.focus),
                 columns: categoryInspectorTextWidth, clipboard: clipboard, keymap: keymap)
             manager.inspector = inspector
             manager.inspectorScroll = nil
@@ -3786,11 +3884,11 @@ public final class TerminalApplication {
                 if let command, [.copy, .cut, .paste, .undo, .redo, .selectText, .setMark].contains(command) {
                     inspector.fields[inspector.focus].handle(
                         command: command,
-                        multiline: inspector.focus == 1 || inspector.focus == 3,
+                        multiline: inspector.isMultiline(inspector.focus),
                         columns: categoryInspectorTextWidth, clipboard: clipboard)
                 } else {
                     inspector.fields[inspector.focus].handle(
-                        key, multiline: inspector.focus == 1 || inspector.focus == 3,
+                        key, multiline: inspector.isMultiline(inspector.focus),
                         columns: categoryInspectorTextWidth, clipboard: clipboard, keymap: keymap)
                 }
                 manager.inspectorScroll = nil
@@ -4234,6 +4332,44 @@ public final class TerminalApplication {
 
     private func handleForm(_ key: TerminalKey, command: TUICommand?) {
         guard var editing = form else { return }
+        if case .captureReview(let plan) = editing.purpose {
+            if command == .cancel || key == .function(9) {
+                form = captureDraftForm
+                captureDraftForm = nil
+                status = "Capture canceled; draft retained and nothing was written."
+            } else if command == .save || command == .activate {
+                if plan.canCommit {
+                    do { try queueCapture(plan) } catch {
+                        status = "Could not retain capture for safe retry: \(error)"
+                    }
+                } else {
+                    status =
+                        "Resolve preview issues in the draft or category settings first; no write occurred."
+                }
+            } else if let delta = captureScrollDelta(command), editing.fields.indices.contains(0) {
+                let lines = editing.fields[0].displayLines(
+                    columns: max(1, columns - 5), cursorLayout: appearance.cursor.layout
+                ).count
+                let available = max(2, rows - editing.fields.count - 6)
+                let maximum = max(0, lines - available)
+                editing.scrollOffset = min(maximum, max(0, (editing.scrollOffset ?? 0) + delta))
+                form = editing
+            }
+            return
+        }
+        if case .capturePreparing = editing.purpose {
+            if command == .cancel || key == .function(9) {
+                capturePreviewGate.invalidate()
+                captureActionLoader?.cancel()
+                captureCommitRunning = false
+                form = captureDraftForm
+                captureDraftForm = nil
+                status = "Capture preparation canceled; draft retained and nothing was written."
+            } else {
+                status = "Capture is still preparing. Esc cancels; the draft remains unchanged."
+            }
+            return
+        }
         if case .search = editing.purpose {
             switch command {
             case .cancel:
@@ -4273,6 +4409,7 @@ public final class TerminalApplication {
             }
             return
         }
+
         if case .categoryDirty = editing.purpose {
             switch key {
             case .left, .up, .backTab:
@@ -4390,6 +4527,14 @@ public final class TerminalApplication {
                 return
             }
         }
+        if case .item(let draft) = editing.purpose, !draft.isCategory, editing.focus == 4,
+            rawDirection != nil || command == .toggle || key == .text(" ")
+        {
+            editing.fields[4] = TextBuffer(
+                editing.fields[4].text.caseInsensitiveCompare("Yes") == .orderedSame ? "No" : "Yes")
+            form = editing
+            return
+        }
         switch command {
         case .cancel:
             form = nil
@@ -4450,6 +4595,15 @@ public final class TerminalApplication {
                     previewCategoryNavigator(connectedTree)
                     returnFromCategoryPreferences()
                     status = "Category navigator saved for this profile."
+                case .captureReview(let plan):
+                    guard plan.canCommit else {
+                        status =
+                            "Resolve the listed hashtag issues in the draft or category configuration first."
+                        return
+                    }
+                    try queueCapture(plan)
+                case .capturePreparing:
+                    return
                 case .learningSettings(let draft):
                     if let edit = try draft.edit(editing.fields) {
                         try queueLearning(edit)
@@ -4511,8 +4665,57 @@ public final class TerminalApplication {
                     draft.body = editing.fields[1]
                     draft.className = editing.fields[2]
                     draft.rule = editing.fields[3]
-                    if let request = draft.request() {
-                        try queue(request)
+                    if draft.isCategory {
+                        draft.captureAliases = editing.fields[4]
+                        draft.captureDateProperty = editing.fields[5]
+                        draft.captureDateOffset = editing.fields[6]
+                        draft.captureDateTimeZone = editing.fields[7]
+                        if !draft.captureDateProperty.text.isEmpty {
+                            guard let offset = Int64(draft.captureDateOffset.text),
+                                (-1200...1200).contains(offset),
+                                TimeZone(
+                                    identifier: draft.captureDateTimeZone.text.isEmpty
+                                        ? "UTC" : draft.captureDateTimeZone.text) != nil
+                            else {
+                                throw TractandaError(
+                                    "invalidCapture",
+                                    "Capture date configuration needs a day offset from -1200 to 1200 and a named IANA timezone."
+                                )
+                            }
+                        }
+                    } else {
+                        draft.captureEnabled =
+                            editing.fields[4].text.caseInsensitiveCompare("Yes") == .orderedSame
+                    }
+                    let request =
+                        draft.request()
+                        ?? (draft.captureEnabled && draft.base != nil
+                            ? CommitRequest(
+                                action: .revise, itemID: draft.base?.itemID,
+                                expectedRevisionID: draft.base?.revisionID, changes: [:],
+                                operationID: Identifier.make())
+                            : nil)
+                    if let request {
+                        if draft.captureEnabled {
+                            guard let captureActionLoader else {
+                                throw TractandaError(
+                                    "captureUnavailable",
+                                    "Hashtag preview requires a connected server client.")
+                            }
+                            captureDraftForm = editing
+                            let generation = capturePreviewGate.begin()
+                            form = Form(
+                                purpose: .capturePreparing, title: "Preparing hashtag preview",
+                                fields: [
+                                    TextBuffer(
+                                        "The server is resolving readable categories and configured dates.")
+                                ],
+                                labels: ["Status"])
+                            status = "Preparing hashtag preview with the server…"
+                            captureActionLoader.prepare(request, generation: generation)
+                        } else {
+                            try queue(request)
+                        }
                     } else {
                         form = nil
                         status = "No changes."
@@ -5093,16 +5296,60 @@ public final class TerminalApplication {
         }
     }
 
+    private func captureScrollDelta(_ command: TUICommand?) -> Int? {
+        switch command {
+        case .moveUp: -1
+        case .moveDown: 1
+        case .pageUp: -max(1, rows - 8)
+        case .pageDown: max(1, rows - 8)
+        case .first: -Int.max / 2
+        case .last: Int.max / 2
+        default: nil
+        }
+    }
+
     private func queue(_ request: CommitRequest) throws {
         try journal.save(request)  // Persist before the first byte of a mutation is sent.
         pending = PendingEdit(request)
         sendPending()
     }
 
+    private func queueCapture(_ plan: CapturePlan) throws {
+        guard plan.canCommit, captureActionLoader != nil else {
+            throw TractandaError(
+                "captureUnavailable", "This capture plan cannot be committed from the current client.")
+        }
+        try journal.save(plan)  // Persist the exact server plan before sending its first mutation byte.
+        pending = PendingEdit(plan)
+        form = nil
+        completedCaptureResult = nil
+        captureCommitRunning = false
+        status = "Saving the reviewed capture plan…"
+        sendPending()
+    }
+
     private func sendPending() {
         guard let pending else { return }
         do {
-            let result = try pending.send(using: workspace.client)
+            let result: CommitResult
+            if case .capture(let plan) = pending.write {
+                if let confirmed = completedCaptureResult {
+                    result = confirmed
+                    completedCaptureResult = nil
+                } else {
+                    guard let captureActionLoader else {
+                        status = "Capture retry needs the connected client; exact plan remains in recovery."
+                        return
+                    }
+                    guard !captureCommitRunning else { return }
+                    captureCommitRunning = true
+                    captureActionLoader.commit(plan, generation: capturePreviewGate.generation)
+                    status = "Saving reviewed capture…"
+                    return
+                }
+            } else {
+                result = try pending.send(using: workspace.client)
+            }
             let savedNewCategory = pending.request.action == .create
             let committedViewDefinition = pending.request.changes["viewDefinition"] != nil
             let categoryManagerBeforeSave:
@@ -5136,6 +5383,8 @@ public final class TerminalApplication {
             let returnToCategoryManager = categoryManagerBeforeSave != nil
             self.pending = nil
             form = nil
+            captureDraftForm = nil
+            captureCommitRunning = false
             if !returnToCategoryManager {
                 picker = nil
                 categoryWorkspace = nil
@@ -5452,7 +5701,8 @@ public final class TerminalApplication {
         }
 
         var content: [EditorRow] = []
-        if panelHeight <= 10 {
+        let multilineExtras = (4..<form.fields.count).filter { form.isMultiline($0) }.count
+        if panelHeight <= 10 || panelHeight - 4 < form.fields.count + multilineExtras {
             let values = display(focused, multiline: form.isMultiline(focused))
             let caret = values.firstIndex(where: \.containsCursor) ?? 0
             let count = max(1, panelHeight - 5)
@@ -5466,7 +5716,9 @@ public final class TerminalApplication {
         } else {
             content.append(EditorRow(field: 0, line: focusedLine(0), label: visibleLabel(0)))
             let fixed = 3  // subject, class and rule each occupy one row
-            let bodyCount = max(2, panelHeight - 5 - fixed)
+            let capacity = panelHeight - 4
+            let extraFields = max(0, form.fields.count - 4)
+            let bodyCount = max(1, capacity - fixed - extraFields - multilineExtras - 1)
             let values = display(1, multiline: true)
             let caret = values.firstIndex(where: \.containsCursor) ?? 0
             let maximum = max(0, values.count - bodyCount)
@@ -5480,9 +5732,38 @@ public final class TerminalApplication {
             }
             content.append(EditorRow(field: 2, line: focusedLine(2), label: visibleLabel(2)))
             content.append(EditorRow(field: 3, line: focusedLine(3), label: visibleLabel(3)))
+            for field in 4..<form.fields.count {
+                if form.isMultiline(field) {
+                    let fieldValues = display(field, multiline: true)
+                    let visibleCount = 2
+                    let fieldMaximum = max(0, fieldValues.count - visibleCount)
+                    let caret = fieldValues.firstIndex(where: \.containsCursor) ?? 0
+                    let fieldStart = min(
+                        fieldMaximum,
+                        max(0, focused == field ? form.scrollOffset ?? (caret - visibleCount + 1) : 0))
+                    if focused == field {
+                        self.form?.scrollOffset = fieldStart
+                        editorViewport = (field, fieldStart, fieldMaximum)
+                    }
+                    content += fieldValues.dropFirst(fieldStart).prefix(visibleCount).enumerated().map {
+                        EditorRow(
+                            field: field, line: $0.element,
+                            label: $0.offset == 0 ? visibleLabel(field) : nil)
+                    }
+                } else {
+                    content.append(
+                        EditorRow(field: field, line: focusedLine(field), label: visibleLabel(field)))
+                }
+            }
         }
         let capacity = panelHeight - 4
-        if content.count > capacity { content = Array(content.prefix(capacity)) }
+        if content.count > capacity {
+            let selected =
+                content.firstIndex { $0.field == focused && $0.line.containsCursor }
+                ?? content.firstIndex { $0.field == focused } ?? 0
+            let start = min(content.count - capacity, max(0, selected - capacity + 1))
+            content = Array(content.dropFirst(start).prefix(capacity))
+        }
 
         func popup(
             _ content: String, row: Int, style: ScreenStyle = .menu, hits: [MouseHit] = [],
@@ -6366,6 +6647,7 @@ public final class TerminalApplication {
     }
 
     func render(columns: Int, rows: Int) -> [ScreenLine] {
+        consumeCaptureDelivery()
         collectCategoryPreview()
         collectItemSearch()
         if mouseFrameSize.columns != columns || mouseFrameSize.rows != rows {
@@ -6486,14 +6768,22 @@ public final class TerminalApplication {
             !isCategoryPreferencesForm, !isCategoryDirtyForm, !isSearchForm
         {
             lines.append(ScreenLine(text: " \(form.title) · \(form.labels[form.focus])", style: .header))
-            let submitLabel: String
-            if case .search = form.purpose {
-                submitLabel = "Enter search"
+            if case .capturePreparing = form.purpose {
+                lines.append(.controls([("Esc cancel", .cancel)]))
+            } else if case .captureReview = form.purpose {
+                lines.append(
+                    .controls([("Ctrl-S accept", .save), ("Esc return", .cancel), ("↑/↓ scroll", .moveDown)]))
             } else {
-                submitLabel = viewDefinitionDraft == nil ? "Ctrl-S save" : "Ctrl-S apply"
+                let submitLabel: String
+                if case .search = form.purpose {
+                    submitLabel = "Enter search"
+                } else {
+                    submitLabel = viewDefinitionDraft == nil ? "Ctrl-S save" : "Ctrl-S apply"
+                }
+                lines.append(
+                    .controls([(submitLabel, .save), ("Esc cancel", .cancel), ("Tab next field", .nextField)])
+                )
             }
-            lines.append(
-                .controls([(submitLabel, .save), ("Esc cancel", .cancel), ("Tab next field", .nextField)]))
             // Focused content uses the space left after one summary line for every other field.
             let available = max(2, height - form.fields.count - 6)
             for index in form.fields.indices {
@@ -6842,13 +7132,15 @@ public final class TerminalApplication {
                     case .previousPage: text += "Previous page · Enter (before \(section.position + 1))"
                     case .nextPage:
                         text +=
-                            "Next page · Enter (\(section.position + section.items.count) of \(section.total))"
+                            "Next page · Enter (\(section.position + section.consumedCount) of \(section.total))"
                     }
                 } else if browserRows.isEmpty, row == 0 {
                     text =
-                        searchReturn == nil
-                        ? " No items. N creates one; C opens categories; A clears filters."
-                        : " No search results. F changes query/mode; A clears; Esc returns."
+                        workspace.projectionNotice != nil
+                        ? " No current content is available. Use item-state/conflicts or retry refresh."
+                        : searchReturn == nil
+                            ? " No items. N creates one; C opens categories; A clears filters."
+                            : " No search results. F changes query/mode; A clears; Esc returns."
                 }
                 let isSelected = index == itemIndex && browserRows.indices.contains(index)
                 let rowStyle: ScreenStyle =
@@ -6971,9 +7263,10 @@ public final class TerminalApplication {
         }
         if height > 1 {
             let prefix = keyContext == .browser ? " A All · " : " "
+            let statusText = keyContext == .browser ? (workspace.projectionNotice ?? status) : status
             lines.append(
                 ScreenLine(
-                    text: prefix + status,
+                    text: prefix + statusText,
                     hits: keyContext == .browser
                         ? [MouseHit(columns: 1..<10, target: .command(.allItems))] : []))
         }

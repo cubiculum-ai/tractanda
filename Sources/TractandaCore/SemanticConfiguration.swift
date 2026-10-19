@@ -19,6 +19,9 @@ enum SemanticInputEncoding: String, Codable, Sendable {
 /// reset cannot lose the selected local runtime/model profile.
 struct SemanticConfiguration: Codable, Equatable, Sendable {
     static let version = 2
+    static let defaultProviderTimeoutSeconds: Double = 6 * 60 * 60
+    static let maximumPendingQueries = 64
+    static let completedQueryRetentionSeconds: Double = 120
 
     var formatVersion = version
     var configurationID: String
@@ -34,13 +37,22 @@ struct SemanticConfiguration: Codable, Equatable, Sendable {
     var pooling: SemanticPooling
     var normalization: SemanticNormalization
     var inputEncoding: SemanticInputEncoding
+    /// Operational allowance, deliberately excluded from SemanticProfileIdentity.
+    var providerTimeoutSeconds: Double?
+    var effectiveProviderTimeoutSeconds: Double {
+        providerTimeoutSeconds ?? Self.defaultProviderTimeoutSeconds
+    }
+    var pendingQueryLifetimeSeconds: Double {
+        effectiveProviderTimeoutSeconds * Double(Self.maximumPendingQueries + 1)
+            + Self.completedQueryRetentionSeconds
+    }
 
     init(
         configurationID: String = Identifier.make(), operationID: String,
         endpoint: String, model: String, modelRevision: String, dimensions: Int,
         documentPrefix: String, queryPrefix: String, chunkBytes: Int = 384, overlapBytes: Int = 64,
         pooling: SemanticPooling = .last, normalization: SemanticNormalization = .l2,
-        inputEncoding: SemanticInputEncoding = .itemTextUTF8V2
+        inputEncoding: SemanticInputEncoding = .itemTextUTF8V2, providerTimeoutSeconds: Double? = nil
     ) {
         self.configurationID = configurationID
         self.operationID = operationID
@@ -55,6 +67,7 @@ struct SemanticConfiguration: Codable, Equatable, Sendable {
         self.pooling = pooling
         self.normalization = normalization
         self.inputEncoding = inputEncoding
+        self.providerTimeoutSeconds = providerTimeoutSeconds
     }
 
     func validate() throws {
@@ -70,6 +83,11 @@ struct SemanticConfiguration: Codable, Equatable, Sendable {
             (0..<chunkBytes).contains(overlapBytes)
         else {
             throw TractandaError("semanticConfiguration", "Invalid semantic model or chunking profile.")
+        }
+        guard effectiveProviderTimeoutSeconds.isFinite, effectiveProviderTimeoutSeconds > 0,
+            pendingQueryLifetimeSeconds.isFinite,
+            pendingQueryLifetimeSeconds < Double(Int64.max) / 1_000_000_000 else {
+            throw TractandaError("semanticConfiguration", "Provider timeout must be finite, positive and addressable.")
         }
         try Self.validateLoopbackEndpoint(endpoint)
     }

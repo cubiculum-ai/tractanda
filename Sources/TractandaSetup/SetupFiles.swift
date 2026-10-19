@@ -131,12 +131,44 @@ extension SetupEngine {
                     && url.lastPathComponent == name
             })
         else { throw SetupError("Invalid installation receipt.") }
+        try receipt.packageSetupOwner?.validate()
+        if let changes = receipt.packageDefinitions, !changes.isEmpty {
+            guard roots.platform == .linux, receipt.state == .preparing, changes.count <= 3,
+                changes.allSatisfy({ role, change in
+                    ["server", "embeddings", "authentication"].contains(role)
+                        && change.old != change.desired
+                        && [change.old, change.desired].compactMap { $0 }.allSatisfy(SetupPackageCompatibility.isDigest)
+                }) else { throw SetupError("Invalid pending package definition commitments.") }
+        }
+        guard (receipt.preparedStoreID == nil) == (receipt.preparedReplicaID == nil) else {
+            throw SetupError("Prepared instance identity pins are incomplete.")
+        }
+        if let store = receipt.preparedStoreID, let replica = receipt.preparedReplicaID {
+            try SetupOptions(name: name, bundle: packagePayload, storeSelection: .prepared(storeID: store, replicaID: replica)).validate()
+        }
+        guard receipt.state == .preparing || receipt.packageSetupOwner == nil else {
+            throw SetupError("Live setup permission exists outside a preparing receipt.")
+        }
+        try requirePackageRelease(receipt.release)
+        if roots.platform == .linux {
+            guard receipt.releases.keys.allSatisfy({ $0 == roots.software.appendingPathComponent("current").path }) else {
+                throw SetupError("Linux receipt contains a program release not owned by the active package.")
+            }
+        }
+        try receipt.peerRuntimeConfiguration?.validate(path: peerConfigurationURL(name).path)
+        try receipt.peerRuntimePrevious?.validate(path: peerConfigurationURL(name).path)
+        guard receipt.state == .preparing || receipt.peerRuntimePrevious == nil else {
+            throw SetupError("Peer configuration snapshot outside a preparing transaction.")
+        }
         return receipt
     }
     func writeReceipt(_ receipt: InstallationReceipt) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-        try writeProtected(try encoder.encode(receipt), to: receiptURL(receipt.instance), mode: 0o600)
+        let bytes = try encoder.encode(receipt)
+        guard bytes.count < 1024 * 1024 else { throw SetupError("Installation receipt is oversized.") }
+        try writeProtected(bytes, to: receiptURL(receipt.instance), mode: 0o600)
+        try syncPeerReceipt(receiptURL(receipt.instance))
     }
     func verifyRegistration(_ receipt: InstallationReceipt) throws {
         let definition = definitionURL(receipt.instance)
@@ -147,6 +179,11 @@ extension SetupEngine {
             }
         } else if receipt.state == .active {
             throw SetupError("The registered service definition is missing.")
+        }
+        if roots.platform == .linux, let expected = receipt.authenticationDefinitionSHA256 {
+            let definition = authenticationDefinitionURL(receipt.instance)
+            try requireOwned(definition, uid: 0, directory: false)
+            guard try sha256(definition) == expected else { throw SetupError("The authentication service definition differs from its receipt.") }
         }
         if receipt.embedding != nil {
             let definition = embeddingDefinitionURL(receipt.instance)
@@ -162,6 +199,17 @@ extension SetupEngine {
     }
     func installRelease(_ manifest: BundleManifest, from bundle: URL, to release: URL, digest: String) throws
     {
+        if roots.platform == .linux {
+            let active = roots.software.appendingPathComponent("current")
+            guard release.path == active.path, release.standardizedFileURL.path == active.path,
+                bundle.path == active.path, bundle.standardizedFileURL.path == active.path,
+                !isLink(active), try sha256(active.appendingPathComponent("bundle-manifest.json")) == digest,
+                try verifyBundle(at: active) == manifest else {
+                throw SetupError("Linux program payload is dpkg-owned; Setup cannot copy or replace a package release.")
+            }
+            try requireOwned(active, uid: 0, directory: true)
+            return
+        }
         try ensureRootDirectory(release.deletingLastPathComponent())
         if exists(release) {
             try requireOwned(release, uid: 0, directory: true)

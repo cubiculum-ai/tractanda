@@ -89,6 +89,88 @@ final class NavigationHistoryTests: XCTestCase {
         XCTAssertEqual(history.back.count, 32)
     }
 
+    func testRefreshUsesOnlyCurrentReadableRowsForMixedAndUnresolvedPages() throws {
+        let fixture = try Fixture()
+        let a = try fixture.item("A")
+        let b = try fixture.item("B")
+        var mode = 0
+        let client = ItemClient(transport: { data in
+            let original = try fixture.service.handle(data, peerUID: fixture.store.ownerUID)
+            var envelope = try JSONSerialization.jsonObject(with: original) as! [String: Any]
+            var responses = envelope["methodResponses"] as! [[Any]]
+            for index in responses.indices {
+                var response = responses[index]
+                let method = response[0] as! String
+                var result = response[1] as! [String: Any]
+                if method == "TractandaItem/query" {
+                    if mode == 1 {
+                        result["ids"] = [a.itemID]
+                        result["total"] = 1
+                    } else if mode == 4 {
+                        result["ids"] = [b.itemID]
+                        result["total"] = 1
+                    } else if mode == 5 {
+                        result["ids"] = [a.itemID]
+                        result["total"] = 1
+                    } else if mode == 3 {
+                        result["ids"] = [String]()
+                        result["total"] = 0
+                        result["conflictsAvailable"] = true
+                    }
+                } else if method == "TractandaItem/get", mode == 1 || mode == 2 || mode == 4 || mode == 5 {
+                    let revisions = result["list"] as! [[String: Any]]
+                    result["list"] = revisions.filter { revision in
+                        let fields = revision["fields"] as! [String: Any]
+                        let itemID = (fields["itemID"] as! [String: Any])["value"] as! String
+                        return itemID != a.itemID && mode != 4 && mode != 5
+                    }
+                    if mode == 1 || mode == 2 {
+                        result["unresolved"] = [[
+                            "itemID": a.itemID, "status": "conflicted", "stateToken": "fixture-token",
+                        ]]
+                    } else if mode == 4 {
+                        result["remainingIDs"] = [b.itemID]
+                    } else {
+                        result["oversizedIDs"] = [a.itemID]
+                    }
+                }
+                response[1] = result
+                responses[index] = response
+            }
+            envelope["methodResponses"] = responses
+            return try JSONSerialization.data(withJSONObject: envelope)
+        })
+        let workspace = Workspace(client: client)
+        try workspace.browse(path: [])
+        XCTAssertEqual(Set(workspace.items.map(\.itemID)), Set([a.itemID, b.itemID]))
+
+        mode = 1  // Current query contains unresolved A only; old B is no longer a candidate.
+        try workspace.refresh(position: 0)
+        XCTAssertTrue(workspace.items.isEmpty)
+        XCTAssertEqual(workspace.total, 1)
+        XCTAssertTrue(workspace.projectionNotice?.contains("item-state/conflicts") == true)
+
+        mode = 2  // A is unresolved while B is a current successful result.
+        try workspace.refresh(position: 0)
+        XCTAssertEqual(workspace.items.map(\.itemID), [b.itemID])
+        XCTAssertNotNil(workspace.projectionNotice)
+
+        mode = 3  // Store-wide conflicts can exist even when this query has no rows.
+        try workspace.refresh(position: 0)
+        XCTAssertTrue(workspace.items.isEmpty)
+        XCTAssertNotNil(workspace.projectionNotice)
+
+        mode = 4
+        try workspace.refresh(position: 0)
+        XCTAssertTrue(workspace.items.isEmpty)
+        XCTAssertTrue(workspace.projectionNotice?.contains("could not be hydrated") == true)
+
+        mode = 5
+        try workspace.refresh(position: 0)
+        XCTAssertTrue(workspace.items.isEmpty)
+        XCTAssertTrue(workspace.projectionNotice?.contains("could not be hydrated") == true)
+    }
+
     func testRestoreRequeriesPagesSectionsAndRenamedCategories() throws {
         let f = try Fixture()
         let first = try f.category("First")

@@ -10,6 +10,8 @@ import ctypes
 import fcntl
 import errno
 import json
+import importlib.util
+import plistlib
 import os
 from pathlib import Path
 import platform
@@ -21,6 +23,10 @@ import tempfile
 import time
 import uuid
 from contextlib import contextmanager
+
+_FORMAT_SPEC = importlib.util.spec_from_file_location('canonical_format_guard', Path(__file__).with_name('canonical-format-guard.py'))
+format_guard = importlib.util.module_from_spec(_FORMAT_SPEC)
+_FORMAT_SPEC.loader.exec_module(format_guard)
 
 
 def secure_open(path, directory=False, writable=False):
@@ -276,13 +282,19 @@ def operational_path(path, index_relative=None):
             or index_relative is not None and (path == index_relative or path.startswith(index_relative + '/')))
 
 
-def require_preserved(before, after, index_relative=None, semantic_change=None):
+def require_preserved(before, after, index_relative=None, semantic_change=None, reader_change=None):
     """Immutable content/identity/settings are distinct from recoverable operation checkpoints."""
     changed = []
     for path, entry in before['entries'].items():
         if operational_path(path, index_relative):
             continue
         current = after['entries'].get(path)
+        if path == format_guard.MARKER_NAME and reader_change and entry != current:
+            if current is None or entry['metadata'] != current['metadata']:
+                raise RuntimeError('Canonical reader requirement ownership/mode/ACL/xattrs changed.')
+            reader_change()
+            changed.append(path)
+            continue
         if path == 'semantic.json' and semantic_change and entry != current:
             if current is None or entry['metadata'] != current['metadata']:
                 raise RuntimeError('Semantic setting ownership/mode/ACL/xattrs changed.')
@@ -316,9 +328,51 @@ def wait_writer_exit(pid, identity, timeout=30):
         time.sleep(.05)
 
 
-def restore_service(label, definition, expected_definition, old_client, socket):
+def retain_stopped_recovery(receipt_path, expected, definition, expected_definition, reason):
+    """Persist an actionable stopped state; never restore canonical data from the backup."""
+    current = format_guard.bounded_json(receipt_path, 1024**2)
+    if current.get('instance') != expected['instance'] or current.get('manifestSHA256') != expected['manifestSHA256']:
+        raise RuntimeError('Receipt changed while stopping incompatible reader; inspect retained data.')
+    if definition.exists() and digest(definition) == expected_definition:
+        label = 'system/ai.tractanda.server.' + expected['instance']
+        running = subprocess.run(['/bin/launchctl', 'print', label], capture_output=True)
+        if running.returncode == 0:
+            pid = service_pid(label)
+            identity = subprocess.check_output(['/bin/ps', '-p', str(pid), '-o', 'lstart=,command='], text=True).strip()
+            if str(Path(expected['release']) / 'bin/tractanda') not in identity:
+                raise RuntimeError('Restored process identity is unknown; operator must inspect without data restoration.')
+            subprocess.run(['/bin/launchctl', 'bootout', label], check=True)
+            wait_writer_exit(pid, identity)
+        definition.unlink()
+        synchronize(definition.parent)
+    current['state'] = 'preparing'
+    current['definitionSHA256'] = None
+    current['recoveryReason'] = ('Canonical reader restoration blocked; writer is stopped. Keep live data/backups intact and retry with a compatible reader. ' + str(reason))[:4096]
+    metadata = receipt_path.lstat()
+    with tempfile.NamedTemporaryFile(mode='w', dir=receipt_path.parent, delete=False) as stream:
+        temporary = Path(stream.name)
+        os.chmod(temporary, 0o600)
+        os.chown(temporary, metadata.st_uid, metadata.st_gid)
+        json.dump(current, stream, indent=2)
+        stream.write('\n')
+        stream.flush()
+        os.fsync(stream.fileno())
+    try:
+        temporary.replace(receipt_path)
+        synchronize(receipt_path.parent)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def restore_service(label, definition, expected_definition, old_client, socket, expected_manifest=None):
     if digest(definition) != expected_definition:
         raise RuntimeError('Old owned service definition changed; restoration requires inspection.')
+    specification = plistlib.loads(Path(definition).read_bytes())
+    arguments = specification.get('ProgramArguments', [])
+    if len(arguments) < 4 or arguments[0] != str(old_client) or arguments[1] not in ('daemon', 'serve'):
+        raise RuntimeError('Old writer store binding is unknown; leave it stopped.')
+    format_guard.require_owned_reader(old_client, Path(arguments[2]), expected_manifest)
     status = subprocess.run(['/bin/launchctl', 'print', label], capture_output=True)
     if status.returncode:
         subprocess.run(['/bin/launchctl', 'bootstrap', 'system', str(definition)], check=True)
@@ -334,7 +388,7 @@ def restore_service(label, definition, expected_definition, old_client, socket):
     raise RuntimeError('Old managed writer restoration did not become ready.')
 
 
-def backup_before_upgrade(receipt, base):
+def backup_before_upgrade(receipt, base, candidate_setup):
     store = Path(receipt['store']).resolve(strict=True)
     index = Path(receipt['indexDirectory']).resolve(strict=True)
     backup_parent = Path('/Users/Shared/Library/Tractanda/Backups') / receipt['instance']
@@ -366,16 +420,28 @@ def backup_before_upgrade(receipt, base):
         subprocess.run(['/bin/launchctl', 'bootout', label], check=True)
         wait_writer_exit(pid, identity)
     def restore_writer():
-        restore_service(label, definition, expected_definition,
-                        Path(receipt['release']) / 'bin/tractanda', receipt['socket'])
-    before, proof = checkpoint_backup(store, destination, stop_writer, restore_writer)
+        try:
+            restore_service(label, definition, expected_definition,
+                            Path(receipt['release']) / 'bin/tractanda', receipt['socket'], receipt['manifestSHA256'])
+        except BaseException as failure:
+            # Backup already stopped the owned writer. A failed compatibility proof must
+            # not leave an active receipt that a later outer catch could restart.
+            retain_stopped_recovery(base / 'receipts' / (receipt['instance'] + '.json'), receipt,
+                                    definition, expected_definition, failure)
+            raise
+    def admit_reader():
+        subprocess.run(['/usr/bin/sudo', '-n', '-u', 'daemon', '--', str(candidate_setup),
+                        '--canonical-reader-admit', str(store)], check=True)
+    before, proof = checkpoint_backup(store, destination, stop_writer, restore_writer, admit_reader=admit_reader)
     return before, proof, store, index
 
 
 def checkpoint_backup(store, destination, stop_writer, restore_writer,
-                      lock=existing_writer_lock, inspect=inventory, copier=copy_backup):
+                      lock=existing_writer_lock, inspect=inventory, copier=copy_backup, admit_reader=None):
     try:
         stop_writer()
+        if admit_reader is not None:
+            admit_reader()
         with lock(store):
             before = inspect(store)
             proof = copier(store, destination, before)
@@ -505,7 +571,8 @@ def main():
     subprocess.run(['xcrun', 'stapler', 'validate', str(args.package)], check=True)
     subprocess.run(['/usr/sbin/spctl', '--assess', '--type', 'install', '--verbose=4', str(args.package)], check=True)
     registry = json.loads((base / 'connections.json').read_text())
-    before, backup_proof, store, index = backup_before_upgrade(receipt, base)
+    before, backup_proof, store, index = backup_before_upgrade(receipt, base, setup)
+    before_reader = format_guard.load_requirement(store)
     try:
         if registry.get('defaultProfile') == args.instance:
             subprocess.run(['/usr/sbin/installer', '-pkg', str(args.package), '-target', '/'], check=True)
@@ -517,9 +584,13 @@ def main():
         # previous active receipt/definition still apply; never force an old binary over a candidate.
         current = json.loads(receipt_path.read_text())
         if current.get('state') == 'active' and current.get('manifestSHA256') == receipt['manifestSHA256']:
-            restore_service('system/ai.tractanda.server.' + args.instance,
-                            Path('/Library/LaunchDaemons/ai.tractanda.server.' + args.instance + '.plist'),
-                            receipt['definitionSHA256'], Path(receipt['release']) / 'bin/tractanda', receipt['socket'])
+            definition = Path('/Library/LaunchDaemons/ai.tractanda.server.' + args.instance + '.plist')
+            try:
+                restore_service('system/ai.tractanda.server.' + args.instance, definition,
+                                receipt['definitionSHA256'], Path(receipt['release']) / 'bin/tractanda', receipt['socket'], receipt['manifestSHA256'])
+            except BaseException as failure:
+                retain_stopped_recovery(receipt_path, receipt, definition, receipt['definitionSHA256'], failure)
+                raise
         raise
     updated = json.loads(receipt_path.read_text())
     index_relative = index.relative_to(store).as_posix() if store in index.parents else None
@@ -527,7 +598,8 @@ def main():
     semantic_changes = []
     def allow_semantic(previous, current):
         semantic_changes.append(verify_semantic_migration(store, receipt, updated, previous, current))
-    require_preserved(before, after, index_relative, allow_semantic)
+    require_preserved(before, after, index_relative, allow_semantic,
+                      lambda: format_guard.require_monotonic(before_reader, format_guard.load_requirement(store)))
     for key in ('store', 'indexDirectory', 'owner', 'port', 'socket'):
         if updated[key] != receipt[key]:
             raise RuntimeError('Upgrade changed an existing installation property: ' + key)

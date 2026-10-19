@@ -114,6 +114,27 @@ final class CategoryWorkspacePresentationTests: XCTestCase {
         XCTAssertEqual(keyboard.lines.compactMap(\.cursorColumn).count, 1)
     }
 
+    func testCategoryInspectorKeepsFocusedCaptureConfigurationVisibleAt80By24() throws {
+        var category = try item(1, name: "When")
+        var fields = category.fields
+        fields["captureAliases"] = .list([.text("tomorrow")])
+        fields["captureDate"] = .object([
+            "property": .text("deadline"), "dayOffset": .integer(1),
+            "timeZone": .text("Europe/Vienna"),
+        ])
+        category = try Revision(fields: fields)
+        var state = CategoryWorkspace(preferences: ViewWorkspacePreferences())
+        state.selectedAllItems = false
+        state.preview.path = [category]
+        state.rightMode = .category
+        state.focus = .right
+        state.inspector = try CategoryInspectorDraft(base: category)
+        state.inspector?.focus = 7
+        let result = try render(state, items: [category], width: 80, height: 24)
+        XCTAssertTrue(result.lines.contains { $0.text.contains("Europe/Vienna") })
+        XCTAssertEqual(result.lines.compactMap(\.cursorColumn).count, 1)
+    }
+
     func testLastPreviewRowsAreReachableAndMouseHitsMatchTheirCurrentIDs() throws {
         let records = try (1...64).map { try item($0, name: "Preview \($0)") }
         var state = CategoryWorkspace(preferences: ViewWorkspacePreferences())
@@ -132,5 +153,18 @@ final class CategoryWorkspacePresentationTests: XCTestCase {
         state.isMaximized = true
         let large = try render(state, items: [])
         XCTAssertFalse(large.lines.flatMap(\.hits).contains { $0.target == .categoryDivider })
+    }
+
+    func testUnresolvedPreviewUsesExistingRowsAndDoesNotGrowTheScreen() throws {
+        var state = CategoryWorkspace(preferences: ViewWorkspacePreferences())
+        state.preview.status = .loaded
+        state.preview.total = 2
+        state.preview.unresolvedCount = 2
+        state.preview.projectionNotice = true
+        let result = try render(state, items: [], width: 79, height: 25)
+        let text = result.lines.map(\.text).joined(separator: "\n")
+        XCTAssertTrue(text.lowercased().contains("some results need attention"), text)
+        XCTAssertTrue(text.contains("item-state/conflicts"), text)
+        XCTAssertEqual(result.lines.count, 22)
     }
 }

@@ -99,7 +99,7 @@ final class AttachmentTextIntegrationTests: XCTestCase {
         let maps = try XCTUnwrap(row["sources"] as? [[String: Any]])
         XCTAssertEqual((maps[0]["location"] as? [String: Any])?["byteStart"] as? Int, 3)
         XCTAssertEqual(maps[0]["corpusByteEnd"] as? Int, source.corpusByteEnd)
-        XCTAssertEqual(response["extractionProfile"] as? String, "tractanda.item-text.v6")
+        XCTAssertEqual(response["extractionProfile"] as? String, "tractanda.item-text.v8")
         XCTAssertEqual(
             ((row["index"] as? [String: Any])?["fts"] as? [String: Any])?["status"] as? String, "current")
         try store.rebuildIndex()
@@ -209,8 +209,9 @@ final class AttachmentTextIntegrationTests: XCTestCase {
             sha256: String(repeating: "a", count: 64))
         fields["attachments"] = .list([mismatch.itemValue])
         XCTAssertFalse(
-            ItemTextContent.corpus(for: try Revision(fields: fields)).sourceText.contains(
-                "unique extracted needle"))
+            ItemTextContent.corpus(for: try Revision(fields: fields, formatVersion: saved.formatVersion))
+                .sourceText.contains(
+                    "unique extracted needle"))
         assertCode("invalidAttachmentText") {
             try store.commit(
                 CommitRequest(

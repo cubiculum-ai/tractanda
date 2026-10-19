@@ -1,0 +1,275 @@
+{
+  "arch": "arm64",
+  "baseline": {
+    "buildOS": "debian13",
+    "minimumCPU": "armv8-a",
+    "swiftABI": "6.4"
+  },
+  "component": "embeddings",
+  "documentExtraction": null,
+  "dynamicLoads": [
+    "lib/libBlocksRuntime.so",
+    "lib/libFoundation.so",
+    "lib/libFoundationEssentials.so",
+    "lib/libFoundationInternationalization.so",
+    "lib/libFoundationNetworking.so",
+    "lib/libFoundationXML.so",
+    "lib/lib_FoundationICU.so",
+    "lib/libblas.so.3",
+    "lib/libdispatch.so",
+    "lib/liblapack.so.3",
+    "lib/libopenblas.so.0",
+    "lib/libswiftCore.so",
+    "lib/libswiftDispatch.so",
+    "lib/libswiftGlibc.so",
+    "lib/libswiftObservation.so",
+    "lib/libswiftRegexBuilder.so",
+    "lib/libswiftSynchronization.so",
+    "lib/libswift_Builtin_float.so",
+    "lib/libswift_Concurrency.so",
+    "lib/libswift_RegexParser.so",
+    "lib/libswift_StringProcessing.so"
+  ],
+  "files": [
+    {
+      "mode": 420,
+      "path": "bin/mlx-swift_VMLXHub.resources/gpt2_tokenizer_config.json",
+      "sha256": "551e26ec611d8d0c8edc3ef72e518a38418cb71f40de1347dd486a595e1557d7",
+      "size": 234
+    },
+    {
+      "mode": 420,
+      "path": "bin/mlx-swift_VMLXHub.resources/t5_tokenizer_config.json",
+      "sha256": "e0aff0b1de9071e30d9a60a199303b6abe916a64a19932bd1c46992279b41a1f",
+      "size": 20746
+    },
+    {
+      "mode": 493,
+      "path": "bin/tractanda-embeddings",
+      "sha256": "248699294ca4868e4ebb8dc14da11f233a384eb9af5626238a3ff9644415554c",
+      "size": 60127168
+    },
+    {
+      "mode": 493,
+      "path": "lib/libBlocksRuntime.so",
+      "sha256": "83ba970c644d6602df9b6ebe989ccbc26727e864d6e6d801ed720d7e1615bc68",
+      "size": 71048
+    },
+    {
+      "mode": 493,
+      "path": "lib/libFoundation.so",
+      "sha256": "173beea3a23e74470524ce53540b883e127483cf0db0586129f2a4bb63346044",
+      "size": 8988552
+    },
+    {
+      "mode": 493,
+      "path": "lib/libFoundationEssentials.so",
+      "sha256": "77f05a32f7e64c4d5eed0713cd2756fd73576e7a07c7e7b336192ff907c9d944",
+      "size": 10504520
+    },
+    {
+      "mode": 493,
+      "path": "lib/libFoundationInternationalization.so",
+      "sha256": "19f04ab0b329bea2f1e8af913c6446e0e5fe69eca9311e75b7fed29cc660f072",
+      "size": 3830512
+    },
+    {
+      "mode": 493,
+      "path": "lib/libFoundationNetworking.so",
+      "sha256": "f952928d3ec062c3dcdc355fd6b1d763d9cb39c14db312dddba6bcec18a6fead",
+      "size": 1832032
+    },
+    {
+      "mode": 493,
+      "path": "lib/libFoundationXML.so",
+      "sha256": "70a35c757bb8ab98ba3f8a2a788eb3767102ea5893fbe00814a71b70fd8b7dcc",
+      "size": 507424
+    },
+    {
+      "mode": 493,
+      "path": "lib/lib_FoundationICU.so",
+      "sha256": "c6adbf736a41b1245f92957e0830c70d889e3d9e7714d7f1e81d26290352722b",
+      "size": 40616512
+    },
+    {
+      "mode": 493,
+      "path": "lib/libblas.so.3",
+      "sha256": "b25174e567e05edf8baedcb3cdc1b745c9795bc8bbb8de8a3259a1b2ff2b5839",
+      "size": 535216
+    },
+    {
+      "mode": 493,
+      "path": "lib/libdispatch.so",
+      "sha256": "4220b8ae2bb46162d525510393a50975523b5d5be7c8127b00ffbd25a2c46609",
+      "size": 465720
+    },
+    {
+      "mode": 493,
+      "path": "lib/liblapack.so.3",
+      "sha256": "f7e70d3f624883b368ba41554b3a4c74de375e31e86c29a69330f94a34338c0d",
+      "size": 5788256
+    },
+    {
+      "mode": 493,
+      "path": "lib/libopenblas.so.0",
+      "sha256": "0e8be3e56b448ddc576c5c4dd0bef7ab1d736c6c520d808b3a78e35390bde8a2",
+      "size": 19411425
+    },
+    {
+      "mode": 493,
+      "path": "lib/libswiftCore.so",
+      "sha256": "4695dc1e3fe7a85598e4cb40b5a5534efd49532d4999877172be2bf02f2a5d88",
+      "size": 9994400
+    },
+    {
+      "mode": 493,
+      "path": "lib/libswiftDispatch.so",
+      "sha256": "d30d966bc21ad2050bb9124a2d29ad38075f6f4929d5cb5dfb174ccd73e6e35d",
+      "size": 375976
+    },
+    {
+      "mode": 493,
+      "path": "lib/libswiftGlibc.so",
+      "sha256": "e09abf8ca4d4f292c78d50da45b0c0200e6d152315df292890d475adcef118e6",
+      "size": 105632
+    },
+    {
+      "mode": 493,
+      "path": "lib/libswiftObservation.so",
+      "sha256": "443fae527acbaeb4a3771c5650d07c5cb822698029a20aa10624d4894f29d445",
+      "size": 258304
+    },
+    {
+      "mode": 493,
+      "path": "lib/libswiftRegexBuilder.so",
+      "sha256": "ffb246e30b0a08fd5d61a86e13e8128485f451727a85b693eb072b5d59c58af0",
+      "size": 209320
+    },
+    {
+      "mode": 493,
+      "path": "lib/libswiftSynchronization.so",
+      "sha256": "65afbb61514cc8300aa761d917d65f5e2faff04246f637a025bffe90509ed85d",
+      "size": 136920
+    },
+    {
+      "mode": 493,
+      "path": "lib/libswift_Builtin_float.so",
+      "sha256": "e54026898e274a5c801b7023fda57394ebd3fad2cb0891cb397d4de135487ade",
+      "size": 74048
+    },
+    {
+      "mode": 493,
+      "path": "lib/libswift_Concurrency.so",
+      "sha256": "3f21b0707d68a5054ae8c12cb97234f952c664b23646c1c77f2914aaa8a42fb7",
+      "size": 1080664
+    },
+    {
+      "mode": 493,
+      "path": "lib/libswift_RegexParser.so",
+      "sha256": "cec5418b3088b30b71f270950f1aaf5d0f22c45ea6b62d1fd18f2ac860874efd",
+      "size": 1606368
+    },
+    {
+      "mode": 493,
+      "path": "lib/libswift_StringProcessing.so",
+      "sha256": "6374cfb973bd5a9b67183a7c35c9bd0b54f9aa8ad8546937d8cab7852c8f3e6e",
+      "size": 1197864
+    },
+    {
+      "mode": 420,
+      "path": "licenses/Swift-6.4.1-LICENSE.txt",
+      "sha256": "770af8291f708538d8ff885a0bbc4e045cd700531741c4f99528d435c14d7f55",
+      "size": 11751
+    },
+    {
+      "mode": 420,
+      "path": "licenses/system-build-provenance/Apache-2.0",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "size": 11358
+    },
+    {
+      "mode": 420,
+      "path": "licenses/system-build-provenance/GPL-2",
+      "sha256": "edaef632cbb643e4e7a221717a6c441a4c1a7c918e6e4d56debc3d8739b233f6",
+      "size": 17984
+    },
+    {
+      "mode": 420,
+      "path": "licenses/system-build-provenance/GPL-3",
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+      "size": 35149
+    },
+    {
+      "mode": 420,
+      "path": "licenses/system-build-provenance/LGPL-2.1",
+      "sha256": "20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95",
+      "size": 26419
+    },
+    {
+      "mode": 420,
+      "path": "licenses/system-build-provenance/LGPL-3",
+      "sha256": "e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118",
+      "size": 7652
+    },
+    {
+      "mode": 420,
+      "path": "licenses/system-build-provenance/libgcc-s1-copyright",
+      "sha256": "20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79",
+      "size": 69004
+    },
+    {
+      "mode": 420,
+      "path": "licenses/system-build-provenance/libgfortran5-copyright",
+      "sha256": "20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79",
+      "size": 69004
+    },
+    {
+      "mode": 420,
+      "path": "licenses/system-build-provenance/libopenblas0-pthread-copyright",
+      "sha256": "e29e707ec9485952500f8b0abda2a9974f0aefba4643a069a7b9a0daba50a845",
+      "size": 20984
+    },
+    {
+      "mode": 420,
+      "path": "licenses/system-build-provenance/libstdc++6-copyright",
+      "sha256": "20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79",
+      "size": 69004
+    }
+  ],
+  "modelRevision": "44399559930365213510b1ee2eb15ded83374f0e",
+  "patches": [
+    {
+      "path": "Packages/TractandaDocuments/RuntimePatches/vmlx-61a4b20-linux-docling.patch",
+      "sha256": "191b56c3569d3998d81a5d2eaa20776059d8aa2ef95cb64850b17d0b283a037c"
+    },
+    {
+      "path": "Packages/TractandaDocuments/RuntimePatches/vmlx-61a4b20-idefics3-gelu-f32.patch",
+      "sha256": "4b45ae94cd5a9a2545025cf5165cd9e617f3c30c5a7b02e236c036ee943b9321"
+    }
+  ],
+  "profile": "tractanda.linux-component-artifacts.v1",
+  "recipe": {
+    "path": "scripts/export-linux-ml-component.py",
+    "sha256": "a743346562d1cc43672c2d98e01ad1a4fc45a5955865ffa20757371709954771"
+  },
+  "runtimeNotices": [
+    "licenses/Swift-6.4.1-LICENSE.txt",
+    "licenses/system-build-provenance/Apache-2.0",
+    "licenses/system-build-provenance/GPL-2",
+    "licenses/system-build-provenance/GPL-3",
+    "licenses/system-build-provenance/LGPL-2.1",
+    "licenses/system-build-provenance/LGPL-3",
+    "licenses/system-build-provenance/libgcc-s1-copyright",
+    "licenses/system-build-provenance/libgfortran5-copyright",
+    "licenses/system-build-provenance/libopenblas0-pthread-copyright",
+    "licenses/system-build-provenance/libstdc++6-copyright"
+  ],
+  "runtimeRevision": "61a4b20d4ad01b10466e8fc94c50402a9f994430",
+  "sourceInputsSHA256": "dc247dfcfbba1beb6e61d464d6da3f4977630bf1b5046ad9803c6eb16f7f13e9",
+  "toolchain": {
+    "clangSHA256": "712106992cb2e4abd378bb6b778c4b19e790df7948b1a3e0c0c518823ecf8cb5",
+    "swiftFrontendSHA256": "6e1dbf14d284019b284344b49968cac64921d5999cf72b3b3d8d723340e90717",
+    "swiftSHA256": "91bc542f8fd68a4b00b832ead45dbe94ec163b881e84a31ffe315c003566ea71",
+    "version": "Swift version 6.4.1 (swift-6.4.1-RELEASE)"
+  }
+}

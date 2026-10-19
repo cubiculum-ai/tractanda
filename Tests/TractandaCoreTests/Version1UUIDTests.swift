@@ -5,7 +5,34 @@ import XCTest
 
 @MainActor
 final class Version1UUIDTests: XCTestCase {
-    func testNodeSelectionPrefersEn0AndRejectsLocalMulticastAndZeroAddresses() {
+    private func publishOriginalRecord(_ revision: Revision, root: URL) throws -> (
+        directory: URL, file: URL, bytes: Data
+    ) {
+        let createdAt = try XCTUnwrap(revision.fields["createdAt"]?.dateString)
+        let date = try XCTUnwrap(Timestamp.parse(createdAt))
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let components = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: date)
+        let directory = root.appendingPathComponent(
+            String(
+                format: "items/%04d/%02d/%02d/%02d/%02d/%@",
+                components.year!, components.month!, components.day!, components.hour!, components.minute!,
+                revision.itemID))
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        var parent = directory
+        while parent.path.hasPrefix(root.path + "/") {
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: parent.path)
+            parent.deleteLastPathComponent()
+        }
+        let file = directory.appendingPathComponent(revision.revisionID + ".tractanda")
+        let bytes = try RecordCodec.encode(revision)
+        try bytes.write(to: file)
+        try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: file.path)
+        return (directory, file, bytes)
+    }
+
+    func testNodeSelectionPrefersEn0AndRejectsLocalMulticastAndZeroAddresses() async {
         func node(_ name: String, _ value: UInt64, builtIn: Bool = false) -> UUIDHardwareNode {
             UUIDHardwareNode(node: value, interfaceName: name, source: "fixture", isBuiltIn: builtIn)
         }
@@ -23,7 +50,7 @@ final class Version1UUIDTests: XCTestCase {
         XCTAssertNil(UUIDHardwareNode.select([localEn0, multicast, zero]))
     }
 
-    func testRFCVectorDecodesTimeClockAndNodeAndRoundTrips() throws {
+    func testRFCVectorDecodesTimeClockAndNodeAndRoundTrips() async throws {
         let uuid = try XCTUnwrap(UUID(uuidString: "c232ab00-9414-11ec-b3c8-9f6bdeced846"))
         let fields = try UUIDVersion1Components(uuid)
         XCTAssertEqual(fields.timestamp, 138_648_505_420_000_000)
@@ -37,7 +64,7 @@ final class Version1UUIDTests: XCTestCase {
         XCTAssertNil(UUID().version1Components)
     }
 
-    func testIdentifierCollisionCannotReplaceAnExistingItemOrRevision() throws {
+    func testIdentifierCollisionCannotReplaceAnExistingItemOrRevision() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
             "trac-uuid-collision-" + Identifier.make())
         defer { try? FileManager.default.removeItem(at: root) }
@@ -67,7 +94,7 @@ final class Version1UUIDTests: XCTestCase {
         XCTAssertEqual(try store.history(first.itemID), [first])
     }
 
-    func testLayoutBoundsAndExactSubsecondDates() throws {
+    func testLayoutBoundsAndExactSubsecondDates() async throws {
         let maximum = try UUIDVersion1Components(
             timestamp: (1 << 60) - 1, clockSequence: (1 << 14) - 1, node: (1 << 48) - 1)
         XCTAssertEqual(maximum.uuid.uuidString.lowercased(), "ffffffff-ffff-1fff-bfff-ffffffffffff")
@@ -110,48 +137,31 @@ final class Version1UUIDTests: XCTestCase {
         XCTAssertEqual(random.uuidString.split(separator: "-")[2].first, "4")
     }
 
-    func testStoreCreatesVersion1AndKeepsLegacyIdentityThroughEditAndRecovery() throws {
+    func testOriginalFormatVersion1RecordWithVersion1IDsSupportsEditCopyAndRecovery() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
             "trac-uuid-v1-" + Identifier.make())
         defer { try? FileManager.default.removeItem(at: root) }
-        let oldItemID = Identifier.make()
-        let oldRevisionID = Identifier.make()
-        XCTAssertNil(UUID(uuidString: oldItemID)?.version1Components)
-        XCTAssertNil(UUID(uuidString: oldRevisionID)?.version1Components)
+        let oldItemID = try UUID.makeVersion1().uuidString.lowercased()
+        let oldRevisionID = try UUID.makeVersion1().uuidString.lowercased()
+        XCTAssertNotNil(UUID(uuidString: oldItemID)?.version1Components)
+        XCTAssertNotNil(UUID(uuidString: oldRevisionID)?.version1Components)
         let now = Timestamp.now()
-        let nowDate = try XCTUnwrap(Timestamp.parse(now))
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
-        let components = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: nowDate)
-        let itemDirectory = root.appendingPathComponent(
-            String(
-                format: "items/%04d/%02d/%02d/%02d/%02d/%@",
-                components.year!, components.month!, components.day!, components.hour!, components.minute!,
-                oldItemID))
-        try FileManager.default.createDirectory(
-            at: itemDirectory, withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700])
-        var directory = itemDirectory
-        while directory.path.hasPrefix(root.path + "/") {
-            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
-            directory.deleteLastPathComponent()
-        }
         let intent = CommitRequest(
-            classID: "Item", changes: ["subject": .text("Legacy v4")], operationID: "legacy-v4-fixture")
-        let legacy = try Revision(fields: [
+            classID: "Item", changes: ["subject": .text("Original format 1")],
+            operationID: "original-format-v1-fixture")
+        let original = try Revision(fields: [
             "itemID": .text(oldItemID), "revisionID": .text(oldRevisionID), "classID": .text("Item"),
             "schemaVersion": .integer(1), "createdAt": .date(now), "modifiedAt": .date(now),
-            "subject": .text("Legacy v4"), "actor": .text("legacy"), "operationID": .text(intent.operationID),
+            "subject": .text("Original format 1"), "actor": .text("fixture"),
+            "operationID": .text(intent.operationID),
             "requestIdentity": .text(try JSON.encode(intent).base64EncodedString()),
         ])
-        let file = itemDirectory.appendingPathComponent(oldRevisionID + ".tractanda")
-        let originalBytes = try RecordCodec.encode(legacy)
-        try originalBytes.write(to: file)
-        try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: file.path)
+        XCTAssertEqual(original.formatVersion, 1)
+        let published = try publishOriginalRecord(original, root: root)
         var store: ItemStore? = try ItemStore(root: root)
         let edit = CommitRequest(
             action: .revise, itemID: oldItemID, expectedRevisionID: oldRevisionID,
-            changes: ["body": .text("Updated")], operationID: "update-legacy")
+            changes: ["body": .text("Updated")], operationID: "update-original-format-v1")
         let result = try store!.commit(edit)
         XCTAssertEqual(result.revision.itemID, oldItemID)
         XCTAssertEqual(result.revision.supersedes, oldRevisionID)
@@ -160,7 +170,7 @@ final class Version1UUIDTests: XCTestCase {
         let copy = try store!.commit(
             CommitRequest(
                 action: .copy, itemID: oldItemID,
-                expectedRevisionID: result.revision.revisionID, operationID: "copy-legacy")
+                expectedRevisionID: result.revision.revisionID, operationID: "copy-original-format-v1")
         ).revision
         XCTAssertNotNil(UUID(uuidString: copy.itemID)?.version1Components)
         XCTAssertNotNil(UUID(uuidString: copy.revisionID)?.version1Components)
@@ -174,9 +184,47 @@ final class Version1UUIDTests: XCTestCase {
         try FileManager.default.removeItem(at: root.appendingPathComponent("index"))
         store = try ItemStore(root: root)
         XCTAssertEqual(try store!.get(oldItemID), result.revision)
-        XCTAssertEqual(try store!.get(oldItemID, revisionID: oldRevisionID), legacy)
-        XCTAssertEqual(try Data(contentsOf: file), originalBytes)
+        XCTAssertEqual(try store!.get(oldItemID, revisionID: oldRevisionID), original)
+        XCTAssertEqual(try Data(contentsOf: published.file), published.bytes)
         XCTAssertEqual(try store!.get(copy.itemID), copy)
         XCTAssertEqual(try store!.get(fresh.itemID), fresh)
+    }
+
+    func testModernEditRejectsUnmigratedV4ItemWithoutCanonicalMutation() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "trac-uuid-v4-edit-" + Identifier.make())
+        defer { try? FileManager.default.removeItem(at: root) }
+        let oldItemID = Identifier.make()
+        let oldRevisionID = Identifier.make()
+        XCTAssertNil(UUID(uuidString: oldItemID)?.version1Components)
+        XCTAssertNil(UUID(uuidString: oldRevisionID)?.version1Components)
+        let now = Timestamp.now()
+        let request = CommitRequest(
+            classID: "Item", changes: ["subject": .text("Unmigrated v4")],
+            operationID: "unmigrated-v4-fixture")
+        let original = try Revision(fields: [
+            "itemID": .text(oldItemID), "revisionID": .text(oldRevisionID), "classID": .text("Item"),
+            "schemaVersion": .integer(1), "createdAt": .date(now), "modifiedAt": .date(now),
+            "subject": .text("Unmigrated v4"), "actor": .text("fixture"),
+            "operationID": .text(request.operationID),
+            "requestIdentity": .text(try JSON.encode(request).base64EncodedString()),
+        ])
+        let published = try publishOriginalRecord(original, root: root)
+        let store = try ItemStore(root: root)
+        XCTAssertEqual(try store.get(oldItemID), original)
+        XCTAssertEqual(try store.history(oldItemID), [original])
+
+        let edit = CommitRequest(
+            action: .revise, itemID: oldItemID, expectedRevisionID: oldRevisionID,
+            changes: ["body": .text("Must not publish")], operationID: "reject-unmigrated-v4-edit")
+        XCTAssertThrowsError(try store.commit(edit)) {
+            XCTAssertEqual(($0 as? TractandaError)?.code, "invalidRevisionAncestry")
+        }
+        XCTAssertEqual(try store.get(oldItemID), original)
+        XCTAssertEqual(try store.history(oldItemID), [original])
+        XCTAssertEqual(try Data(contentsOf: published.file), published.bytes)
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(atPath: published.directory.path),
+            [oldRevisionID + ".tractanda"])
     }
 }

@@ -26,7 +26,7 @@ public struct CommitRequest: Codable, Equatable, Sendable {
 
 public struct CommitResult: Codable, Sendable {
     private enum CodingKeys: String, CodingKey {
-        case revision, warnings
+        case revision, warnings, itemState
         case wasReplayed = "replayed"
         case isIndexReady = "indexReady"
     }
@@ -34,11 +34,17 @@ public struct CommitResult: Codable, Sendable {
     public let wasReplayed: Bool
     public let isIndexReady: Bool
     public let warnings: [String]
+    /// Absent when canonical acceptance precedes derived-index projection readiness.
+    public let itemState: ItemState?
 
-    public init(revision: Revision, wasReplayed: Bool, isIndexReady: Bool, warnings: [String]) {
+    public init(
+        revision: Revision, wasReplayed: Bool, isIndexReady: Bool, warnings: [String],
+        itemState: ItemState? = nil
+    ) {
         self.revision = revision
         self.wasReplayed = wasReplayed
         self.isIndexReady = isIndexReady
         self.warnings = warnings
+        self.itemState = itemState
     }
 }

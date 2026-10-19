@@ -1,3 +1,4 @@
+#if !os(Linux)
 import CoreGraphics
 import Darwin
 import Foundation
@@ -227,3 +228,5 @@ public final class DoclingFileRasterSession: @unchecked Sendable {
     }
     deinit { close() }
 }
+
+#endif

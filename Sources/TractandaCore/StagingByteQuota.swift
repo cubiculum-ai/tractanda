@@ -1,3 +1,4 @@
+import CTractandaPlatform
 import Foundation
 
 #if canImport(Darwin)
@@ -24,19 +25,27 @@ final class StagingByteQuota: @unchecked Sendable {
     private var completedGroups: Set<String> = []
     init(
         root: URL, ownerUID: UInt32, maximumBytes: Int64,
-        pendingUploads: [String: AttachmentUploadState] = [:]
+        pendingUploads: [String: AttachmentUploadState] = [:], payloads: AttachmentPayloadStore? = nil,
+        documents: DocumentContentStore? = nil
     ) throws {
         self.maximumBytes = maximumBytes
-        try restoreCopyBindings(root: root, ownerUID: ownerUID)
-        try restoreJobBindings(root: root, ownerUID: ownerUID)
+        try restoreCopyBindings(root: root, ownerUID: ownerUID, payloads: payloads, documents: documents)
+        try restorePeerPayloadBindings(root: root, ownerUID: ownerUID, payloads: payloads)
+        try restorePendingPeerJournal(root: root, ownerUID: ownerUID)
+        try restoreDocumentBindings(root: root, ownerUID: ownerUID, documents: documents)
+        try restoreJobBindings(root: root, ownerUID: ownerUID, documents: documents)
         for (id, upload) in pendingUploads {
             try retainUpload(id: id, recovering: true)
             let stage = ["attachments", ".staging", id + ".stage"]
             if upload.location == "published",
                 (try? FileMetadata.read(at: stage.reduce(root) { $0.appendingPathComponent($1) })) == nil
             {
-                let canonical = try AttachmentPayloadStore.payloadRelativePath(id).split(separator: "/").map(
-                    String.init)
+                let storage =
+                    try payloads ?? AttachmentPayloadStore(root: root, ownerUID: ownerUID, reserveBytes: 0)
+                guard let relative = try storage.resolvedPayloadPath(id) else {
+                    throw TractandaError("attachmentIntegrity", "Published upload original is missing.")
+                }
+                let canonical = relative.split(separator: "/").map(String.init)
                 try scan(
                     root: root, path: canonical, ownerUID: ownerUID, depth: 0,
                     accountingGroup: Self.group(stage))
@@ -44,7 +53,8 @@ final class StagingByteQuota: @unchecked Sendable {
         }
         for prefix in [
             ["attachments", ".staging"], ["attachments", ".uploads"], ["documents", ".staging"], ["copies"],
-            ["document-jobs"],
+            ["document-jobs"], ["authority", "payloads"], ["authority", "payload-work"],
+            ["authority", "document-transfers"],
         ] {
             try scan(root: root, path: prefix, ownerUID: ownerUID, depth: 0)
         }
@@ -59,7 +69,10 @@ final class StagingByteQuota: @unchecked Sendable {
         let url = path.reduce(root) { $0.appendingPathComponent($1) }
         let metadata: FileMetadata
         do { metadata = try FileMetadata.read(at: url) } catch FileMetadataError.posix(ENOENT) { return }
-        guard metadata.uid == ownerUID, metadata.mode & 0o077 == 0 else {
+        guard
+            (accountingGroup != nil && tractanda_path_read_only(url.path) == 1)
+                || (metadata.uid == ownerUID && metadata.mode & 0o077 == 0)
+        else {
             throw TractandaError(
                 "unsafeAttachmentStore", "Private staging must be service-owned and private.")
         }
@@ -79,11 +92,176 @@ final class StagingByteQuota: @unchecked Sendable {
             try add(bytes, group: group, enforcingLimit: false)
         }
     }
-    private func restoreCopyBindings(root: URL, ownerUID: UInt32) throws {
+    private func restorePendingPeerJournal(root: URL, ownerUID: UInt32) throws {
+        let files = DocumentContentFiles(root: root, ownerUID: ownerUID, minimumFreeBytes: 0)
+        try files.withDirectoryEntries(path: ["authority", "intake"]) { id in
+            _ = try AuthorityRecord.persistentID(.text(id))
+            let base = ["authority", "intake", id]
+            if let applied = try files.readIfPresent(
+                path: base + ["applied.json"], maximumBytes: PeerPackage.maximumPageBytes)
+            {
+                let begin = try PeerPackage.decode(
+                    PeerIntakeJournal.Begin.self,
+                    files.read(path: base + ["begin.json"], maximumBytes: PeerPackage.maximumPageBytes))
+                try begin.manifest.validate(retained: true)
+                let publication = try PeerPackage.decode(PeerIntakeJournal.Publication.self, applied)
+                guard publication.packageID == id, begin.manifest.packageID == id,
+                    publication.context == begin.context, begin.manifest.storeID == begin.context.storeID,
+                    publication.manifestDigest
+                        == AuthorityRecordCodec.sha256(try JSON.encode(begin.manifest)),
+                    try files.read(path: base + ["sealed.json"], maximumBytes: PeerPackage.maximumPageBytes)
+                        == applied,
+                    try files.read(path: base + ["prepared.json"], maximumBytes: PeerPackage.maximumPageBytes)
+                        == applied
+                else {
+                    throw TractandaError("invalidPeerPackage", "Completed peer quota proof differs.")
+                }
+                // Completed immutable receipts are history, not pending staging quota.
+            } else {
+                try self.scan(root: root, path: base, ownerUID: ownerUID, depth: 0)
+            }
+            return true
+        }
+    }
+    private func restorePeerPayloadBindings(root: URL, ownerUID: UInt32, payloads: AttachmentPayloadStore?)
+        throws
+    {
+        let files = DocumentContentFiles(root: root, ownerUID: ownerUID, minimumFreeBytes: 0)
+        try files.withDirectoryEntries(path: ["authority", "payloads"]) { packageID in
+            _ = try AuthorityRecord.persistentID(.text(packageID))
+            let applied = try files.readIfPresent(
+                path: ["authority", "intake", packageID, "applied.json"],
+                maximumBytes: PeerPackage.maximumPageBytes)
+            try files.withDirectoryEntries(path: ["authority", "payloads", packageID]) { objectID in
+                _ = try AuthorityRecord.persistentID(.text(objectID))
+                let base = ["authority", "payloads", packageID, objectID]
+                guard let bytes = try files.readIfPresent(path: base + ["binding.json"], maximumBytes: 4096)
+                else { return true }
+                let binding = try PeerPackage.decode(PeerOriginalTransfer.Binding.self, bytes, maximum: 4096)
+                try binding.object.validate()
+                _ = try AuthorityRecord.persistentID(.text(binding.stageID))
+                guard binding.object.kind == .attachment, binding.object.id == objectID else {
+                    throw TractandaError("peerObjectCollision", "Peer payload quota binding differs.")
+                }
+                let key = "peer:" + packageID + ":" + objectID
+                let stage = ["attachments", ".staging", binding.stageID + ".stage"]
+                self.pin(path: stage, copyKey: key)
+                self.pin(path: base, copyKey: key)
+                if applied == nil,
+                    (try? FileMetadata.read(at: stage.reduce(root) { $0.appendingPathComponent($1) })) == nil
+                {
+                    let storage =
+                        try payloads
+                        ?? AttachmentPayloadStore(root: root, ownerUID: ownerUID, reserveBytes: 0)
+                    if let path = try storage.resolvedPayloadPath(objectID) {
+                        try self.scan(
+                            root: root, path: path.split(separator: "/").map(String.init), ownerUID: ownerUID,
+                            depth: 0, accountingGroup: Self.group(stage))
+                    }
+                }
+                return true
+            }
+            return true
+        }
+    }
+    private func restoreDocumentBindings(root: URL, ownerUID: UInt32, documents: DocumentContentStore?) throws
+    {
+        let files = DocumentContentFiles(root: root, ownerUID: ownerUID, minimumFreeBytes: 0)
+        let contents = documents ?? DocumentContentStore(root: root, ownerUID: ownerUID, minimumFreeBytes: 0)
+        try files.withDirectoryEntries(path: ["authority", "document-transfers"]) { package in
+            _ = try AuthorityRecord.persistentID(.text(package))
+            let applied = try files.readIfPresent(
+                path: ["authority", "intake", package, "applied.json"],
+                maximumBytes: PeerPackage.maximumPageBytes)
+            try files.withDirectoryEntries(path: ["authority", "document-transfers", package]) { content in
+                let base = try PeerDocumentTransfer.prefix(package, content)
+                guard let raw = try files.readIfPresent(path: base + ["binding.json"], maximumBytes: 4096)
+                else { return true }
+                let binding = try PeerPackage.decode(
+                    PeerDocumentTransfer.TreeBinding.self, raw, maximum: 4096)
+                try binding.manifest.validate()
+                _ = try AuthorityRecord.persistentID(.text(binding.stageID))
+                guard binding.manifest.id == content, binding.manifest.kind == .document,
+                    binding.manifest.part == .manifest
+                else { throw TractandaError("peerObjectCollision", "Document quota anchor differs.") }
+                let key = PeerDocumentTransfer.key(package, content)
+                let frozen = ["documents", ".staging", binding.stageID + ".frozen.json"]
+                self.pin(path: base, copyKey: key)
+                self.pin(path: binding.stage, copyKey: key)
+                self.pin(path: frozen, copyKey: key)
+                if applied == nil {
+                    if (try? FileMetadata.read(
+                        at: binding.stage.reduce(root) { $0.appendingPathComponent($1) })) == nil,
+                        let canonical = try contents.peerDirectory(content)
+                    {
+                        let manifest = try files.read(
+                            path: canonical + ["manifest.json"],
+                            maximumBytes: DocumentContentStore.maximumNodeBytes)
+                        guard manifest.count == binding.manifest.length,
+                            AuthorityRecordCodec.sha256(manifest) == binding.manifest.sha256
+                        else {
+                            throw TractandaError(
+                                "peerObjectCollision", "Published document quota binding differs.")
+                        }
+                        try self.scan(
+                            root: root, path: canonical, ownerUID: ownerUID, depth: 0,
+                            accountingGroup: Self.group(binding.stage))
+                    }
+                }
+                try files.withDirectoryEntries(path: base + ["parts"]) { role in
+                    guard let roleValue = PeerPackage.DocumentPart.Role(rawValue: role) else {
+                        throw TractandaError("peerObjectCollision", "Unknown document quota role.")
+                    }
+                    try files.withDirectoryEntries(path: base + ["parts", role]) { level in
+                        guard let levelValue = Int(level), String(levelValue) == level else {
+                            throw TractandaError("peerObjectCollision", "Invalid document quota level.")
+                        }
+                        try files.withDirectoryEntries(path: base + ["parts", role, level]) { ordinal in
+                            guard let ordinalValue = Int64(ordinal), String(ordinalValue) == ordinal else {
+                                throw TractandaError("peerObjectCollision", "Invalid document quota ordinal.")
+                            }
+                            let part = PeerPackage.DocumentPart(
+                                role: roleValue, level: levelValue, ordinal: ordinalValue)
+                            try part.validate()
+                            let path = base + ["parts", role, level, ordinal]
+                            guard
+                                let raw = try files.readIfPresent(
+                                    path: path + ["binding.json"], maximumBytes: 4096)
+                            else { return true }
+                            let value = try PeerPackage.decode(
+                                PeerDocumentTransfer.PartBinding.self, raw, maximum: 4096)
+                            try value.object.validate()
+                            _ = try AuthorityRecord.persistentID(.text(value.stageID))
+                            guard value.object.id == content, value.object.kind == .document,
+                                value.object.part == part
+                            else {
+                                throw TractandaError(
+                                    "peerObjectCollision", "Document part quota binding differs.")
+                            }
+                            let stage = ["attachments", ".staging", value.stageID + ".stage"]
+                            if (try? FileMetadata.read(
+                                at: stage.reduce(root) { $0.appendingPathComponent($1) })) != nil
+                            {
+                                self.pin(path: stage, copyKey: key)
+                            }
+                            return true
+                        }
+                        return true
+                    }
+                    return true
+                }
+                return true
+            }
+            return true
+        }
+    }
+    private func restoreCopyBindings(
+        root: URL, ownerUID: UInt32, payloads: AttachmentPayloadStore?, documents: DocumentContentStore?
+    ) throws {
         let copies = root.appendingPathComponent("copies")
         do { _ = try FileMetadata.read(at: copies) } catch FileMetadataError.posix(ENOENT) { return }
         let files = DocumentContentFiles(root: root, ownerUID: ownerUID, minimumFreeBytes: 0)
-        let documents = DocumentContentStore(root: root, ownerUID: ownerUID, minimumFreeBytes: 0)
+        let documents = documents ?? DocumentContentStore(root: root, ownerUID: ownerUID, minimumFreeBytes: 0)
         try POSIXDirectory.withEntries(at: copies) { key in
             let base = ["copies", key]
             guard
@@ -111,9 +289,11 @@ final class StagingByteQuota: @unchecked Sendable {
                     self.pin(path: path, copyKey: key)
                     let stageURL = path.reduce(root) { $0.appendingPathComponent($1) }
                     if (try? FileMetadata.read(at: stageURL)) == nil {
-                        let canonical = try AttachmentPayloadStore.payloadRelativePath(id).split(
-                            separator: "/"
-                        ).map(String.init)
+                        let storage =
+                            try payloads
+                            ?? AttachmentPayloadStore(root: root, ownerUID: ownerUID, reserveBytes: 0)
+                        guard let relative = try storage.resolvedPayloadPath(id) else { continue }
+                        let canonical = relative.split(separator: "/").map(String.init)
                         try self.scan(
                             root: root, path: canonical, ownerUID: ownerUID, depth: 0,
                             accountingGroup: Self.group(path))
@@ -157,9 +337,9 @@ final class StagingByteQuota: @unchecked Sendable {
             return true
         }
     }
-    private func restoreJobBindings(root: URL, ownerUID: UInt32) throws {
+    private func restoreJobBindings(root: URL, ownerUID: UInt32, documents: DocumentContentStore?) throws {
         let files = DocumentContentFiles(root: root, ownerUID: ownerUID, minimumFreeBytes: 0)
-        let documents = DocumentContentStore(root: root, ownerUID: ownerUID, minimumFreeBytes: 0)
+        let documents = documents ?? DocumentContentStore(root: root, ownerUID: ownerUID, minimumFreeBytes: 0)
         let records = try DocumentJobRecords(root: root, files: files).load()
         for record in records.values {
             let id = record.intent.jobID
@@ -256,6 +436,23 @@ final class StagingByteQuota: @unchecked Sendable {
         }
         total -= groups.removeValue(forKey: "copies/" + copyKey) ?? 0
     }
+    /// Same-filesystem rename moves one physical part; it creates no second encoded-byte hold.
+    func movePrivateBytes(_ bytes: Int64, from source: [String], to destination: [String]) throws {
+        guard bytes >= 0, let old = Self.group(source), let new = Self.group(destination), old != new else {
+            throw TractandaError("resourceLimit", "Invalid private document accounting move.")
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        guard let held = groups[old] else { return }  // exact retry after the accounted rename
+        guard held == bytes else {
+            throw TractandaError("resourceLimit", "Private document part accounting differs.")
+        }
+        let sum = (groups[new] ?? 0).addingReportingOverflow(bytes)
+        guard !sum.overflow else { throw TractandaError("resourceLimit", "Document accounting overflowed.") }
+        groups[new] = sum.partialValue
+        groups.removeValue(forKey: old)
+        for key in copyGroups.keys { copyGroups[key]?.remove(old) }
+    }
     static func group(_ path: [String]) -> String? {
         if path.count >= 3, path[0] == "attachments", [".staging", ".uploads"].contains(path[1]) {
             return path.prefix(3).joined(separator: "/")
@@ -268,6 +465,18 @@ final class StagingByteQuota: @unchecked Sendable {
         }
         if path.count >= 3, ["copies", "document-jobs"].contains(path[0]) {
             return path.prefix(2).joined(separator: "/")
+        }
+        if path.count >= 4, path.prefix(2) == ["authority", "intake"] {
+            return path.prefix(path.count >= 5 && path[3] == "objects" ? 5 : 4).joined(separator: "/")
+        }
+        if path.count >= 4, path.prefix(2) == ["authority", "payloads"] {
+            return path.prefix(4).joined(separator: "/")
+        }
+        if path.count >= 4, path.prefix(2) == ["authority", "document-transfers"] {
+            return path.prefix(4).joined(separator: "/")
+        }
+        if path.count >= 3, path.prefix(2) == ["authority", "payload-work"] {
+            return path.prefix(3).joined(separator: "/")
         }
         return nil
     }
@@ -408,6 +617,54 @@ final class StagingByteQuota: @unchecked Sendable {
         defer { lock.unlock() }
         guard !copyGroups.values.contains(where: { $0.contains(group) }) else { return }
         total -= groups.removeValue(forKey: group) ?? 0
+    }
+    func completePeerJournal(packageID: String) {
+        let prefix = "authority/intake/" + packageID + "/"
+        lock.lock()
+        defer { lock.unlock() }
+        for (group, bytes) in groups where group.hasPrefix(prefix) {
+            total -= bytes
+            groups.removeValue(forKey: group)
+        }
+    }
+    func usedBytes(path: [String]) -> Int64 {
+        guard let group = Self.group(path) else { return 0 }
+        lock.lock()
+        defer { lock.unlock() }
+        return groups[group] ?? 0
+    }
+    /// Document groups contain a whole tree/proof namespace, not one in-memory row per page.
+    func peerDocumentUsage(packageID: String) throws -> (objects: Int, bytes: UInt64) {
+        let prefix = "peer-document:" + packageID + ":"
+        lock.lock()
+        defer { lock.unlock() }
+        var bytes: UInt64 = 0
+        var objects = 0
+        for (key, members) in copyGroups where key.hasPrefix(prefix) {
+            objects += 1
+            for group in members {
+                let held = groups[group] ?? 0
+                guard held >= 0 else {
+                    throw TractandaError("resourceLimit", "Invalid document quota accounting.")
+                }
+                let next = bytes.addingReportingOverflow(UInt64(held))
+                guard !next.overflow else {
+                    throw TractandaError("resourceLimit", "Document quota accounting overflowed.")
+                }
+                bytes = next.partialValue
+            }
+        }
+        return (objects, bytes)
+    }
+    /// Applied canonical bytes are no longer private staging; caller has removed any duplicate
+    /// private stage before releasing this hold. Proof/marker groups stay charged until disposal.
+    func releaseAppliedDocumentStage(_ stage: [String], copyKey: String) {
+        guard let group = Self.group(stage) else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        guard copyGroups[copyKey]?.contains(group) == true else { return }
+        total -= groups.removeValue(forKey: group) ?? 0
+        copyGroups[copyKey]?.remove(group)
     }
     var usedBytes: Int64 {
         lock.lock()

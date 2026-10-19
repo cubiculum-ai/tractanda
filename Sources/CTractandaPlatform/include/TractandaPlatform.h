@@ -11,6 +11,8 @@ int tractanda_file_metadata(
 // Opaque immediate-directory iterator. Names exclude . and ..; 1 = entry, 0 = end, -1 = error.
 // Callers must close a non-null handle. The iterator never follows child symlinks.
 void *tractanda_directory_open(const char *path);
+// Duplicates an already no-follow opened directory descriptor.
+void *tractanda_directory_open_fd(int32_t descriptor);
 int tractanda_directory_next(void *directory, char *name, size_t capacity);
 int tractanda_directory_close(void *directory);
 // Explicit time-based UUID generation. Calls are serialized within the process.
@@ -70,6 +72,34 @@ int tractanda_terminate_if_stopping(void);
 int tractanda_peer_uid(int descriptor, uint32_t *uid);
 int tractanda_send_frame(int descriptor, const void *bytes, uint32_t count);
 int tractanda_receive_frame(int descriptor, void **bytes, uint32_t *count);
+// Fixed local enrollment launch: actual current image path; no argv/PATH fallback.
+int tractanda_current_executable(char *buffer, uint32_t capacity);
+// Fixed basename only, no-follow trusted-owner chain; reject mutation-granting ACLs.
+int tractanda_validate_enrollment_helper(const char *path, int root_only);
+int tractanda_validate_enrollment_ssh(void);
+int tractanda_peer_configuration_no_mutation_acl(int fd);
+// Enrollment source socket only, CLOCK_MONOTONIC absolute deadline at most20seconds away.
+int tractanda_private_connect_until(const char *path, uint64_t deadline);
+// Private native input only: owned client socket, one monotonic 20-second IO budget.
+uint64_t tractanda_private_io_begin(int descriptor);
+int tractanda_private_send_begin(int descriptor, const void *bytes, uint32_t count, uint64_t deadline);
+int tractanda_private_send_frame(int descriptor, const void *bytes, uint32_t count, uint64_t deadline);
+int tractanda_private_receive_frame(int descriptor, void **bytes, uint32_t *count, uint32_t maximum, uint64_t deadline);
+// Caller-owned no-follow regular input; returns a bounded copy, never a pathname-derived grant.
+int tractanda_capture_private_credential(const char *path, void **bytes, uint32_t *count);
+// Local enrollment artifacts only; operation-specific callers retain their smaller exact caps.
+//0=copy,1=actual final-open absence,-1=unsafe/change/error (errno never implies absence).
+int tractanda_capture_private_artifact(const char *path, void **bytes, uint32_t *count, uint32_t maximum);
+int tractanda_capture_private_artifact_at(int parent, const char *name, void **bytes, uint32_t *count, uint32_t maximum);
+int tractanda_capture_peer_preparation(const char *path, void **bytes, uint32_t *count);
+// Synchronous test-only after-stat boundary; no callback/context is retained.
+int tractanda_capture_private_artifact_for_testing(const char *path, void **bytes, uint32_t *count,
+    uint32_t maximum, void (*after_stat)(void *), void *context);
+int tractanda_open_private_directory(const char *path);
+//0=exclusive atomic publication,1=published but directory fsync uncertain,-1=failure.
+int tractanda_write_private_artifact_at(int parent, const char *temporary, const char *target,
+    const void *bytes, uint32_t count);
+void tractanda_private_free(void *bytes, uint32_t count);
 void tractanda_free(void *bytes);
 void tractanda_close(int descriptor);
 #endif

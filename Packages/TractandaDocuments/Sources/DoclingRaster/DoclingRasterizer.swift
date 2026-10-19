@@ -1,3 +1,4 @@
+#if !os(Linux)
 import CoreGraphics
 import CryptoKit
 import DoclingRGB
@@ -413,3 +414,5 @@ public enum DoclingRasterizer {
         return (Int(width), Int(height))
     }
 }
+
+#endif

@@ -8,6 +8,8 @@ The terminal client offers temporary Text/Semantic item search with `F` / `Ctrl-
 
 The downloadable macOS preview requires Apple Silicon (M1 or later) and macOS 15 or later; 16 GiB unified memory is a provisional practical recommendation. See [macOS installation and service management](docs/install.md) and [system requirements](docs/system-requirements.md) for limitations and storage guidance. Linux packaging remains in development. The macOS package includes pinned Granite Docling 258M model assets for durable document jobs; see [installation details](docs/install.md).
 
+Optional inline capture resolves authored `#categories` and category-configured dates in one reviewed edit, retaining plain text and stable references. See the [capture guide](docs/inline-capture.md). This source change awaits an explicitly requested release/deployment; the installed preview remains on its existing build.
+
 ## Proof-of-concept status
 
 This is source-available evaluation software. Formats and APIs are experimental; use a dedicated store and keep backups. The core builds with Swift 6.4 on macOS 15+ and Debian-family Linux. The optional embedding host is separately built and model-dependent.
@@ -41,6 +43,7 @@ It binds HTTP only to loopback. `--no-http` keeps the native Unix listener only.
 - [User guide](docs/index.html)
 - [Build and test](docs/build.md)
 - [API and agent integration](docs/api.md)
+- [Inline category and date capture](docs/inline-capture.md)
 - [Install the Claude/Codex agent skill](docs/agent-skill.md)
 - [Agent access](docs/agent-access.md)
 - [Security scope](SECURITY.md)

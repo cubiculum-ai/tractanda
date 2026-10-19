@@ -9,7 +9,8 @@ func handleConnectionCommand(_ arguments: [String]) throws -> Bool {
         tractanda connections default|remove NAME
         tractanda service prepare|install NAME STORE [--socket PATH] [--default]
             [--shared [--http-port PORT|--no-http]
-             [--view ID | --project-root ID --status-root ID [--project ID]]]
+             [--view ID | --project-root ID --status-root ID [--project ID]]
+             [--peer-runtime-config ABSOLUTE_PATH]]
         tractanda service activate NAME [--default]
         tractanda service start|stop|status|uninstall NAME
         """
@@ -74,6 +75,7 @@ func handleConnectionCommand(_ arguments: [String]) throws -> Bool {
         var projectRoot: String?
         var statusRoot: String?
         var project: String?
+        var peerRuntimeConfigurationPath: String?
         var remaining = Array(arguments.dropFirst(4))
         while let flag = remaining.first {
             remaining.removeFirst()
@@ -91,7 +93,8 @@ func handleConnectionCommand(_ arguments: [String]) throws -> Bool {
                 guard !httpModeSet else { throw TractandaError("usage", usage) }
                 httpModeSet = true
                 httpPort = nil
-            } else if ["--http-port", "--view", "--project-root", "--status-root", "--project"].contains(
+            } else if ["--http-port", "--view", "--project-root", "--status-root", "--project",
+                "--peer-runtime-config"].contains(
                 flag),
                 let value = remaining.first, !value.hasPrefix("--")
             {
@@ -112,6 +115,11 @@ func handleConnectionCommand(_ arguments: [String]) throws -> Bool {
                 case "--status-root":
                     guard statusRoot == nil else { throw TractandaError("usage", usage) }
                     statusRoot = value
+                case "--peer-runtime-config":
+                    guard peerRuntimeConfigurationPath == nil, value.hasPrefix("/"), value != "/",
+                        value.utf8.count <= 4096, !value.contains("\0")
+                    else { throw TractandaError("usage", usage) }
+                    peerRuntimeConfigurationPath = value
                 default:
                     guard project == nil else { throw TractandaError("usage", usage) }
                     project = value
@@ -122,7 +130,8 @@ func handleConnectionCommand(_ arguments: [String]) throws -> Bool {
         }
         guard
             shared
-                || (!httpModeSet && view == nil && projectRoot == nil && statusRoot == nil && project == nil),
+                || (!httpModeSet && view == nil && projectRoot == nil && statusRoot == nil && project == nil
+                    && peerRuntimeConfigurationPath == nil),
             (projectRoot == nil) == (statusRoot == nil), project == nil || projectRoot != nil,
             !(view != nil && projectRoot != nil)
         else { throw TractandaError("usage", usage) }
@@ -130,7 +139,8 @@ func handleConnectionCommand(_ arguments: [String]) throws -> Bool {
             shared
             ? ManagedServer.SharedDaemonOptions(
                 httpPort: httpPort, viewItemID: view, projectRootID: projectRoot,
-                statusRootID: statusRoot, initialProjectID: project)
+                statusRootID: statusRoot, initialProjectID: project,
+                peerRuntimeConfigurationPath: peerRuntimeConfigurationPath)
             : nil
         let record = try ManagedServer.prepare(
             name: name, store: URL(fileURLWithPath: arguments[3]),

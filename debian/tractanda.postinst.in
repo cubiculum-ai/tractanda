@@ -1,0 +1,48 @@
+#!/bin/sh
+set -eu
+helper=/opt/tractanda/current/bin/tractanda-setup
+fallback_action=none
+case "${1-}" in
+ configure)
+  { [ "$#" -eq 1 ] || [ "$#" -eq 2 ]; } || { echo "tractanda postinst: invalid configure arguments" >&2; exit 2; }
+  lifecycle=configure
+  umask 077
+  descriptor=$(/usr/bin/mktemp /run/tractanda-package-descriptor.XXXXXX)
+  trap '/bin/rm -f -- "$descriptor"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  cat >"$descriptor" <<'TRACTANDA_PACKAGE_DESCRIPTOR_EOF'
+@TRACTANDA_PACKAGE_DESCRIPTOR_JSON@
+TRACTANDA_PACKAGE_DESCRIPTOR_EOF
+  ;;
+ abort-upgrade)
+  [ "$#" -eq 2 ] || { echo "tractanda postinst: invalid abort-upgrade arguments" >&2; exit 2; }
+  lifecycle=abort-upgrade ;;
+ abort-remove)
+  if [ "$#" -eq 1 ]; then
+   lifecycle=abort-upgrade; fallback_action=postrm
+  elif [ "$#" -eq 4 ] && [ "$2" = in-favour ]; then
+   lifecycle=abort-upgrade; fallback_action=postrm
+  else
+   echo "tractanda postinst: invalid abort-remove arguments" >&2; exit 2
+  fi ;;
+ *) echo "tractanda postinst: unsupported dpkg action" >&2; exit 2 ;;
+esac
+if [ -x "$helper" ]; then
+ set -- verify-helper "$helper"
+else
+ [ "$fallback_action" = postrm ] || { echo "tractanda postinst: new Setup helper is unavailable" >&2; exit 1; }
+ set -- postrm
+fi
+/usr/bin/python3 -I - "$@" <<'TRACTANDA_PACKAGE_HOOK_FALLBACK_EOF'
+@TRACTANDA_PACKAGE_HOOK_FALLBACK_PY@
+TRACTANDA_PACKAGE_HOOK_FALLBACK_EOF
+if [ -x "$helper" ]; then
+ if [ "$lifecycle" = configure ]; then
+  "$helper" --package-lifecycle configure --descriptor "$descriptor"
+ else
+  "$helper" --package-lifecycle abort-upgrade
+ fi
+fi
+

@@ -1,0 +1,13 @@
+Package: tractanda
+Version: @TRACTANDA_DEBIAN_VERSION@
+Architecture: @TRACTANDA_DEBIAN_ARCH@
+Maintainer: @TRACTANDA_MAINTAINER@
+Bugs: @TRACTANDA_BUGS_URL@
+Section: utils
+Priority: optional
+Depends: @TRACTANDA_RUNTIME_DEPENDS@
+Pre-Depends: python3, systemd
+Installed-Size: @TRACTANDA_INSTALLED_KIB@
+Description: Tractanda shared canonical store and clients
+ Shared server, terminal and MCP clients, local Granite embeddings and
+ local Docling document extraction. Instance initialization is explicit.

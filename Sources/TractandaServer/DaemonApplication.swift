@@ -11,6 +11,12 @@ public actor DaemonApplication {
     private let nonce: String
     private let mcp: MCPHTTPService
     private var closed = false
+    private var privateEnrollmentControls: [UUID: PeerExchangeControl] = [:]
+    private var peerStatusProvider: (@Sendable () async throws -> PeerOperatorRuntimeStatus)?
+
+    func setPeerStatusProvider(_ provider: @escaping @Sendable () async throws -> PeerOperatorRuntimeStatus) {
+        peerStatusProvider = provider
+    }
 
     public init(
         coordinator: ServiceCoordinator, sessions: SessionAuthority, page: Data, manual: Data, nonce: String
@@ -26,6 +32,33 @@ public actor DaemonApplication {
     }
 
     public func native(_ request: Data, forUID uid: UInt32) async throws -> Data {
+        do {
+            if let call = try PeerEnrollmentNativeCall.parse(request) {
+                do {
+                    guard !closed else { throw TractandaError("serviceClosed", "Native application is closed.") }
+                    let result = try await coordinator.nativeEnrollmentCall(call, forUID: uid)
+                    guard !closed else { throw TractandaError("serviceClosed", "Native application is closed.") }
+                    return result
+                } catch { return NativePeerEnrollment.failure(error) }
+            }
+        } catch { return NativePeerEnrollment.failure(error) }
+        do {
+            if let call = try PeerOperatorStatusNativeCall.parse(request) {
+                do {
+                    guard !closed else { throw TractandaError("serviceClosed", "Native application is closed.") }
+                    _ = try await coordinator.peerOperatorCanonicalStatus(forUID: uid)
+                    let runtime: PeerOperatorRuntimeStatus
+                    do { runtime = try await peerStatusProvider?() ?? .unavailable }
+                    catch { runtime = .unavailable }
+                    // Runtime reads suspend. Reauthorize and refresh canonical facts before delivery.
+                    let canonical = try await coordinator.peerOperatorCanonicalStatus(forUID: uid)
+                    guard !closed else { throw TractandaError("serviceClosed", "Native application is closed.") }
+                    return try call.response(.init(canonical: canonical, runtime: runtime))
+                } catch { return call.failure(error) }
+            }
+        } catch {
+            return try JSON.encode(TractandaError("invalidArguments", "Use one native peer status call with empty arguments."))
+        }
         guard let object = try? JSONSerialization.jsonObject(with: request) as? [String: Any],
             Set(object.keys) == ["using", "methodCalls"],
             let using = object["using"] as? [String], using == [ItemService.capability],
@@ -45,9 +78,72 @@ public actor DaemonApplication {
             ]
         ])
     }
+    func makePrivateCredentialSession(_ request: NativePeerCredentialRegistration.Begin,
+        forUID uid: UInt32, control: PeerExchangeControl) async throws -> NativeCredentialRegistrationSession {
+        guard !closed else { throw TractandaError("serviceClosed", "Native application is closed.") }
+        let admission = try await coordinator.beginNativeCredentialRegistration(request, forUID: uid, control: control)
+        do {
+            guard !closed else { throw TractandaError("serviceClosed", "Native application is closed.") }
+            try control.check()
+        } catch {
+            await coordinator.cancelNativeCredentialRegistration(admission); throw error
+        }
+        let coordinator = coordinator
+        return NativeCredentialRegistrationSession(byteCount: request.byteCount,
+            commit: { input in try await self.finishPrivateCredential(admission, input: input, control: control) },
+            cancel: { await coordinator.cancelNativeCredentialRegistration(admission) })
+    }
+    private func finishPrivateCredential(_ admission: PeerCredentialRegistrationAdmission,
+        input: PeerPrivateCredentialInput, control: PeerExchangeControl) async throws -> Data {
+        guard !closed else { throw TractandaError("serviceClosed", "Native application is closed.") }
+        try control.check()
+        return try await coordinator.finishNativeCredentialRegistration(admission, input: input)
+    }
+    func makePrivateEnrollmentSession(_ request: NativePeerEnrollment.PrivateRequest,
+        forUID uid: UInt32, control: PeerExchangeControl) async throws -> NativePeerEnrollmentSession {
+        guard !closed else { throw TractandaError("serviceClosed", "Native application is closed.") }
+        let token = UUID(); privateEnrollmentControls[token] = control
+        let admission: PeerNativeEnrollmentAdmission
+        do { admission = try await coordinator.beginNativeEnrollment(request, forUID: uid, control: control) }
+        catch { privateEnrollmentControls.removeValue(forKey: token); throw error }
+        do {
+            guard !closed else { throw TractandaError("serviceClosed", "Native application is closed.") }
+            try control.check()
+        } catch { await cancelPrivateEnrollment(token, admission: admission); throw error }
+        return .init(operation: request.operation, byteCount: request.byteCount,
+            commit: { data in try await self.finishPrivateEnrollment(admission, data: data, request: request, control: control) },
+            cancel: { await self.cancelPrivateEnrollment(token, admission: admission) },
+            validateBeforeDelivery: { if request.operation == .exportTarget {
+                try await self.validatePrivateEnrollmentDelivery(admission, control: control)
+            } }, control: control)
+    }
+    private func cancelPrivateEnrollment(_ token: UUID, admission: PeerNativeEnrollmentAdmission) async {
+        privateEnrollmentControls.removeValue(forKey: token)?.cancel()
+        await coordinator.cancelNativeEnrollment(admission)
+    }
+    private func validatePrivateEnrollmentDelivery(_ admission: PeerNativeEnrollmentAdmission,
+        control: PeerExchangeControl) async throws {
+        guard !closed else { throw TractandaError("serviceClosed", "Native application is closed.") }
+        try control.check(); try await coordinator.validateNativeEnrollmentExportDelivery(admission)
+        guard !closed else { throw TractandaError("serviceClosed", "Native application is closed.") }
+        try control.check()
+    }
+    private func finishPrivateEnrollment(_ admission: PeerNativeEnrollmentAdmission, data: Data?,
+        request: NativePeerEnrollment.PrivateRequest, control: PeerExchangeControl) async throws -> Data {
+        guard !closed else { throw TractandaError("serviceClosed", "Native application is closed.") }
+        try control.check()
+        let input: PeerEnrollmentPairInput?
+        if request.operation == .begin { guard let data else { throw NativePeerEnrollment.failure() }; input = try .init(bytes: data) }
+        else { guard data == nil else { throw NativePeerEnrollment.failure() }; input = nil }
+        let result = try await coordinator.finishNativeEnrollment(admission, input: input)
+        guard !closed else { throw TractandaError("serviceClosed", "Native application is closed.") }
+        try control.check()
+        return result
+    }
     public func close() async {
         guard !closed else { return }
         closed = true
+        for control in privateEnrollmentControls.values { control.cancel() }
         await mcp.close()
         await sessions.close()
     }

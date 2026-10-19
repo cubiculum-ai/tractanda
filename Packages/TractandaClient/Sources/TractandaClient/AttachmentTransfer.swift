@@ -67,16 +67,22 @@ public struct AttachmentUploadResult: Codable, Sendable {
     }
 }
 public struct AttachmentListResult: Codable, Sendable {
+    /// Authoritative canonical identity. Resumable transfers require this value.
+    public let storeID: String?
     public let itemID: String
     public let revisionID: String
     public let attachments: [AttachmentDescriptor]
-    public init(itemID: String, revisionID: String, attachments: [AttachmentDescriptor]) {
+    public init(
+        itemID: String, revisionID: String, attachments: [AttachmentDescriptor], storeID: String? = nil
+    ) {
+        self.storeID = storeID
         self.itemID = itemID
         self.revisionID = revisionID
         self.attachments = attachments
     }
 }
 public struct AttachmentContentResult: Codable, Sendable {
+    public let storeID: String?
     public let attachment: AttachmentDescriptor
     public let offset: Int64
     public let nextOffset: Int64
@@ -84,8 +90,9 @@ public struct AttachmentContentResult: Codable, Sendable {
     public let data: Data
     public init(
         attachment: AttachmentDescriptor, offset: Int64, nextOffset: Int64,
-        isComplete: Bool, data: Data
+        isComplete: Bool, data: Data, storeID: String? = nil
     ) {
+        self.storeID = storeID
         self.attachment = attachment
         self.offset = offset
         self.nextOffset = nextOffset

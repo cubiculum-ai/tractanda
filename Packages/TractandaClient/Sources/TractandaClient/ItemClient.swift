@@ -58,11 +58,21 @@ public struct ItemQuery: Codable, Equatable, Sendable {
 public struct ItemPage: Sendable, Equatable {
     public let items: [Revision]
     public let position: Int
+    /// Number of query IDs consumed, independent of how many current revisions were hydrated.
+    public let consumedCount: Int
     public let total: Int
     public let state: String
     public let nextCursor: String?
     public let previousCursor: String?
-    public var hasNextPage: Bool { position + items.count < total }
+    public let unresolved: [ItemUnresolvedState]
+    public let notFound: [String]
+    public let remainingIDs: [String]
+    public let oversizedIDs: [String]
+    public let historicalDispositions: [String: HistoricalDisposition]
+    public let completeness: Completeness
+    public let conflictsAvailable: Bool
+    public enum Completeness: String, Codable, Sendable { case complete, unresolvedItems }
+    public var hasNextPage: Bool { position + consumedCount < total }
 }
 
 /// Typed, asynchronous access to the existing native protocol. No database or OS-account dependency.
@@ -102,15 +112,24 @@ public struct ItemClient: Sendable {
     }
 
     public func revision(for itemID: String) async throws -> Revision {
-        let result: GetResult = try await call(
-            "TractandaItem/get", arguments: GetRequest(ids: [itemID]), returning: GetResult.self)
-        guard result.notFound.isEmpty, result.list.count == 1,
-            result.list[0].itemID == itemID
-        else { throw TractandaError("notFound", "Item is unavailable.") }
+        let result = try await items(ids: [itemID])
+        if result.unresolved.contains(where: { $0.itemID == itemID }) {
+            throw TractandaError("itemUnresolved", "Item has no current representative; inspect its state.")
+        }
+        if result.oversizedIDs.contains(itemID) {
+            throw TractandaError("responseTooLarge", "Use a narrower item projection.")
+        }
+        if result.remainingIDs.contains(itemID) {
+            throw TractandaError("itemIncomplete", "Item remains unprocessed; continue the bounded get.")
+        }
+        if result.notFound.contains(itemID) { throw TractandaError("notFound", "Item is unavailable.") }
+        guard result.list.count == 1, result.list[0].itemID == itemID else {
+            throw TractandaError("protocolError", "Single-item get returned no classified result.")
+        }
         return result.list[0]
     }
 
-    /// Query and get are checked against the same authorized store state; partial pages are rejected.
+    /// Query/get share one caller-visible state; unresolved and byte-limited outcomes remain explicit.
     public func page(matching query: ItemQuery, requiring state: String? = nil) async throws -> ItemPage {
         guard query.position >= 0, (1...256).contains(query.limit), query.categoryPath.count <= 32,
             query.excludedCategoryIDs.count <= 32
@@ -129,18 +148,156 @@ public struct ItemClient: Sendable {
         if let state, state != page.queryState {
             throw TractandaError("stateChanged", "Items changed; refresh from the first page.")
         }
-        let result: GetResult = try await call(
-            "TractandaItem/get", arguments: GetRequest(ids: page.ids), returning: GetResult.self)
-        guard result.state == page.queryState, result.notFound.isEmpty else {
-            throw TractandaError("stateChanged", "Items changed while loading; refresh the view.")
+        let chunks = stride(from: 0, to: page.ids.count, by: 64).map {
+            Array(page.ids[$0..<min($0 + 64, page.ids.count)])
         }
-        guard result.list.count == page.ids.count,
-            Set(result.list.map(\.itemID)) == Set(page.ids)
-        else { throw TractandaError("protocolError", "Missing or duplicate item in query results.") }
-        let byID = Dictionary(uniqueKeysWithValues: result.list.map { ($0.itemID, $0) })
+        var fetched: [ItemGetResult] = []
+        for ids in chunks {
+            let result = try await items(ids: ids)
+            guard result.state == page.queryState else {
+                throw TractandaError("stateChanged", "Items changed while loading; refresh the view.")
+            }
+            fetched.append(result)
+        }
+        let list = fetched.flatMap(\.list)
+        let unresolved = fetched.flatMap(\.unresolved)
+        let notFound = fetched.flatMap(\.notFound)
+        let remainingIDs = fetched.flatMap(\.remainingIDs)
+        let oversizedIDs = fetched.flatMap(\.oversizedIDs)
+        let dispositionPairs = fetched.flatMap { Array($0.historicalDispositions) }
+        let historicalDispositions = Dictionary(
+            dispositionPairs,
+            uniquingKeysWith: { first, second in
+                first
+            })
+        guard historicalDispositions.count == dispositionPairs.count else {
+            throw TractandaError("protocolError", "Duplicate historical disposition revision ID.")
+        }
+        let seenIDs = list.map(\.itemID) + unresolved.map(\.itemID) + notFound + remainingIDs + oversizedIDs
+        guard Set(seenIDs).count == seenIDs.count, Set(seenIDs) == Set(page.ids) else {
+            throw TractandaError("protocolError", "Missing, duplicate, or unclassified query result ID.")
+        }
+        let byID = Dictionary(uniqueKeysWithValues: list.map { ($0.itemID, $0) })
+        let unresolvedByID = Dictionary(uniqueKeysWithValues: unresolved.map { ($0.itemID, $0) })
+        let completeness: ItemPage.Completeness =
+            unresolved.isEmpty && page.completeness != .unresolvedItems ? .complete : .unresolvedItems
         return ItemPage(
-            items: page.ids.compactMap { byID[$0] }, position: page.position, total: page.total,
-            state: page.queryState, nextCursor: page.nextCursor, previousCursor: page.previousCursor)
+            items: page.ids.compactMap { byID[$0] }, position: page.position,
+            consumedCount: page.ids.count, total: page.total, state: page.queryState,
+            nextCursor: page.nextCursor, previousCursor: page.previousCursor,
+            unresolved: page.ids.compactMap { unresolvedByID[$0] }, notFound: notFound,
+            remainingIDs: remainingIDs, oversizedIDs: oversizedIDs,
+            historicalDispositions: historicalDispositions, completeness: completeness,
+            conflictsAvailable: page.conflictsAvailable ?? !unresolved.isEmpty)
+    }
+
+    public func itemStates(ids: [String], maxBytes: Int = 65_536) async throws -> ItemStateResult {
+        try Self.validateIDs(ids)
+        guard (8_192...524_288).contains(maxBytes) else {
+            throw TractandaError("invalidArguments", "maxBytes must be 8192 through 524288.")
+        }
+        let result = try await call(
+            "TractandaItem/state", arguments: StateRequest(ids: ids, maxBytes: maxBytes),
+            returning: ItemStateResult.self)
+        try result.validate(requestedIDs: ids)
+        return result
+    }
+
+    /// Partial success is explicit; callers must inspect unresolved/remaining/oversized IDs.
+    public func items(
+        ids: [String], projection: String? = nil, properties: [String]? = nil,
+        maxBytes: Int = 524_288
+    ) async throws -> ItemGetResult {
+        try Self.validateIDs(ids)
+        guard (8_192...524_288).contains(maxBytes),
+            !(projection != nil && properties != nil),
+            projection.map({ ["full", "content", "summary"].contains($0) }) ?? true,
+            (properties?.count ?? 0) <= 64,
+            properties.map({ Set($0).count == $0.count }) ?? true,
+            properties?.allSatisfy({ !$0.isEmpty && !$0.contains("\0") }) ?? true
+        else { throw TractandaError("invalidArguments", "Invalid get projection or maxBytes.") }
+        let result = try await call(
+            "TractandaItem/get",
+            arguments: GetRequest(
+                ids: ids, projection: projection, properties: properties, maxBytes: maxBytes),
+            returning: ItemGetResult.self)
+        try result.validate(requestedIDs: ids)
+        return result
+    }
+
+    /// Reads an existing paged history route and preserves disposition metadata for returned revisions.
+    public func history(
+        itemID: String, position: Int = 0, limit: Int = 100,
+        projection: String? = nil, properties: [String]? = nil
+    ) async throws -> ItemHistoryResult {
+        try Identifier.validate(itemID)
+        guard position >= 0, (1...256).contains(limit),
+            !(projection != nil && properties != nil),
+            projection.map({ ["full", "content", "summary"].contains($0) }) ?? true,
+            (properties?.count ?? 0) <= 64,
+            properties.map({ Set($0).count == $0.count }) ?? true,
+            properties?.allSatisfy({ !$0.isEmpty && !$0.contains("\0") }) ?? true
+        else {
+            throw TractandaError("invalidArguments", "Invalid history page or projection.")
+        }
+        let page = try await call(
+            "TractandaItem/history",
+            arguments: HistoryRequest(
+                itemID: itemID, position: position, limit: limit,
+                projection: projection, properties: properties),
+            returning: ItemHistoryResult.self)
+        let revisionIDs = page.list.map(\.revisionID)
+        guard page.total >= 0, position <= page.total,
+            page.list.count <= page.total - position, page.list.count <= limit,
+            page.list.allSatisfy({ $0.itemID == itemID }),
+            Set(revisionIDs).count == revisionIDs.count,
+            Set(page.historicalDispositions.keys).isSubset(of: Set(revisionIDs))
+        else {
+            throw TractandaError("protocolError", "History page contains an invalid disposition map.")
+        }
+        return page
+    }
+
+    public func conflicts(limit: Int = 64, cursor: String? = nil) async throws -> ItemConflictPage {
+        guard (1...256).contains(limit), (cursor?.utf8.count ?? 0) <= 8_192 else {
+            throw TractandaError("invalidArguments", "Invalid conflict page limit or cursor.")
+        }
+        let page = try await call(
+            "TractandaItem/conflicts", arguments: ConflictPageRequest(limit: limit, cursor: cursor),
+            returning: ItemConflictPage.self)
+        guard !page.state.isEmpty, page.list.count <= limit, (page.nextCursor?.utf8.count ?? 0) <= 8_192,
+            Set(page.list.map(\.itemID)).count == page.list.count,
+            page.list.allSatisfy({ !$0.stateToken.isEmpty })
+        else { throw TractandaError("protocolError", "Invalid conflict page result.") }
+        return page
+    }
+
+    public func resolveConflict(_ request: ResolveConflictRequest) async throws -> CommitResult {
+        try Identifier.validate(request.itemID)
+        guard !request.expectedStateToken.isEmpty, request.expectedStateToken.utf8.count <= 8_192,
+            !request.reviewedFrontier.isEmpty, request.reviewedFrontier.count <= 1024,
+            Set(request.reviewedFrontier).count == request.reviewedFrontier.count,
+            !request.operationID.isEmpty, request.operationID.utf8.count <= 200,
+            !request.operationID.contains("\0"), Set(request.unset).count == request.unset.count,
+            Set(request.changes.keys).isDisjoint(with: request.unset)
+        else { throw TractandaError("invalidArguments", "Invalid conflict resolution request.") }
+        for id in request.reviewedFrontier { try Identifier.validate(id) }
+        let result = try await call(
+            "TractandaItem/resolveConflict", arguments: request, returning: CommitResult.self)
+        guard result.revision.itemID == request.itemID,
+            result.revision.fields["operationID"]?.string == request.operationID,
+            result.itemState == nil || result.itemState?.itemID == request.itemID
+        else {
+            throw TractandaError("protocolError", "Conflict resolution receipt does not match its request.")
+        }
+        return result
+    }
+
+    private static func validateIDs(_ ids: [String]) throws {
+        guard (1...64).contains(ids.count), Set(ids).count == ids.count else {
+            throw TractandaError("invalidArguments", "Supply 1 through 64 distinct item IDs.")
+        }
+        for id in ids { try Identifier.validate(id) }
     }
 
     public func beginStoreRebuild(operationID: String) async throws -> StoreRebuildStatus {
@@ -305,11 +462,33 @@ public struct ItemClient: Sendable {
 
 }
 
-private struct GetRequest: Encodable, Sendable { let ids: [String] }
-private struct GetResult: Decodable, Sendable {
-    let list: [Revision]
-    let notFound: [String]
-    let state: String
+private struct GetRequest: Encodable, Sendable {
+    let ids: [String]
+    let projection: String?
+    let properties: [String]?
+    let maxBytes: Int
+
+    init(ids: [String], projection: String? = nil, properties: [String]? = nil, maxBytes: Int = 524_288) {
+        self.ids = ids
+        self.projection = projection
+        self.properties = properties
+        self.maxBytes = maxBytes
+    }
+}
+private struct HistoryRequest: Encodable, Sendable {
+    let itemID: String
+    let position: Int
+    let limit: Int
+    let projection: String?
+    let properties: [String]?
+}
+private struct StateRequest: Encodable, Sendable {
+    let ids: [String]
+    let maxBytes: Int
+}
+private struct ConflictPageRequest: Encodable, Sendable {
+    let limit: Int
+    let cursor: String?
 }
 private struct QueryResult: Decodable, Sendable {
     let ids: [String]
@@ -318,6 +497,38 @@ private struct QueryResult: Decodable, Sendable {
     let queryState: String
     let nextCursor: String?
     let previousCursor: String?
+    let completeness: ItemPage.Completeness?
+    let conflictsAvailable: Bool?
+}
+
+extension ItemGetResult {
+    fileprivate func validate(requestedIDs: [String]) throws {
+        guard !state.isEmpty else { throw TractandaError("protocolError", "Missing get state token.") }
+        let returned = list.map(\.itemID)
+        let unresolvedIDs = unresolved.map(\.itemID)
+        let all = returned + unresolvedIDs + notFound + remainingIDs + oversizedIDs
+        guard all.allSatisfy(requestedIDs.contains), Set(all).count == all.count,
+            Set(all) == Set(requestedIDs)
+        else { throw TractandaError("protocolError", "Get result omitted or repeated requested IDs.") }
+        let returnedRevisionIDs = Set(list.map(\.revisionID))
+        guard Set(historicalDispositions.keys).isSubset(of: returnedRevisionIDs) else {
+            throw TractandaError("protocolError", "Get disposition map names a revision not returned.")
+        }
+        guard unresolved.allSatisfy({ !$0.stateToken.isEmpty }) else {
+            throw TractandaError("protocolError", "Unresolved item state lacks a token.")
+        }
+    }
+}
+
+extension ItemStateResult {
+    fileprivate func validate(requestedIDs: [String]) throws {
+        guard !state.isEmpty else { throw TractandaError("protocolError", "Missing item state token.") }
+        let returned = list.map(\.itemID)
+        let all = returned + notFound + remainingIDs + oversizedIDs
+        guard all.allSatisfy(requestedIDs.contains), Set(all).count == all.count,
+            Set(all) == Set(requestedIDs), list.allSatisfy({ !$0.stateToken.isEmpty })
+        else { throw TractandaError("protocolError", "State result omitted or repeated requested IDs.") }
+    }
 }
 
 private struct MethodRequest<Arguments: Encodable>: Encodable {

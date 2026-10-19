@@ -29,19 +29,29 @@ struct ItemSearchResponse: Decodable, Sendable {
 struct ItemSearchPage: Sendable {
     let items: [TractandaCore.Revision]
     let hits: [String: ItemSearchHit]
+    let unresolved: [TractandaCore.ItemUnresolvedState]
+    let unhydratedIDs: [String]
     let partialCoverage: Bool
     let omitted: Int
     let currentState: String?
 
-    init(response: ItemSearchResponse, current: [TractandaCore.Revision], currentState: String? = nil) {
+    init(
+        response: ItemSearchResponse, current: [TractandaCore.Revision], currentState: String? = nil,
+        unresolved: [TractandaCore.ItemUnresolvedState] = [], unhydratedIDs: [String] = []
+    ) {
         self.currentState = currentState
         let byID = Dictionary(current.map { ($0.itemID, $0) }, uniquingKeysWith: { first, _ in first })
+        let unresolvedByID = Dictionary(unresolved.map { ($0.itemID, $0) }, uniquingKeysWith: { first, _ in first })
         var seen = Set<String>()
         var items: [TractandaCore.Revision] = []
         var hits: [String: ItemSearchHit] = [:]
         var omitted = 0
         for hit in (response.results ?? []).prefix(ItemSearchLoader.limit) {
             guard !seen.contains(hit.itemID) else { continue }
+            if unresolvedByID[hit.itemID] != nil {
+                seen.insert(hit.itemID)
+                continue
+            }
             guard let item = byID[hit.itemID], !item.isDeleted, item.revisionID == hit.revisionID,
                 hit.similarity.isFinite
             else {
@@ -54,6 +64,8 @@ struct ItemSearchPage: Sendable {
         }
         self.items = items
         self.hits = hits
+        self.unresolved = (response.results ?? []).compactMap { unresolvedByID[$0.itemID] }
+        self.unhydratedIDs = unhydratedIDs
         partialCoverage = response.partialCoverage ?? false
         self.omitted = omitted
     }
@@ -120,6 +132,8 @@ struct ItemSearchLoader: Sendable {
     private struct GetRequest: Encodable, Sendable { let ids: [String] }
     private struct GetResponse: Decodable, Sendable {
         let list: [TractandaCore.Revision]
+        let notFound: [String]?
+        let unresolved: [TractandaCore.ItemUnresolvedState]?
         let state: String?
         let remainingIDs: [String]?
         let oversizedIDs: [String]?
@@ -170,6 +184,8 @@ struct ItemSearchLoader: Sendable {
         }
         var remaining = ids
         var items: [TractandaCore.Revision] = []
+        var unresolvedByID: [String: TractandaCore.ItemUnresolvedState] = [:]
+        var unhydratedIDs = Set<String>()
         var state: String?
         var retainedBytes = 0
         var attempts = 0
@@ -187,6 +203,21 @@ struct ItemSearchLoader: Sendable {
                     "stateChanged", "Items changed while fetching semantic results. Refresh search.")
             }
             state = current.state
+            let unresolved = current.unresolved ?? []
+            let remainingIDs = current.remainingIDs ?? []
+            let oversizedIDs = current.oversizedIDs ?? []
+            let classified = current.list.map(\.itemID) + (current.notFound ?? [])
+                + unresolved.map(\.itemID) + remainingIDs + oversizedIDs
+            guard Set(classified).count == classified.count, Set(classified) == Set(remaining) else {
+                throw TractandaCore.TractandaError(
+                    "protocolError", "Semantic item delivery omitted or repeated requested IDs.")
+            }
+            unresolvedByID.merge(
+                Dictionary(uniqueKeysWithValues: unresolved.map { ($0.itemID, $0) })) {
+                    _, newer in newer
+                }
+            unhydratedIDs.formUnion(remainingIDs)
+            unhydratedIDs.formUnion(oversizedIDs)
             for item in current.list where ids.contains(item.itemID) {
                 let bytes = try TractandaCore.JSON.encode(item).count
                 if retainedBytes + bytes <= 16 * 1_024 * 1_024 {
@@ -194,16 +225,19 @@ struct ItemSearchLoader: Sendable {
                     retainedBytes += bytes
                 }
             }
-            let next = (current.remainingIDs ?? []).filter {
-                remaining.contains($0) && !(current.oversizedIDs ?? []).contains($0)
+            let next = remainingIDs.filter {
+                remaining.contains($0) && !oversizedIDs.contains($0)
             }
             guard next.count < remaining.count else {
-                throw TractandaCore.TractandaError(
-                    "protocolError", "Semantic item delivery made no progress.")
+                unhydratedIDs.formUnion(remaining)
+                break
             }
             remaining = next
         }
-        return ItemSearchPage(response: response, current: items, currentState: state)
+        return ItemSearchPage(
+            response: response, current: items, currentState: state,
+            unresolved: (response.results ?? []).compactMap { unresolvedByID[$0.itemID] },
+            unhydratedIDs: Array(unhydratedIDs))
     }
 
     @discardableResult

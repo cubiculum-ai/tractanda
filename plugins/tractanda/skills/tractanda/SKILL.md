@@ -37,13 +37,15 @@ Represent ordinary actions as `Item` with the instance's relevant category assig
 
 ## Retrieve economically and accurately
 
-`tractanda_get`, `tractanda_memberships` and `tractanda_extracted_text` are batch tools: pass `ids: ["item UUID"]`, even for one item. Single-item tools use `itemID`.
+`tractanda_get`, `tractanda_memberships` and `tractanda_extracted_text` are batch tools: pass `ids: ["item UUID"]`, even for one item. When the native server advertises `tractanda.revision-projection.v1` and the connected schema exposes `tractanda_state`, it also accepts batch `ids`. Single-item tools use `itemID`.
 
 - Use `tractanda_query` for metadata predicates, literal FTS text, category intersections and exclusions. Read `tractanda://reference/query` for the portable Spotlight grammar. It is not arbitrary SQL or a promise of every native Spotlight feature.
 - Query IDs first, then `tractanda_get` with `projection: "summary"` or a small `properties` list, never both. Fetch content for relevant records. Properties are literal top-level keys; a projection's omission does not mean a field is unset.
 - Honor pagination and the byte budget independently. Follow `remainingIDs`; narrow the projection for `oversizedIDs`. Do not interpret a partial batch as absence.
 - When native `features` declares `tractanda.live-seek-cursor.v1`, use the served query reference to determine whether an order and filter support cursor paging. A cursor is bound to the current live query, actor, store, state and exposed clock; it is not permission. If it is rejected after a change or server restart, start a fresh query and continue with the supported cursor path or exact `position` fallback. Every page/get still uses current content and permissions.
 - Treat a multi-call query/get traversal as a live read, not a frozen result. Each delivery uses current content and permissions. Compare `queryState`/`state` across pages; if either changes, reconcile or restart the read before presenting the pages as one coherent result. These values are change indicators, not pinned results or read capabilities, and a changed read state does not require repeating committed writes. If state keeps changing, stop retrying and report a partial or unstable read, or narrow the query; do not loop indefinitely or claim a frozen snapshot.
+- Preserve successful records when a batch also reports unresolved or undelivered IDs. Follow available continuations, narrow oversized reads, and describe incomplete coverage; a global conflict-availability flag does not identify which query results were affected. Do not present old cached rows as current merely because the new read was incomplete.
+- Only use `tractanda_state`, `tractanda_conflicts` or `tractanda_resolve_conflict` when the active server advertises `tractanda.revision-projection.v1` and the connected schema exposes them. `ready` is a projection status, not a user workflow category. Review the complete current conflict context before an explicit resolution; keep ordinary edits on their existing revision-based guard. `tractanda_resolve` remains reference-path traversal. Resolving a conflict cannot approve a stale-authority offline edit; pause for administrator review after a user decision, and do not imply the projection tools provide that review.
 - For relative-date queries, when the query API exposes these controls, keep the same `timeZone` and reuse its returned `evaluatedAt` as `at` on later pages. This fixes relative-time evaluation only, not content or permissions.
 - Use `sort` for an inline query. A saved `viewID` supplies its own criteria and sort; do not combine it with inline criteria. `sectionID` applies to a saved view.
 - Resolve ambiguity between an event date and a reminder date before assigning precise dates.
@@ -54,6 +56,10 @@ Represent ordinary actions as `Item` with the instance's relevant category assig
 - For meaning-based retrieval, check `tractanda_semantic_status`, read `tractanda://reference/semantic`, start `tractanda_semantic_search`, and poll `tractanda_semantic_results` with its returned query ID. With native feature `tractanda.semantic-job-timing.v1`, retain `createdAt`/`expiresAt` and honor `retryAfterMilliseconds` while pending; polling does not renew the 120-second job. Missing timing fields without that feature are not evidence of a broken server. `notFound` omits timing and does not distinguish expired, unknown or foreign IDs: use your retained expiry to assess timing, then start a new search. Coverage may be incomplete. A low score or no result is not proof that an item does not exist; try metadata or literal search as appropriate. Fetch cited items before treating passages as current evidence.
 
 Return relevant item names/reference labels and IDs when useful, with a short account of unresolved or conflicting evidence. Avoid dumping entire histories or catalogs into the conversation.
+
+## Optional inline authoring
+
+For authored category/date shorthand, check current info for `tractanda.inline-capture.v1`, discover the available capture tools and read `tractanda://reference/items` for their exact schemas and retry semantics. Use the server preview rather than a separate parser or guessed taxonomy; retain its complete frozen plan through uncertainty. Ordinary imports/commits do not opt into interpretation. Keep API shapes and date configuration details in the served reference.
 
 ## Make a complete, recoverable edit
 
@@ -66,6 +72,8 @@ Use tagged `date` values for known timestamps, including `activityNotes[].at` an
 3. Persist a unique `operationID` and the exact write arguments in the task's durable working state before sending. Use `expectedRevisionID` for revise, retype or copy.
 4. Call `tractanda_commit` once for that edit. After a lost response or uncertain failure, retry the identical request with the same operation ID. Do not turn an uncertain retry into a second create.
 5. On conflict, read the new revision and merge deliberately. After reconciling the previous outcome, persist a new operation for a new edit. A definite validation rejection requires correcting the payload, not repeating the invalid request. It does not consume an unused operation ID, but cannot prove that an earlier uncertain attempt never committed; reconcile that uncertainty before changing the intent. Verify the returned revision and report unconfirmed writes as unconfirmed.
+
+For an explicitly surfaced projection conflict, use the served conflict-resolution contract only after reviewing its current state and complete frontier. This does not grant broader read or write permissions.
 
 For imports, read [importing existing records](references/importing.md). Stable source-derived operation IDs are useful, but replay also requires the identical payload and the same actor/store. Retain the payload journal; verify existing source identifiers and visible category intersections instead of restarting committed writes when the store state changes.
 

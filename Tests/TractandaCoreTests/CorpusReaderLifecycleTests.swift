@@ -41,8 +41,10 @@ final class CorpusReaderLifecycleTests: XCTestCase {
         }
     }
     private func store(_ root: URL, maximum: Int64 = 16 * 1024 * 1024) throws -> ItemStore {
-        try ItemStore(
-            root: root, attachmentUploadPolicy: .init(maximumStagedBytes: maximum, minimumFreeBytes: reserve))
+        if !FileManager.default.fileExists(atPath: root.path) { _ = try ItemStore.initializeFresh(root: root) }
+        return try ItemStore(
+            root: root, attachmentUploadPolicy: .init(maximumStagedBytes: maximum, minimumFreeBytes: reserve),
+            revisionProjectionEnabled: true, authorityIntakeEnabled: true)
     }
     private func source(_ store: ItemStore) throws -> Revision {
         try store.commit(
@@ -370,7 +372,8 @@ final class CorpusReaderLifecycleTests: XCTestCase {
                         await gate.wait("released")
                     }, onCancel: { gate.mark("cancelled") })
                 return inputs.map { _ in [1, 0] }
-            }, attachmentUploadPolicy: .init(maximumStagedBytes: cap, minimumFreeBytes: reserve))
+            }, requireInitializedStore: true,
+            attachmentUploadPolicy: .init(maximumStagedBytes: cap, minimumFreeBytes: reserve))
         await coordinator.setSemanticReaderDrainHookForTesting { evidence.drained($0, $1) }
         let client = TractandaClient.ItemClient(transport: Transport(coordinator: coordinator))
         do {

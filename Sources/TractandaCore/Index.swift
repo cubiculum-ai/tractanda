@@ -9,6 +9,10 @@ import Foundation
 #endif
 
 final class ItemIndex {
+    static let catalogueSchemaVersion = "20"
+    static let catalogueEngine = "tractanda-sqlite-catalogue-v18"
+    static let catalogueRowByteWindow = 8 * 1024 * 1024 + 4096
+    static let cataloguePageByteWindow = catalogueRowByteWindow
     static let headSummaryFieldNames: Set<String> = [
         "permissions", "selection", "categoryParents", "categoryOrder", "subject", "target",
         "categoryOverrides", "personalOverrides", "viewDefinition", "accessConfiguration",
@@ -42,12 +46,15 @@ final class ItemIndex {
         let digest: Data
         let createdAt: String
         let feedbackRevisionIDs: [String]
+        let modifiedAt: String
+        let provenance: RevisionProvenance?
 
         init(
             revisionID: String, itemID: String, path: String, parentID: String?, actor: String,
             operationID: String, size: UInt64, inode: UInt64, uid: UInt32, mode: UInt32,
             modificationSeconds: Int64, modificationNanoseconds: Int32, digest: Data,
-            createdAt: String = "", feedbackRevisionIDs: [String] = []
+            createdAt: String = "", feedbackRevisionIDs: [String] = [], modifiedAt: String = "",
+            provenance: RevisionProvenance? = nil
         ) {
             self.revisionID = revisionID
             self.itemID = itemID
@@ -64,6 +71,8 @@ final class ItemIndex {
             self.digest = digest
             self.createdAt = createdAt
             self.feedbackRevisionIDs = feedbackRevisionIDs
+            self.modifiedAt = modifiedAt
+            self.provenance = provenance
         }
     }
     struct ValidatedCatalogue: Sendable { fileprivate let identity: String }
@@ -83,6 +92,7 @@ final class ItemIndex {
     }
     let corpusIndexPath: String
     private var database: OpaquePointer?
+    private var activeCatalogueScanBudget: CatalogueScanBudget?
     var onPersistentFailure: (() -> Void)?
     static func shouldQuarantineSQLiteFailure(_ code: Int32) -> Bool {
         ![SQLITE_BUSY, SQLITE_LOCKED, SQLITE_INTERRUPT, SQLITE_NOMEM, SQLITE_TOOBIG, SQLITE_FULL]
@@ -91,6 +101,20 @@ final class ItemIndex {
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
     var corpusGCStatsForTesting = IndexCorpusGCStats()
     var afterCorpusReadCommitForTesting: (() throws -> Void)?
+    var graphReserveBytes: UInt64 = 1024 * 1024 * 1024
+    var graphMaximumTemporaryBytes: UInt64 = 256 * 1024 * 1024
+    var graphMaximumVMInstructions: Int64 = 200_000_000
+    var graphMaximumPageBytes = ItemIndex.cataloguePageByteWindow
+    var revisionProjectionActive = false
+    var currentProjectionSchemaReady = false
+    var projectionAppendActive = false
+    var authorityControlSchemaReady = false
+    var lastAnalyzedProjection: RevisionProjection.Snapshot?
+    var admittedProjectionCheckpointWatermark: Int64?
+    private var validatedGraphWatermark: Int64?
+    private var validatedGraphAllowsOnlyLinear = false
+    private(set) var graphValidationPassesForTesting = 0
+    private(set) var lastCatalogueScanWorkForTesting: Int64 = 0
     private(set) var seekVMInstructionsForTesting = 0
     private(set) var principalLookupVMInstructionsForTesting = 0
     private(set) var savedViewCategoryPlanLookupsForTesting = 0
@@ -308,14 +332,14 @@ final class ItemIndex {
             try createCorpusTables()
             try execute("CREATE TABLE checkpoint_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             try execute(
-                "CREATE TABLE revision_catalog (revision TEXT PRIMARY KEY, item TEXT NOT NULL, path TEXT NOT NULL, parent TEXT, actor TEXT NOT NULL, operation TEXT NOT NULL, size INTEGER NOT NULL, inode INTEGER NOT NULL, uid INTEGER NOT NULL, mode INTEGER NOT NULL, mtime_seconds INTEGER NOT NULL, mtime_nanoseconds INTEGER NOT NULL, digest TEXT NOT NULL, created_at TEXT NOT NULL)"
+                "CREATE TABLE revision_catalog (revision TEXT PRIMARY KEY, item TEXT NOT NULL, path TEXT NOT NULL, parent TEXT, actor TEXT NOT NULL, operation TEXT NOT NULL, size INTEGER NOT NULL, inode INTEGER NOT NULL, uid INTEGER NOT NULL, mode INTEGER NOT NULL, mtime_seconds INTEGER NOT NULL, mtime_nanoseconds INTEGER NOT NULL, digest TEXT NOT NULL, created_at TEXT NOT NULL, modified_at TEXT NOT NULL, provenance TEXT, modified_ticks INTEGER)"
             )
             try execute("CREATE INDEX revision_catalog_item ON revision_catalog(item, revision)")
             try execute(
-                "CREATE UNIQUE INDEX revision_catalog_operation ON revision_catalog(actor, operation)")
+                "CREATE INDEX revision_catalog_operation ON revision_catalog(actor, operation)")
             try execute("CREATE UNIQUE INDEX revision_catalog_path ON revision_catalog(path)")
             try execute(
-                "CREATE UNIQUE INDEX revision_catalog_parent ON revision_catalog(item,parent) WHERE parent IS NOT NULL"
+                "CREATE INDEX revision_catalog_parent ON revision_catalog(item,parent) WHERE parent IS NOT NULL"
             )
             try execute(
                 "CREATE TABLE operation_receipts (actor TEXT NOT NULL, operation TEXT NOT NULL, revision TEXT NOT NULL UNIQUE, item TEXT NOT NULL, PRIMARY KEY(actor, operation))"
@@ -330,11 +354,14 @@ final class ItemIndex {
                 "CREATE TABLE recovery_ordinals (item TEXT NOT NULL, revision TEXT PRIMARY KEY, ordinal INTEGER NOT NULL, UNIQUE(item, ordinal))"
             )
             try execute("CREATE TABLE recovery_heads (item TEXT PRIMARY KEY, revision TEXT NOT NULL UNIQUE)")
+            try createRevisionGraphTables()
         }
         if !create {
             // No old-schema shim: rebuilding preserves canonical items and constructs this disposable projection.
             try execute("SELECT encoded_bytes,owner_work_id FROM corpus_generation LIMIT 0")
             try execute("SELECT generation_id FROM corpus_gc_candidate LIMIT 0")
+            try execute("SELECT status,dirty FROM current_projection LIMIT 0")
+            currentProjectionSchemaReady = true
         }
         // Request-local authorization state belongs to each connection, including
         // reopened read-only connections; TEMP writes do not mutate the main catalogue.
@@ -360,7 +387,7 @@ final class ItemIndex {
         guard sqlite3_prepare_v2(database, "PRAGMA journal_mode=WAL", -1, &statement, nil) == SQLITE_OK,
             let statement
         else { throw error() }
-        guard sqlite3_step(statement) == SQLITE_ROW,
+        guard catalogueStep(statement) == SQLITE_ROW,
             let mode = sqlite3_column_text(statement, 0), String(cString: mode).lowercased() == "wal"
         else {
             sqlite3_finalize(statement)
@@ -373,7 +400,7 @@ final class ItemIndex {
         guard sqlite3_prepare_v2(database, "PRAGMA synchronous", -1, &syncStatement, nil) == SQLITE_OK,
             let syncStatement
         else { throw error() }
-        guard sqlite3_step(syncStatement) == SQLITE_ROW,
+        guard catalogueStep(syncStatement) == SQLITE_ROW,
             sqlite3_column_int(syncStatement, 0) == 2
         else {
             sqlite3_finalize(syncStatement)
@@ -388,7 +415,7 @@ final class ItemIndex {
             let statement
         else { throw error() }
         defer { sqlite3_finalize(statement) }
-        guard sqlite3_step(statement) == SQLITE_ROW else { throw error() }
+        guard catalogueStep(statement) == SQLITE_ROW else { throw error() }
         return sqlite3_column_int(statement, 0)
     }
     func holdStatementForTesting() throws -> OpaquePointer {
@@ -399,6 +426,104 @@ final class ItemIndex {
         try prepare(sql, values)
     }
     private func prepare(_ sql: String, _ bindings: [String] = []) throws -> OpaquePointer {
+        try activeCatalogueScanBudget?.requireAvailable()
+        let tokens = sql.lowercased().split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        let verb = tokens.first ?? ""
+        let target: String?
+        switch verb {
+        case "insert", "replace":
+            target = tokens.firstIndex(of: "into").flatMap { position in
+                position + 1 < tokens.count ? tokens[position + 1] : nil
+            }
+        case "update": target = tokens.count > 1 ? tokens[1] : nil
+        case "delete": target = tokens.count > 2 && tokens[1] == "from" ? tokens[2] : nil
+        case "create", "drop", "alter":
+            if let position = tokens.firstIndex(where: { ["table", "index"].contains($0) }) {
+                target = tokens.dropFirst(position + 1).first {
+                    !["if", "not", "exists"].contains($0)
+                }
+            } else {
+                target = nil
+            }
+        default: target = nil
+        }
+        let targetTable = target?.split(separator: "(", maxSplits: 1).first.map(String.init)
+        let projectionTargets: Set<String> = [
+            "peer_original_required", "peer_original_present", "peer_original_revision", "peer_original_text",
+            "temp.peer_original_required", "temp.peer_original_present", "temp.peer_original_revision",
+            "temp.peer_original_text",
+            "peer_original_document", "peer_original_document_present",
+            "temp.peer_original_document", "temp.peer_original_document_present",
+            "peer_original_item", "temp.peer_original_item",
+            "peer_inventory_state", "peer_inventory_receipt",
+            "peer_export_plan", "peer_export_object", "peer_export_ready", "peer_export_page",
+            "peer_document_work", "peer_document_part", "peer_document_corpus_owner",
+            "peer_document_corpus_work",
+            "peer_lifecycle_retired", "peer_lifecycle_cutoff", "peer_lifecycle_decision",
+            "peer_lifecycle_effect", "peer_lifecycle_recheck",
+            "authority_origin_issued", "authority_kind",
+            "authority_review_event", "authority_review_target", "authority_review_edge",
+            "authority_review_children", "authority_review_head", "authority_review_applied",
+            "authority_review_resolution", "authority_review_item",
+            "rp_nodes", "rp_node_order", "rp_segments", "rp_writes", "rp_frontier", "rp_scope",
+            "rp_fields", "rp_memo", "rp_origins", "rp_lookup", "rp_lookup_order", "rp_seen", "rp_ready",
+            "recovery_ordinals", "recovery_heads", "recovery_graph_work", "recovery_ready",
+            "recovery_roots", "recovery_item_progress", "recovery_forks", "recovery_reach_seen",
+            "recovery_reach_ready",
+            "current_projection", "current_policy", "projection_acl", "projection_acl_named",
+            "projection_principal_counts", "request_users", "request_groups", "request_actor",
+            "checkpoint_meta", "corpus_index_identity", "page_text_index", "text_index",
+            "acl_principal_counts",
+            "document_owners", "attachment_owners",
+            "items", "head_summaries", "field_presence", "scalar_value", "acl_named", "acl_core",
+            "text_snapshot", "corpus_head", "corpus_link", "corpus_generation", "corpus_work",
+            "corpus_work_generation", "corpus_unit", "corpus_span", "corpus_gc_candidate", "corpus_gc_cursor",
+            "saved_view_targets", "saved_view_dependencies", "saved_view_coverage", "saved_view_staging",
+            "saved_view_build_state", "saved_view_base", "category_include_candidates",
+            "category_decision_candidates",
+            "category_edges", "personal_category_delta", "personal_overlay_targets",
+            "authority_original_receipts", "authority_objects", "authority_packages",
+            "authority_dispositions", "authority_dependencies",
+            "authority_evidence_target", "authority_packages_object", "authority_dependencies_reverse",
+            "authority_ready_status", "authority_walk", "authority_package_pending",
+            "authority_objects_path", "authority_objects_kind_id",
+            "authority_evidence_binding", "authority_object_receipts",
+            "authority_pending_effect", "authority_retired_items", "authority_control_pending",
+            "authority_control_pending_package",
+            "authority_control_pending_ready", "authority_control_pending_object",
+            "authority_reconciliation_witness", "authority_reconciliation_recovery", "authority_absorbed",
+            "authority_absorbed_cut",
+            "authority_invalidation",
+            "authority_invalidation_item", "authority_objects_item",
+            "authority_control", "authority_control_origin", "authority_control_heads",
+            "authority_control_edges",
+            "authority_control_children", "authority_control_delta", "authority_control_target",
+            "authority_control_affected", "authority_control_work", "authority_control_work_order",
+            "authority_exposure", "authority_exposure_order", "authority_reconciliation",
+            "authority_exposure_revision", "authority_local_exposure", "authority_local_exposure_order",
+            "authority_local_exposure_revision", "authority_local_visibility_work",
+            "authority_local_acceptance", "authority_local_assessment", "authority_local_bootstrap",
+            "authority_local_history", "authority_local_history_order",
+            "peer_origin_reconsideration",
+        ]
+        let readOrControl = [
+            "select", "explain", "savepoint", "release", "rollback", "begin", "commit", "end",
+        ]
+        // The canonical catalogue audit uses this exact read-only pragma. All other
+        // pragma syntax retains the conservative fallback, including unknown queries.
+        let readOnlyIntegrityAudit = bindings.isEmpty && tokens == ["pragma", "integrity_check"]
+        if !readOrControl.contains(verb),
+            !readOnlyIntegrityAudit,
+            targetTable == nil || !projectionTargets.contains(targetTable!)
+        {
+            // Only our explicitly known work targets retain proof. Unsupported syntax,
+            // including CTE mutations/quoted targets, conservatively invalidates it.
+            invalidateRevisionGraphValidation()
+            if currentProjectionSchemaReady, !projectionAppendActive {
+                try execute("DELETE FROM checkpoint_meta WHERE key='graphAdmissionProof'")
+                try execute("UPDATE current_projection SET dirty=1")
+            }
+        }
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
             throw error()
@@ -415,6 +540,16 @@ final class ItemIndex {
         return statement
     }
     private func error() -> TractandaError {
+        if let budget = activeCatalogueScanBudget {
+            if let callbackError = budget.callbackError {
+                return callbackError as? TractandaError
+                    ?? TractandaError("indexTransient", "Catalogue control interrupted a query.")
+            }
+            if budget.exhausted {
+                return TractandaError("resourceLimit", "Catalogue VM work budget exceeded.")
+            }
+            if budget.cancelled { return TractandaError("cancelled", "Catalogue scan was cancelled.") }
+        }
         let code = database.map { sqlite3_errcode($0) } ?? SQLITE_MISUSE
         if Self.shouldQuarantineSQLiteFailure(code) { onPersistentFailure?() }
         let errorCode: String
@@ -441,7 +576,7 @@ final class ItemIndex {
             }
             guard result == SQLITE_OK else { throw error() }
         }
-        let status = sqlite3_step(statement)
+        let status = catalogueStep(statement)
         guard status == SQLITE_DONE || status == SQLITE_ROW else { throw error() }
     }
     func makeRebuildStatements() throws -> RebuildStatements {
@@ -572,7 +707,7 @@ final class ItemIndex {
     func execute(_ sql: String, _ bindings: [String] = []) throws {
         let statement = try prepare(sql, bindings)
         defer { sqlite3_finalize(statement) }
-        let status = sqlite3_step(statement)
+        let status = catalogueStep(statement)
         guard status == SQLITE_DONE || status == SQLITE_ROW else { throw error() }
     }
 
@@ -583,7 +718,7 @@ final class ItemIndex {
         let statement = try prepare(
             "SELECT item, descriptor FROM document_owners WHERE id = ?", [reference.contentID])
         defer { sqlite3_finalize(statement) }
-        let status = sqlite3_step(statement)
+        let status = catalogueStep(statement)
         if status == SQLITE_ROW {
             guard let item = sqlite3_column_text(statement, 0),
                 let descriptor = sqlite3_column_text(statement, 1),
@@ -605,7 +740,7 @@ final class ItemIndex {
         let statement = try prepare(
             "SELECT item, descriptor FROM attachment_owners WHERE id = ?", [descriptor.attachmentID])
         defer { sqlite3_finalize(statement) }
-        let status = sqlite3_step(statement)
+        let status = catalogueStep(statement)
         if status == SQLITE_ROW {
             guard let storedItem = sqlite3_column_text(statement, 0),
                 let storedDescriptor = sqlite3_column_text(statement, 1),
@@ -633,25 +768,16 @@ final class ItemIndex {
         try execute("DELETE FROM recovery_heads")
         try execute("DELETE FROM checkpoint_meta")
         try execute("INSERT INTO checkpoint_meta VALUES ('identity', ?)", [identity])
-        try execute("INSERT INTO checkpoint_meta VALUES ('schema', '11')")
-        try execute("INSERT INTO checkpoint_meta VALUES ('engine', 'tractanda-sqlite-catalogue-v11')")
+        try execute("INSERT INTO checkpoint_meta VALUES ('schema', ?)", [Self.catalogueSchemaVersion])
+        try execute("INSERT INTO checkpoint_meta VALUES ('engine', ?)", [Self.catalogueEngine])
         try execute("INSERT INTO checkpoint_meta VALUES ('itemTextProfile', ?)", [ItemTextContent.profile])
-        for row in rows {
-            let values = [
-                row.revisionID, row.itemID, row.path, row.parentID ?? "", row.actor,
-                row.operationID, String(row.size), String(row.inode),
-                String(row.uid), String(row.mode), String(row.modificationSeconds),
-                String(row.modificationNanoseconds), row.digest.map { String(format: "%02x", $0) }.joined(),
-                row.createdAt,
-            ]
-            try execute(
-                "INSERT INTO revision_catalog VALUES (?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                values)
-            try execute(
-                "INSERT INTO operation_receipts VALUES (?, ?, ?, ?)",
-                [row.actor, row.operationID, row.revisionID, row.itemID])
-            try insertFeedback(row)
+        for table in [
+            "revision_parents", "revision_field_values", "revision_field_writes", "revision_frontier",
+            "scoped_operation_receipts",
+        ] {
+            try execute("DELETE FROM \(table)")
         }
+        for row in rows { try insertRecoveryRow(row) }
     }
 
     func catalogue(identity: String) throws -> [CatalogueRow]? {
@@ -665,53 +791,61 @@ final class ItemIndex {
         }
         let integrity = try prepare("PRAGMA integrity_check")
         defer { sqlite3_finalize(integrity) }
-        guard sqlite3_step(integrity) == SQLITE_ROW,
+        guard catalogueStep(integrity) == SQLITE_ROW,
             exactString(integrity, 0) == "ok",
-            sqlite3_step(integrity) == SQLITE_DONE
+            catalogueStep(integrity) == SQLITE_DONE
         else { return nil }
         let invalidReceipt = try prepare(
-            "SELECT 1 FROM revision_catalog r LEFT JOIN operation_receipts o ON o.actor=r.actor AND o.operation=r.operation WHERE o.revision IS NULL OR o.revision!=r.revision OR o.item!=r.item LIMIT 1"
+            "SELECT 1 FROM revision_catalog r LEFT JOIN operation_receipts o ON o.revision=r.revision LEFT JOIN scoped_operation_receipts m ON m.revision=r.revision WHERE (r.provenance IS NULL AND (o.revision IS NULL OR o.actor!=r.actor OR o.operation!=r.operation OR o.item!=r.item)) OR (r.provenance IS NOT NULL AND (m.revision IS NULL OR m.actor!=r.actor OR m.operation!=r.operation OR m.item!=r.item)) LIMIT 1"
         )
         defer { sqlite3_finalize(invalidReceipt) }
-        guard sqlite3_step(invalidReceipt) == SQLITE_DONE else { return nil }
+        guard catalogueStep(invalidReceipt) == SQLITE_DONE else { return nil }
         let receiptCounts = try prepare(
-            "SELECT (SELECT COUNT(*) FROM revision_catalog),(SELECT COUNT(*) FROM operation_receipts)")
+            "SELECT (SELECT COUNT(*) FROM revision_catalog),(SELECT COUNT(*) FROM operation_receipts)+(SELECT COUNT(*) FROM scoped_operation_receipts)"
+        )
         defer { sqlite3_finalize(receiptCounts) }
-        guard sqlite3_step(receiptCounts) == SQLITE_ROW,
+        guard catalogueStep(receiptCounts) == SQLITE_ROW,
             sqlite3_column_int64(receiptCounts, 0) == sqlite3_column_int64(receiptCounts, 1),
-            sqlite3_step(receiptCounts) == SQLITE_DONE
+            catalogueStep(receiptCounts) == SQLITE_DONE
         else { return nil }
         let meta = try prepare("SELECT value FROM checkpoint_meta WHERE key = 'identity'")
         defer { sqlite3_finalize(meta) }
-        guard sqlite3_step(meta) == SQLITE_ROW,
-            exactString(meta, 0) == identity, sqlite3_step(meta) == SQLITE_DONE
+        guard catalogueStep(meta) == SQLITE_ROW,
+            exactString(meta, 0) == identity, catalogueStep(meta) == SQLITE_DONE
         else { return nil }
         let schema = try prepare("SELECT value FROM checkpoint_meta WHERE key = 'schema'")
         defer { sqlite3_finalize(schema) }
-        guard sqlite3_step(schema) == SQLITE_ROW,
-            exactString(schema, 0) == "11", sqlite3_step(schema) == SQLITE_DONE
+        guard catalogueStep(schema) == SQLITE_ROW,
+            exactString(schema, 0) == Self.catalogueSchemaVersion, catalogueStep(schema) == SQLITE_DONE
         else { return nil }
         let extraction = try prepare("SELECT value FROM checkpoint_meta WHERE key = 'itemTextProfile'")
         defer { sqlite3_finalize(extraction) }
-        guard sqlite3_step(extraction) == SQLITE_ROW,
-            exactString(extraction, 0) == ItemTextContent.profile, sqlite3_step(extraction) == SQLITE_DONE
+        guard catalogueStep(extraction) == SQLITE_ROW,
+            exactString(extraction, 0) == ItemTextContent.profile, catalogueStep(extraction) == SQLITE_DONE
         else { return nil }
         let engine = try prepare("SELECT value FROM checkpoint_meta WHERE key = 'engine'")
         defer { sqlite3_finalize(engine) }
-        guard sqlite3_step(engine) == SQLITE_ROW,
-            exactString(engine, 0) == "tractanda-sqlite-catalogue-v11", sqlite3_step(engine) == SQLITE_DONE
+        guard catalogueStep(engine) == SQLITE_ROW,
+            exactString(engine, 0) == Self.catalogueEngine, catalogueStep(engine) == SQLITE_DONE
         else { return nil }
         // A copied or partially replaced v3 catalogue can retain valid metadata while
         // its derived query table no longer matches the current engine contract.
         func hasColumns(_ sql: String) -> Bool {
             guard let statement = try? prepare(sql) else { return false }
             defer { sqlite3_finalize(statement) }
-            return sqlite3_step(statement) == SQLITE_DONE
+            return catalogueStep(statement) == SQLITE_DONE
         }
         for sql in [
             "SELECT id,revision,class,deleted,modified,created,fields FROM items LIMIT 0",
-            "SELECT revision,item,path,parent,actor,operation,size,inode,uid,mode,mtime_seconds,mtime_nanoseconds,digest,created_at FROM revision_catalog LIMIT 0",
+            "SELECT revision,item,path,parent,actor,operation,size,inode,uid,mode,mtime_seconds,mtime_nanoseconds,digest,created_at,modified_at,provenance,modified_ticks FROM revision_catalog LIMIT 0",
             "SELECT actor,operation,revision,item FROM operation_receipts LIMIT 0",
+            "SELECT origin,kind,actor,operation,revision,item FROM scoped_operation_receipts LIMIT 0",
+            "SELECT child,parent FROM revision_parents LIMIT 0",
+            "SELECT revision,field,action,digest FROM revision_field_writes LIMIT 0",
+            "SELECT revision,field,digest FROM revision_field_values LIMIT 0",
+            "SELECT revision,item FROM recovery_ready LIMIT 0",
+            "SELECT revision,item,indegree,processed FROM recovery_graph_work LIMIT 0",
+            "SELECT revision,authored FROM revision_frontier LIMIT 0",
             "SELECT item,revision,target FROM feedback_refs LIMIT 0",
             "SELECT item_id,field FROM field_presence LIMIT 0",
             "SELECT item_id,field,member_ordinal,type,int_value,real_value,date_value,bool_value FROM scalar_value LIMIT 0",
@@ -723,96 +857,59 @@ final class ItemIndex {
         )
         defer { sqlite3_finalize(statement) }
         var rows: [CatalogueRow] = []
+        var pageBytes = 0
         while true {
-            let status = sqlite3_step(statement)
+            let status = catalogueStep(statement)
             if status == SQLITE_DONE { break }
             guard status == SQLITE_ROW else { return nil }
-            func string(_ i: Int32) -> String? {
-                exactString(statement, i)
-            }
-            guard let revision = string(0), let item = string(1), let path = string(2),
-                let actor = string(4), let operation = string(5)
-            else { return nil }
-            let parent = sqlite3_column_type(statement, 3) == SQLITE_NULL ? nil : string(3)
-            let size = UInt64(sqlite3_column_int64(statement, 6))
-            let inode = UInt64(sqlite3_column_int64(statement, 7))
-            let uid = UInt32(sqlite3_column_int64(statement, 8))
-            let mode = UInt32(sqlite3_column_int64(statement, 9))
-            let mtimeSeconds = sqlite3_column_int64(statement, 10)
-            let mtimeNanoseconds = Int32(sqlite3_column_int64(statement, 11))
-            guard let digestHex = string(12), digestHex.count == 64, let createdAt = string(13) else {
-                return nil
-            }
-            var digest = Data()
-            var cursor = digestHex.startIndex
-            for _ in 0..<32 {
-                let end = digestHex.index(cursor, offsetBy: 2)
-                guard let byte = UInt8(digestHex[cursor..<end], radix: 16) else { return nil }
-                digest.append(byte)
-                cursor = end
-            }
-            rows.append(
-                CatalogueRow(
-                    revisionID: revision, itemID: item, path: path, parentID: parent,
-                    actor: actor, operationID: operation, size: size,
-                    inode: inode, uid: uid, mode: mode,
-                    modificationSeconds: mtimeSeconds,
-                    modificationNanoseconds: mtimeNanoseconds, digest: digest,
-                    createdAt: createdAt, feedbackRevisionIDs: try feedbackRevisionIDs(revision)))
+            try boundCatalogueRow(statement, remaining: &pageBytes, maximum: graphMaximumPageBytes)
+            guard let row = try catalogueRow(statement) else { return nil }
+            rows.append(row)
         }
-        let receipts = try prepare("SELECT COUNT(*) FROM operation_receipts")
+        let receipts = try prepare(
+            "SELECT (SELECT COUNT(*) FROM operation_receipts)+(SELECT COUNT(*) FROM scoped_operation_receipts)"
+        )
         defer { sqlite3_finalize(receipts) }
-        guard sqlite3_step(receipts) == SQLITE_ROW,
+        guard catalogueStep(receipts) == SQLITE_ROW,
             sqlite3_column_int64(receipts, 0) == Int64(rows.count),
-            sqlite3_step(receipts) == SQLITE_DONE
+            catalogueStep(receipts) == SQLITE_DONE
         else { return nil }
         let mismatches = try prepare(
             "SELECT COUNT(*) FROM revision_catalog r LEFT JOIN operation_receipts o "
-                + "ON o.actor=r.actor AND o.operation=r.operation "
-                + "WHERE o.revision IS NULL OR o.revision != r.revision OR o.item != r.item")
+                + "ON o.revision=r.revision LEFT JOIN scoped_operation_receipts m ON m.revision=r.revision "
+                + "WHERE (r.provenance IS NULL AND (o.revision IS NULL OR o.actor!=r.actor OR o.operation!=r.operation OR o.item!=r.item)) "
+                + "OR (r.provenance IS NOT NULL AND (m.revision IS NULL OR m.actor!=r.actor OR m.operation!=r.operation OR m.item!=r.item))"
+        )
         defer { sqlite3_finalize(mismatches) }
-        guard sqlite3_step(mismatches) == SQLITE_ROW, sqlite3_column_int64(mismatches, 0) == 0,
-            sqlite3_step(mismatches) == SQLITE_DONE
+        guard catalogueStep(mismatches) == SQLITE_ROW, sqlite3_column_int64(mismatches, 0) == 0,
+            catalogueStep(mismatches) == SQLITE_DONE
         else { return nil }
         return rows
     }
 
-    func upsertCatalogue(_ row: CatalogueRow) throws {
-        try execute(
-            "INSERT INTO revision_catalog VALUES (?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [
-                row.revisionID, row.itemID, row.path, row.parentID ?? "", row.actor, row.operationID,
-                String(row.size), String(row.inode), String(row.uid), String(row.mode),
-                String(row.modificationSeconds), String(row.modificationNanoseconds),
-                row.digest.map { String(format: "%02x", $0) }.joined(), row.createdAt,
-            ])
-        try execute(
-            "INSERT INTO operation_receipts VALUES (?, ?, ?, ?)",
-            [row.actor, row.operationID, row.revisionID, row.itemID])
-        try execute("DELETE FROM feedback_refs WHERE revision=?", [row.revisionID])
-        try insertFeedback(row)
+    func upsertCatalogue(_ row: CatalogueRow, graphFields: [String: ItemValue]? = nil) throws {
+        try insertRecoveryRow(row, graphFields: graphFields)
     }
 
-    func insertRecoveryRow(_ row: CatalogueRow) throws {
-        let values = [
-            row.revisionID, row.itemID, row.path, row.parentID ?? "", row.actor, row.operationID,
-            String(row.size), String(row.inode), String(row.uid), String(row.mode),
-            String(row.modificationSeconds), String(row.modificationNanoseconds),
-            row.digest.map { String(format: "%02x", $0) }.joined(), row.createdAt,
-        ]
-        try execute(
-            "INSERT INTO revision_catalog VALUES (?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            values)
-        try execute(
-            "INSERT INTO operation_receipts VALUES (?, ?, ?, ?)",
-            [row.actor, row.operationID, row.revisionID, row.itemID])
-        try insertFeedback(row)
+    func insertRecoveryRow(_ row: CatalogueRow, graphFields: [String: ItemValue]? = nil) throws {
+        if row.provenance?.mergeProfile == AuthorityStore.reconciliationProfile {
+            guard let graphFields else {
+                throw TractandaError("invalidAuthority", "Reconciliation needs actual canonical fields.")
+            }
+            try validateAuthorityReconciliationMetadata(
+                Revision(fields: graphFields, formatVersion: 2), allowUnprojectedRecoveryParents: true)
+        }
+        try insertGraphCatalogueRow(row, graphFields: graphFields)
+        if authorityControlSchemaReady {
+            try execute("UPDATE authority_local_history SET retired=0 WHERE revision=?", [row.revisionID])
+            try execute("DELETE FROM authority_retired_items WHERE item=?", [row.itemID])
+        }
     }
 
     func catalogueCount() throws -> Int {
         let statement = try prepare("SELECT COUNT(*) FROM revision_catalog")
         defer { sqlite3_finalize(statement) }
-        guard sqlite3_step(statement) == SQLITE_ROW else { throw error() }
+        guard catalogueStep(statement) == SQLITE_ROW else { throw error() }
         return Int(sqlite3_column_int64(statement, 0))
     }
 
@@ -820,22 +917,36 @@ final class ItemIndex {
     func catalogueWatermark() throws -> Int64 {
         let statement = try prepare("SELECT COALESCE(MAX(rowid), 0) FROM revision_catalog")
         defer { sqlite3_finalize(statement) }
-        guard sqlite3_step(statement) == SQLITE_ROW else { throw error() }
+        guard catalogueStep(statement) == SQLITE_ROW else { throw error() }
         let watermark = sqlite3_column_int64(statement, 0)
-        guard sqlite3_step(statement) == SQLITE_DONE else { throw error() }
+        guard catalogueStep(statement) == SQLITE_DONE else { throw error() }
         return watermark
     }
 
     func sealCatalogue(identity: String) throws {
-        try execute("INSERT OR REPLACE INTO checkpoint_meta VALUES ('identity', ?)", [identity])
-        try execute("INSERT OR REPLACE INTO checkpoint_meta VALUES ('schema', '11')")
-        try execute(
-            "INSERT OR REPLACE INTO checkpoint_meta VALUES ('engine', 'tractanda-sqlite-catalogue-v11')")
-        try execute(
-            "INSERT OR REPLACE INTO checkpoint_meta VALUES ('itemTextProfile', ?)", [ItemTextContent.profile])
+        try execute("SAVEPOINT seal_catalogue")
+        do {
+            try execute("INSERT OR REPLACE INTO checkpoint_meta VALUES ('identity', ?)", [identity])
+            try execute(
+                "INSERT OR REPLACE INTO checkpoint_meta VALUES ('schema', ?)", [Self.catalogueSchemaVersion])
+            try execute(
+                "INSERT OR REPLACE INTO checkpoint_meta VALUES ('engine', ?)", [Self.catalogueEngine])
+            try execute(
+                "INSERT OR REPLACE INTO checkpoint_meta VALUES ('itemTextProfile', ?)",
+                [ItemTextContent.profile])
+            if try acceptedGraphProofIsCurrent() { try persistAcceptedGraphProof() }
+            try execute("RELEASE seal_catalogue")
+        } catch {
+            try? execute("ROLLBACK TO seal_catalogue")
+            try? execute("RELEASE seal_catalogue")
+            throw error
+        }
     }
 
     func recoveryRowPage(after revision: String? = nil, limit: Int = 128) throws -> [CatalogueRow] {
+        guard (1...1024).contains(limit) else {
+            throw TractandaError("invalidLimit", "Recovery page limit is invalid.")
+        }
         let sql =
             revision == nil
             ? "SELECT \(catalogueColumns) FROM revision_catalog ORDER BY revision LIMIT ?"
@@ -844,103 +955,187 @@ final class ItemIndex {
         let statement = try prepare(sql, bindings)
         defer { sqlite3_finalize(statement) }
         var rows: [CatalogueRow] = []
+        var pageBytes = 0
         while true {
-            let status = sqlite3_step(statement)
+            let status = catalogueStep(statement)
             if status == SQLITE_DONE { return rows }
-            guard status == SQLITE_ROW, let row = catalogueRow(statement) else { throw error() }
+            guard status == SQLITE_ROW else { throw error() }
+            guard
+                try boundCatalogueRow(
+                    statement, remaining: &pageBytes, maximum: graphMaximumPageBytes, allowPrefix: true)
+            else { return rows }
+            guard let row = try catalogueRow(statement) else { throw error() }
             rows.append(row)
         }
     }
 
-    /// Validate graph shape with indexed successor lookups and disk-backed ordinals.
-    /// No revision-sized Swift collection is constructed.
-    func validateRecoveryGraph() throws {
-        try execute("DELETE FROM recovery_ordinals")
-        try execute("DELETE FROM recovery_heads")
-        let invalidParents = try prepare(
-            "SELECT 1 FROM revision_catalog r LEFT JOIN revision_catalog p ON p.revision=r.parent "
-                + "WHERE r.parent IS NOT NULL AND (p.revision IS NULL OR p.item!=r.item) LIMIT 1")
-        defer { sqlite3_finalize(invalidParents) }
-        guard sqlite3_step(invalidParents) == SQLITE_DONE else {
-            throw TractandaError("recoveryError", "Missing predecessor or cross-item link.")
+    /// Shape/causal-reference validation is disk backed; semantic projection remains gated.
+    func validateRecoveryGraph(
+        requireLinearProjection: Bool = true, progress: (() throws -> Void)? = nil
+    ) throws {
+        invalidateRevisionGraphValidation()
+        try execute("SAVEPOINT graph_admission")
+        do {
+            try validateCatalogueGraph(requireLinearProjection: requireLinearProjection, progress: progress)
+            graphValidationPassesForTesting += 1
+            validatedGraphWatermark = try catalogueWatermark()
+            validatedGraphAllowsOnlyLinear = requireLinearProjection
+            try persistAcceptedGraphProof()
+            try execute("RELEASE graph_admission")
+        } catch {
+            try? execute("ROLLBACK TO graph_admission")
+            try? execute("RELEASE graph_admission")
+            invalidateRevisionGraphValidation()
+            try? execute("DELETE FROM checkpoint_meta WHERE key='graphAdmissionProof'")
+            throw error
         }
-        let roots = try prepare(
-            "SELECT item,COUNT(*) FROM revision_catalog GROUP BY item "
-                + "HAVING SUM(parent IS NULL)!=1 LIMIT 1")
-        defer { sqlite3_finalize(roots) }
-        guard sqlite3_step(roots) == SQLITE_DONE else {
-            throw TractandaError("recoveryError", "An item must have exactly one initial revision.")
-        }
-        let rootRows = try prepare(
-            "SELECT item,revision,created_at FROM revision_catalog WHERE parent IS NULL ORDER BY item")
-        defer { sqlite3_finalize(rootRows) }
-        while true {
-            let status = sqlite3_step(rootRows)
-            if status == SQLITE_DONE { break }
-            guard status == SQLITE_ROW,
-                let itemBytes = sqlite3_column_text(rootRows, 0),
-                let rootBytes = sqlite3_column_text(rootRows, 1),
-                let createdBytes = sqlite3_column_text(rootRows, 2)
-            else { throw error() }
-            let item = String(cString: itemBytes)
-            var current = String(cString: rootBytes)
-            let createdAt = String(cString: createdBytes)
-            var ordinal: Int64 = 0
-            while true {
-                ordinal += 1
-                try execute(
-                    "INSERT INTO recovery_ordinals VALUES (?, ?, ?)", [item, current, String(ordinal)])
-                let createdCheck = try prepare(
-                    "SELECT created_at FROM revision_catalog WHERE revision=?", [current])
-                let createdStatus = sqlite3_step(createdCheck)
-                let sameCreatedAt =
-                    createdStatus == SQLITE_ROW
-                    && sqlite3_column_text(createdCheck, 0).map({ String(cString: $0) }) == createdAt
-                let createdDone = sqlite3_step(createdCheck) == SQLITE_DONE
-                sqlite3_finalize(createdCheck)
-                guard sameCreatedAt && createdDone else {
-                    throw TractandaError(
-                        "recoveryError", "An item's creation time changed between revisions.")
-                }
-                let successor = try prepare(
-                    "SELECT revision FROM revision_catalog WHERE item=? AND parent=?", [item, current])
-                let nextStatus = sqlite3_step(successor)
-                if nextStatus == SQLITE_DONE {
-                    sqlite3_finalize(successor)
-                    break
-                }
-                guard nextStatus == SQLITE_ROW, let nextBytes = sqlite3_column_text(successor, 0) else {
-                    sqlite3_finalize(successor)
-                    throw error()
-                }
-                current = String(cString: nextBytes)
-                guard sqlite3_step(successor) == SQLITE_DONE else {
-                    sqlite3_finalize(successor)
-                    throw TractandaError("recoveryError", "Competing revisions.")
-                }
-                sqlite3_finalize(successor)
-            }
-            try execute("INSERT INTO recovery_heads VALUES (?, ?)", [item, current])
-            let expected = try prepare("SELECT COUNT(*) FROM revision_catalog WHERE item=?", [item])
-            let expectedStatus = sqlite3_step(expected)
-            let expectedCount = expectedStatus == SQLITE_ROW ? sqlite3_column_int64(expected, 0) : -1
-            let expectedDone = sqlite3_step(expected) == SQLITE_DONE
-            sqlite3_finalize(expected)
-            guard expectedCount == ordinal && expectedDone else {
-                throw TractandaError("recoveryError", "Disconnected revision chain or cycle.")
+    }
+    func invalidateRevisionGraphValidation() {
+        validatedGraphWatermark = nil
+        lastAnalyzedProjection = nil
+        admittedProjectionCheckpointWatermark = nil
+    }
+    struct AuthorityPeerGraphState {
+        let watermark: Int64?
+        let linear: Bool
+        let analysis: RevisionProjection.Snapshot?
+        let checkpoint: Int64?
+    }
+    func captureAuthorityPeerGraphState() -> AuthorityPeerGraphState {
+        .init(
+            watermark: validatedGraphWatermark, linear: validatedGraphAllowsOnlyLinear,
+            analysis: lastAnalyzedProjection, checkpoint: admittedProjectionCheckpointWatermark)
+    }
+    func restoreAuthorityPeerGraphState(_ state: AuthorityPeerGraphState) {
+        validatedGraphWatermark = state.watermark
+        validatedGraphAllowsOnlyLinear = state.linear
+        lastAnalyzedProjection = state.analysis
+        admittedProjectionCheckpointWatermark = state.checkpoint
+    }
+    /// Only fixed rollback/release statements bypass a failed scan callback. Cleanup
+    /// is bounded by already guarded writes and must restore SQL before restoring proof.
+    func rollbackAuthorityPeerMaterialization() throws {
+        try rollbackAuthoritySavepoint(review: false)
+    }
+    func rollbackAuthorityReview() throws {
+        try rollbackAuthoritySavepoint(review: true)
+    }
+    func rollbackPeerInventoryRetain() throws {
+        try rollbackAuthoritySavepoint(review: false, inventory: true)
+    }
+    private func rollbackAuthoritySavepoint(review: Bool, inventory: Bool = false) throws {
+        guard let database else { throw TractandaError("indexError", "Catalogue closed during cleanup.") }
+        let budget = activeCatalogueScanBudget
+        activeCatalogueScanBudget = nil
+        sqlite3_progress_handler(database, 0, nil, nil)
+        defer {
+            activeCatalogueScanBudget = budget
+            if let budget {
+                sqlite3_progress_handler(
+                    database, Int32(budget.quantum), catalogueScanProgress,
+                    Unmanaged.passUnretained(budget).toOpaque())
             }
         }
-        let feedback = try prepare(
-            "SELECT 1 FROM feedback_refs f LEFT JOIN recovery_ordinals source "
-                + "ON source.revision=f.revision AND source.item=f.item "
-                + "LEFT JOIN recovery_ordinals target ON target.revision=f.target AND target.item=f.item "
-                + "WHERE source.revision IS NULL OR target.revision IS NULL OR target.ordinal>=source.ordinal LIMIT 1"
-        )
-        defer { sqlite3_finalize(feedback) }
-        guard sqlite3_step(feedback) == SQLITE_DONE else {
-            throw TractandaError(
-                "recoveryError", "Learning feedback must refer to an earlier revision of the same item.")
+        if inventory {
+            try execute("ROLLBACK TO peer_inventory_retain")
+            try execute("RELEASE peer_inventory_retain")
+        } else if review {
+            try execute("ROLLBACK TO authority_review")
+            try execute("RELEASE authority_review")
+        } else {
+            try execute("ROLLBACK TO authority_peer_materialization")
+            try execute("RELEASE authority_peer_materialization")
         }
+    }
+    func withAuthorityPeerWorkAllowance<T>(maximum: Int64, _ body: () throws -> T) throws -> T {
+        guard maximum > 0, let budget = activeCatalogueScanBudget else {
+            throw TractandaError("resourceLimit", "Missing peer work allowance.")
+        }
+        try budget.requireAvailable()
+        let remaining = budget.remaining
+        let allowance = min(remaining, maximum)
+        budget.remaining = allowance
+        defer { budget.remaining = remaining - max(0, allowance - budget.remaining) }
+        return try body()
+    }
+    func acceptedGraphProofIsCurrent() throws -> Bool {
+        try validatedGraphWatermark != nil && validatedGraphWatermark == catalogueWatermark()
+    }
+    func advanceAcceptedGraphProof(retainsLinearProjection: Bool = false) throws {
+        validatedGraphWatermark = try catalogueWatermark()
+        validatedGraphAllowsOnlyLinear = validatedGraphAllowsOnlyLinear && retainsLinearProjection
+        try persistAcceptedGraphProof()
+    }
+    private struct GraphAdmissionProof: Codable {
+        let schema: String
+        let engine: String
+        let ancestryProfile: String
+        let mergeProfile: String
+        let identity: String
+        let watermark: Int64
+        let linear: Bool
+    }
+    private func proofIdentity() throws -> String? {
+        let statement = try prepare("SELECT value FROM checkpoint_meta WHERE key='identity'")
+        defer { sqlite3_finalize(statement) }
+        let status = catalogueStep(statement)
+        if status == SQLITE_DONE { return nil }
+        guard status == SQLITE_ROW, sqlite3_column_bytes(statement, 0) <= 4096,
+            let value = sqlite3_column_text(statement, 0)
+        else { throw error() }
+        return String(cString: value)
+    }
+    private func persistAcceptedGraphProof() throws {
+        guard let watermark = validatedGraphWatermark, let identity = try proofIdentity() else { return }
+        let marker = GraphAdmissionProof(
+            schema: Self.catalogueSchemaVersion, engine: Self.catalogueEngine,
+            ancestryProfile: RevisionProvenance.profile, mergeProfile: RevisionMerge.profile,
+            identity: identity, watermark: watermark, linear: validatedGraphAllowsOnlyLinear)
+        try execute(
+            "INSERT OR REPLACE INTO checkpoint_meta VALUES('graphAdmissionProof',?)",
+            [String(decoding: try JSON.encode(marker), as: UTF8.self)])
+    }
+    /// Called only after canonical inventory and complete current-cache checkpoint admission.
+    func resumeAcceptedGraphProofFromCheckpoint(
+        validated: ValidatedCatalogue, requireLinearProjection: Bool = true
+    ) throws -> Bool {
+        guard try proofIdentity() == validated.identity else { return false }
+        let statement = try prepare("SELECT value FROM checkpoint_meta WHERE key='graphAdmissionProof'")
+        defer { sqlite3_finalize(statement) }
+        guard catalogueStep(statement) == SQLITE_ROW, sqlite3_column_bytes(statement, 0) <= 4096,
+            let raw = sqlite3_column_text(statement, 0),
+            let marker = try? JSON.decode(
+                GraphAdmissionProof.self, Data(bytes: raw, count: Int(sqlite3_column_bytes(statement, 0)))),
+            marker.schema == Self.catalogueSchemaVersion, marker.engine == Self.catalogueEngine,
+            marker.ancestryProfile == RevisionProvenance.profile,
+            marker.mergeProfile == RevisionMerge.profile,
+            marker.identity == validated.identity, !requireLinearProjection || marker.linear,
+            marker.watermark == admittedProjectionCheckpointWatermark,
+            marker.watermark == (try catalogueWatermark())
+        else { return false }
+        validatedGraphWatermark = marker.watermark
+        validatedGraphAllowsOnlyLinear = marker.linear
+        return true
+    }
+
+    func prepareRevisionProjectionGraph(progress: (() throws -> Void)?) throws {
+        if validatedGraphWatermark != (try catalogueWatermark()) {
+            try validateRecoveryGraph(requireLinearProjection: false, progress: progress)
+        }
+    }
+
+    /// Enumerates accepted items without inventing a current representative for a fork.
+    func recoveryItem(after itemID: String? = nil) throws -> String? {
+        let sql =
+            itemID == nil
+            ? "SELECT item FROM recovery_roots ORDER BY item LIMIT 1"
+            : "SELECT item FROM recovery_roots WHERE item>? ORDER BY item LIMIT 1"
+        let statement = try prepare(sql, itemID.map { [$0] } ?? [])
+        defer { sqlite3_finalize(statement) }
+        let status = catalogueStep(statement)
+        if status == SQLITE_DONE { return nil }
+        guard status == SQLITE_ROW, let item = sqlite3_column_text(statement, 0) else { throw error() }
+        return String(cString: item)
     }
 
     func recoveryHead(after itemID: String? = nil) throws -> (itemID: String, revisionID: String)? {
@@ -950,7 +1145,7 @@ final class ItemIndex {
             : "SELECT item,revision FROM recovery_heads WHERE item>? ORDER BY item LIMIT 1"
         let statement = try prepare(sql, itemID.map { [$0] } ?? [])
         defer { sqlite3_finalize(statement) }
-        let status = sqlite3_step(statement)
+        let status = catalogueStep(statement)
         if status == SQLITE_DONE { return nil }
         guard status == SQLITE_ROW, let item = sqlite3_column_text(statement, 0),
             let revision = sqlite3_column_text(statement, 1)
@@ -963,7 +1158,7 @@ final class ItemIndex {
         defer { sqlite3_finalize(statement) }
         var targets: [String] = []
         while true {
-            let status = sqlite3_step(statement)
+            let status = catalogueStep(statement)
             if status == SQLITE_DONE { return targets }
             guard status == SQLITE_ROW, let bytes = sqlite3_column_text(statement, 0) else { throw error() }
             targets.append(String(cString: bytes))
@@ -976,7 +1171,9 @@ final class ItemIndex {
         }
     }
 
-    private func catalogueRow(_ statement: OpaquePointer?) -> CatalogueRow? {
+    private func catalogueRow(_ statement: OpaquePointer?) throws -> CatalogueRow? {
+        var rowBytes = 0
+        try boundCatalogueRow(statement, remaining: &rowBytes, maximum: Self.catalogueRowByteWindow)
         func string(_ column: Int32) -> String? {
             guard let bytes = sqlite3_column_text(statement, column) else { return nil }
             return String(
@@ -996,30 +1193,201 @@ final class ItemIndex {
             digest.append(byte)
             cursor = end
         }
-        return CatalogueRow(
+        guard let size = UInt64(exactly: sqlite3_column_int64(statement, 6)),
+            let inode = UInt64(exactly: sqlite3_column_int64(statement, 7)),
+            let uid = UInt32(exactly: sqlite3_column_int64(statement, 8)),
+            let mode = UInt32(exactly: sqlite3_column_int64(statement, 9)),
+            let nanos = Int32(exactly: sqlite3_column_int64(statement, 11)),
+            let modifiedAt = string(14)
+        else { return nil }
+        if !modifiedAt.isEmpty {
+            guard sqlite3_column_type(statement, 16) == SQLITE_INTEGER,
+                try RevisionTimestamp(modifiedAt).ticks == sqlite3_column_int64(statement, 16)
+            else { throw TractandaError("recoveryError", "Exact catalogue timestamp metadata disagrees.") }
+        }
+        let row = CatalogueRow(
             revisionID: revision, itemID: item, path: path, parentID: parent, actor: actor,
-            operationID: operation, size: UInt64(sqlite3_column_int64(statement, 6)),
-            inode: UInt64(sqlite3_column_int64(statement, 7)),
-            uid: UInt32(sqlite3_column_int64(statement, 8)),
-            mode: UInt32(sqlite3_column_int64(statement, 9)),
+            operationID: operation, size: size, inode: inode, uid: uid, mode: mode,
             modificationSeconds: sqlite3_column_int64(statement, 10),
-            modificationNanoseconds: Int32(sqlite3_column_int64(statement, 11)), digest: digest,
-            createdAt: string(13) ?? "", feedbackRevisionIDs: (try? feedbackRevisionIDs(revision)) ?? [])
+            modificationNanoseconds: nanos, digest: digest,
+            createdAt: string(13) ?? "", feedbackRevisionIDs: try feedbackRevisionIDs(revision),
+            modifiedAt: modifiedAt, provenance: try decodeCatalogueProvenance(statement, column: 15))
+        try validateGraphReceipt(row)
+        return row
     }
 
     private let catalogueColumns =
-        "revision,item,path,parent,actor,operation,size,inode,uid,mode,mtime_seconds,mtime_nanoseconds,digest,created_at"
+        "revision,item,path,parent,actor,operation,size,inode,uid,mode,mtime_seconds,mtime_nanoseconds,digest,created_at,modified_at,provenance,modified_ticks"
+
+    private func decodeCatalogueProvenance(_ statement: OpaquePointer?, column: Int32) throws
+        -> RevisionProvenance?
+    {
+        if sqlite3_column_type(statement, column) == SQLITE_NULL { return nil }
+        let count = Int(sqlite3_column_bytes(statement, column))
+        guard count <= RevisionProvenance.maximumBytes, let bytes = sqlite3_column_text(statement, column)
+        else {
+            throw TractandaError("recoveryError", "Invalid catalogue ancestry metadata.")
+        }
+        return try RevisionProvenance(value: JSON.decode(ItemValue.self, Data(bytes: bytes, count: count)))
+    }
+
+    /// Same-executor bridge; rows remain metadata only and each page has a hard bound.
+    func graphCatalogueRows(where clause: String, bindings: [String], limit: Int) throws -> [CatalogueRow] {
+        guard (1...1024).contains(limit) else {
+            throw TractandaError("invalidLimit", "Graph page limit is invalid.")
+        }
+        let statement = try prepare(
+            "SELECT \(catalogueColumns) FROM revision_catalog \(clause) LIMIT ?", bindings + [String(limit)])
+        defer { sqlite3_finalize(statement) }
+        var rows: [CatalogueRow] = []
+        var pageBytes = 0
+        while true {
+            let status = catalogueStep(statement)
+            if status == SQLITE_DONE { return rows }
+            guard status == SQLITE_ROW else { throw error() }
+            guard
+                try boundCatalogueRow(
+                    statement, remaining: &pageBytes, maximum: graphMaximumPageBytes, allowPrefix: true)
+            else { return rows }
+            guard let row = try catalogueRow(statement) else { throw error() }
+            rows.append(row)
+        }
+    }
+
+    func graphSQLiteError() -> TractandaError { error() }
+
+    /// Every protected step charges its measured VM delta exactly once. The progress
+    /// handler bounds in-flight work and preparation without charging the same step twice.
+    func catalogueStep(_ statement: OpaquePointer?) -> Int32 {
+        guard let statement else { return SQLITE_MISUSE }
+        guard let budget = activeCatalogueScanBudget else { return sqlite3_step(statement) }
+        let before = sqlite3_stmt_status(statement, SQLITE_STMTSTATUS_VM_STEP, 0)
+        guard budget.beginStep(before: before) else { return SQLITE_INTERRUPT }
+        let status = sqlite3_step(statement)
+        let after = sqlite3_stmt_status(statement, SQLITE_STMTSTATUS_VM_STEP, 0)
+        guard budget.finishStep(after: after) else { return SQLITE_INTERRUPT }
+        return status
+    }
+
+    /// Count raw SQLite bytes before materializing Strings, JSON or a page's next metadata row.
+    @discardableResult
+    private func boundCatalogueRow(
+        _ statement: OpaquePointer?, remaining accumulated: inout Int, maximum: Int,
+        allowPrefix: Bool = false
+    ) throws -> Bool {
+        guard maximum > 0 else {
+            throw TractandaError("resourceLimit", "Invalid catalogue page byte window.")
+        }
+        var rowBytes = 128
+        for column in 0..<sqlite3_column_count(statement) {
+            let bytes = Int(sqlite3_column_bytes(statement, column))
+            let sum = rowBytes.addingReportingOverflow(bytes)
+            guard bytes >= 0, !sum.overflow else {
+                throw TractandaError("resourceLimit", "Catalogue row byte count overflowed.")
+            }
+            rowBytes = sum.partialValue
+        }
+        guard rowBytes <= Self.catalogueRowByteWindow else {
+            throw TractandaError("resourceLimit", "Catalogue row exceeds its byte window before decoding.")
+        }
+        let feedback = try prepare(
+            "SELECT COALESCE(SUM(length(CAST(target AS BLOB))+64),0) FROM feedback_refs WHERE revision=?")
+        defer { sqlite3_finalize(feedback) }
+        guard let revision = sqlite3_column_text(statement, 0),
+            sqlite3_bind_text(feedback, 1, revision, sqlite3_column_bytes(statement, 0), transient)
+                == SQLITE_OK,
+            catalogueStep(feedback) == SQLITE_ROW
+        else { throw error() }
+        let feedbackBytes = sqlite3_column_int64(feedback, 0)
+        guard let feedbackSize = Int(exactly: feedbackBytes), feedbackSize >= 0,
+            !rowBytes.addingReportingOverflow(feedbackSize).overflow
+        else {
+            throw TractandaError("resourceLimit", "Catalogue feedback byte count overflowed.")
+        }
+        rowBytes += feedbackSize
+        let total = accumulated.addingReportingOverflow(rowBytes)
+        guard !total.overflow, rowBytes <= Self.catalogueRowByteWindow else {
+            throw TractandaError(
+                "resourceLimit", "Catalogue metadata exceeds its byte window; retry a smaller page.")
+        }
+        if total.partialValue > maximum {
+            if allowPrefix, accumulated > 0 { return false }
+            throw TractandaError(
+                "resourceLimit", "Catalogue metadata exceeds its byte window; retry a smaller page.")
+        }
+        accumulated = total.partialValue
+        return true
+    }
+
+    /// Explicit short-operation boundary; the active budget remains connection-private.
+    func checkCatalogueScanProgress() throws {
+        try Task.checkCancellation()
+        guard let budget = activeCatalogueScanBudget else { return }
+        try budget.requireAvailable()
+        do {
+            try budget.progress?()
+        } catch {
+            budget.callbackError = error
+            throw error
+        }
+    }
+
+    func withCatalogueScanBudget<T>(
+        progress: (() throws -> Void)? = nil, reusingActiveBudget: Bool = false,
+        _ body: () throws -> T
+    ) throws -> T {
+        if reusingActiveBudget, let active = activeCatalogueScanBudget {
+            try active.requireAvailable()
+            return try body()
+        }
+        guard let database, graphMaximumVMInstructions > 0, activeCatalogueScanBudget == nil else {
+            throw TractandaError("resourceLimit", "Invalid graph work budget or closed catalogue.")
+        }
+        let budget = CatalogueScanBudget(maximum: graphMaximumVMInstructions, progress: progress)
+        activeCatalogueScanBudget = budget
+        sqlite3_progress_handler(
+            database, Int32(budget.quantum), catalogueScanProgress,
+            Unmanaged.passUnretained(budget).toOpaque())
+        defer {
+            lastCatalogueScanWorkForTesting = graphMaximumVMInstructions - budget.remaining
+            sqlite3_progress_handler(database, 0, nil, nil)
+            activeCatalogueScanBudget = nil
+        }
+        do {
+            try progress?()
+            let result = try body()
+            if let callbackError = budget.callbackError { throw callbackError }
+            if budget.exhausted {
+                throw TractandaError("resourceLimit", "Revision catalogue work budget exceeded.")
+            }
+            if budget.cancelled {
+                throw TractandaError("cancelled", "Revision catalogue validation was cancelled.")
+            }
+            return result
+        } catch {
+            if let callbackError = budget.callbackError { throw callbackError }
+            if budget.cancelled {
+                throw TractandaError("cancelled", "Revision catalogue validation was cancelled.")
+            }
+            if budget.exhausted {
+                throw TractandaError("resourceLimit", "Revision catalogue work budget exceeded.")
+            }
+            throw error
+        }
+    }
 
     func revision(_ revisionID: String) throws -> CatalogueRow? {
         let statement = try prepare(
             "SELECT \(catalogueColumns) FROM revision_catalog WHERE revision=?", [revisionID])
         defer { sqlite3_finalize(statement) }
-        let status = sqlite3_step(statement)
+        let status = catalogueStep(statement)
         guard status == SQLITE_ROW else {
             if status == SQLITE_DONE { return nil }
             throw error()
         }
-        guard let row = catalogueRow(statement), sqlite3_step(statement) == SQLITE_DONE else { throw error() }
+        guard let row = try catalogueRow(statement), catalogueStep(statement) == SQLITE_DONE else {
+            throw error()
+        }
         return row
     }
 
@@ -1031,9 +1399,9 @@ final class ItemIndex {
     func revisionCount(itemID: String) throws -> Int {
         let statement = try prepare("SELECT COUNT(*) FROM revision_catalog WHERE item=?", [itemID])
         defer { sqlite3_finalize(statement) }
-        guard sqlite3_step(statement) == SQLITE_ROW else { throw error() }
+        guard catalogueStep(statement) == SQLITE_ROW else { throw error() }
         let count = sqlite3_column_int64(statement, 0)
-        guard count >= 0, let result = Int(exactly: count), sqlite3_step(statement) == SQLITE_DONE
+        guard count >= 0, let result = Int(exactly: count), catalogueStep(statement) == SQLITE_DONE
         else { throw error() }
         return result
     }
@@ -1042,12 +1410,14 @@ final class ItemIndex {
         let statement = try prepare(
             "SELECT \(catalogueColumns) FROM revision_catalog WHERE item=? AND parent=?", [itemID, parentID])
         defer { sqlite3_finalize(statement) }
-        let status = sqlite3_step(statement)
+        let status = catalogueStep(statement)
         guard status == SQLITE_ROW else {
             if status == SQLITE_DONE { return nil }
             throw error()
         }
-        guard let row = catalogueRow(statement), sqlite3_step(statement) == SQLITE_DONE else { throw error() }
+        guard let row = try catalogueRow(statement), catalogueStep(statement) == SQLITE_DONE else {
+            throw error()
+        }
         return row
     }
 
@@ -1056,25 +1426,53 @@ final class ItemIndex {
             "SELECT \(catalogueColumns) FROM revision_catalog WHERE revision=(SELECT revision FROM operation_receipts WHERE actor=? AND operation=?)",
             [actor, operationID])
         defer { sqlite3_finalize(statement) }
-        let status = sqlite3_step(statement)
+        let status = catalogueStep(statement)
         guard status == SQLITE_ROW else {
             if status == SQLITE_DONE { return nil }
             throw error()
         }
-        guard let row = catalogueRow(statement), sqlite3_step(statement) == SQLITE_DONE else { throw error() }
+        guard let row = try catalogueRow(statement), catalogueStep(statement) == SQLITE_DONE else {
+            throw error()
+        }
         return row
     }
 
-    func receipts(named operationID: String, maximum: Int = 1024) throws -> [CatalogueRow]? {
-        let statement = try prepare(
-            "SELECT \(catalogueColumns) FROM revision_catalog WHERE operation=? ORDER BY actor LIMIT ?",
-            [operationID, String(maximum + 1)])
+    func receipts(
+        named operationID: String, localReplicaID: String? = nil,
+        kind: RevisionProvenance.Kind = .authored, maximum: Int = 1024
+    ) throws
+        -> [CatalogueRow]?
+    {
+        guard (1...1024).contains(maximum) else {
+            throw TractandaError("invalidLimit", "Receipt limit is invalid.")
+        }
+        let sql: String
+        let bindings: [String]
+        if let localReplicaID {
+            guard kind != .automaticMerge else { return [] }
+            try Identifier.validate(localReplicaID)
+            sql =
+                "SELECT \(catalogueColumns) FROM revision_catalog WHERE revision IN "
+                + "(SELECT revision FROM scoped_operation_receipts WHERE operation=? AND origin=? AND kind=?) "
+                + "ORDER BY actor,revision LIMIT ?"
+            bindings = [operationID, localReplicaID, kind.rawValue, String(maximum + 1)]
+        } else {
+            guard kind == .authored else { return [] }
+            sql =
+                "SELECT \(catalogueColumns) FROM revision_catalog WHERE revision IN "
+                + "(SELECT revision FROM operation_receipts WHERE operation=?) ORDER BY actor,revision LIMIT ?"
+            bindings = [operationID, String(maximum + 1)]
+        }
+        let statement = try prepare(sql, bindings)
         defer { sqlite3_finalize(statement) }
         var rows: [CatalogueRow] = []
+        var pageBytes = 0
         while true {
-            let status = sqlite3_step(statement)
+            let status = catalogueStep(statement)
             if status == SQLITE_DONE { return rows.count <= maximum ? rows : nil }
-            guard status == SQLITE_ROW, let row = catalogueRow(statement) else { throw error() }
+            guard status == SQLITE_ROW else { throw error() }
+            try boundCatalogueRow(statement, remaining: &pageBytes, maximum: graphMaximumPageBytes)
+            guard let row = try catalogueRow(statement) else { throw error() }
             rows.append(row)
             if rows.count > maximum { return nil }
         }
@@ -1084,27 +1482,34 @@ final class ItemIndex {
         // This is the clean-start admission probe. A full integrity/receipt audit scans
         // catalogue-sized data and belongs to explicit audit/rebuild work, not startup.
         for (key, expected) in [
-            ("identity", identity), ("schema", "11"), ("engine", "tractanda-sqlite-catalogue-v11"),
+            ("identity", identity), ("schema", Self.catalogueSchemaVersion), ("engine", Self.catalogueEngine),
             ("itemTextProfile", ItemTextContent.profile),
         ] {
             let statement = try prepare("SELECT value FROM checkpoint_meta WHERE key=?", [key])
             let valid =
-                sqlite3_step(statement) == SQLITE_ROW
+                catalogueStep(statement) == SQLITE_ROW
                 && sqlite3_column_text(statement, 0).map({ String(cString: $0) }) == expected
-                && sqlite3_step(statement) == SQLITE_DONE
+                && catalogueStep(statement) == SQLITE_DONE
             sqlite3_finalize(statement)
             guard valid else { return nil }
         }
         func hasColumns(_ sql: String) -> Bool {
             guard let statement = try? prepare(sql) else { return false }
             defer { sqlite3_finalize(statement) }
-            return sqlite3_step(statement) == SQLITE_DONE
+            return catalogueStep(statement) == SQLITE_DONE
         }
         for sql in [
             "SELECT id,revision,class,deleted,modified,created,fields FROM items LIMIT 0",
             "SELECT item_id,revision,class,deleted,fields,clock_dependent,category FROM head_summaries LIMIT 0",
-            "SELECT revision,item,path,parent,actor,operation,size,inode,uid,mode,mtime_seconds,mtime_nanoseconds,digest,created_at FROM revision_catalog LIMIT 0",
+            "SELECT revision,item,path,parent,actor,operation,size,inode,uid,mode,mtime_seconds,mtime_nanoseconds,digest,created_at,modified_at,provenance,modified_ticks FROM revision_catalog LIMIT 0",
             "SELECT actor,operation,revision,item FROM operation_receipts LIMIT 0",
+            "SELECT origin,kind,actor,operation,revision,item FROM scoped_operation_receipts LIMIT 0",
+            "SELECT child,parent FROM revision_parents LIMIT 0",
+            "SELECT revision,field,action,digest FROM revision_field_writes LIMIT 0",
+            "SELECT revision,field,digest FROM revision_field_values LIMIT 0",
+            "SELECT revision,item FROM recovery_ready LIMIT 0",
+            "SELECT revision,item,indegree,processed FROM recovery_graph_work LIMIT 0",
+            "SELECT revision,authored FROM revision_frontier LIMIT 0",
             "SELECT item,revision,target FROM feedback_refs LIMIT 0",
             "SELECT item_id,field FROM field_presence LIMIT 0",
             "SELECT item_id,field,member_ordinal,type,int_value,real_value,date_value,bool_value FROM scalar_value LIMIT 0",
@@ -1115,16 +1520,16 @@ final class ItemIndex {
             "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN ('acl_core_principal_insert','acl_core_principal_delete','acl_named_principal_insert','acl_named_principal_delete')"
         )
         defer { sqlite3_finalize(triggers) }
-        guard sqlite3_step(triggers) == SQLITE_ROW, sqlite3_column_int64(triggers, 0) == 4,
-            sqlite3_step(triggers) == SQLITE_DONE
+        guard catalogueStep(triggers) == SQLITE_ROW, sqlite3_column_int64(triggers, 0) == 4,
+            catalogueStep(triggers) == SQLITE_DONE
         else { return nil }
         let savedViewIndexes = try prepare(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='index' "
                 + "AND name IN ('saved_view_base_item','saved_view_staging_item')")
         defer { sqlite3_finalize(savedViewIndexes) }
-        guard sqlite3_step(savedViewIndexes) == SQLITE_ROW,
+        guard catalogueStep(savedViewIndexes) == SQLITE_ROW,
             sqlite3_column_int64(savedViewIndexes, 0) == 2,
-            sqlite3_step(savedViewIndexes) == SQLITE_DONE
+            catalogueStep(savedViewIndexes) == SQLITE_DONE
         else { return nil }
         return ValidatedCatalogue(identity: identity)
     }
@@ -1141,7 +1546,7 @@ final class ItemIndex {
         }
         let statement = try prepare(sql, itemID.map { [$0] } ?? [])
         defer { sqlite3_finalize(statement) }
-        let status = sqlite3_step(statement)
+        let status = catalogueStep(statement)
         guard status == SQLITE_ROW else {
             if status == SQLITE_DONE { return nil }
             throw error()
@@ -1160,7 +1565,7 @@ final class ItemIndex {
         let statement = try prepare(
             "SELECT revision,class,deleted,fields FROM head_summaries WHERE item_id=?", [itemID])
         defer { sqlite3_finalize(statement) }
-        let status = sqlite3_step(statement)
+        let status = catalogueStep(statement)
         if status == SQLITE_DONE { return nil }
         guard status == SQLITE_ROW, let revision = sqlite3_column_text(statement, 0),
             let classID = sqlite3_column_text(statement, 1),
@@ -1184,7 +1589,7 @@ final class ItemIndex {
             "SELECT item_id,revision,class,deleted,fields FROM head_summaries WHERE class=? ORDER BY item_id LIMIT 1",
             [classID])
         defer { sqlite3_finalize(statement) }
-        let status = sqlite3_step(statement)
+        let status = catalogueStep(statement)
         if status == SQLITE_DONE { return nil }
         guard status == SQLITE_ROW, let item = sqlite3_column_text(statement, 0),
             let revision = sqlite3_column_text(statement, 1), let cls = sqlite3_column_text(statement, 2),
@@ -1221,7 +1626,7 @@ final class ItemIndex {
         }
         let statement = try prepare(sql, bindings)
         defer { sqlite3_finalize(statement) }
-        let status = sqlite3_step(statement)
+        let status = catalogueStep(statement)
         if status == SQLITE_DONE { return nil }
         guard status == SQLITE_ROW, let bytes = sqlite3_column_text(statement, 0) else { throw error() }
         return String(cString: bytes)
@@ -1233,7 +1638,7 @@ final class ItemIndex {
                 ? "SELECT COUNT(*) FROM head_summaries"
                 : "SELECT COUNT(*) FROM head_summaries WHERE class=?", classID.map { [$0] } ?? [])
         defer { sqlite3_finalize(statement) }
-        guard sqlite3_step(statement) == SQLITE_ROW else { throw error() }
+        guard catalogueStep(statement) == SQLITE_ROW else { throw error() }
         return Int(sqlite3_column_int64(statement, 0))
     }
 
@@ -1244,7 +1649,7 @@ final class ItemIndex {
             : "SELECT item_id FROM head_summaries WHERE category=1 AND item_id>? ORDER BY item_id LIMIT 1"
         let statement = try prepare(sql, itemID.map { [$0] } ?? [])
         defer { sqlite3_finalize(statement) }
-        let status = sqlite3_step(statement)
+        let status = catalogueStep(statement)
         if status == SQLITE_DONE { return nil }
         guard status == SQLITE_ROW, let bytes = sqlite3_column_text(statement, 0) else { throw error() }
         return String(cString: bytes)
@@ -1253,7 +1658,7 @@ final class ItemIndex {
     func hasClockDependentCategories() throws -> Bool {
         let statement = try prepare("SELECT 1 FROM head_summaries WHERE clock_dependent=1 LIMIT 1")
         defer { sqlite3_finalize(statement) }
-        let status = sqlite3_step(statement)
+        let status = catalogueStep(statement)
         if status == SQLITE_DONE { return false }
         guard status == SQLITE_ROW else { throw error() }
         return true
@@ -1263,7 +1668,7 @@ final class ItemIndex {
         let statement = try prepare(
             "SELECT 1 FROM head_summaries WHERE class=? AND deleted=0 LIMIT 1", [classID])
         defer { sqlite3_finalize(statement) }
-        let status = sqlite3_step(statement)
+        let status = catalogueStep(statement)
         if status == SQLITE_DONE { return false }
         guard status == SQLITE_ROW else { throw error() }
         return true
@@ -1283,10 +1688,16 @@ final class ItemIndex {
         let statement = try prepare(sql, bindings)
         defer { sqlite3_finalize(statement) }
         var rows: [CatalogueRow] = []
+        var pageBytes = 0
         while true {
-            let status = sqlite3_step(statement)
+            let status = catalogueStep(statement)
             if status == SQLITE_DONE { return rows }
-            guard status == SQLITE_ROW, let row = catalogueRow(statement) else { throw error() }
+            guard status == SQLITE_ROW else { throw error() }
+            guard
+                try boundCatalogueRow(
+                    statement, remaining: &pageBytes, maximum: graphMaximumPageBytes, allowPrefix: true)
+            else { return rows }
+            guard let row = try catalogueRow(statement) else { throw error() }
             rows.append(row)
         }
     }
@@ -1298,7 +1709,7 @@ final class ItemIndex {
         defer { sqlite3_finalize(statement) }
         var details: [String] = []
         while true {
-            let status = sqlite3_step(statement)
+            let status = catalogueStep(statement)
             if status == SQLITE_DONE { return details }
             guard status == SQLITE_ROW, let detail = sqlite3_column_text(statement, 3) else { throw error() }
             details.append(String(cString: detail))
@@ -1310,7 +1721,7 @@ final class ItemIndex {
         defer { sqlite3_finalize(statement) }
         var actual: [String: String] = [:]
         while true {
-            let status = sqlite3_step(statement)
+            let status = catalogueStep(statement)
             if status == SQLITE_DONE { break }
             guard status == SQLITE_ROW, let id = sqlite3_column_text(statement, 0),
                 let revision = sqlite3_column_text(statement, 1)
@@ -1436,7 +1847,7 @@ final class ItemIndex {
                 || target.selection.contains("\"positiveCategorySeed\""))
         let coverageState = materialized ? "building" : target.state
         let prior = try prepare("SELECT definition_hash FROM saved_view_coverage WHERE view_id=?", [id])
-        let priorStatus = sqlite3_step(prior)
+        let priorStatus = catalogueStep(prior)
         let changed =
             priorStatus == SQLITE_DONE
             || (priorStatus == SQLITE_ROW
@@ -1472,7 +1883,7 @@ final class ItemIndex {
     func advanceSavedViewMaterialization(id: String) throws {
         let target = try prepare(
             "SELECT selection,class_filter,state FROM saved_view_targets WHERE id = ?", [id])
-        guard sqlite3_step(target) == SQLITE_ROW,
+        guard catalogueStep(target) == SQLITE_ROW,
             let selectionBytes = sqlite3_column_text(target, 0),
             let stateBytes = sqlite3_column_text(target, 2)
         else {
@@ -1499,7 +1910,7 @@ final class ItemIndex {
         let coverage = try prepare(
             "SELECT definition_hash,dependency_epoch,state FROM saved_view_coverage WHERE view_id=?",
             [id])
-        guard sqlite3_step(coverage) == SQLITE_ROW,
+        guard catalogueStep(coverage) == SQLITE_ROW,
             let hashBytes = sqlite3_column_text(coverage, 0),
             let coverageStateBytes = sqlite3_column_text(coverage, 2),
             String(cString: coverageStateBytes) == "building"
@@ -1513,7 +1924,7 @@ final class ItemIndex {
         let build = try prepare(
             "SELECT definition_hash,dependency_epoch,cursor,candidate_count FROM saved_view_build_state WHERE view_id=?",
             [id])
-        guard sqlite3_step(build) == SQLITE_ROW,
+        guard catalogueStep(build) == SQLITE_ROW,
             let buildHashBytes = sqlite3_column_text(build, 0),
             let cursorBytes = sqlite3_column_text(build, 2),
             String(cString: buildHashBytes) == definitionHash,
@@ -1557,7 +1968,7 @@ final class ItemIndex {
             bindings)
         var batch: [(String, Double, Double)] = []
         while true {
-            let status = sqlite3_step(statement)
+            let status = catalogueStep(statement)
             if status == SQLITE_DONE { break }
             guard status == SQLITE_ROW, let idBytes = sqlite3_column_text(statement, 0)
             else {
@@ -1571,11 +1982,11 @@ final class ItemIndex {
         sqlite3_finalize(statement)
         let retained = try prepare("SELECT COUNT(*) FROM saved_view_base")
         defer { sqlite3_finalize(retained) }
-        guard sqlite3_step(retained) == SQLITE_ROW else { throw error() }
+        guard catalogueStep(retained) == SQLITE_ROW else { throw error() }
         var retainedRows = Int(sqlite3_column_int64(retained, 0))
         let stagedCount = try prepare("SELECT COUNT(*) FROM saved_view_staging")
         defer { sqlite3_finalize(stagedCount) }
-        guard sqlite3_step(stagedCount) == SQLITE_ROW else { throw error() }
+        guard catalogueStep(stagedCount) == SQLITE_ROW else { throw error() }
         retainedRows += Int(sqlite3_column_int64(stagedCount, 0))
         let candidateCount = candidateCountBefore + batch.count
         var serializedBytes = 0
@@ -1584,7 +1995,7 @@ final class ItemIndex {
         for row in batch {
             let fieldsStatement = try prepare(
                 "SELECT fields FROM items WHERE id=? AND deleted=0", [row.0])
-            guard sqlite3_step(fieldsStatement) == SQLITE_ROW,
+            guard catalogueStep(fieldsStatement) == SQLITE_ROW,
                 let fieldsBytes = sqlite3_column_text(fieldsStatement, 0)
             else {
                 sqlite3_finalize(fieldsStatement)
@@ -1602,12 +2013,13 @@ final class ItemIndex {
             sqlite3_finalize(fieldsStatement)
             serializedBytes += fieldByteCount
             let fields = try JSON.decode([String: ItemValue].self, fieldData)
-            let revision = try Revision(fields: fields)
+            let revision = try Revision(
+                fields: fields, formatVersion: fields["revisionAncestry"] == nil ? 1 : 2)
             guard query?.matches(revision, at: Date()) ?? true else { continue }
             let staged = try prepare(
                 "SELECT 1 FROM saved_view_staging WHERE view_id=? AND item_id=?",
                 [id, row.0])
-            let alreadyStaged = sqlite3_step(staged) == SQLITE_ROW
+            let alreadyStaged = catalogueStep(staged) == SQLITE_ROW
             sqlite3_finalize(staged)
             guard alreadyStaged || retainedRows < savedViewMaterializedRowLimit else {
                 try execute("DELETE FROM saved_view_staging WHERE view_id=?", [id])
@@ -1628,7 +2040,7 @@ final class ItemIndex {
         guard batch.count < batchLimit else { return }
         let current = try prepare(
             "SELECT definition_hash,dependency_epoch,state FROM saved_view_coverage WHERE view_id=?", [id])
-        guard sqlite3_step(current) == SQLITE_ROW,
+        guard catalogueStep(current) == SQLITE_ROW,
             let currentHash = sqlite3_column_text(current, 0),
             String(cString: currentHash) == definitionHash,
             sqlite3_column_int64(current, 1) == dependencyEpoch,
@@ -1654,7 +2066,7 @@ final class ItemIndex {
     {
         savedViewCategoryPlanLookupsForTesting += 1
         let target = try prepare("SELECT selection FROM saved_view_targets WHERE id=?", [id])
-        guard sqlite3_step(target) == SQLITE_ROW, let bytes = sqlite3_column_text(target, 0) else {
+        guard catalogueStep(target) == SQLITE_ROW, let bytes = sqlite3_column_text(target, 0) else {
             sqlite3_finalize(target)
             return nil
         }
@@ -1676,7 +2088,7 @@ final class ItemIndex {
             guard categories.insert(categoryID).inserted else { continue }
             guard categories.count <= 32 else { return nil }
             let row = try prepare("SELECT fields,deleted FROM items WHERE id=?", [categoryID])
-            guard sqlite3_step(row) == SQLITE_ROW, sqlite3_column_int(row, 1) == 0,
+            guard catalogueStep(row) == SQLITE_ROW, sqlite3_column_int(row, 1) == 0,
                 let fieldBytes = sqlite3_column_text(row, 0)
             else {
                 sqlite3_finalize(row)
@@ -1700,7 +2112,7 @@ final class ItemIndex {
             let children = try prepare(
                 "SELECT target_id FROM category_edges WHERE source_id=? AND kind='parent'", [categoryID])
             while true {
-                let status = sqlite3_step(children)
+                let status = catalogueStep(children)
                 if status == SQLITE_DONE { break }
                 guard status == SQLITE_ROW, let child = sqlite3_column_text(children, 0) else {
                     sqlite3_finalize(children)
@@ -1712,7 +2124,7 @@ final class ItemIndex {
             let exclusions = try prepare(
                 "SELECT target_id FROM category_edges WHERE source_id=? AND kind='exclusion'", [categoryID])
             while true {
-                let status = sqlite3_step(exclusions)
+                let status = catalogueStep(exclusions)
                 if status == SQLITE_DONE { break }
                 guard status == SQLITE_ROW, let excluded = sqlite3_column_text(exclusions, 0) else {
                     sqlite3_finalize(exclusions)
@@ -1760,7 +2172,7 @@ final class ItemIndex {
     private func changedFields(for revision: Revision) throws -> Set<String> {
         let statement = try prepare("SELECT fields FROM items WHERE id=?", [revision.itemID])
         defer { sqlite3_finalize(statement) }
-        guard sqlite3_step(statement) == SQLITE_ROW,
+        guard catalogueStep(statement) == SQLITE_ROW,
             let bytes = sqlite3_column_text(statement, 0)
         else { return Set(revision.fields.keys).union(["modifiedAt"]) }
         let old = try JSON.decode(
@@ -1807,7 +2219,7 @@ final class ItemIndex {
                     + "(\(Array(repeating: "?", count: batch.count).joined(separator: ",")))",
                 batch)
             while true {
-                let status = sqlite3_step(statement)
+                let status = catalogueStep(statement)
                 if status == SQLITE_DONE { break }
                 guard status == SQLITE_ROW, let raw = sqlite3_column_text(statement, 0) else {
                     sqlite3_finalize(statement)
@@ -1829,7 +2241,7 @@ final class ItemIndex {
                 + "UNION SELECT view_id FROM saved_view_staging WHERE item_id=?",
             [revision.itemID, revision.itemID])
         while true {
-            let status = sqlite3_step(existingViews)
+            let status = catalogueStep(existingViews)
             if status == SQLITE_DONE { break }
             guard status == SQLITE_ROW, let raw = sqlite3_column_text(existingViews, 0) else {
                 sqlite3_finalize(existingViews)
@@ -1849,7 +2261,7 @@ final class ItemIndex {
                 "SELECT 1 FROM saved_view_dependencies WHERE view_id=? AND kind='field' AND key IN "
                     + "(\(Array(repeating: "?", count: keys.count).joined(separator: ","))) LIMIT 1",
                 [id] + keys)
-            let predicateStatus = sqlite3_step(predicateDependency)
+            let predicateStatus = catalogueStep(predicateDependency)
             sqlite3_finalize(predicateDependency)
             let predicateChanged = predicateStatus == SQLITE_ROW
             let hasCategoryRuleDependency = try {
@@ -1857,13 +2269,13 @@ final class ItemIndex {
                     "SELECT 1 FROM saved_view_dependencies WHERE view_id=? AND kind='categoryRule' LIMIT 1",
                     [id])
                 defer { sqlite3_finalize(statement) }
-                return sqlite3_step(statement) == SQLITE_ROW
+                return catalogueStep(statement) == SQLITE_ROW
             }()
             if categoryStructureChanged && hasCategoryRuleDependency { continue }
             let stateStatement = try prepare(
                 "SELECT state,definition_hash,dependency_epoch FROM saved_view_coverage WHERE view_id=?", [id]
             )
-            guard sqlite3_step(stateStatement) == SQLITE_ROW,
+            guard catalogueStep(stateStatement) == SQLITE_ROW,
                 let stateBytes = sqlite3_column_text(stateStatement, 0),
                 let hashBytes = sqlite3_column_text(stateStatement, 1)
             else {
@@ -1879,11 +2291,11 @@ final class ItemIndex {
             let existing = try prepare(
                 "SELECT 1 FROM \(destination) WHERE view_id=? AND item_id=? LIMIT 1",
                 [id, revision.itemID])
-            let hasRow = sqlite3_step(existing) == SQLITE_ROW
+            let hasRow = catalogueStep(existing) == SQLITE_ROW
             sqlite3_finalize(existing)
             let target = try prepare(
                 "SELECT selection,class_filter FROM saved_view_targets WHERE id=?", [id])
-            guard sqlite3_step(target) == SQLITE_ROW,
+            guard catalogueStep(target) == SQLITE_ROW,
                 let selectionBytes = sqlite3_column_text(target, 0)
             else {
                 sqlite3_finalize(target)
@@ -1915,7 +2327,7 @@ final class ItemIndex {
                 let match = try prepare(
                     "SELECT 1 FROM items WHERE id=? AND deleted=0 AND \(candidate.0) LIMIT 1",
                     [revision.itemID] + candidate.1)
-                let seedMatches = sqlite3_step(match) == SQLITE_ROW
+                let seedMatches = catalogueStep(match) == SQLITE_ROW
                 sqlite3_finalize(match)
                 newMatches = queryMatches && seedMatches
             } else if predicateChanged, !revision.isDeleted,
@@ -1951,7 +2363,7 @@ final class ItemIndex {
                 let retained = try prepare(
                     "SELECT (SELECT COUNT(*) FROM saved_view_base)+(SELECT COUNT(*) FROM saved_view_staging)"
                 )
-                guard sqlite3_step(retained) == SQLITE_ROW else {
+                guard catalogueStep(retained) == SQLITE_ROW else {
                     sqlite3_finalize(retained)
                     throw error()
                 }
@@ -2118,7 +2530,7 @@ final class ItemIndex {
             }
             var result: [String] = []
             while true {
-                let status = sqlite3_step(statement)
+                let status = catalogueStep(statement)
                 if status == SQLITE_DONE { return result }
                 guard status == SQLITE_ROW, let text = sqlite3_column_text(statement, 0) else {
                     throw error()
@@ -2129,10 +2541,10 @@ final class ItemIndex {
         }
         guard
             let users = try names(
-                "SELECT name FROM acl_principal_counts WHERE kind='user' AND refcount>0 ORDER BY name LIMIT \(maximum + 1)"
+                "SELECT name FROM acl_principal_counts WHERE kind='user' AND refcount>0 UNION SELECT name FROM projection_principal_counts WHERE kind='user' AND refcount>0 ORDER BY name LIMIT \(maximum + 1)"
             ),
             let groups = try names(
-                "SELECT name FROM acl_principal_counts WHERE kind='group' AND refcount>0 ORDER BY name LIMIT \(maximum + 1)"
+                "SELECT name FROM acl_principal_counts WHERE kind='group' AND refcount>0 UNION SELECT name FROM projection_principal_counts WHERE kind='group' AND refcount>0 ORDER BY name LIMIT \(maximum + 1)"
             ),
             users.count <= maximum, groups.count <= maximum
         else { return nil }
@@ -2317,7 +2729,7 @@ final class ItemIndex {
             let statement = try prepare(
                 "SELECT target_id FROM category_edges WHERE source_id=? ", [id])
             while true {
-                let status = sqlite3_step(statement)
+                let status = catalogueStep(statement)
                 if status == SQLITE_DONE { break }
                 guard status == SQLITE_ROW else {
                     sqlite3_finalize(statement)
@@ -2345,7 +2757,7 @@ final class ItemIndex {
             "SELECT DISTINCT owner_name FROM personal_overlay_targets ORDER BY owner_name")
         do {
             while true {
-                let status = sqlite3_step(statement)
+                let status = catalogueStep(statement)
                 if status == SQLITE_DONE { break }
                 guard status == SQLITE_ROW, let raw = sqlite3_column_text(statement, 0) else { throw error() }
                 try body(String(cString: raw))
@@ -2378,7 +2790,7 @@ final class ItemIndex {
                 [targetID] + batch)
             do {
                 while true {
-                    let status = sqlite3_step(statement)
+                    let status = catalogueStep(statement)
                     if status == SQLITE_DONE { break }
                     guard status == SQLITE_ROW, let raw = sqlite3_column_text(statement, 0) else {
                         throw error()
@@ -2428,7 +2840,7 @@ final class ItemIndex {
                     bindings)
                 do {
                     while true {
-                        let status = sqlite3_step(statement)
+                        let status = catalogueStep(statement)
                         if status == SQLITE_DONE { break }
                         guard status == SQLITE_ROW, let raw = sqlite3_column_text(statement, 0) else {
                             throw error()
@@ -2457,7 +2869,7 @@ final class ItemIndex {
                 batch)
             defer { sqlite3_finalize(statement) }
             while true {
-                let status = sqlite3_step(statement)
+                let status = catalogueStep(statement)
                 if status == SQLITE_DONE { break }
                 guard status == SQLITE_ROW, let text = sqlite3_column_text(statement, 0) else {
                     throw error()
@@ -2479,7 +2891,7 @@ final class ItemIndex {
                     + "(\(Array(repeating: "?", count: batch.count).joined(separator: ",")))", batch)
             defer { sqlite3_finalize(statement) }
             while true {
-                let status = sqlite3_step(statement)
+                let status = catalogueStep(statement)
                 if status == SQLITE_DONE { break }
                 guard status == SQLITE_ROW, let raw = sqlite3_column_text(statement, 0) else { throw error() }
                 result.insert(String(cString: raw))
@@ -2616,11 +3028,14 @@ final class ItemIndex {
         candidatePlan: SpotlightQuery.IndexCandidatePlan, aclUserID: UInt32? = nil,
         includeDeleted: Bool = false, savedViewID: String? = nil
     ) -> (sql: String, arguments: [String]) {
-        var joins =
+        let joins =
             aclUserID == nil
             ? " FROM items"
             : " FROM (\(aclAuthorizedIDs)) acl_visible CROSS JOIN items ON items.id=acl_visible.item_id"
         var predicates = includeDeleted ? ["1"] : ["items.deleted = 0"]
+        predicates.append(
+            "NOT EXISTS(SELECT 1 FROM current_projection cp WHERE cp.item=items.id AND (cp.dirty=1 OR cp.status!='ready' OR cp.policies_complete=0))"
+        )
         var arguments: [String] = []
         if let lexicalText {
             predicates.append(Self.corpusLiteralMembershipSQL)
@@ -2662,7 +3077,7 @@ final class ItemIndex {
         defer { sqlite3_finalize(statement) }
         var details: [String] = []
         while true {
-            let status = sqlite3_step(statement)
+            let status = catalogueStep(statement)
             if status == SQLITE_DONE { return details }
             guard status == SQLITE_ROW, let value = sqlite3_column_text(statement, 3) else {
                 throw error()
@@ -2684,7 +3099,7 @@ final class ItemIndex {
         defer { sqlite3_finalize(statement) }
         var details: [String] = []
         while true {
-            let status = sqlite3_step(statement)
+            let status = catalogueStep(statement)
             if status == SQLITE_DONE { return details }
             guard status == SQLITE_ROW, let pointer = sqlite3_column_text(statement, 3) else { throw error() }
             details.append(String(cString: pointer))
@@ -2699,7 +3114,7 @@ final class ItemIndex {
         defer { sqlite3_finalize(statement) }
         var details: [String] = []
         while true {
-            let status = sqlite3_step(statement)
+            let status = catalogueStep(statement)
             if status == SQLITE_DONE { return details }
             guard status == SQLITE_ROW, let value = sqlite3_column_text(statement, 3) else { throw error() }
             details.append(String(cString: value))
@@ -2724,7 +3139,7 @@ final class ItemIndex {
         defer { sqlite3_finalize(statement) }
         var ids: [String] = []
         while true {
-            let status = sqlite3_step(statement)
+            let status = catalogueStep(statement)
             if status == SQLITE_DONE { return ids }
             guard status == SQLITE_ROW, let pointer = sqlite3_column_text(statement, 0) else { throw error() }
             let id = String(cString: pointer)
@@ -2750,9 +3165,9 @@ final class ItemIndex {
         if fastCount {
             let counter = try prepare("SELECT COUNT(*)" + source, arguments)
             defer { sqlite3_finalize(counter) }
-            guard sqlite3_step(counter) == SQLITE_ROW else { throw error() }
+            guard catalogueStep(counter) == SQLITE_ROW else { throw error() }
             let total = Int(sqlite3_column_int64(counter, 0))
-            guard sqlite3_step(counter) == SQLITE_DONE else { throw error() }
+            guard catalogueStep(counter) == SQLITE_DONE else { throw error() }
             let statement = try prepare(
                 "SELECT items.id" + source
                     + " ORDER BY items.\(order.column) DESC, items.id LIMIT ? OFFSET ?",
@@ -2760,7 +3175,7 @@ final class ItemIndex {
             defer { sqlite3_finalize(statement) }
             var ids: [String] = []
             while true {
-                let status = sqlite3_step(statement)
+                let status = catalogueStep(statement)
                 if status == SQLITE_DONE { return Page(ids: ids, total: total) }
                 guard status == SQLITE_ROW, let pointer = sqlite3_column_text(statement, 0) else {
                     throw error()
@@ -2779,7 +3194,7 @@ final class ItemIndex {
         var ids: [String] = []
         var total = 0
         while true {
-            let status = sqlite3_step(statement)
+            let status = catalogueStep(statement)
             if status == SQLITE_DONE { return Page(ids: ids, total: total) }
             guard status == SQLITE_ROW, let pointer = sqlite3_column_text(statement, 0) else { throw error() }
             let id = String(cString: pointer)
@@ -2813,15 +3228,15 @@ final class ItemIndex {
         } else if fastCount {
             let countStatement = try prepare("SELECT COUNT(*)" + itemSource.sql, itemSource.arguments)
             defer { sqlite3_finalize(countStatement) }
-            guard sqlite3_step(countStatement) == SQLITE_ROW else { throw error() }
+            guard catalogueStep(countStatement) == SQLITE_ROW else { throw error() }
             total = Int(sqlite3_column_int64(countStatement, 0))
-            guard sqlite3_step(countStatement) == SQLITE_DONE else { throw error() }
+            guard catalogueStep(countStatement) == SQLITE_DONE else { throw error() }
         } else {
             let countStatement = try prepare("SELECT items.id" + itemSource.sql, itemSource.arguments)
             defer { sqlite3_finalize(countStatement) }
             total = 0
             while true {
-                let status = sqlite3_step(countStatement)
+                let status = catalogueStep(countStatement)
                 if status == SQLITE_DONE { break }
                 guard status == SQLITE_ROW, let pointer = sqlite3_column_text(countStatement, 0) else {
                     throw error()
@@ -2846,7 +3261,7 @@ final class ItemIndex {
         }
         var ids: [String] = []
         while true {
-            let status = sqlite3_step(statement)
+            let status = catalogueStep(statement)
             if status == SQLITE_DONE { break }
             guard status == SQLITE_ROW, let pointer = sqlite3_column_text(statement, 0) else { throw error() }
             let id = String(cString: pointer)
@@ -2865,7 +3280,7 @@ final class ItemIndex {
             "SELECT t.state,c.state,c.definition_hash FROM saved_view_targets t "
                 + "JOIN saved_view_coverage c ON c.view_id=t.id WHERE t.id=?", [id])
         defer { sqlite3_finalize(statement) }
-        let status = sqlite3_step(statement)
+        let status = catalogueStep(statement)
         if status == SQLITE_DONE { return false }
         guard status == SQLITE_ROW, let targetState = sqlite3_column_text(statement, 0),
             let coverageState = sqlite3_column_text(statement, 1),
@@ -2880,7 +3295,7 @@ final class ItemIndex {
     ) throws -> Bool {
         let statement = try prepare("SELECT selection FROM saved_view_targets WHERE id=?", [id])
         defer { sqlite3_finalize(statement) }
-        guard sqlite3_step(statement) == SQLITE_ROW,
+        guard catalogueStep(statement) == SQLITE_ROW,
             let bytes = sqlite3_column_text(statement, 0)
         else { return false }
         let selection = try JSON.decode(
@@ -2900,7 +3315,7 @@ final class ItemIndex {
         defer { sqlite3_finalize(statement) }
         var ids = Set<String>()
         while true {
-            let status = sqlite3_step(statement)
+            let status = catalogueStep(statement)
             if status == SQLITE_DONE { return ids }
             guard status == SQLITE_ROW, let bytes = sqlite3_column_text(statement, 0) else {
                 throw error()
@@ -2913,7 +3328,7 @@ final class ItemIndex {
         defer { sqlite3_finalize(statement) }
         var ids = Set<String>()
         while true {
-            let status = sqlite3_step(statement)
+            let status = catalogueStep(statement)
             if status == SQLITE_DONE { return ids }
             guard status == SQLITE_ROW, let bytes = sqlite3_column_text(statement, 0) else {
                 throw error()
@@ -2929,7 +3344,7 @@ final class ItemIndex {
         defer { sqlite3_finalize(statement) }
         var result = Set<String>()
         while true {
-            let step = sqlite3_step(statement)
+            let step = catalogueStep(statement)
             if step == SQLITE_DONE { return result }
             guard step == SQLITE_ROW, let text = sqlite3_column_text(statement, 0) else { throw error() }
             result.insert(String(cString: text))
@@ -2964,7 +3379,7 @@ final class ItemIndex {
                     [phrase] + batch)
                 defer { sqlite3_finalize(statement) }
                 while true {
-                    let step = sqlite3_step(statement)
+                    let step = catalogueStep(statement)
                     if step == SQLITE_DONE { break }
                     guard step == SQLITE_ROW, let text = sqlite3_column_text(statement, 0) else {
                         throw error()
@@ -2989,7 +3404,7 @@ final class ItemIndex {
         defer { sqlite3_finalize(statement) }
         var result: [String] = []
         while true {
-            let step = sqlite3_step(statement)
+            let step = catalogueStep(statement)
             if step == SQLITE_DONE { return result }
             guard step == SQLITE_ROW, let text = sqlite3_column_text(statement, 0) else { throw error() }
             result.append(String(cString: text))
@@ -3017,7 +3432,7 @@ final class ItemIndex {
             "SELECT items.id" + source.sql + " ORDER BY " + ordering, source.arguments)
         defer { sqlite3_finalize(statement) }
         while true {
-            let status = sqlite3_step(statement)
+            let status = catalogueStep(statement)
             if status == SQLITE_DONE { return }
             guard status == SQLITE_ROW, let value = sqlite3_column_text(statement, 0) else { throw error() }
             let id = String(cString: value)
@@ -3029,7 +3444,7 @@ final class ItemIndex {
             "SELECT items.revision, text_snapshot.id, text_snapshot.subject, text_snapshot.body, text_snapshot.metadata FROM items LEFT JOIN text_snapshot ON items.id = text_snapshot.id WHERE items.id = ?",
             [id])
         defer { sqlite3_finalize(statement) }
-        let step = sqlite3_step(statement)
+        let step = catalogueStep(statement)
         if step == SQLITE_DONE { return nil }
         guard step == SQLITE_ROW else { throw error() }
         if sqlite3_column_type(statement, 1) == SQLITE_NULL { return nil }
@@ -3042,7 +3457,7 @@ final class ItemIndex {
             return text
         }
         let result = try TextRow(revisionID: value(0), subject: value(2), body: value(3), metadata: value(4))
-        guard sqlite3_step(statement) == SQLITE_DONE else {
+        guard catalogueStep(statement) == SQLITE_DONE else {
             throw TractandaError("indexError", "Ambiguous indexed text.")
         }
         return result

@@ -160,6 +160,18 @@ protocol PageCorpusPageProvider: Sendable {
     func forEachPage(
         document: PageCorpusDocumentPlan, visit: (DocumentStoredPage) throws -> Void
     ) throws
+    func forEachEncodedPage(
+        document: PageCorpusDocumentPlan, visit: (DocumentStoredPage, Int) throws -> Void
+    ) throws
+}
+extension PageCorpusPageProvider {
+    /// Synthetic providers have no stored encoding. Real stores override this with the
+    /// authenticated raw length so preserved JSON whitespace survives derived rebuilds.
+    func forEachEncodedPage(
+        document: PageCorpusDocumentPlan, visit: (DocumentStoredPage, Int) throws -> Void
+    ) throws {
+        try forEachPage(document: document) { try visit($0, JSON.encode($0).count) }
+    }
 }
 
 struct PageCorpusOrigin: Codable, Equatable, Sendable {
@@ -204,6 +216,39 @@ struct PageCorpusSummary: Codable, Equatable, Sendable {
 }
 
 enum PageCorpusEmitter {
+    static func documentUnit(
+        _ saved: DocumentStoredPage, document: PageCorpusDocumentPlan, ordinal: Int64, byteStart: Int64
+    ) throws -> PageCorpusUnit? {
+        try saved.validate()
+        guard saved.sourceSHA256 == document.source.sha256 else {
+            throw TractandaError("documentIntegrity", "Corpus page source differs.")
+        }
+        guard let output = saved.page else { return nil }
+        guard try DoclingDocTagsParser.parse(output.parsed.rawDocTags) == output.parsed,
+            output.geometry.sourceUnit
+                == (document.source.mediaType == "application/pdf" ? "pdfPoint" : "pixel")
+        else {
+            throw TractandaError("documentIntegrity", "Corpus page output/source units changed.")
+        }
+        if document.identity.preprocessing == DocumentConverterIdentity().preprocessing {
+            try output.geometry.validateContentCrop()
+        }
+        guard !output.parsed.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        let spans = output.parsed.blocks.enumerated().compactMap { index, block -> PageCorpusSpan? in
+            guard !block.text.isEmpty else { return nil }
+            return PageCorpusSpan(
+                blockIndex: Int64(index), unitByteStart: Int64(block.textByteStart),
+                unitByteEnd: Int64(block.textByteEnd), box: block.location)
+        }
+        return .init(
+            ordinal: ordinal, byteStart: byteStart, text: output.parsed.text,
+            origin: .init(
+                kind: "document", fieldPath: nil, attachmentID: document.attachmentID,
+                representationID: document.representationID, contentID: document.savedContent?.contentID,
+                documentSource: document.source, textSource: nil, pageNumber: saved.pageNumber,
+                sourceByteStart: nil, sourceByteEnd: nil, rasterSHA256: output.rasterSHA256,
+                geometry: output.geometry), spans: spans)
+    }
     static func emit(
         _ input: PageCorpusInput, provider: any PageCorpusPageProvider,
         boundary: () throws -> Void = {}, visit: (PageCorpusUnit) throws -> Void
@@ -269,50 +314,32 @@ enum PageCorpusEmitter {
             var number: Int64 = 0
             var encodedBytes: Int64 = 0
             var counts = [Int64](repeating: 0, count: 5)
-            func page(_ saved: DocumentStoredPage) throws {
+            func page(_ saved: DocumentStoredPage, encodedCount: Int) throws {
                 try boundary()
                 try saved.validate()
                 let next = try add(number, 1)
                 guard saved.pageNumber == next, saved.sourceSHA256 == document.source.sha256 else {
                     throw TractandaError("documentIntegrity", "Corpus provider page binding changed.")
                 }
-                let bytes = try JSON.encode(saved)
-                guard bytes.count <= DocumentContentStore.maximumPageBytes else {
+                guard encodedCount > 0, encodedCount <= DocumentContentStore.maximumPageBytes else {
                     throw TractandaError("resourceLimit", "Corpus provider exceeded its page window.")
                 }
                 number = next
-                encodedBytes = try add(encodedBytes, Int64(bytes.count))
+                encodedBytes = try add(encodedBytes, Int64(encodedCount))
                 guard
                     let index = ["converted", "unsupported", "truncated", "timeout", "failed"]
                         .firstIndex(of: saved.status)
                 else { throw TractandaError("documentIntegrity", "Unknown corpus page outcome.") }
                 counts[index] = try add(counts[index], 1)
-                guard let output = saved.page else { return }
-                guard try DoclingDocTagsParser.parse(output.parsed.rawDocTags) == output.parsed,
-                    output.geometry.sourceUnit
-                        == (document.source.mediaType == "application/pdf" ? "pdfPoint" : "pixel")
-                else { throw TractandaError("documentIntegrity", "Corpus page output/source units changed.") }
-                if document.identity.preprocessing == DocumentConverterIdentity().preprocessing {
-                    try output.geometry.validateContentCrop()
+                if let value = try documentUnit(
+                    saved, document: document,
+                    ordinal: summary.unitCount, byteStart: summary.utf8Bytes)
+                {
+                    try unit(value.text, origin: value.origin, spans: value.spans)
                 }
-                let spans = output.parsed.blocks.enumerated().compactMap { index, block -> PageCorpusSpan? in
-                    guard !block.text.isEmpty else { return nil }
-                    return PageCorpusSpan(
-                        blockIndex: Int64(index), unitByteStart: Int64(block.textByteStart),
-                        unitByteEnd: Int64(block.textByteEnd), box: block.location)
-                }
-                try unit(
-                    output.parsed.text,
-                    origin: PageCorpusOrigin(
-                        kind: "document", fieldPath: nil, attachmentID: document.attachmentID,
-                        representationID: document.representationID,
-                        contentID: document.savedContent?.contentID,
-                        documentSource: document.source, textSource: nil, pageNumber: number,
-                        sourceByteStart: nil, sourceByteEnd: nil, rasterSHA256: output.rasterSHA256,
-                        geometry: output.geometry), spans: spans)
             }
             if document.savedContent != nil || document.isIncoming {
-                try provider.forEachPage(document: document, visit: page)
+                try provider.forEachEncodedPage(document: document) { try page($0, encodedCount: $1) }
                 let coverage = try DocumentCoverage(
                     converted: counts[0], unsupported: counts[1], truncated: counts[2],
                     timedOut: counts[3], failed: counts[4])
@@ -321,10 +348,10 @@ enum PageCorpusEmitter {
                 else { throw TractandaError("documentIntegrity", "Corpus provider closure is incomplete.") }
             } else {
                 for output in document.inlinePages {
-                    try page(
-                        DocumentStoredPage(
-                            pageNumber: Int64(output.pageNumber), sourceSHA256: document.source.sha256,
-                            page: output))
+                    let saved = try DocumentStoredPage(
+                        pageNumber: Int64(output.pageNumber), sourceSHA256: document.source.sha256,
+                        page: output)
+                    try page(saved, encodedCount: JSON.encode(saved).count)
                 }
             }
             summary.converted = try add(summary.converted, counts[0])

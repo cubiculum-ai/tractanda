@@ -10,7 +10,11 @@ public struct DocumentConverterIdentity: Codable, Equatable, Sendable {
     public let parser: String
 
     public init() {
+#if os(Linux)
+        converter = LinuxDocumentConverterProfiles.currentConverter
+#else
         converter = "tractanda.docling-native.v2-idefics3-gelu-f32"
+#endif
         model = "ibm-granite/granite-docling-258M-mlx"
         modelRevision = "a8b999991fe8c521a0cec749973414eaaf823731"
         runtimeRevision = "61a4b20d4ad01b10466e8fc94c50402a9f994430"
@@ -18,12 +22,25 @@ public struct DocumentConverterIdentity: Codable, Equatable, Sendable {
         parser = "doctags-strict-v1"
     }
 
+    /// Finite current artifact profile for package metadata; never selects a historical runtime.
+    public static func approvedLinuxConverter(architecture: String) -> String? {
+        let digest: String?
+        switch architecture {
+        case "amd64", "x86_64": digest = GeneratedLinuxDocumentConverterDigests.amd64
+        case "arm64": digest = GeneratedLinuxDocumentConverterDigests.arm64
+        default: return nil
+        }
+        return LinuxDocumentConverterProfiles.converterNames(
+            currentDigests: [digest], historicalDigests: []).first
+    }
+
     public func validate() throws {
         let current = Self()
-        guard [current.converter, "tractanda.docling-native.v1"].contains(converter), model == current.model,
+        let modern = [LinuxDocumentConverterProfiles.macConverter] + LinuxDocumentConverterProfiles.knownConverters
+        guard (modern + ["tractanda.docling-native.v1"]).contains(converter), model == current.model,
             modelRevision == current.modelRevision, runtimeRevision == current.runtimeRevision,
             parser == current.parser,
-            (converter == current.converter && preprocessing == current.preprocessing)
+            (modern.contains(converter) && preprocessing == current.preprocessing)
                 || (converter == "tractanda.docling-native.v1"
                     && [current.preprocessing, "opaque-rgb2048-17tiles-v1"].contains(preprocessing))
         else {

@@ -14,14 +14,18 @@ public struct DaemonConfiguration: Codable, Sendable {
     public let rebuildNoProgressTimeoutSeconds: Double?
     public let attachmentUploadPolicy: AttachmentUploadPolicy?
     public let documentConverter: DocumentConverterConfiguration?
+    public let documentJobResources: DocumentJobResources?
+    /// Optional explicit local peer runtime settings path; absent keeps peer networking disabled.
+    public let peerRuntimeConfigurationPath: String?
 
     public init(
         storePath: String, indexDirectory: String? = nil, socketPath: String, httpPort: Int? = 48_728,
         managed: Bool = false,
         viewItemID: String? = nil, projectRootID: String? = nil, statusRootID: String? = nil,
         initialProjectID: String? = nil, documentConverter: DocumentConverterConfiguration? = nil,
+        documentJobResources: DocumentJobResources? = nil,
         attachmentUploadPolicy: AttachmentUploadPolicy? = nil,
-        rebuildNoProgressTimeoutSeconds: Double? = nil
+        rebuildNoProgressTimeoutSeconds: Double? = nil, peerRuntimeConfigurationPath: String? = nil
     ) {
         self.storePath = storePath
         self.indexDirectory = indexDirectory
@@ -33,10 +37,13 @@ public struct DaemonConfiguration: Codable, Sendable {
         self.statusRootID = statusRootID
         self.initialProjectID = initialProjectID
         self.documentConverter = documentConverter
+        self.documentJobResources = documentJobResources
         self.attachmentUploadPolicy = attachmentUploadPolicy
         self.rebuildNoProgressTimeoutSeconds = rebuildNoProgressTimeoutSeconds
+        self.peerRuntimeConfigurationPath = peerRuntimeConfigurationPath
     }
     public func validate() throws {
+        try documentJobResources?.validate()
         guard
             rebuildNoProgressTimeoutSeconds == nil
                 || (rebuildNoProgressTimeoutSeconds!.isFinite && rebuildNoProgressTimeoutSeconds! > 0)
@@ -56,6 +63,15 @@ public struct DaemonConfiguration: Codable, Sendable {
         }
         guard socketPath.hasPrefix("/"), !socketPath.contains("\0"), socketPath.utf8.count <= 103 else {
             throw TractandaError("invalidConfiguration", "Choose a short absolute socket path.")
+        }
+        guard peerRuntimeConfigurationPath == nil
+            || (peerRuntimeConfigurationPath!.hasPrefix("/") && peerRuntimeConfigurationPath! != "/"
+                && peerRuntimeConfigurationPath!.utf8.count <= 4096
+                && !peerRuntimeConfigurationPath!.contains("\0")
+                && !peerRuntimeConfigurationPath!.contains("\n")
+                && !peerRuntimeConfigurationPath!.contains("\r"))
+        else {
+            throw TractandaError("invalidConfiguration", "Peer runtime configuration path must be absolute.")
         }
         guard httpPort == nil || (0...65_535).contains(httpPort!) else {
             throw TractandaError("invalidConfiguration", "HTTP port is invalid.")

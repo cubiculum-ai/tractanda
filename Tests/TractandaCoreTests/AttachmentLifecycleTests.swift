@@ -274,6 +274,116 @@ final class AttachmentLifecycleTests: XCTestCase {
         }
         XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
     }
+    func testResumableNativeExportPinsStoreAndRechecksCurrentACLForCompleteHistory() throws {
+        let root = fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let accounts = Accounts()
+        let store = try AttachmentFixtureCapacity.makeStore(root: root, accounts: accounts)
+        _ = try store.configureAccess(
+            .object([
+                "profile": .text(AccessConfiguration.profile),
+                "users": .list([.text("alice"), .text("bob")]),
+            ]),
+            operationID: "download-config")
+        let base = try store.withAccess(forUID: accounts.alice) {
+            try store.commit(
+                CommitRequest(
+                    classID: "Item", changes: ["permissions": permissions(owner: "alice", mode: 0o640)],
+                    operationID: "download-create")
+            ).revision
+        }
+        let bytes = Data(repeating: 17, count: 262_157)
+        let attached = try store.withAccess(forUID: accounts.alice) {
+            try attach(store, base: base, bytes: bytes)
+        }.revision
+        let descriptor = try XCTUnwrap(AttachmentDescriptor.descriptors(in: attached.fields).first)
+        let service = ItemService(store: store)
+        let client = ItemClient(transport: { service.handle($0, peerUID: accounts.bob) })
+        let connection = ServerConnection(socketPath: "/tmp/download-fixture.sock")
+        let stage = root.appendingPathComponent("retained-download")
+        let destination = root.appendingPathComponent("download")
+        let policy = AttachmentDownloadPolicy(
+            maximumStagedBytes: 4 * 1024 * 1024, minimumFreeBytes: AttachmentFixtureCapacity.reserveBytes)
+        func download(_ hooks: ResumableByteDownload.Hooks = .init()) throws -> AttachmentDescriptor {
+            try AttachmentFiles.exportResumable(
+                client: client, connection: connection, itemID: base.itemID,
+                attachmentID: descriptor.attachmentID, destination: destination,
+                revisionID: attached.revisionID, resumeDirectory: stage, policy: policy, hooks: hooks)
+        }
+        let list = try client.listAttachments(itemID: base.itemID)
+        XCTAssertNotNil(UUID(uuidString: try XCTUnwrap(list.storeID))?.version1Components)
+        XCTAssertEqual(
+            try client.attachmentContent(itemID: base.itemID, attachmentID: descriptor.attachmentID).storeID,
+            list.storeID)
+        assertCode("connectionLost") {
+            try download(
+                .init(afterCheckpoint: { _ in throw TractandaError("connectionLost", "Interrupted") }))
+        }
+        let revoked = try store.commit(
+            CommitRequest(
+                action: .revise, itemID: base.itemID, expectedRevisionID: attached.revisionID,
+                changes: ["permissions": permissions(owner: "alice", mode: 0o600)],
+                operationID: "download-revoke"))
+        assertCode("forbidden") { try download() }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
+        let restored = try store.commit(
+            CommitRequest(
+                action: .revise, itemID: base.itemID, expectedRevisionID: revoked.revision.revisionID,
+                changes: ["permissions": permissions(owner: "alice", mode: 0o640)],
+                operationID: "download-restore"))
+        XCTAssertEqual(try download(), descriptor)
+        XCTAssertEqual(try Data(contentsOf: destination), bytes)
+        _ = try store.commit(
+            CommitRequest(
+                action: .revise, itemID: base.itemID, expectedRevisionID: restored.revision.revisionID,
+                changes: ["permissions": permissions(owner: "alice", mode: 0o600)],
+                operationID: "download-revoke-again"))
+        assertCode("forbidden") { try download() }
+        XCTAssertEqual(try Data(contentsOf: destination), bytes)
+    }
+    func testResumableNativeExportRejectsMissingAndChangedServerIdentity() throws {
+        let root = fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try AttachmentFixtureCapacity.makeStore(root: root)
+        let base = try item(store)
+        let attached = try attach(store, base: base, bytes: Data([1, 2, 3])).revision
+        let descriptor = try XCTUnwrap(AttachmentDescriptor.descriptors(in: attached.fields).first)
+        let service = ItemService(store: store)
+        func client(missing: Bool) -> ItemClient {
+            ItemClient(transport: { request in
+                let response = service.handle(request, peerUID: getuid())
+                var object = try JSONSerialization.jsonObject(with: response) as! [String: Any]
+                var responses = object["methodResponses"] as! [[Any]]
+                let method = responses[0][0] as! String
+                if missing || method == "TractandaAttachment/content" {
+                    var result = responses[0][1] as! [String: Any]
+                    if missing {
+                        result.removeValue(forKey: "storeID")
+                    } else {
+                        result["storeID"] = "22222222-2222-1222-8222-222222222222"
+                    }
+                    responses[0][1] = result
+                    object["methodResponses"] = responses
+                }
+                return try JSONSerialization.data(withJSONObject: object)
+            })
+        }
+        for missing in [true, false] {
+            assertCode(missing ? "downloadBinding" : "downloadIntegrity") {
+                try AttachmentFiles.exportResumable(
+                    client: client(missing: missing),
+                    connection: ServerConnection(socketPath: "/tmp/test.sock"),
+                    itemID: base.itemID, attachmentID: descriptor.attachmentID,
+                    destination: root.appendingPathComponent("download"), revisionID: attached.revisionID,
+                    resumeDirectory: root.appendingPathComponent("retained"),
+                    policy: AttachmentDownloadPolicy(
+                        maximumStagedBytes: 4 * 1024 * 1024,
+                        minimumFreeBytes: AttachmentFixtureCapacity.reserveBytes))
+            }
+            XCTAssertFalse(
+                FileManager.default.fileExists(atPath: root.appendingPathComponent("download").path))
+        }
+    }
     private final class Accounts: AccountDirectory {
         let alice: UInt32 = 60001, bob: UInt32 = 60002
         func user(forUID uid: UInt32) throws -> AccountIdentity {
@@ -403,7 +513,11 @@ final class AttachmentLifecycleTests: XCTestCase {
         let other = try item(store, operation: "other-owner")
         var forgedFields = other.fields
         forgedFields["attachments"] = attached.revision.fields["attachments"]
-        let forged = try Revision(fields: forgedFields)
+        var ancestry = try XCTUnwrap(forgedFields["revisionAncestry"]?.map)
+        let writes = try XCTUnwrap(other.provenance).writtenFields
+        ancestry["writtenFields"] = .list(Array(Set(writes + ["attachments"])).sorted().map(ItemValue.text))
+        forgedFields["revisionAncestry"] = .object(ancestry)
+        let forged = try Revision(fields: forgedFields, formatVersion: other.formatVersion)
         let records = FileManager.default.enumerator(
             at: root.appendingPathComponent("items"), includingPropertiesForKeys: nil)
         var target: URL?

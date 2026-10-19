@@ -1,0 +1,45 @@
+#!/bin/sh
+set -eu
+helper=/opt/tractanda/current/bin/tractanda-setup
+descriptor=
+cleanup() { if [ -n "$descriptor" ]; then /bin/rm -f -- "$descriptor"; fi; }
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+case "${1-}" in
+ install)
+  { [ "$#" -eq 1 ] || [ "$#" -eq 3 ]; } || { echo "tractanda preinst: invalid install arguments" >&2; exit 2; }
+  lifecycle=install ;;
+ upgrade)
+  [ "$#" -eq 3 ] || { echo "tractanda preinst: invalid upgrade arguments" >&2; exit 2; }
+  lifecycle=upgrade ;;
+ abort-upgrade)
+  [ "$#" -eq 2 ] || { echo "tractanda preinst: invalid abort-upgrade arguments" >&2; exit 2; }
+  lifecycle=abort-upgrade ;;
+ *) echo "tractanda preinst: unsupported dpkg action" >&2; exit 2 ;;
+esac
+if [ "$lifecycle" != abort-upgrade ]; then
+ umask 077
+ descriptor=$(/usr/bin/mktemp /run/tractanda-package-descriptor.XXXXXX)
+ cat >"$descriptor" <<'TRACTANDA_PACKAGE_DESCRIPTOR_EOF'
+@TRACTANDA_PACKAGE_DESCRIPTOR_JSON@
+TRACTANDA_PACKAGE_DESCRIPTOR_EOF
+fi
+if [ -x "$helper" ]; then
+ set -- verify-helper "$helper"
+else
+ [ "$lifecycle" != abort-upgrade ] || { echo "tractanda preinst: no-helper abort is unsafe" >&2; exit 1; }
+ set -- preinst "$lifecycle" "$descriptor"
+fi
+/usr/bin/python3 -I - "$@" <<'TRACTANDA_PACKAGE_HOOK_FALLBACK_EOF'
+@TRACTANDA_PACKAGE_HOOK_FALLBACK_PY@
+TRACTANDA_PACKAGE_HOOK_FALLBACK_EOF
+if [ -x "$helper" ]; then
+ if [ "$lifecycle" = abort-upgrade ]; then
+  "$helper" --package-lifecycle abort-upgrade
+ else
+  "$helper" --package-lifecycle preinst --descriptor "$descriptor"
+ fi
+fi
+
