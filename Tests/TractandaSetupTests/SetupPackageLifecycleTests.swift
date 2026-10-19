@@ -21,6 +21,7 @@ final class SetupPackageLifecycleTests: XCTestCase {
         var calls: [[String]] = []
         var failDisable: String?
         var foreignUnit: String?
+        var inventoryResults: [String: ProcessResult] = [:]
         var bootstraps = 0
         init(_ definitions: URL) { self.definitions = definitions }
         func run(_ executable: String, _ arguments: [String], environment: [String: String]) throws
@@ -39,6 +40,7 @@ final class SetupPackageLifecycleTests: XCTestCase {
             }
             if action == "daemon-reload" { return ProcessResult(status: 0) }
             if action == "list-units" || action == "list-unit-files" {
+                if let result = inventoryResults[action] { return result }
                 return ProcessResult(status: 0, output: foreignUnit.map { $0 + " loaded\n" } ?? "")
             }
             let unit = arguments.last!
@@ -397,6 +399,36 @@ final class SetupPackageLifecycleTests: XCTestCase {
     override func tearDownWithError() throws {
         if let root { try FileManager.default.removeItem(at: root) }
         try super.tearDownWithError()
+    }
+
+    func testFreshPackageAcceptsExactEmptyUnitFileInventoryExitOne() throws {
+        let f = try fixture()
+        f.runner.inventoryResults["list-unit-files"] = ProcessResult(status: 1)
+        try f.configureFresh()
+        XCTAssertEqual(try f.engine.readPackageState()?.phase, .committed)
+        XCTAssertEqual(try f.engine.readPackageState()?.instances, [])
+        XCTAssertEqual(f.runner.bootstraps, 0)
+        XCTAssertTrue(f.runner.running.isEmpty)
+        XCTAssertFalse(f.engine.exists(f.engine.roots.data))
+    }
+
+    func testFailedOrNonemptyInventoryCannotClaimNoManagedServices() throws {
+        let f = try fixture()
+        for (action, result) in [
+            (
+                "list-unit-files",
+                ProcessResult(status: 1, output: "tractanda-server-foreign.service disabled\n")
+            ),
+            ("list-unit-files", ProcessResult(status: 1, output: "Failed to connect to bus")),
+            ("list-unit-files", ProcessResult(status: 1, output: "\n")),
+            ("list-unit-files", ProcessResult(status: 2)),
+            ("list-units", ProcessResult(status: 1)),
+        ] {
+            f.runner.inventoryResults = [action: result]
+            XCTAssertThrowsError(try f.engine.verifyPackageDefinitionFiles([]))
+        }
+        XCTAssertEqual(f.runner.bootstraps, 0)
+        XCTAssertTrue(f.runner.running.isEmpty)
     }
 
     func testFreshPackageConfigureNeverSelectsInitializesOrStartsAStore() throws {

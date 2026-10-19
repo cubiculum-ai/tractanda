@@ -41,29 +41,43 @@ let package = Package(
 )
 
 #if os(Linux)
-// The reviewed build driver supplies a verified, target-specific native prefix.
-// These support libraries are bundled package inputs, never a host service.
-guard let native = Context.environment["TRACTANDA_DOCLING_NATIVE_PREFIX"],
-    native.hasPrefix("/"), !native.contains("\0") else {
-    fatalError("Linux Docling requires its verified private native build prefix")
-}
-package.dependencies.append(.package(
-    url: "https://github.com/apple/swift-crypto.git",
-    exact: "4.5.2"))
-package.targets.append(.target(
-    name: "CDoclingRaster", path: "Sources/CDoclingRaster",
-    exclude: ["raster.c", "png.c", "jpeg.c", "color.c", "metadata.c", "images.exports", "pdf.exports", "internal.h"],
-    sources: ["module.c"], publicHeadersPath: "include",
-    linkerSettings: [.unsafeFlags(["-L" + native + "/lib", "-Xlinker", "-rpath", "-Xlinker", "$ORIGIN/../lib/tractanda/document-native"]),
-        .linkedLibrary("tractanda_docling_pdf")]))
-for target in package.targets where ["DoclingRaster", "TractandaDocumentConverter"].contains(target.name) {
-    target.dependencies.append(.product(name: "Crypto", package: "swift-crypto"))
-    if target.name == "DoclingRaster" { target.dependencies.append("CDoclingRaster") }
-}
-// This existing check generates Mac fixtures with CoreGraphics; the portable
-// regression target below supplies Linux checks without pulling Apple frameworks.
-package.products.removeAll { $0.name == "docling-raster-check" }
-package.targets.removeAll { $0.name == "DoclingRasterCheck" }
+    // The reviewed build driver supplies a verified, target-specific native prefix.
+    // These support libraries are bundled package inputs, never a host service.
+    guard let native = Context.environment["TRACTANDA_DOCLING_NATIVE_PREFIX"],
+        native.hasPrefix("/"), !native.contains("\0")
+    else {
+        fatalError("Linux Docling requires its verified private native build prefix")
+    }
+    package.dependencies.append(
+        .package(
+            url: "https://github.com/apple/swift-crypto.git",
+            exact: "4.5.2"))
+    package.targets.append(
+        .target(
+            name: "CDoclingRaster", path: "Sources/CDoclingRaster",
+            exclude: [
+                "raster.c", "png.c", "jpeg.c", "color.c", "metadata.c", "images.exports", "pdf.exports",
+                "internal.h",
+            ],
+            sources: ["module.c"], publicHeadersPath: "include",
+            linkerSettings: [
+                .unsafeFlags([
+                    "-L" + native + "/lib", "-Xlinker", "-rpath", "-Xlinker",
+                    "$ORIGIN/../lib/tractanda/document-native",
+                ]),
+                .linkedLibrary("tractanda_docling_pdf"),
+            ]))
+    for target in package.targets where ["DoclingRaster", "TractandaDocumentConverter"].contains(target.name)
+    {
+        target.dependencies.append(.product(name: "Crypto", package: "swift-crypto"))
+        if target.name == "DoclingRaster" { target.dependencies.append("CDoclingRaster") }
+    }
+    // This existing check generates Mac fixtures with CoreGraphics; the portable
+    // regression target below supplies Linux checks without pulling Apple frameworks.
+    package.products.removeAll { $0.name == "docling-raster-check" }
+    package.targets.removeAll { $0.name == "DoclingRasterCheck" }
 #endif
-package.targets.append(.testTarget(name: "DoclingRasterTests", dependencies: ["DoclingRaster", "DoclingRGB"],
-    resources: [.copy("Fixtures")]))
+package.targets.append(
+    .testTarget(
+        name: "DoclingRasterTests", dependencies: ["DoclingRaster", "DoclingRGB"],
+        resources: [.copy("Fixtures")]))

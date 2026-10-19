@@ -8,9 +8,11 @@ struct DocumentWorkerBudgets: Sendable {
     let noProgress: Double
     let terminationGrace: Double
     init(
-        inspect: Double = DocumentJobResources.defaultInspectSeconds, modelLoad: Double = DocumentJobResources.defaultModelLoadSeconds,
+        inspect: Double = DocumentJobResources.defaultInspectSeconds,
+        modelLoad: Double = DocumentJobResources.defaultModelLoadSeconds,
         page: Double = DocumentJobResources.defaultPageSeconds,
-        noProgress: Double = DocumentJobResources.defaultNoProgressSeconds, terminationGrace: Double = DocumentJobResources.defaultTerminationGraceSeconds
+        noProgress: Double = DocumentJobResources.defaultNoProgressSeconds,
+        terminationGrace: Double = DocumentJobResources.defaultTerminationGraceSeconds
     ) throws {
         guard
             [inspect, modelLoad, page, noProgress, terminationGrace].allSatisfy({
@@ -75,9 +77,10 @@ struct DocumentWorkerDeadline {
     }
     /// Safe bounded context captured at failure, before termination can add cleanup time.
     func timeoutFailure(lastPhase: String?, now: ContinuousClock.Instant = .now) -> TractandaError {
-        let noProgress = usesProgressDeadline &&
-            lastProgress.advanced(by: .seconds(budgets.noProgress))
-            < started.advanced(by: .seconds(phaseSeconds))
+        let noProgress =
+            usesProgressDeadline
+            && lastProgress.advanced(by: .seconds(budgets.noProgress))
+                < started.advanced(by: .seconds(phaseSeconds))
         let origin = noProgress ? lastProgress : started
         let duration = origin.duration(to: now).components
         let elapsed = max(0, Double(duration.seconds) + Double(duration.attoseconds) / 1e18)

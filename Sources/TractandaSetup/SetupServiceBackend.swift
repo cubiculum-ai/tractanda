@@ -227,7 +227,9 @@ struct SetupServiceBackend {
         try successful(["enable", name(instance, role: role)])
         let after = try systemdState(instance, role: role)
         try after.requireOwned(fragment: definitionURL(instance, role: role))
-        guard after.unitFileState == "enabled" else { throw SetupError("Owned boot enablement was not established.") }
+        guard after.unitFileState == "enabled" else {
+            throw SetupError("Owned boot enablement was not established.")
+        }
     }
 
     /// Used for failed/pending configuration: stopped must persist over a subsequent boot.
@@ -288,7 +290,10 @@ struct SetupServiceBackend {
             "ExecStart="
                 + (try arguments.map { try Self.quoted($0, executableArgument: true) }.joined(separator: " ")),
             "Restart=on-failure", "RestartSec=5s", "TimeoutStopSec=45s", "KillMode=control-group",
-            "ExecStartPre=+" + (try Self.quoted(roots.software.appendingPathComponent("current/bin/tractanda-setup").path, executableArgument: true))
+            "ExecStartPre=+"
+                + (try Self.quoted(
+                    roots.software.appendingPathComponent("current/bin/tractanda-setup").path,
+                    executableArgument: true))
                 + " --package-runtime-guard " + instance,
         ]
         if role == .server {

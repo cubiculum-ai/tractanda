@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+
 @testable import TractandaSetup
 
 final class SetupPeerRuntimeArgumentsTests: XCTestCase {
@@ -36,9 +37,10 @@ final class SetupPeerRuntimeArgumentsTests: XCTestCase {
     func testRuntimeOptionsRejectUnsupportedCommandsIncludingDryRun() {
         for command in ["dry-run", "status", "start", "stop", "restart", "uninstall", "unknown"] {
             XCTAssertThrowsError(try SetupPeerRuntimeArguments.parse([command, "--disable-peer-runtime"]))
-            XCTAssertThrowsError(try SetupPeerRuntimeArguments.parse([
-                command, "--peer-runtime-configuration", "/tmp/config.json",
-            ]))
+            XCTAssertThrowsError(
+                try SetupPeerRuntimeArguments.parse([
+                    command, "--peer-runtime-configuration", "/tmp/config.json",
+                ]))
         }
     }
 
@@ -48,7 +50,10 @@ final class SetupPeerRuntimeArgumentsTests: XCTestCase {
             ["install", "--peer-runtime-configuration", "--name"],
             ["upgrade", "--peer-runtime-configuration", "--disable-peer-runtime"],
             ["plan", "--disable-peer-runtime", "--disable-peer-runtime"],
-            ["install", "--peer-runtime-configuration", "/tmp/a.json", "--peer-runtime-configuration", "/tmp/b.json"],
+            [
+                "install", "--peer-runtime-configuration", "/tmp/a.json", "--peer-runtime-configuration",
+                "/tmp/b.json",
+            ],
             ["upgrade", "--peer-runtime-configuration", "/tmp/a.json", "--disable-peer-runtime"],
         ]
         for arguments in invalid {

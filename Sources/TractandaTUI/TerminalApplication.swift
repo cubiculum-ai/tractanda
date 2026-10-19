@@ -2903,7 +2903,8 @@ public final class TerminalApplication {
                 "Semantic ready · top matches · \(page.items.count) items"
                 + (page.partialCoverage ? " · partial coverage" : "")
                 + (page.omitted > 0 ? " · \(page.omitted) stale/unavailable passages omitted" : "")
-                + (!page.unhydratedIDs.isEmpty ? " · some results could not be loaded; matches are partial"
+                + (!page.unhydratedIDs.isEmpty
+                    ? " · some results could not be loaded; matches are partial"
                     : !page.unresolved.isEmpty ? " · some results need review; readable matches remain" : "")
                 + " · Esc returns; A clears"
         case .failed(let message):

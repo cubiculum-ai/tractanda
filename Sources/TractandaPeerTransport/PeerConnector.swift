@@ -11,7 +11,8 @@ package struct PeerConnectionLimits: Sendable {
     package init() {}
     package func validate() throws {
         guard connectSeconds.isFinite, connectSeconds > 0, connectSeconds <= 30,
-            handshakeSeconds.isFinite, handshakeSeconds > 0, handshakeSeconds <= 30 else {
+            handshakeSeconds.isFinite, handshakeSeconds > 0, handshakeSeconds <= 30
+        else {
             throw TractandaError("resourceLimit", "Invalid peer connection deadlines.")
         }
         try exchange.validate()
@@ -62,7 +63,10 @@ private final class PeerConnectState: Sendable {
 
 /// Owns the current single address attempt. Cancellation also fences late initializers.
 private final class PeerConnectOwner: Sendable {
-    private struct State: Sendable { var cancelled = false; var attempt: PeerConnectState? }
+    private struct State: Sendable {
+        var cancelled = false
+        var attempt: PeerConnectState?
+    }
     private let state = Mutex(State())
     func begin(_ attempt: PeerConnectState) -> Bool {
         state.withLock {
@@ -72,7 +76,10 @@ private final class PeerConnectOwner: Sendable {
         }
     }
     func cancel() {
-        let attempt = state.withLock { $0.cancelled = true; return $0.attempt }
+        let attempt = state.withLock {
+            $0.cancelled = true
+            return $0.attempt
+        }
         attempt?.cancel()
     }
 }
@@ -86,15 +93,21 @@ package enum PeerConnector {
         logicalLease: PeerLogicalLeaseFactory? = nil
     ) async throws -> PeerExchangeConnection {
         try limits.validate()
-        guard (1...65_535).contains(port) else { throw TractandaError("invalidConfiguration", "Invalid peer port.") }
+        guard (1...65_535).contains(port) else {
+            throw TractandaError("invalidConfiguration", "Invalid peer port.")
+        }
         guard pairing.tls.role == .initiator else {
             throw TractandaError("invalidPeerRole", "Only the configured initiator can connect.")
         }
         let owner = PeerConnectOwner()
-        let end = NIODeadline.now() + .nanoseconds(Int64((limits.connectSeconds + limits.handshakeSeconds) * 1_000_000_000))
+        let end =
+            NIODeadline.now()
+            + .nanoseconds(Int64((limits.connectSeconds + limits.handshakeSeconds) * 1_000_000_000))
         func remaining() throws -> Int64 {
             let now = NIODeadline.now()
-            guard now < end else { throw TractandaError("deadlineExceeded", "Peer connection deadline expired.") }
+            guard now < end else {
+                throw TractandaError("deadlineExceeded", "Peer connection deadline expired.")
+            }
             return Int64((end - now).nanoseconds)
         }
         return try await withTaskCancellationHandler {
@@ -109,17 +122,24 @@ package enum PeerConnector {
                 guard owner.begin(state) else { throw CancellationError() }
                 do {
                     // A dead first address cannot consume every remaining address's opportunity.
-                    let share = max(1, min(Int64(limits.connectSeconds * 1_000_000_000), budget / Int64(addresses.count - index)))
+                    let share = max(
+                        1,
+                        min(
+                            Int64(limits.connectSeconds * 1_000_000_000),
+                            budget / Int64(addresses.count - index)))
                     let channel = try await ClientBootstrap(group: group)
                         .connectTimeout(.nanoseconds(share))
                         .channelInitializer { channel in
                             guard state.attach(channel) else {
                                 channel.close(promise: nil)
-                                return channel.eventLoop.makeFailedFuture(TractandaError("cancelled", "Peer connection cancelled."))
+                                return channel.eventLoop.makeFailedFuture(
+                                    TractandaError("cancelled", "Peer connection cancelled."))
                             }
-                            return PeerExchangeConnection.install(on: channel, pairing: pairing,
+                            return PeerExchangeConnection.install(
+                                on: channel, pairing: pairing,
                                 coordinator: coordinator, limits: limits.exchange,
-                                authorizeAdmission: authorizeAdmission, logicalLease: logicalLease).map { state.installed($0) }
+                                authorizeAdmission: authorizeAdmission, logicalLease: logicalLease
+                            ).map { state.installed($0) }
                         }.connect(to: address).get()
                     let handshake = min(try remaining(), Int64(limits.handshakeSeconds * 1_000_000_000))
                     let deadline = channel.eventLoop.scheduleTask(in: .nanoseconds(handshake)) {
@@ -140,6 +160,8 @@ package enum PeerConnector {
                 }
             }
             throw failure
-        } onCancel: { owner.cancel() }
+        } onCancel: {
+            owner.cancel()
+        }
     }
 }

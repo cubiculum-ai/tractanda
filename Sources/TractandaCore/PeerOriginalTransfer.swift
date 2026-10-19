@@ -209,11 +209,13 @@ final class PeerOriginalTransfer {
         if let owner {
             let fields = owner.split(separator: ":")
             guard fields.count == 2, UUID(uuidString: String(fields[0])) != nil,
-                ["comparison", "export", "intake"].contains(String(fields[1])) else {
+                ["comparison", "export", "intake"].contains(String(fields[1]))
+            else {
                 throw TractandaError("resourceLimit", "Invalid logical verification slot.")
             }
         }
-        let previous = logicalOwner; logicalOwner = owner
+        let previous = logicalOwner
+        logicalOwner = owner
         defer { logicalOwner = previous }
         return try body()
     }
@@ -415,13 +417,15 @@ final class PeerOriginalTransfer {
             jobs.removeValue(forKey: certificate.last!)
             return old.complete
         }
-        let jobKey = certificate.last!, owner = logicalOwner
+        let jobKey = certificate.last!
+        let owner = logicalOwner
         let now = ProcessInfo.processInfo.systemUptime
         jobs = jobs.filter { now - $0.value.touched < 60 }
         let existing = owner.flatMap { parked[$0] } ?? (owner == nil ? jobs[jobKey] : nil)
         if let existing, existing.certificateKey != jobKey {
             guard existing.object == object, existing.metadata == file.metadata else {
-                throw TractandaError("peerVerificationBusy", "This bounded logical slot has unfinished verification.")
+                throw TractandaError(
+                    "peerVerificationBusy", "This bounded logical slot has unfinished verification.")
             }
             throw TractandaError("peerObjectCollision", "Verification certificate binding changed.")
         }
@@ -430,12 +434,17 @@ final class PeerOriginalTransfer {
                 throw TractandaError("peerVerificationBusy", "Bounded verification progress slots are busy.")
             }
         }
-        var current = existing ?? Job(key: key, object: object, metadata: file.metadata,
-            certificateKey: jobKey, proofPrefix: proofPrefix)
+        var current =
+            existing
+            ?? Job(
+                key: key, object: object, metadata: file.metadata,
+                certificateKey: jobKey, proofPrefix: proofPrefix)
         guard current.object == object, current.metadata == file.metadata else {
             throw TractandaError("peerObjectCollision", "Original verification work binding differs.")
         }
-        let parkedCost = try JSON.encode(current.object).count + (current.proofPrefix?.reduce(0) { $0 + $1.utf8.count } ?? 0)
+        let parkedCost =
+            try JSON.encode(current.object).count
+            + (current.proofPrefix?.reduce(0) { $0 + $1.utf8.count } ?? 0)
             + MemoryLayout<SHA256>.stride * 2 + MemoryLayout<FileMetadata>.stride + 8192
         guard parkedCost <= 16 * 1024 else {
             throw TractandaError("resourceLimit", "One parked verification state exceeds its fixed reserve.")

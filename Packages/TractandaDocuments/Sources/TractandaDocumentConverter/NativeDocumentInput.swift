@@ -1,13 +1,14 @@
-#if canImport(CryptoKit)
-import CryptoKit
-#else
-import Crypto
-#endif
 import DoclingRGB
 import Foundation
 import MLX
 import MLXLMCommon
 import TractandaClient
+
+#if canImport(CryptoKit)
+    import CryptoKit
+#else
+    import Crypto
+#endif
 
 func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
     guard condition() else { throw TractandaError("documentConverter", message) }

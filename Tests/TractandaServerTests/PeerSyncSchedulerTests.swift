@@ -1,6 +1,7 @@
 import Foundation
 import NIOPosix
 import XCTest
+
 @testable import TractandaCore
 @testable import TractandaPeerTransport
 @testable import TractandaServer
@@ -80,15 +81,19 @@ final class PeerSyncSchedulerTests: XCTestCase {
         return report
     }
 
-    private func call(at index: Int, in calls: [PeerSyncSchedulerGate.Call], file: StaticString = #filePath,
-        line: UInt = #line) throws -> PeerSyncSchedulerGate.Call {
-        try XCTUnwrap(calls.indices.contains(index) ? calls[index] : nil,
+    private func call(
+        at index: Int, in calls: [PeerSyncSchedulerGate.Call], file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws -> PeerSyncSchedulerGate.Call {
+        try XCTUnwrap(
+            calls.indices.contains(index) ? calls[index] : nil,
             "Expected scheduler call at bounded index \(index).", file: file, line: line)
     }
 
     func testBoundedFairSchedulingReplacementAndDrainedClose() async throws {
         try PeerFixtureCapacity.requireFree()
-        let root = try GuardedFixtureDirectory.create(prefix: "q", source: "PeerSyncSchedulerTests", test: name)
+        let root = try GuardedFixtureDirectory.create(
+            prefix: "q", source: "PeerSyncSchedulerTests", test: name)
         defer { try? FileManager.default.removeItem(at: root) }
         let fixture = try PeerServiceFixture(root: root)
         defer { fixture.releaseWriter() }
@@ -99,15 +104,19 @@ final class PeerSyncSchedulerTests: XCTestCase {
         try fixture.source.withAccess(forUID: fixture.accounts.human) {
             for (index, alias) in ["edge-a", "edge-b", "edge-c"].enumerated() {
                 let digest = AuthorityRecordCodec.sha256(Data(("scheduler-" + alias).utf8))
-                let binding = try PeerExchangeBinding(peerID: alias, storeID: original.storeID,
+                let binding = try PeerExchangeBinding(
+                    peerID: alias, storeID: original.storeID,
                     localReplicaID: original.localReplicaID, remoteReplicaID: original.remoteReplicaID,
                     pairingID: PeerServiceFixture.id(), localIsInitiator: true,
                     configurationDigest: digest)
-                let credential = try PeerCredential(binding: binding,
+                let credential = try PeerCredential(
+                    binding: binding,
                     secret: [UInt8](repeating: UInt8(index + 1), count: 32))
-                let context = try PeerPackage.Context(peerID: alias, storeID: binding.storeID,
+                let context = try PeerPackage.Context(
+                    peerID: alias, storeID: binding.storeID,
                     configurationDigest: digest, permittedOrigins: [binding.remoteReplicaID])
-                try fixture.source.registerPeerCredential(credential, context: context,
+                try fixture.source.registerPeerCredential(
+                    credential, context: context,
                     expectedContextToken: fixture.source.peerIntakeContextToken(),
                     operationID: PeerServiceFixture.id())
             }
@@ -115,7 +124,8 @@ final class PeerSyncSchedulerTests: XCTestCase {
         fixture.releaseWriter()
 
         let accounts = fixture.accounts
-        let coordinator = try await ServiceCoordinator(opening: fixture.sourceRoot,
+        let coordinator = try await ServiceCoordinator(
+            opening: fixture.sourceRoot,
             embeddingProviderForTesting: nil, requireInitializedStore: true,
             makeAccountDirectory: { accounts })
         defer { await coordinator.close() }
@@ -127,9 +137,11 @@ final class PeerSyncSchedulerTests: XCTestCase {
         }
         let synchronization = try PeerRuntimeConfiguration.Synchronization(enabled: true, intervalSeconds: 15)
         let configuration = try PeerRuntimeConfiguration(peers: peers, synchronization: synchronization)
-        let network = try PeerServiceRuntime(configuration: configuration, coordinator: coordinator, group: group)
+        let network = try PeerServiceRuntime(
+            configuration: configuration, coordinator: coordinator, group: group)
         defer { await network.close() }
-        let runtime = try PeerSyncRuntime(configuration: configuration, coordinator: coordinator, network: network,
+        let runtime = try PeerSyncRuntime(
+            configuration: configuration, coordinator: coordinator, network: network,
             synchronizeForTesting: { peerID, snapshot in
                 try await gate.hold(peerID: peerID, snapshot: snapshot)
             })
@@ -159,7 +171,8 @@ final class PeerSyncSchedulerTests: XCTestCase {
         for offset in 1...4 { await runtime.tick(now: base + Double(offset)) }
         try await Task.sleep(for: .milliseconds(40))
         let heldCallCount = await gate.callLog().count
-        XCTAssertEqual(heldCallCount, 2,
+        XCTAssertEqual(
+            heldCallCount, 2,
             "Held jobs occupy both slots; repeated ticks cannot start the third edge.")
 
         await gate.release(firstCall.id, with: yieldedReport(marker: 41))
@@ -186,13 +199,16 @@ final class PeerSyncSchedulerTests: XCTestCase {
         let oldA = try await coordinator.loadPeerCredential(peerID: "edge-a")
         let oldBinding = oldA.binding
         let rotatedDigest = AuthorityRecordCodec.sha256(Data("scheduler-edge-a-rotated".utf8))
-        let rotatedBinding = try PeerExchangeBinding(peerID: oldBinding.peerID, storeID: oldBinding.storeID,
+        let rotatedBinding = try PeerExchangeBinding(
+            peerID: oldBinding.peerID, storeID: oldBinding.storeID,
             localReplicaID: oldBinding.localReplicaID, remoteReplicaID: oldBinding.remoteReplicaID,
             pairingID: oldBinding.pairingID, localIsInitiator: true,
             configurationDigest: rotatedDigest)
         let rotated = try PeerCredential(binding: rotatedBinding, secret: [UInt8](repeating: 9, count: 32))
-        let registrationContext = try await coordinator.peerCredentialRegistrationContext(forUID: fixture.accounts.human)
-        try await coordinator.registerPeerCredential(rotated, permittedOrigins: [rotatedBinding.remoteReplicaID],
+        let registrationContext = try await coordinator.peerCredentialRegistrationContext(
+            forUID: fixture.accounts.human)
+        try await coordinator.registerPeerCredential(
+            rotated, permittedOrigins: [rotatedBinding.remoteReplicaID],
             expectedContextToken: registrationContext, operationID: PeerServiceFixture.id(),
             forUID: fixture.accounts.human)
 
@@ -203,9 +219,11 @@ final class PeerSyncSchedulerTests: XCTestCase {
         XCTAssertTrue(oldJobsCancelled, "Snapshot replacement cancels both outstanding old jobs.")
         let cancelledJobsStillOccupySlots = await runtime.activeJobsForTesting()
         let callsBeforeOldReturn = await gate.callLog().count
-        XCTAssertEqual(cancelledJobsStillOccupySlots, 2,
+        XCTAssertEqual(
+            cancelledJobsStillOccupySlots, 2,
             "A cancelled job retains its slot until its synchronization call actually returns.")
-        XCTAssertEqual(callsBeforeOldReturn, 4,
+        XCTAssertEqual(
+            callsBeforeOldReturn, 4,
             "Replacement edges cannot start while cancelled old calls still occupy both slots.")
 
         // Return stale success-shaped results. Edge identity and cancellation must prevent publication.
@@ -214,7 +232,8 @@ final class PeerSyncSchedulerTests: XCTestCase {
         let replacementCallsStarted = await waitUntil { await gate.callLog().count == 6 }
         XCTAssertTrue(replacementCallsStarted)
         let replacementReports = await runtime.reportsForTesting()
-        XCTAssertTrue(replacementReports.isEmpty,
+        XCTAssertTrue(
+            replacementReports.isEmpty,
             "Neither stale completion may populate a report on a replacement edge.")
         calls = await gate.callLog()
         let replacementCall = try call(at: 4, in: calls)
@@ -241,7 +260,8 @@ final class PeerSyncSchedulerTests: XCTestCase {
         XCTAssertEqual(activeAfterClose, 0)
         await runtime.tick(now: base + 10_000)
         let startsAfterClose = await gate.callLog().count
-        XCTAssertEqual(startsAfterClose, startCountAtClose,
+        XCTAssertEqual(
+            startsAfterClose, startCountAtClose,
             "A closed scheduler starts no later work.")
         let maximumObservedJobs = await runtime.maximumObservedJobs
         XCTAssertEqual(maximumObservedJobs, 2)

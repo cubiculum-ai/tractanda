@@ -37,11 +37,16 @@ final class DocumentPackagingTests: XCTestCase {
         }
         let prefix = "tractanda.docling-native.v2-idefics3-gelu-f32+linux-raster."
         if pinned.identity.converter.hasPrefix(prefix) {
-            records.append(.init(path: "lib/tractanda/document-native-closure.json",
-                sha256: String(pinned.identity.converter.dropFirst(prefix.count)), size: 100, mode: 0o644))
+            records.append(
+                .init(
+                    path: "lib/tractanda/document-native-closure.json",
+                    sha256: String(pinned.identity.converter.dropFirst(prefix.count)), size: 100, mode: 0o644)
+            )
             for provider in ["pdf", "images"] {
-                records.append(.init(path: "lib/tractanda/document-native/libtractanda_docling_" + provider + ".so.1",
-                    sha256: String(repeating: "3", count: 64), size: 100, mode: 0o755))
+                records.append(
+                    .init(
+                        path: "lib/tractanda/document-native/libtractanda_docling_" + provider + ".so.1",
+                        sha256: String(repeating: "3", count: 64), size: 100, mode: 0o755))
             }
         }
         return records
@@ -84,13 +89,16 @@ final class DocumentPackagingTests: XCTestCase {
 
     func testFiniteLinuxDocumentPlatformAndResources() throws {
         for arch in ["x86_64", "arm64"] {
-            let converter = try XCTUnwrap(DocumentConverterIdentity.approvedLinuxConverter(architecture: arch))
-            var object = try XCTUnwrap(JSONSerialization.jsonObject(
-                with: JSONEncoder().encode(DocumentExtractionPayload.pinned)) as? [String: Any])
+            let converter = try XCTUnwrap(
+                DocumentConverterIdentity.approvedLinuxConverter(architecture: arch))
+            var object = try XCTUnwrap(
+                JSONSerialization.jsonObject(
+                    with: JSONEncoder().encode(DocumentExtractionPayload.pinned)) as? [String: Any])
             var identity = try XCTUnwrap(object["identity"] as? [String: String])
             identity["converter"] = converter
             object["identity"] = identity
-            let payload = try JSONDecoder().decode(DocumentExtractionPayload.self,
+            let payload = try JSONDecoder().decode(
+                DocumentExtractionPayload.self,
                 from: JSONSerialization.data(withJSONObject: object))
             XCTAssertNoThrow(try payload.validatePlatform(platform: "linux", arch: arch))
             XCTAssertThrowsError(try payload.validatePlatform(platform: "macos", arch: "arm64"))
@@ -98,24 +106,36 @@ final class DocumentPackagingTests: XCTestCase {
             let wrongArch = arch == "arm64" ? "x86_64" : "arm64"
             XCTAssertThrowsError(try payload.validatePlatform(platform: "linux", arch: wrongArch))
             let resources = try inventory(payload).map { row in
-                BundleManifest.File(path: row.path.replacingOccurrences(of:
-                    "TractandaDocuments_TractandaDocumentConverter.bundle/", with:
-                    "TractandaDocuments_TractandaDocumentConverter.resources/"),
+                BundleManifest.File(
+                    path: row.path.replacingOccurrences(
+                        of:
+                            "TractandaDocuments_TractandaDocumentConverter.bundle/",
+                        with:
+                            "TractandaDocuments_TractandaDocumentConverter.resources/"),
                     sha256: row.sha256, size: row.size, mode: row.mode)
             }
             XCTAssertNoThrow(try payload.validate(files: resources))
-            for missing in ["document-native-closure.json", "libtractanda_docling_pdf.so.1", "libtractanda_docling_images.so.1", "ModelAssets.json"] {
-                XCTAssertThrowsError(try payload.validate(files: resources.filter { !$0.path.hasSuffix("/" + missing) }))
+            for missing in [
+                "document-native-closure.json", "libtractanda_docling_pdf.so.1",
+                "libtractanda_docling_images.so.1", "ModelAssets.json",
+            ] {
+                XCTAssertThrowsError(
+                    try payload.validate(files: resources.filter { !$0.path.hasSuffix("/" + missing) }))
             }
             let wrongClosure = resources.map { row in
-                BundleManifest.File(path: row.path,
-                    sha256: row.path == "lib/tractanda/document-native-closure.json" ? String(repeating: "0", count: 64) : row.sha256,
+                BundleManifest.File(
+                    path: row.path,
+                    sha256: row.path == "lib/tractanda/document-native-closure.json"
+                        ? String(repeating: "0", count: 64) : row.sha256,
                     size: row.size, mode: row.mode)
             }
             XCTAssertThrowsError(try payload.validate(files: wrongClosure))
-            identity["converter"] = "tractanda.docling-native.v2-idefics3-gelu-f32+linux-raster." + String(repeating: "0", count: 64)
+            identity["converter"] =
+                "tractanda.docling-native.v2-idefics3-gelu-f32+linux-raster."
+                + String(repeating: "0", count: 64)
             object["identity"] = identity
-            let unknown = try JSONDecoder().decode(DocumentExtractionPayload.self,
+            let unknown = try JSONDecoder().decode(
+                DocumentExtractionPayload.self,
                 from: JSONSerialization.data(withJSONObject: object))
             XCTAssertThrowsError(try unknown.validatePlatform(platform: "linux", arch: arch))
             XCTAssertThrowsError(try unknown.validate(files: resources))
@@ -305,7 +325,9 @@ final class DocumentPackagingTests: XCTestCase {
             let runner = LifecycleRunner()
             let installer = SetupEngine(
                 roots: roots, runner: runner, rootCheck: { true }, trustedOwnership: false,
-                peerStatusCall: { _, _ in try .init(state: .disabled, synchronization: .init(state: .disabled)) },
+                peerStatusCall: { _, _ in
+                    try .init(state: .disabled, synchronization: .init(state: .disabled))
+                },
                 readinessCheck: { _, _, _ in })
             try installer.install(options)
             try body(installer, options, runner)
@@ -360,8 +382,11 @@ final class DocumentPackagingTests: XCTestCase {
         try lifecycle { engine, options, runner in
             let failing = SetupEngine(
                 roots: engine.roots, runner: runner, rootCheck: { true }, trustedOwnership: false,
-                peerStatusCall: { _, _ in try .init(state: .disabled, synchronization: .init(state: .disabled)) },
-                readinessCheck: { _, _, _ in throw TractandaError("fixtureReadiness", "Exact readiness cause") })
+                peerStatusCall: { _, _ in
+                    try .init(state: .disabled, synchronization: .init(state: .disabled))
+                },
+                readinessCheck: { _, _, _ in throw TractandaError("fixtureReadiness", "Exact readiness cause")
+                })
             XCTAssertThrowsError(try failing.install(options, upgrade: true)) { error in
                 XCTAssertTrue(String(describing: error).contains("fixtureReadiness: Exact readiness cause"))
             }

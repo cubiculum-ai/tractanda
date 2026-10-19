@@ -16,7 +16,8 @@ public struct DocumentJobResources: Codable, Sendable {
     public let noProgressSeconds: Double
     public let terminationGraceSeconds: Double
     public init(
-        inspectSeconds: Double = DocumentJobResources.defaultInspectSeconds, modelLoadSeconds: Double = DocumentJobResources.defaultModelLoadSeconds,
+        inspectSeconds: Double = DocumentJobResources.defaultInspectSeconds,
+        modelLoadSeconds: Double = DocumentJobResources.defaultModelLoadSeconds,
         pageSeconds: Double = DocumentJobResources.defaultPageSeconds,
         noProgressSeconds: Double = DocumentJobResources.defaultNoProgressSeconds,
         terminationGraceSeconds: Double = DocumentJobResources.defaultTerminationGraceSeconds

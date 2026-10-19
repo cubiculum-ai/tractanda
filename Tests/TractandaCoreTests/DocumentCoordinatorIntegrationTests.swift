@@ -91,11 +91,17 @@ final class DocumentCoordinatorIntegrationTests: XCTestCase {
         let descriptor: AttachmentDescriptor
         do {
             let selectedAccounts: any AccountDirectory
-            if let accounts { selectedAccounts = accounts }
-            else { selectedAccounts = SystemAccountDirectory() }
-            let initialAccess = accounts == nil ? nil : ItemValue.object([
-                "profile": .text(AccessConfiguration.profile), "groups": .list([.text("staff")]),
-            ])
+            if let accounts {
+                selectedAccounts = accounts
+            } else {
+                selectedAccounts = SystemAccountDirectory()
+            }
+            let initialAccess =
+                accounts == nil
+                ? nil
+                : ItemValue.object([
+                    "profile": .text(AccessConfiguration.profile), "groups": .list([.text("staff")]),
+                ])
             _ = try ItemStore.initializeFresh(
                 root: root, accounts: selectedAccounts, initialAccessConfiguration: initialAccess)
             let store = try ItemStore(

@@ -282,6 +282,31 @@ class PackageHookTests(unittest.TestCase):
         self.assertEqual(self.harness.records()[1]["args"][-1], "prerm-upgrade")
 
 
+class SystemctlInventoryTests(unittest.TestCase):
+    def test_exact_empty_unit_file_inventory_exit_one_is_empty(self):
+        fallback = module_from_template()
+        args = ("list-unit-files", "--no-legend", "--no-pager", "tractanda-*.service")
+        result = subprocess.CompletedProcess([], 1, "", "")
+        with mock.patch.object(fallback.subprocess, "run", return_value=result):
+            self.assertEqual(fallback.listed_units(args), set())
+
+    def test_other_error_output_status_or_query_cannot_claim_empty_inventory(self):
+        fallback = module_from_template()
+        args = ("list-unit-files", "--no-legend", "--no-pager", "tractanda-*.service")
+        for query, code, out, err in (
+            (args, 1, "tractanda-server-other.service disabled\n", ""),
+            (args, 1, "", "Failed to connect to bus"),
+            (args, 1, "\n", ""),
+            (args, 2, "", ""),
+            (("list-units", "--all", "--no-legend", "--plain", "--full", "--type=service", "tractanda-*.service"), 1, "", ""),
+            (("list-unit-files", "--no-legend", "--no-pager", "other-*.service"), 1, "", ""),
+        ):
+            with self.subTest(query=query, code=code, out=out, err=err), \
+                    mock.patch.object(fallback.subprocess, "run", return_value=subprocess.CompletedProcess([], code, out, err)), \
+                    self.assertRaises(SystemExit):
+                fallback.run_systemctl(query)
+
+
 class FallbackUnitTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="tractanda-fallback-test-")

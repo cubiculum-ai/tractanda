@@ -5,15 +5,23 @@ import XCTest
 private actor CompatibilityAdoptionGate {
     private var continuation: CheckedContinuation<Void, Never>?
     func hold(_ entered: XCTestExpectation) async {
-        await withCheckedContinuation { continuation = $0; entered.fulfill() }
+        await withCheckedContinuation {
+            continuation = $0
+            entered.fulfill()
+        }
     }
-    func release() { continuation?.resume(); continuation = nil }
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
 }
 
 final class PeerExchangeBoundaryTests: XCTestCase {
     typealias Fixture = PeerIntakeStoreTests.Fixture
     private func fixture() throws -> Fixture {
-        try Fixture(directory: GuardedFixtureDirectory.create(prefix: "c", source: "PeerExchangeBoundaryTests", test: name))
+        try Fixture(
+            directory: GuardedFixtureDirectory.create(
+                prefix: "c", source: "PeerExchangeBoundaryTests", test: name))
     }
 
     private func state(_ fixture: Fixture) throws -> PeerExchangeState {
@@ -28,9 +36,12 @@ final class PeerExchangeBoundaryTests: XCTestCase {
             binding: binding, progress: {},
             { _, security in
                 var state = PeerExchangeState(binding: binding, securityBinding: security)
-                let declaration = try state.compatibility.advance(.declare, store: fixture.receiver, storeID: binding.storeID)
-                let ack = try state.compatibility.advance(.accept(declaration), store: fixture.receiver, storeID: binding.storeID)
-                _ = try state.compatibility.advance(.acknowledge(ack), store: fixture.receiver, storeID: binding.storeID)
+                let declaration = try state.compatibility.advance(
+                    .declare, store: fixture.receiver, storeID: binding.storeID)
+                let ack = try state.compatibility.advance(
+                    .accept(declaration), store: fixture.receiver, storeID: binding.storeID)
+                _ = try state.compatibility.advance(
+                    .acknowledge(ack), store: fixture.receiver, storeID: binding.storeID)
                 return state
             })
         return result
@@ -163,23 +174,34 @@ final class PeerExchangeBoundaryTests: XCTestCase {
         }
         let root = f.receiverRoot
         f.receiver = nil
-        let coordinator = try await ServiceCoordinator(opening: root, embeddingProviderForTesting: nil,
+        let coordinator = try await ServiceCoordinator(
+            opening: root, embeddingProviderForTesting: nil,
             revisionProjectionEnabledForTesting: true, authorityIntakeEnabledForTesting: true,
             makeAccountDirectory: { PeerIntakeStoreTests.Accounts() })
         defer { await coordinator.close() }
         let control = try PeerExchangeControl()
-        do { try await coordinator.authorizePeerExchange(state, control: control); XCTFail("Direct authorize bypassed admission") }
-        catch { XCTAssertEqual((error as? TractandaError)?.code, "peerCompatibilityRequired") }
-        do { _ = try await coordinator.peerSyncWork(state: state, replacement: nil, control: control); XCTFail("Direct sync work bypassed admission") }
-        catch { XCTAssertEqual((error as? TractandaError)?.code, "peerCompatibilityRequired") }
+        do {
+            try await coordinator.authorizePeerExchange(state, control: control)
+            XCTFail("Direct authorize bypassed admission")
+        } catch { XCTAssertEqual((error as? TractandaError)?.code, "peerCompatibilityRequired") }
+        do {
+            _ = try await coordinator.peerSyncWork(state: state, replacement: nil, control: control)
+            XCTFail("Direct sync work bypassed admission")
+        } catch { XCTAssertEqual((error as? TractandaError)?.code, "peerCompatibilityRequired") }
         let gateway = try await PeerExchangeGateway(coordinator: coordinator, binding: state.binding)
-        do { _ = try await gateway.execute(inventory, control: control); XCTFail("Gateway bypassed admission") }
-        catch { XCTAssertEqual((error as? TractandaError)?.code, "peerCompatibilityRequired") }
-        do { _ = try await gateway.advanceCompatibility(.acknowledge(Data()), control: control); XCTFail("Early acknowledgement accepted") }
-        catch {}
+        do {
+            _ = try await gateway.execute(inventory, control: control)
+            XCTFail("Gateway bypassed admission")
+        } catch { XCTAssertEqual((error as? TractandaError)?.code, "peerCompatibilityRequired") }
+        do {
+            _ = try await gateway.advanceCompatibility(.acknowledge(Data()), control: control)
+            XCTFail("Early acknowledgement accepted")
+        } catch {}
         let declaration = try await gateway.advanceCompatibility(.declare, control: control)
-        do { _ = try await gateway.advanceCompatibility(.declare, control: control); XCTFail("Duplicate declaration accepted") }
-        catch {}
+        do {
+            _ = try await gateway.advanceCompatibility(.declare, control: control)
+            XCTFail("Duplicate declaration accepted")
+        } catch {}
         let acknowledgement = try await gateway.advanceCompatibility(.accept(declaration), control: control)
         _ = try await gateway.advanceCompatibility(.acknowledge(acknowledgement), control: control)
         _ = try await gateway.execute(inventory, control: control)
@@ -187,18 +209,25 @@ final class PeerExchangeBoundaryTests: XCTestCase {
         let original = try Data(contentsOf: floor)
         defer { try? original.write(to: floor) }
         let prior = try JSON.decode(CanonicalReaderRequirement.self, original)
-        let advanced = CanonicalReaderRequirement(storeID: prior.storeID, minimumReaderLevel: 15,
+        let advanced = CanonicalReaderRequirement(
+            storeID: prior.storeID, minimumReaderLevel: 15,
             recordFormats: prior.recordFormats, capabilities: prior.capabilities)
         // Model a newer writer's durable floor; no newer item is published by this fixture.
         try JSON.encode(advanced).write(to: floor)
-        do { _ = try await gateway.execute(inventory, control: control); XCTFail("Advanced floor did not fence ordinary exchange") }
-        catch { XCTAssertEqual((error as? TractandaError)?.code, "incompatibleCanonicalReader") }
-        do { try await gateway.authorize(control: control); XCTFail("Advanced floor did not fence delivery") }
-        catch { XCTAssertEqual((error as? TractandaError)?.code, "incompatibleCanonicalReader") }
+        do {
+            _ = try await gateway.execute(inventory, control: control)
+            XCTFail("Advanced floor did not fence ordinary exchange")
+        } catch { XCTAssertEqual((error as? TractandaError)?.code, "incompatibleCanonicalReader") }
+        do {
+            try await gateway.authorize(control: control)
+            XCTFail("Advanced floor did not fence delivery")
+        } catch { XCTAssertEqual((error as? TractandaError)?.code, "incompatibleCanonicalReader") }
         try FileManager.default.removeItem(at: floor)
         let newGateway = try await PeerExchangeGateway(coordinator: coordinator, binding: state.binding)
-        do { _ = try await newGateway.advanceCompatibility(.declare, control: control); XCTFail("Missing floor was inferred") }
-        catch { XCTAssertEqual((error as? TractandaError)?.code, "peerCompatibilityRequired") }
+        do {
+            _ = try await newGateway.advanceCompatibility(.declare, control: control)
+            XCTFail("Missing floor was inferred")
+        } catch { XCTAssertEqual((error as? TractandaError)?.code, "peerCompatibilityRequired") }
         try original.write(to: floor)
         try f.capacity()
     }
@@ -207,9 +236,11 @@ final class PeerExchangeBoundaryTests: XCTestCase {
         let f = try fixture()
         var initial = try self.state(f)
         initial.compatibility = PeerExchangeCompatibility()
-        let empty = initial, binding = initial.binding
+        let empty = initial
+        let binding = initial.binding
         f.receiver = nil
-        let coordinator = try await ServiceCoordinator(opening: f.receiverRoot, embeddingProviderForTesting: nil,
+        let coordinator = try await ServiceCoordinator(
+            opening: f.receiverRoot, embeddingProviderForTesting: nil,
             revisionProjectionEnabledForTesting: true, authorityIntakeEnabledForTesting: true,
             makeAccountDirectory: { PeerIntakeStoreTests.Accounts() })
         defer { await coordinator.close() }
@@ -218,82 +249,127 @@ final class PeerExchangeBoundaryTests: XCTestCase {
             // Core-only handshake fixture. The existing Server reconnect case exercises actual TLS handoff.
             let gateway = try await PeerExchangeGateway(coordinator: coordinator, binding: binding)
             let declaration = try await gateway.advanceCompatibility(.declare, control: control)
-            let wrongProfile = Data(String(decoding: declaration, as: UTF8.self)
-                .replacingOccurrences(of: PeerCompatibilityDeclaration.semanticProfile, with: "tractanda.peer-exchange.v1").utf8)
-            do { _ = try await gateway.advanceCompatibility(.accept(wrongProfile), control: control); XCTFail("Wrong semantic profile admitted") }
-            catch {}
-            do { _ = try await gateway.compatibilityAdmission(lifetime: PeerCompatibilityLifetime(), control: control); XCTFail("Absent mutual acknowledgement minted proof") }
-            catch { XCTAssertEqual((error as? TractandaError)?.code, "peerCompatibilityRequired") }
-            let acknowledgement = try await gateway.advanceCompatibility(.accept(declaration), control: control)
+            let wrongProfile = Data(
+                String(decoding: declaration, as: UTF8.self)
+                    .replacingOccurrences(
+                        of: PeerCompatibilityDeclaration.semanticProfile, with: "tractanda.peer-exchange.v1"
+                    ).utf8)
+            do {
+                _ = try await gateway.advanceCompatibility(.accept(wrongProfile), control: control)
+                XCTFail("Wrong semantic profile admitted")
+            } catch {}
+            do {
+                _ = try await gateway.compatibilityAdmission(
+                    lifetime: PeerCompatibilityLifetime(), control: control)
+                XCTFail("Absent mutual acknowledgement minted proof")
+            } catch { XCTAssertEqual((error as? TractandaError)?.code, "peerCompatibilityRequired") }
+            let acknowledgement = try await gateway.advanceCompatibility(
+                .accept(declaration), control: control)
             _ = try await gateway.advanceCompatibility(.acknowledge(acknowledgement), control: control)
             let lifetime = PeerCompatibilityLifetime()
             return (lifetime, try await gateway.compatibilityAdmission(lifetime: lifetime, control: control))
         }
         let (oldLifetime, proof) = try await admitted()
-        let wrongPair = try PeerExchangeBinding(peerID: binding.peerID, storeID: binding.storeID,
+        let wrongPair = try PeerExchangeBinding(
+            peerID: binding.peerID, storeID: binding.storeID,
             localReplicaID: binding.localReplicaID, remoteReplicaID: binding.remoteReplicaID,
             pairingID: Fixture.id(), localIsInitiator: binding.localIsInitiator,
             configurationDigest: binding.configurationDigest)
-        let wrongRole = try PeerExchangeBinding(peerID: binding.peerID, storeID: binding.storeID,
+        let wrongRole = try PeerExchangeBinding(
+            peerID: binding.peerID, storeID: binding.storeID,
             localReplicaID: binding.localReplicaID, remoteReplicaID: binding.remoteReplicaID,
             pairingID: binding.pairingID, localIsInitiator: !binding.localIsInitiator,
             configurationDigest: binding.configurationDigest)
-        let wrongStore = try PeerExchangeBinding(peerID: binding.peerID, storeID: Fixture.id(),
+        let wrongStore = try PeerExchangeBinding(
+            peerID: binding.peerID, storeID: Fixture.id(),
             localReplicaID: binding.localReplicaID, remoteReplicaID: binding.remoteReplicaID,
             pairingID: binding.pairingID, localIsInitiator: binding.localIsInitiator,
             configurationDigest: binding.configurationDigest)
-        let wrongConfiguration = try PeerExchangeBinding(peerID: binding.peerID, storeID: binding.storeID,
+        let wrongConfiguration = try PeerExchangeBinding(
+            peerID: binding.peerID, storeID: binding.storeID,
             localReplicaID: binding.localReplicaID, remoteReplicaID: binding.remoteReplicaID,
             pairingID: binding.pairingID, localIsInitiator: binding.localIsInitiator,
             configurationDigest: AuthorityRecordCodec.sha256(Data("different configuration".utf8)))
-        let wrongPeer = try PeerExchangeBinding(peerID: "different-peer", storeID: binding.storeID,
+        let wrongPeer = try PeerExchangeBinding(
+            peerID: "different-peer", storeID: binding.storeID,
             localReplicaID: binding.localReplicaID, remoteReplicaID: binding.remoteReplicaID,
             pairingID: binding.pairingID, localIsInitiator: binding.localIsInitiator,
             configurationDigest: binding.configurationDigest)
-        let wrongLocal = try PeerExchangeBinding(peerID: binding.peerID, storeID: binding.storeID,
+        let wrongLocal = try PeerExchangeBinding(
+            peerID: binding.peerID, storeID: binding.storeID,
             localReplicaID: Fixture.id(), remoteReplicaID: binding.remoteReplicaID,
             pairingID: binding.pairingID, localIsInitiator: binding.localIsInitiator,
             configurationDigest: binding.configurationDigest)
-        let wrongRemote = try PeerExchangeBinding(peerID: binding.peerID, storeID: binding.storeID,
+        let wrongRemote = try PeerExchangeBinding(
+            peerID: binding.peerID, storeID: binding.storeID,
             localReplicaID: binding.localReplicaID, remoteReplicaID: Fixture.id(),
             pairingID: binding.pairingID, localIsInitiator: binding.localIsInitiator,
             configurationDigest: binding.configurationDigest)
-        for wrong in [wrongPair, wrongRole, wrongStore, wrongConfiguration, wrongPeer, wrongLocal, wrongRemote] {
-            do { _ = try await coordinator.adoptPeerCompatibility(proof, expectedBinding: wrong, state: empty, control: control); XCTFail("Wrong full identity adopted") }
-            catch { XCTAssertEqual((error as? TractandaError)?.code, "peerCompatibilityRequired") }
+        for wrong in [
+            wrongPair, wrongRole, wrongStore, wrongConfiguration, wrongPeer, wrongLocal, wrongRemote,
+        ] {
+            do {
+                _ = try await coordinator.adoptPeerCompatibility(
+                    proof, expectedBinding: wrong, state: empty, control: control)
+                XCTFail("Wrong full identity adopted")
+            } catch { XCTAssertEqual((error as? TractandaError)?.code, "peerCompatibilityRequired") }
         }
-        let adopted = try await coordinator.adoptPeerCompatibility(proof, expectedBinding: binding, state: empty, control: control)
+        let adopted = try await coordinator.adoptPeerCompatibility(
+            proof, expectedBinding: binding, state: empty, control: control)
         try await coordinator.authorizePeerExchange(adopted, control: control)
         oldLifetime.cancel()
-        do { _ = try await coordinator.adoptPeerCompatibility(proof, expectedBinding: binding, state: empty, control: control); XCTFail("Closed admission adopted") }
-        catch { XCTAssertEqual((error as? TractandaError)?.code, "peerCompatibilityRequired") }
-        do { try await coordinator.authorizePeerExchange(adopted, control: control); XCTFail("Post-adoption close did not fence delivery") }
-        catch { XCTAssertEqual((error as? TractandaError)?.code, "peerCompatibilityRequired") }
-        do { _ = try await coordinator.peerSyncWork(state: adopted, replacement: nil, control: control); XCTFail("Post-adoption close did not fence work") }
-        catch { XCTAssertEqual((error as? TractandaError)?.code, "peerCompatibilityRequired") }
+        do {
+            _ = try await coordinator.adoptPeerCompatibility(
+                proof, expectedBinding: binding, state: empty, control: control)
+            XCTFail("Closed admission adopted")
+        } catch { XCTAssertEqual((error as? TractandaError)?.code, "peerCompatibilityRequired") }
+        do {
+            try await coordinator.authorizePeerExchange(adopted, control: control)
+            XCTFail("Post-adoption close did not fence delivery")
+        } catch { XCTAssertEqual((error as? TractandaError)?.code, "peerCompatibilityRequired") }
+        do {
+            _ = try await coordinator.peerSyncWork(state: adopted, replacement: nil, control: control)
+            XCTFail("Post-adoption close did not fence work")
+        } catch { XCTAssertEqual((error as? TractandaError)?.code, "peerCompatibilityRequired") }
         let (replacementLifetime, replacement) = try await admitted()
-        let fresh = try await coordinator.adoptPeerCompatibility(replacement, expectedBinding: binding, state: empty, control: control)
+        let fresh = try await coordinator.adoptPeerCompatibility(
+            replacement, expectedBinding: binding, state: empty, control: control)
         oldLifetime.cancel()
         try await coordinator.authorizePeerExchange(fresh, control: control)
         let floor = f.receiverRoot.appendingPathComponent(CanonicalReaderRequirement.fileName)
         let originalFloor = try Data(contentsOf: floor)
         defer { try? originalFloor.write(to: floor) }
         let prior = try JSON.decode(CanonicalReaderRequirement.self, originalFloor)
-        try JSON.encode(CanonicalReaderRequirement(storeID: prior.storeID, minimumReaderLevel: 15,
-            recordFormats: prior.recordFormats, capabilities: prior.capabilities)).write(to: floor)
-        do { _ = try await coordinator.adoptPeerCompatibility(replacement, expectedBinding: binding, state: empty, control: control); XCTFail("Advanced floor admitted handoff") }
-        catch { XCTAssertEqual((error as? TractandaError)?.code, "incompatibleCanonicalReader") }
+        try JSON.encode(
+            CanonicalReaderRequirement(
+                storeID: prior.storeID, minimumReaderLevel: 15,
+                recordFormats: prior.recordFormats, capabilities: prior.capabilities)
+        ).write(to: floor)
+        do {
+            _ = try await coordinator.adoptPeerCompatibility(
+                replacement, expectedBinding: binding, state: empty, control: control)
+            XCTFail("Advanced floor admitted handoff")
+        } catch { XCTAssertEqual((error as? TractandaError)?.code, "incompatibleCanonicalReader") }
         try originalFloor.write(to: floor)
-        let gate = CompatibilityAdoptionGate(), entered = expectation(description: "adoption owner held")
+        let gate = CompatibilityAdoptionGate()
+        let entered = expectation(description: "adoption owner held")
         await coordinator.setPeerExchangeAuthorizationHookForTesting { await gate.hold(entered) }
-        defer { await gate.release(); await coordinator.setPeerExchangeAuthorizationHookForTesting(nil) }
-        let pending = Task { try await coordinator.adoptPeerCompatibility(replacement,
-            expectedBinding: binding, state: empty, control: control) }
+        defer {
+            await gate.release()
+            await coordinator.setPeerExchangeAuthorizationHookForTesting(nil)
+        }
+        let pending = Task {
+            try await coordinator.adoptPeerCompatibility(
+                replacement,
+                expectedBinding: binding, state: empty, control: control)
+        }
         await fulfillment(of: [entered], timeout: 5)
         replacementLifetime.cancel()
         await gate.release()
-        do { _ = try await pending.value; XCTFail("Close across owner await published adoption") }
-        catch { XCTAssertEqual((error as? TractandaError)?.code, "peerCompatibilityRequired") }
+        do {
+            _ = try await pending.value
+            XCTFail("Close across owner await published adoption")
+        } catch { XCTAssertEqual((error as? TractandaError)?.code, "peerCompatibilityRequired") }
         try f.capacity()
     }
 

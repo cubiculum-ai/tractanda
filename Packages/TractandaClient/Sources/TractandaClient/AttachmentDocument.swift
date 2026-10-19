@@ -10,11 +10,11 @@ public struct DocumentConverterIdentity: Codable, Equatable, Sendable {
     public let parser: String
 
     public init() {
-#if os(Linux)
-        converter = LinuxDocumentConverterProfiles.currentConverter
-#else
-        converter = "tractanda.docling-native.v2-idefics3-gelu-f32"
-#endif
+        #if os(Linux)
+            converter = LinuxDocumentConverterProfiles.currentConverter
+        #else
+            converter = "tractanda.docling-native.v2-idefics3-gelu-f32"
+        #endif
         model = "ibm-granite/granite-docling-258M-mlx"
         modelRevision = "a8b999991fe8c521a0cec749973414eaaf823731"
         runtimeRevision = "61a4b20d4ad01b10466e8fc94c50402a9f994430"
@@ -31,12 +31,14 @@ public struct DocumentConverterIdentity: Codable, Equatable, Sendable {
         default: return nil
         }
         return LinuxDocumentConverterProfiles.converterNames(
-            currentDigests: [digest], historicalDigests: []).first
+            currentDigests: [digest], historicalDigests: []
+        ).first
     }
 
     public func validate() throws {
         let current = Self()
-        let modern = [LinuxDocumentConverterProfiles.macConverter] + LinuxDocumentConverterProfiles.knownConverters
+        let modern =
+            [LinuxDocumentConverterProfiles.macConverter] + LinuxDocumentConverterProfiles.knownConverters
         guard (modern + ["tractanda.docling-native.v1"]).contains(converter), model == current.model,
             modelRevision == current.modelRevision, runtimeRevision == current.runtimeRevision,
             parser == current.parser,

@@ -164,12 +164,15 @@ final class DocumentWorkerProtocolTests: XCTestCase {
         let now = ContinuousClock.now
         let configured = try DocumentJobResources(
             inspectSeconds: 90, modelLoadSeconds: 7200, pageSeconds: 86400,
-            noProgressSeconds: 3600, terminationGraceSeconds: 5).budgets()
+            noProgressSeconds: 3600, terminationGraceSeconds: 5
+        ).budgets()
         var deadline = DocumentWorkerDeadline(budgets: configured, phase: .page, now: now)
         deadline.observe(meaningful: true, workerPhase: "prefill", now: now)
         XCTAssertEqual(deadline.deadline, now.advanced(by: .seconds(86400)))
         deadline.observe(meaningful: false, workerPhase: "prefill", now: now.advanced(by: .seconds(80000)))
-        XCTAssertEqual(deadline.deadline, now.advanced(by: .seconds(86400)), "Silence cannot renew the absolute page limit")
+        XCTAssertEqual(
+            deadline.deadline, now.advanced(by: .seconds(86400)),
+            "Silence cannot renew the absolute page limit")
         let failure = deadline.timeoutFailure(lastPhase: "prefill", now: now.advanced(by: .seconds(86401)))
         XCTAssertTrue(failure.message.contains("timeout=page"))
 
@@ -177,7 +180,8 @@ final class DocumentWorkerProtocolTests: XCTestCase {
         deadline.observe(meaningful: true, workerPhase: "generate", now: now)
         XCTAssertEqual(deadline.deadline, now.advanced(by: .seconds(3600)))
         deadline.observe(meaningful: false, workerPhase: "generate", now: now.advanced(by: .seconds(3500)))
-        XCTAssertEqual(deadline.deadline, now.advanced(by: .seconds(3600)), "Repeated counters cannot renew liveness")
+        XCTAssertEqual(
+            deadline.deadline, now.advanced(by: .seconds(3600)), "Repeated counters cannot renew liveness")
         XCTAssertNoThrow(try DocumentJobResources(pageSeconds: 7 * 86400).validate())
         XCTAssertThrowsError(try DocumentJobResources(pageSeconds: .infinity).validate())
         XCTAssertThrowsError(try DocumentJobResources(noProgressSeconds: 0).validate())

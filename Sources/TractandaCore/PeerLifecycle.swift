@@ -384,16 +384,26 @@ extension PeerIntakeCoordinator {
         index: ItemIndex, configuration supplied: AuthorityStore.Configuration? = nil,
         forAdministratorReview: Bool = false, readBudget: ((Int) throws -> Void)? = nil
     ) throws -> Bool {
-        guard row.permittedOrigin, let publication = try journal.publication(row.packageID, readBudget: readBudget),
+        guard row.permittedOrigin,
+            let publication = try journal.publication(row.packageID, readBudget: readBudget),
             publication.context.peerID == row.peerID,
             publication.context.configurationDigest == row.configurationDigest
         else { return false }
-        guard try publication.context.permittedOrigins.contains(origin)
-            || admittedReceiptPermits(packageID: row.packageID, origin: origin, index: index,
-                                      readBudget: readBudget) else { return false }
+        guard
+            try publication.context.permittedOrigins.contains(origin)
+                || admittedReceiptPermits(
+                    packageID: row.packageID, origin: origin, index: index,
+                    readBudget: readBudget)
+        else { return false }
         let configuration = try supplied ?? self.configuration(readBudget: readBudget)
-        if row.peerID == "local" { return try publication.context == context(peerID: "local", readBudget: readBudget) }
-        if let provisioningScope, try provisioningScope.permits(publication, readBudget: readBudget ?? admissionReadBudget()) { return true }
+        if row.peerID == "local" {
+            return try publication.context == context(peerID: "local", readBudget: readBudget)
+        }
+        if let provisioningScope,
+            try provisioningScope.permits(publication, readBudget: readBudget ?? admissionReadBudget())
+        {
+            return true
+        }
         if configuration?.peers.contains(publication.context) == true { return true }
         guard configuration?.lifecycle?.historicalContexts.contains(publication.context) == true else {
             return false

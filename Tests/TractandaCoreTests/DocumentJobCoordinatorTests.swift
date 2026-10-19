@@ -13,13 +13,18 @@ import XCTest
 
 // Kept identical in the three boundary-test targets; no product API or shared runtime state.
 enum GuardedFixtureDirectory {
-    struct Context { let root: URL; let proof: URL }
+    struct Context {
+        let root: URL
+        let proof: URL
+    }
     static func validate(_ url: URL) throws -> stat {
         var info = stat()
         guard url.path.hasPrefix("/"), url.path == url.standardizedFileURL.resolvingSymlinksInPath().path,
             lstat(url.path, &info) == 0, info.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR),
-            info.st_uid == geteuid(), info.st_mode & 0o777 == 0o700 else {
-            throw TractandaError("fixtureRoot", "Fixture override must be an existing private owned physical directory.")
+            info.st_uid == geteuid(), info.st_mode & 0o777 == 0o700
+        else {
+            throw TractandaError(
+                "fixtureRoot", "Fixture override must be an existing private owned physical directory.")
         }
         return info
     }
@@ -32,13 +37,16 @@ enum GuardedFixtureDirectory {
         guard guarded == "1", let root, let proof, !root.contains("\0"), !proof.contains("\0") else {
             throw TractandaError("fixtureRoot", "Guarded fixture overrides are incomplete.")
         }
-        let result = Context(root: URL(fileURLWithPath: root, isDirectory: true),
+        let result = Context(
+            root: URL(fileURLWithPath: root, isDirectory: true),
             proof: URL(fileURLWithPath: proof, isDirectory: true))
         guard root.hasPrefix("/"), proof.hasPrefix("/"), result.root.path == root,
             result.proof.path == proof, result.root.path != result.proof.path,
             result.root.deletingLastPathComponent().path == result.proof.deletingLastPathComponent().path,
-            try validate(result.root).st_dev == validate(result.proof).st_dev else {
-            throw TractandaError("fixtureRoot", "Fixture and proof overrides must be physical sibling directories.")
+            try validate(result.root).st_dev == validate(result.proof).st_dev
+        else {
+            throw TractandaError(
+                "fixtureRoot", "Fixture and proof overrides must be physical sibling directories.")
         }
         return result
     }
@@ -57,46 +65,65 @@ enum GuardedFixtureDirectory {
         let root = parent.appendingPathComponent(prefix + String(UUID().uuidString.prefix(7)))
         if let socket {
             #if os(Linux)
-            let limit = 108
+                let limit = 108
             #else
-            let limit = 104
+                let limit = 104
             #endif
             guard root.appendingPathComponent(socket).path.utf8.count < limit else {
-                throw TractandaError("resourceLimit", "Configured fixture root leaves no room for a Unix socket.")
+                throw TractandaError(
+                    "resourceLimit", "Configured fixture root leaves no room for a Unix socket.")
             }
         }
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false,
+        try FileManager.default.createDirectory(
+            at: root, withIntermediateDirectories: false,
             attributes: [.posixPermissions: 0o700])
         if let context {
             let actual = root.resolvingSymlinksInPath()
             _ = try validate(actual)
             guard actual.path == root.path, actual.deletingLastPathComponent().path == context.root.path,
-                test.utf8.count <= 256 else { throw TractandaError("fixtureRoot", "Fixture escaped its override.") }
-            let fact: [String: Any] = ["profile": "tractanda.fixture-root-proof.v1", "source": source,
+                test.utf8.count <= 256
+            else { throw TractandaError("fixtureRoot", "Fixture escaped its override.") }
+            let fact: [String: Any] = [
+                "profile": "tractanda.fixture-root-proof.v1", "source": source,
                 "test": test, "root": actual.path, "expectedRoot": context.root.path,
-                "proofRoot": context.proof.path, "uid": Int(geteuid()), "pid": Int(getpid()), "phase": "created"]
+                "proofRoot": context.proof.path, "uid": Int(geteuid()), "pid": Int(getpid()),
+                "phase": "created",
+            ]
             let bytes = try JSONSerialization.data(withJSONObject: fact, options: [.sortedKeys])
-            guard bytes.count <= 2048 else { throw TractandaError("fixtureRoot", "Fixture proof exceeds its bound.") }
-            let temporary = context.root.appendingPathComponent(".fixture-proof-" + UUID().uuidString + ".tmp")
+            guard bytes.count <= 2048 else {
+                throw TractandaError("fixtureRoot", "Fixture proof exceeds its bound.")
+            }
+            let temporary = context.root.appendingPathComponent(
+                ".fixture-proof-" + UUID().uuidString + ".tmp")
             let descriptor = open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
             guard descriptor >= 0 else { throw TractandaError("fixtureRoot", "Cannot create fixture proof.") }
             defer { _ = close(descriptor) }
             try bytes.withUnsafeBytes { buffer in
                 var offset = 0
                 while offset < bytes.count {
-                    let count = write(descriptor, buffer.baseAddress!.advanced(by: offset), bytes.count - offset)
+                    let count = write(
+                        descriptor, buffer.baseAddress!.advanced(by: offset), bytes.count - offset)
                     if count < 0, errno == EINTR { continue }
-                    guard count > 0 else { throw TractandaError("fixtureRoot", "Cannot write fixture proof.") }
+                    guard count > 0 else {
+                        throw TractandaError("fixtureRoot", "Cannot write fixture proof.")
+                    }
                     offset += count
                 }
             }
-            guard fsync(descriptor) == 0 else { throw TractandaError("fixtureRoot", "Cannot sync fixture proof.") }
-            try FileManager.default.moveItem(at: temporary,
+            guard fsync(descriptor) == 0 else {
+                throw TractandaError("fixtureRoot", "Cannot sync fixture proof.")
+            }
+            try FileManager.default.moveItem(
+                at: temporary,
                 to: context.proof.appendingPathComponent(source + "-" + root.lastPathComponent + ".json"))
             let directory = open(context.proof.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-            guard directory >= 0 else { throw TractandaError("fixtureRoot", "Cannot open fixture proof directory.") }
+            guard directory >= 0 else {
+                throw TractandaError("fixtureRoot", "Cannot open fixture proof directory.")
+            }
             defer { _ = close(directory) }
-            guard fsync(directory) == 0 else { throw TractandaError("fixtureRoot", "Cannot sync fixture proof directory.") }
+            guard fsync(directory) == 0 else {
+                throw TractandaError("fixtureRoot", "Cannot sync fixture proof directory.")
+            }
         }
         return root
     }
@@ -211,7 +238,8 @@ final class DocumentJobCoordinatorTests: XCTestCase {
     }
 
     func testOperationalInventoryRetryIsBoundedAndCanonicalLossIsNotRetried() throws {
-        let root = try GuardedFixtureDirectory.create(prefix: "j", source: "DocumentJobCoordinatorTests", test: name)
+        let root = try GuardedFixtureDirectory.create(
+            prefix: "j", source: "DocumentJobCoordinatorTests", test: name)
         defer { try? FileManager.default.removeItem(at: root) }
         try capacity(root)
         let file = root.appendingPathComponent("probe")
@@ -239,22 +267,28 @@ final class DocumentJobCoordinatorTests: XCTestCase {
     }
 
     func testFixtureCapacityFollowsOnlyOwnedSealedPromotionCounterpart() throws {
-        let root = try GuardedFixtureDirectory.create(prefix: "j", source: "DocumentJobCoordinatorTests", test: name)
+        let root = try GuardedFixtureDirectory.create(
+            prefix: "j", source: "DocumentJobCoordinatorTests", test: name)
         defer { try? FileManager.default.removeItem(at: root) }
         try capacity(root)
         let store = root.appendingPathComponent("store")
-        try FileManager.default.createDirectory(at: store, withIntermediateDirectories: false,
+        try FileManager.default.createDirectory(
+            at: store, withIntermediateDirectories: false,
             attributes: [.posixPermissions: 0o700])
-        let content = DocumentContentStore(root: store, ownerUID: getuid(),
+        let content = DocumentContentStore(
+            root: store, ownerUID: getuid(),
             minimumFreeBytes: AttachmentFixtureCapacity.reserveBytes)
         let sourceID = try UUID.makeVersion1().uuidString.lowercased()
-        let source = try AttachmentDocumentSource(itemID: sourceID, revisionID: sourceID,
+        let source = try AttachmentDocumentSource(
+            itemID: sourceID, revisionID: sourceID,
             attachmentID: sourceID, sha256: String(repeating: "a", count: 64),
             byteCount: 3, mediaType: "application/pdf")
         // Begin initializes canonical StoreID/placement before creating staging content.
         let writer = try content.begin(source: source, identity: .init())
-        try writer.append(DocumentStoredPage(pageNumber: 1, sourceSHA256: source.sha256,
-            status: "failed", failureCode: "syntheticFixture"))
+        try writer.append(
+            DocumentStoredPage(
+                pageNumber: 1, sourceSHA256: source.sha256,
+                status: "failed", failureCode: "syntheticFixture"))
         let prepared = try writer.preparePublication()
         let stage = prepared.stage.reduce(store) { $0.appendingPathComponent($1) }
         let page = stage.appendingPathComponent("pages/0/1.json")
@@ -264,9 +298,12 @@ final class DocumentJobCoordinatorTests: XCTestCase {
             if url.path == page.path { reference = try content.publishPrepared(prepared) }
         }
         let publishedReference = try XCTUnwrap(reference)
-        XCTAssertNotEqual(prepared.stage.last, publishedReference.contentID,
+        XCTAssertNotEqual(
+            prepared.stage.last, publishedReference.contentID,
             "Publication assigns a new content identity; staging UUID is not its placement key")
-        let canonical = try content.directory(publishedReference.contentID).reduce(store) { $0.appendingPathComponent($1) }
+        let canonical = try content.directory(publishedReference.contentID).reduce(store) {
+            $0.appendingPathComponent($1)
+        }
         XCTAssertEqual(try accountedBytes(page, root: root), UInt64(pageBytes.count))
         let published = canonical.appendingPathComponent("pages/0/1.json")
         try FileManager.default.removeItem(at: published)
@@ -289,15 +326,20 @@ final class DocumentJobCoordinatorTests: XCTestCase {
             parts.allSatisfy({ $0 != "." && $0 != ".." })
         else { return nil }
         let store = root.appendingPathComponent("store")
-        let files = DocumentContentFiles(root: store, ownerUID: getuid(),
+        let files = DocumentContentFiles(
+            root: store, ownerUID: getuid(),
             minimumFreeBytes: AttachmentFixtureCapacity.reserveBytes)
-        guard let bytes = try? files.read(path: ["documents", ".staging", id + ".publication.json"],
+        guard
+            let bytes = try? files.read(
+                path: ["documents", ".staging", id + ".publication.json"],
                 maximumBytes: DocumentContentStore.maximumNodeBytes),
             let receipt = try? DocumentValue.strictDecode(DocumentPublicationReceipt.self, data: bytes),
             receipt.manifest.publicationID == id, DocumentHashNode.isDigest(receipt.preparedSHA256),
             let manifestBytes = try? JSON.encode(receipt.manifest),
-            let reference = try? DocumentContentReference(contentID: receipt.manifest.contentID,
-                manifestSHA256: PageCorpusInput.digest(manifestBytes), rootSHA256: receipt.manifest.rootSHA256,
+            let reference = try? DocumentContentReference(
+                contentID: receipt.manifest.contentID,
+                manifestSHA256: PageCorpusInput.digest(manifestBytes),
+                rootSHA256: receipt.manifest.rootSHA256,
                 pageCount: receipt.manifest.pageCount, totalEncodedBytes: receipt.manifest.totalEncodedBytes,
                 coverage: receipt.manifest.coverage)
         else { return nil }
@@ -345,7 +387,8 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         let staging = root.appendingPathComponent("store/documents/.staging").path + "/"
         let name = url.lastPathComponent
         let rebuildPrefix = ".rebuild-status-"
-        if failure == ENOENT, url.deletingLastPathComponent().path == root.appendingPathComponent("store").path,
+        if failure == ENOENT,
+            url.deletingLastPathComponent().path == root.appendingPathComponent("store").path,
             name.hasPrefix(rebuildPrefix), String(name.dropFirst(rebuildPrefix.count)).count == 36,
             UUID(uuidString: String(name.dropFirst(rebuildPrefix.count))) != nil
         {
@@ -420,7 +463,8 @@ final class DocumentJobCoordinatorTests: XCTestCase {
     }
 
     func testFixtureCapacityAccountsOnlyVanishedOperationalFiles() throws {
-        let root = try GuardedFixtureDirectory.create(prefix: "j", source: "DocumentJobCoordinatorTests", test: name)
+        let root = try GuardedFixtureDirectory.create(
+            prefix: "j", source: "DocumentJobCoordinatorTests", test: name)
         defer { try? FileManager.default.removeItem(at: root) }
         try capacity(root)
         let job = root.appendingPathComponent("store/document-jobs/" + Identifier.make())
@@ -449,7 +493,8 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         XCTAssertEqual(try accountedBytes(checkpoint, root: root), 16 * 1024)
         XCTAssertEqual(try accountedBytes(rebuildTemporary, root: root), 16 * 1024)
         for rejected in [".rebuild-status.json", ".rebuild-status-not-a-uuid", "canonical.json"] {
-            XCTAssertThrowsError(try accountedBytes(root.appendingPathComponent("store/" + rejected), root: root))
+            XCTAssertThrowsError(
+                try accountedBytes(root.appendingPathComponent("store/" + rejected), root: root))
         }
         XCTAssertEqual(try accountedBytes(journal, root: root), 4098)
         XCTAssertEqual(
@@ -470,15 +515,22 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         delay: Double = 0, pages: Int = 129, heldPage: Int? = nil, accounts: Accounts? = nil
     ) throws -> Fixture {
         try capacity(temporaryDirectory)
-        let root = try GuardedFixtureDirectory.create(prefix: "j", source: "DocumentJobCoordinatorTests", test: name)
+        let root = try GuardedFixtureDirectory.create(
+            prefix: "j", source: "DocumentJobCoordinatorTests", test: name)
         let storeURL = root.appendingPathComponent("store")
         let request: DocumentJobStart = try {
             let selectedAccounts: any AccountDirectory
-            if let accounts { selectedAccounts = accounts }
-            else { selectedAccounts = SystemAccountDirectory() }
-            let initialAccess = accounts == nil ? nil : ItemValue.object([
-                "profile": .text(AccessConfiguration.profile), "groups": .list([.text("staff")]),
-            ])
+            if let accounts {
+                selectedAccounts = accounts
+            } else {
+                selectedAccounts = SystemAccountDirectory()
+            }
+            let initialAccess =
+                accounts == nil
+                ? nil
+                : ItemValue.object([
+                    "profile": .text(AccessConfiguration.profile), "groups": .list([.text("staff")]),
+                ])
             _ = try ItemStore.initializeFresh(
                 root: storeURL, accounts: selectedAccounts, initialAccessConfiguration: initialAccess)
             let store = try ItemStore(
@@ -562,24 +614,28 @@ final class DocumentJobCoordinatorTests: XCTestCase {
             "Bounded fake-worker completion was not observed: \(last?.state ?? "unknown")/\(last?.reasonCode ?? "none") pages=\(last?.acceptedPages ?? -1)."
         )
     }
-#if os(Linux)
-    func testPublicCoordinatorRetainsRealRuntimePreflight() async throws {
-        guard try DocumentLinuxRuntimeClosure.compiledCurrentDigest() != nil else {
-            throw XCTSkip("Requires the finite production Linux profile")
+    #if os(Linux)
+        func testPublicCoordinatorRetainsRealRuntimePreflight() async throws {
+            guard try DocumentLinuxRuntimeClosure.compiledCurrentDigest() != nil else {
+                throw XCTSkip("Requires the finite production Linux profile")
+            }
+            let fixture = try fixture(pages: 1)
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            // Intentionally the unchanged public constructor, without any fixture seam.
+            let coordinator = try await ServiceCoordinator(
+                opening: fixture.store, documentConverter: fixture.configuration)
+            let client = client(coordinator)
+            let admitted = try await client.startDocumentJob(fixture.request)
+            let paused = try await wait(client, id: admitted.jobID, root: fixture.root) {
+                $0.state == "paused"
+            }
+            XCTAssertEqual(paused.reasonCode, "documentConverter")
+            XCTAssertFalse(
+                FileManager.default.fileExists(atPath: fixture.root.appendingPathComponent("worker-pid").path)
+            )
+            await coordinator.close()
         }
-        let fixture = try fixture(pages: 1)
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        // Intentionally the unchanged public constructor, without any fixture seam.
-        let coordinator = try await ServiceCoordinator(
-            opening: fixture.store, documentConverter: fixture.configuration)
-        let client = client(coordinator)
-        let admitted = try await client.startDocumentJob(fixture.request)
-        let paused = try await wait(client, id: admitted.jobID, root: fixture.root) { $0.state == "paused" }
-        XCTAssertEqual(paused.reasonCode, "documentConverter")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.root.appendingPathComponent("worker-pid").path))
-        await coordinator.close()
-    }
-#endif
+    #endif
 
     func testCoordinatorVerifierFailurePreventsWorkerLaunch() async throws {
         let fixture = try fixture(pages: 1)
@@ -593,7 +649,8 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         let admitted = try await client.startDocumentJob(fixture.request)
         let paused = try await wait(client, id: admitted.jobID, root: fixture.root) { $0.state == "paused" }
         XCTAssertEqual(paused.reasonCode, "fixtureVerifierRejected")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.root.appendingPathComponent("worker-pid").path))
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: fixture.root.appendingPathComponent("worker-pid").path))
         await coordinator.close()
     }
 
@@ -637,7 +694,9 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         let admitted: DocumentJobStatus
         do {
             await first.setDocumentJobIndexHookForTesting { batch in
-                if batch.phase == .afterCommit { throw TractandaError("testPaused", "Retained partial index") }
+                if batch.phase == .afterCommit {
+                    throw TractandaError("testPaused", "Retained partial index")
+                }
             }
             admitted = try await client(first).startDocumentJob(fixture.request)
             _ = try await wait(client(first), id: admitted.jobID, root: fixture.root) { $0.state == "paused" }
@@ -867,7 +926,8 @@ final class DocumentJobCoordinatorTests: XCTestCase {
             pageSeconds: 0.05, noProgressSeconds: 1, terminationGraceSeconds: 0.05)
         let coordinator = try await ServiceCoordinator(
             opening: fixture.store, embeddingProviderForTesting: nil, requireInitializedStore: true,
-            documentRuntimeVerifierForTesting: { _ in }, documentConverter: fixture.configuration, documentJobResources: resources)
+            documentRuntimeVerifierForTesting: { _ in }, documentConverter: fixture.configuration,
+            documentJobResources: resources)
         let client = client(coordinator)
         let admitted = try await client.startDocumentJob(fixture.request)
         let paused = try await wait(client, id: admitted.jobID, root: fixture.root) { $0.state == "paused" }
@@ -1157,7 +1217,8 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         }()
         let coordinator = try await ServiceCoordinator(
             opening: fixture.store, embeddingProviderForTesting: nil, requireInitializedStore: true,
-            documentRuntimeVerifierForTesting: { _ in }, documentConverter: fixture.configuration, makeAccountDirectory: { accounts })
+            documentRuntimeVerifierForTesting: { _ in }, documentConverter: fixture.configuration,
+            makeAccountDirectory: { accounts })
         let alice = client(coordinator, uid: accounts.alice)
         let admin = client(coordinator)
         let active = try await alice.startDocumentJob(request)

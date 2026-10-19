@@ -99,7 +99,8 @@ public actor ServiceCoordinator {
         makeAccountDirectory: @escaping @Sendable () -> any AccountDirectory = { SystemAccountDirectory() }
     ) async throws {
         try await self.init(
-            opening: root, embeddingProviderForTesting: nil, requireInitializedStore: true, indexDirectory: indexDirectory,
+            opening: root, embeddingProviderForTesting: nil, requireInitializedStore: true,
+            indexDirectory: indexDirectory,
             documentConverter: documentConverter, documentJobResources: documentJobResources,
             attachmentUploadPolicy: attachmentUploadPolicy,
             rebuildNoProgressTimeoutSeconds: rebuildNoProgressTimeoutSeconds,
@@ -127,7 +128,8 @@ public actor ServiceCoordinator {
                 "invalidConfiguration", "Rebuild no-progress timeout must be positive and finite.")
         }
         self.documentJobBudgets = try documentJobResources.budgets()
-        self.documentRuntimeVerifier = documentRuntimeVerifierForTesting ?? DocumentNativeSession.verifyRuntime
+        self.documentRuntimeVerifier =
+            documentRuntimeVerifierForTesting ?? DocumentNativeSession.verifyRuntime
         self.rebuildNoProgressSeconds = rebuildNoProgressTimeoutSeconds
         let opened: CoreBox = try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -1385,7 +1387,8 @@ public actor ServiceCoordinator {
         try Task.checkCancellation()
         let generation = canonicalWorkGeneration
         try requireCanonicalGeneration(generation)
-        try beginWork(); defer { finishWork() }
+        try beginWork()
+        defer { finishWork() }
         let result = try await submit { service in
             try service.store.withAccess(forUID: uid) { try service.store.peerOperatorCanonicalStatus() }
         }
@@ -1395,68 +1398,93 @@ public actor ServiceCoordinator {
     }
 
     /// Host-only, package-internal seams; no service/CLI route or default activation.
-    package func beginNativeCredentialRegistration(_ request: NativePeerCredentialRegistration.Begin,
-        forUID uid: UInt32, control: PeerExchangeControl) async throws -> PeerCredentialRegistrationAdmission {
-        try control.check(); try Task.checkCancellation()
+    package func beginNativeCredentialRegistration(
+        _ request: NativePeerCredentialRegistration.Begin,
+        forUID uid: UInt32, control: PeerExchangeControl
+    ) async throws -> PeerCredentialRegistrationAdmission {
+        try control.check()
+        try Task.checkCancellation()
         let generation = canonicalWorkGeneration
         try requireCanonicalGeneration(generation)
-        guard privateCredentialAdmissions.count + privateEnrollmentAdmissions.count < Self.maximumPending else {
+        guard privateCredentialAdmissions.count + privateEnrollmentAdmissions.count < Self.maximumPending
+        else {
             throw TractandaError("serviceBusy", "Private credential admission is full.")
         }
-        try beginWork(); defer { finishWork() }
+        try beginWork()
+        defer { finishWork() }
         let id = UUID()
         privateCredentialAdmissions[id] = control
         do {
             let token = try await submit { service in
                 try control.check()
-                return try service.store.withAccess(forUID: uid) { try service.store.nativeCredentialRegistrationContext() }
+                return try service.store.withAccess(forUID: uid) {
+                    try service.store.nativeCredentialRegistrationContext()
+                }
             }
             guard accepting else { throw TractandaError("serviceClosed", "The service is closed.") }
-            try requireCanonicalGeneration(generation); try control.check(); try Task.checkCancellation()
-            return .init(id: id, owner: privateCredentialOwner, uid: uid, generation: generation,
+            try requireCanonicalGeneration(generation)
+            try control.check()
+            try Task.checkCancellation()
+            return .init(
+                id: id, owner: privateCredentialOwner, uid: uid, generation: generation,
                 context: token, request: request, control: control)
         } catch {
-            privateCredentialAdmissions.removeValue(forKey: id); control.cancel(); throw error
+            privateCredentialAdmissions.removeValue(forKey: id)
+            control.cancel()
+            throw error
         }
     }
     package func cancelNativeCredentialRegistration(_ admission: PeerCredentialRegistrationAdmission) {
         guard admission.owner == privateCredentialOwner else { return }
         privateCredentialAdmissions[admission.id]?.cancel()
-        if !privateCredentialCommitting.contains(admission.id) { privateCredentialAdmissions.removeValue(forKey: admission.id) }
+        if !privateCredentialCommitting.contains(admission.id) {
+            privateCredentialAdmissions.removeValue(forKey: admission.id)
+        }
     }
-    package func finishNativeCredentialRegistration(_ admission: PeerCredentialRegistrationAdmission,
-        input: PeerPrivateCredentialInput) async throws -> Data {
+    package func finishNativeCredentialRegistration(
+        _ admission: PeerCredentialRegistrationAdmission,
+        input: PeerPrivateCredentialInput
+    ) async throws -> Data {
         guard admission.owner == privateCredentialOwner,
             privateCredentialAdmissions[admission.id] === admission.control,
-            !privateCredentialCommitting.contains(admission.id) else {
+            !privateCredentialCommitting.contains(admission.id)
+        else {
             throw TractandaError("privateCredentialProtocol", "Private admission is no longer current.")
         }
         try requireCanonicalGeneration(admission.generation)
-        try admission.control.check(); try Task.checkCancellation()
+        try admission.control.check()
+        try Task.checkCancellation()
         try beginWork()
         privateCredentialCommitting.insert(admission.id)
         defer {
             privateCredentialAdmissions.removeValue(forKey: admission.id)
-            privateCredentialCommitting.remove(admission.id); finishWork()
+            privateCredentialCommitting.remove(admission.id)
+            finishWork()
         }
         return try await withTaskCancellationHandler {
             try await submit { service in
                 try admission.control.check()
                 return try service.store.withAccess(forUID: admission.uid) {
                     _ = try service.store.nativeCredentialRegistrationContext()
-                    guard input.count == admission.request.byteCount else { throw NativePeerCredentialRegistration.protocolFailure() }
-                    let credential = try input.withBytes { data in
-                        do { return try PeerCredential.decode(data) }
-                        catch { throw TractandaError("invalidPeerCredential", "Private credential is invalid.") }
+                    guard input.count == admission.request.byteCount else {
+                        throw NativePeerCredentialRegistration.protocolFailure()
                     }
-                    try admission.control.check() // Last cancellation boundary before synchronous mutation.
-                    try service.store.registerNativePeerCredential(credential,
+                    let credential = try input.withBytes { data in
+                        do { return try PeerCredential.decode(data) } catch {
+                            throw TractandaError("invalidPeerCredential", "Private credential is invalid.")
+                        }
+                    }
+                    try admission.control.check()  // Last cancellation boundary before synchronous mutation.
+                    try service.store.registerNativePeerCredential(
+                        credential,
                         permittedOrigins: admission.request.permittedOrigins,
                         expectedContextToken: admission.context, operationID: admission.request.operationID)
                     return try JSON.encode(NativePeerCredentialRegistration.Result(registered: true))
                 }
             }
-        } onCancel: { admission.control.cancel() }
+        } onCancel: {
+            admission.control.cancel()
+        }
     }
 
     package func peerCredentialRegistrationContext(forUID uid: UInt32) async throws -> String {
@@ -1473,7 +1501,9 @@ public actor ServiceCoordinator {
         _ credential: PeerCredential, permittedOrigins: [String], expectedContextToken: String,
         operationID: String, forUID uid: UInt32
     ) async throws {
-        guard !exclusiveRebuildPending else { throw TractandaError("serviceBusy", "Store rebuild is pending.") }
+        guard !exclusiveRebuildPending else {
+            throw TractandaError("serviceBusy", "Store rebuild is pending.")
+        }
         try beginWork()
         defer { finishWork() }
         try await submit { service in
@@ -1482,13 +1512,16 @@ public actor ServiceCoordinator {
                 let context = try PeerPackage.Context(
                     peerID: binding.peerID, storeID: binding.storeID,
                     configurationDigest: binding.configurationDigest, permittedOrigins: permittedOrigins)
-                try service.store.registerPeerCredential(credential, context: context,
+                try service.store.registerPeerCredential(
+                    credential, context: context,
                     expectedContextToken: expectedContextToken, operationID: operationID)
             }
         }
     }
     package func loadPeerCredential(peerID: String) async throws -> PeerCredential {
-        guard !exclusiveRebuildPending else { throw TractandaError("serviceBusy", "Store rebuild is pending.") }
+        guard !exclusiveRebuildPending else {
+            throw TractandaError("serviceBusy", "Store rebuild is pending.")
+        }
         try beginWork()
         defer { finishWork() }
         return try await submit { try $0.store.loadPeerCredential(peerID: peerID) }
@@ -1501,7 +1534,9 @@ public actor ServiceCoordinator {
     package func validatePeerRuntimeSnapshot(_ snapshot: PeerRuntimeSnapshot) async throws {
         _ = try await preparePeerRuntimeSnapshot(expected: snapshot)
     }
-    private func preparePeerRuntimeSnapshot(expected: PeerRuntimeSnapshot?) async throws -> PeerRuntimeSnapshot {
+    private func preparePeerRuntimeSnapshot(expected: PeerRuntimeSnapshot?) async throws
+        -> PeerRuntimeSnapshot
+    {
         guard accepting, !peerRuntimeStopped else {
             throw TractandaError("serviceClosed", "The peer runtime is stopped.")
         }
@@ -1517,37 +1552,56 @@ public actor ServiceCoordinator {
         return try await withTaskCancellationHandler {
             let loaded = try await submit { try $0.store.peerRuntimeMaterial(progress: control.check) }
             await peerRuntimeSnapshotDeliveryHookForTesting?()
-            guard accepting, !peerRuntimeStopped else { throw TractandaError("serviceClosed", "The peer runtime is stopped.") }
+            guard accepting, !peerRuntimeStopped else {
+                throw TractandaError("serviceClosed", "The peer runtime is stopped.")
+            }
             try requireCanonicalGeneration(generation)
             try control.check()
             let material = expected?.material ?? loaded
             // A queued policy/credential change can precede result delivery. Revalidate the
             // exact private bytes and security state, never just cached metadata possession.
             try await submit { try $0.store.validatePeerRuntimeMaterial(material, progress: control.check) }
-            guard accepting, !peerRuntimeStopped else { throw TractandaError("serviceClosed", "The peer runtime is stopped.") }
+            guard accepting, !peerRuntimeStopped else {
+                throw TractandaError("serviceClosed", "The peer runtime is stopped.")
+            }
             try requireCanonicalGeneration(generation)
             try control.check()
-            return PeerRuntimeSnapshot(material: material, owner: peerRuntimeSnapshotOwner,
+            return PeerRuntimeSnapshot(
+                material: material, owner: peerRuntimeSnapshotOwner,
                 canonicalGeneration: generation)
-        } onCancel: { control.cancel() }
+        } onCancel: {
+            control.cancel()
+        }
     }
     func setPeerRuntimeSnapshotDeliveryHookForTesting(_ hook: (@Sendable () async -> Void)?) {
         peerRuntimeSnapshotDeliveryHookForTesting = hook
     }
 
-    func peerSyncWork(state: PeerExchangeState, replacement: PeerSyncWork?,
-        control: PeerExchangeControl) async throws -> PeerSyncWork {
+    func peerSyncWork(
+        state: PeerExchangeState, replacement: PeerSyncWork?,
+        control: PeerExchangeControl
+    ) async throws -> PeerSyncWork {
         let generation = canonicalWorkGeneration
         try requireCanonicalGeneration(generation)
-        try beginWork(); defer { finishWork() }
+        try beginWork()
+        defer { finishWork() }
         let result = try await submit { service in
-            try service.store.withPeerExchange(binding: state.binding,
-                expectedSecurity: state.securityBinding, progress: { try control.check(); try state.compatibility.requireLifetime() }) { _, security in
+            try service.store.withPeerExchange(
+                binding: state.binding,
+                expectedSecurity: state.securityBinding,
+                progress: {
+                    try control.check()
+                    try state.compatibility.requireLifetime()
+                }
+            ) { _, security in
                 try state.compatibility.requireAdmission(store: service.store, storeID: state.binding.storeID)
-                return try service.store.peerSyncWork(binding: state.binding, security: security, replacement: replacement)
+                return try service.store.peerSyncWork(
+                    binding: state.binding, security: security, replacement: replacement)
             }
         }
-        try requireCanonicalGeneration(generation); try control.check(); try state.compatibility.requireLifetime()
+        try requireCanonicalGeneration(generation)
+        try control.check()
+        try state.compatibility.requireLifetime()
         return result
     }
 
@@ -1566,41 +1620,64 @@ public actor ServiceCoordinator {
         }
     }
 
-    func adoptPeerCompatibility(_ admission: PeerCompatibilityAdmission, expectedBinding: PeerExchangeBinding,
-        state: PeerExchangeState, control: PeerExchangeControl) async throws -> PeerExchangeState {
+    func adoptPeerCompatibility(
+        _ admission: PeerCompatibilityAdmission, expectedBinding: PeerExchangeBinding,
+        state: PeerExchangeState, control: PeerExchangeControl
+    ) async throws -> PeerExchangeState {
         try admission.requireBinding(expectedBinding)
         guard expectedBinding == state.binding, state.compatibility.local == nil,
-            state.compatibility.remote == nil, !state.compatibility.acknowledged else { throw PeerExchangeCompatibility.invalid() }
+            state.compatibility.remote == nil, !state.compatibility.acknowledged
+        else { throw PeerExchangeCompatibility.invalid() }
         await peerExchangeAuthorizationHookForTesting?()
         let generation = canonicalWorkGeneration
-        try requireCanonicalGeneration(generation); try control.check(); try admission.checkLifetime()
-        try beginWork(); defer { finishWork() }
+        try requireCanonicalGeneration(generation)
+        try control.check()
+        try admission.checkLifetime()
+        try beginWork()
+        defer { finishWork() }
         let next = try await submit { service in
-            try service.store.withPeerExchange(binding: state.binding, expectedSecurity: state.securityBinding,
-                progress: { try control.check(); try admission.checkLifetime() }) { _, _ in
-                try admission.compatibility.requireAdmission(store: service.store, storeID: state.binding.storeID)
-                var next = state; next.compatibility = admission.compatibility
+            try service.store.withPeerExchange(
+                binding: state.binding, expectedSecurity: state.securityBinding,
+                progress: {
+                    try control.check()
+                    try admission.checkLifetime()
+                }
+            ) { _, _ in
+                try admission.compatibility.requireAdmission(
+                    store: service.store, storeID: state.binding.storeID)
+                var next = state
+                next.compatibility = admission.compatibility
                 return next
             }
         }
-        try requireCanonicalGeneration(generation); try control.check(); try admission.checkLifetime()
+        try requireCanonicalGeneration(generation)
+        try control.check()
+        try admission.checkLifetime()
         return next
     }
-    func advancePeerCompatibility(_ action: PeerCompatibilityAction, state: PeerExchangeState,
-        control: PeerExchangeControl) async throws -> PeerExchangeStep {
+    func advancePeerCompatibility(
+        _ action: PeerCompatibilityAction, state: PeerExchangeState,
+        control: PeerExchangeControl
+    ) async throws -> PeerExchangeStep {
         let generation = canonicalWorkGeneration
-        try requireCanonicalGeneration(generation); try control.check()
-        try beginWork(); defer { finishWork() }
+        try requireCanonicalGeneration(generation)
+        try control.check()
+        try beginWork()
+        defer { finishWork() }
         let result = try await submit { service in
-            try service.store.withPeerExchange(binding: state.binding,
-                expectedSecurity: state.securityBinding, progress: control.check) { _, _ in
+            try service.store.withPeerExchange(
+                binding: state.binding,
+                expectedSecurity: state.securityBinding, progress: control.check
+            ) { _, _ in
                 var next = state
-                let response = try next.compatibility.advance(action, store: service.store, storeID: state.binding.storeID)
+                let response = try next.compatibility.advance(
+                    action, store: service.store, storeID: state.binding.storeID)
                 try control.check()
                 return PeerExchangeStep(state: next, response: response)
             }
         }
-        try requireCanonicalGeneration(generation); try control.check()
+        try requireCanonicalGeneration(generation)
+        try control.check()
         return result
     }
     func authorizePeerExchange(_ state: PeerExchangeState, control: PeerExchangeControl) async throws {
@@ -1612,11 +1689,17 @@ public actor ServiceCoordinator {
         try await submit { service in
             try service.store.withPeerExchange(
                 binding: state.binding, expectedSecurity: state.securityBinding,
-                progress: { try control.check(); try state.compatibility.requireLifetime() }
-            ) { _, _ in try state.compatibility.requireAdmission(store: service.store, storeID: state.binding.storeID) }
+                progress: {
+                    try control.check()
+                    try state.compatibility.requireLifetime()
+                }
+            ) { _, _ in
+                try state.compatibility.requireAdmission(store: service.store, storeID: state.binding.storeID)
+            }
         }
         try requireCanonicalGeneration(generation)
-        try control.check(); try state.compatibility.requireLifetime()
+        try control.check()
+        try state.compatibility.requireLifetime()
     }
 
     func releasePeerLogicalVerification(_ owner: String) async {
@@ -1635,15 +1718,23 @@ public actor ServiceCoordinator {
                 try control.check()
                 return try service.store.withPeerExchange(
                     binding: state.binding, expectedSecurity: state.securityBinding,
-                    progress: { try control.check(); try state.compatibility.requireLifetime() }
+                    progress: {
+                        try control.check()
+                        try state.compatibility.requireLifetime()
+                    }
                 ) { context, _ in
                     var next = state
-                    let decoded = try PeerPackage.decode(PeerExchangeRequest.self, request, maximum: 2 * 1024 * 1024)
-                    let slot = decoded.operation == "needsTransfer" ? "comparison"
+                    let decoded = try PeerPackage.decode(
+                        PeerExchangeRequest.self, request, maximum: 2 * 1024 * 1024)
+                    let slot =
+                        decoded.operation == "needsTransfer"
+                        ? "comparison"
                         : decoded.operation.hasPrefix("export") ? "export" : "intake"
                     let owner = state.logicalOwner.map { $0 + ":" + slot }
                     let response = try service.store.withPeerLogicalVerification(owner) {
-                        try next.perform(request, store: service.store, context: context, control: control, scanLimit: scanLimit)
+                        try next.perform(
+                            request, store: service.store, context: context, control: control,
+                            scanLimit: scanLimit)
                     }
                     return PeerExchangeStep(state: next, response: response)
                 }
@@ -1653,7 +1744,8 @@ public actor ServiceCoordinator {
             throw error
         }
         try requireCanonicalGeneration(generation)
-        try control.check(); try state.compatibility.requireLifetime()
+        try control.check()
+        try state.compatibility.requireLifetime()
         return result
     }
     func setPeerExchangeFailureHookForTesting(_ hook: (@Sendable (TractandaError) -> Void)?) {
@@ -1662,8 +1754,10 @@ public actor ServiceCoordinator {
     func setPeerExchangeAuthorizationHookForTesting(_ hook: (@Sendable () async -> Void)?) {
         peerExchangeAuthorizationHookForTesting = hook
     }
-    func removePeerIntakeForTesting(peerID: String, origins: [String], operationID: String,
-        forUID uid: UInt32? = nil) async throws {
+    func removePeerIntakeForTesting(
+        peerID: String, origins: [String], operationID: String,
+        forUID uid: UInt32? = nil
+    ) async throws {
         try await submit { service in
             try service.store.withAccess(forUID: uid ?? service.store.ownerUID) {
                 try service.store.removePeerIntake(
@@ -1718,14 +1812,15 @@ private final class CoreBox: @unchecked Sendable {
     ) throws {
         let store: ItemStore
         if requireInitializedStore {
-            store = try ItemStore.openInitialized(root: root, indexDirectory: indexDirectory, accounts: accounts,
+            store = try ItemStore.openInitialized(
+                root: root, indexDirectory: indexDirectory, accounts: accounts,
                 attachmentUploadPolicy: attachmentUploadPolicy)
         } else {
             store = try ItemStore(
-            root: root, indexDirectory: indexDirectory, accounts: accounts,
-            attachmentUploadPolicy: attachmentUploadPolicy,
-            revisionProjectionEnabled: revisionProjectionEnabled,
-            authorityIntakeEnabled: authorityIntakeEnabled)
+                root: root, indexDirectory: indexDirectory, accounts: accounts,
+                attachmentUploadPolicy: attachmentUploadPolicy,
+                revisionProjectionEnabled: revisionProjectionEnabled,
+                authorityIntakeEnabled: authorityIntakeEnabled)
         }
         if let embeddingProviderForTesting {
             guard documentConverter == nil else {
@@ -1786,61 +1881,96 @@ extension ServiceCoordinator {
     /// Trusted host-only enrollment seams. The real caller's UID is resolved on the serial owner;
     /// no wire request, listener or ordinary peer registration route invokes these operations.
     func beginPeerEnrollment(_ request: PeerEnrollmentApproval.Request, forUID uid: UInt32) async throws
-        -> PeerEnrollmentApproval.Handle {
-        guard !exclusiveRebuildPending else { throw TractandaError("serviceBusy", "Store rebuild is pending.") }
-        try beginWork(); defer { finishWork() }
+        -> PeerEnrollmentApproval.Handle
+    {
+        guard !exclusiveRebuildPending else {
+            throw TractandaError("serviceBusy", "Store rebuild is pending.")
+        }
+        try beginWork()
+        defer { finishWork() }
         return try await submit { try $0.store.beginPeerEnrollment(request, forUID: uid) }
     }
     func stepPeerEnrollment(_ handle: PeerEnrollmentApproval.Handle, forUID uid: UInt32) async throws
-        -> PeerEnrollmentApproval.Status {
-        guard !exclusiveRebuildPending else { throw TractandaError("serviceBusy", "Store rebuild is pending.") }
-        try beginWork(); defer { finishWork() }
+        -> PeerEnrollmentApproval.Status
+    {
+        guard !exclusiveRebuildPending else {
+            throw TractandaError("serviceBusy", "Store rebuild is pending.")
+        }
+        try beginWork()
+        defer { finishWork() }
         return try await submit { try $0.store.stepPeerEnrollment(handle, forUID: uid) }
     }
     func acceptPeerEnrollment(_ handle: PeerEnrollmentApproval.Handle, forUID uid: UInt32) async throws
-        -> PeerEnrollmentApproval.Status {
-        guard !exclusiveRebuildPending else { throw TractandaError("serviceBusy", "Store rebuild is pending.") }
-        try beginWork(); defer { finishWork() }
+        -> PeerEnrollmentApproval.Status
+    {
+        guard !exclusiveRebuildPending else {
+            throw TractandaError("serviceBusy", "Store rebuild is pending.")
+        }
+        try beginWork()
+        defer { finishWork() }
         return try await submit { try $0.store.acceptPeerEnrollment(handle, forUID: uid) }
     }
-    func readPeerEnrollment(_ handle: PeerEnrollmentApproval.Handle, object: PeerPackage.Object,
-                            offset: Int, maximumBytes: Int, forUID uid: UInt32) async throws -> PeerExportPlan.Chunk {
-        guard !exclusiveRebuildPending else { throw TractandaError("serviceBusy", "Store rebuild is pending.") }
-        try beginWork(); defer { finishWork() }
-        return try await submit { try $0.store.readPeerEnrollment(handle, object: object,
-            offset: offset, maximumBytes: maximumBytes, forUID: uid) }
+    func readPeerEnrollment(
+        _ handle: PeerEnrollmentApproval.Handle, object: PeerPackage.Object,
+        offset: Int, maximumBytes: Int, forUID uid: UInt32
+    ) async throws -> PeerExportPlan.Chunk {
+        guard !exclusiveRebuildPending else {
+            throw TractandaError("serviceBusy", "Store rebuild is pending.")
+        }
+        try beginWork()
+        defer { finishWork() }
+        return try await submit {
+            try $0.store.readPeerEnrollment(
+                handle, object: object,
+                offset: offset, maximumBytes: maximumBytes, forUID: uid)
+        }
     }
 }
 
 extension ServiceCoordinator {
-    func peerEnrollmentActivationMaterial(_ handle: PeerEnrollmentApproval.Handle, forUID uid: UInt32) async throws
-        -> PeerEnrollmentActivation.Material {
-        guard !exclusiveRebuildPending else { throw TractandaError("serviceBusy", "Store rebuild is pending.") }
-        try beginWork(); defer { finishWork() }
+    func peerEnrollmentActivationMaterial(_ handle: PeerEnrollmentApproval.Handle, forUID uid: UInt32)
+        async throws
+        -> PeerEnrollmentActivation.Material
+    {
+        guard !exclusiveRebuildPending else {
+            throw TractandaError("serviceBusy", "Store rebuild is pending.")
+        }
+        try beginWork()
+        defer { finishWork() }
         return try await submit { try $0.store.peerEnrollmentActivationMaterial(handle, forUID: uid) }
     }
-    func registerAcceptedPeerEnrollment(_ handle: PeerEnrollmentApproval.Handle, forUID uid: UInt32) async throws {
-        guard !exclusiveRebuildPending else { throw TractandaError("serviceBusy", "Store rebuild is pending.") }
-        try beginWork(); defer { finishWork() }
+    func registerAcceptedPeerEnrollment(_ handle: PeerEnrollmentApproval.Handle, forUID uid: UInt32)
+        async throws
+    {
+        guard !exclusiveRebuildPending else {
+            throw TractandaError("serviceBusy", "Store rebuild is pending.")
+        }
+        try beginWork()
+        defer { finishWork() }
         try await submit { try $0.store.registerAcceptedPeerEnrollment(handle, forUID: uid) }
     }
 }
-
 
 extension ServiceCoordinator {
     func setNativeEnrollmentPreparedHookForTesting(_ hook: (@Sendable () async -> Void)?) {
         privateEnrollmentPreparedHookForTesting = hook
     }
-    package func beginNativeEnrollment(_ request: NativePeerEnrollment.PrivateRequest,
-        forUID uid: UInt32, control: PeerExchangeControl) async throws -> PeerNativeEnrollmentAdmission {
-        try control.check(); try Task.checkCancellation()
+    package func beginNativeEnrollment(
+        _ request: NativePeerEnrollment.PrivateRequest,
+        forUID uid: UInt32, control: PeerExchangeControl
+    ) async throws -> PeerNativeEnrollmentAdmission {
+        try control.check()
+        try Task.checkCancellation()
         let generation = canonicalWorkGeneration
         try requireCanonicalGeneration(generation)
-        guard privateCredentialAdmissions.count + privateEnrollmentAdmissions.count < Self.maximumPending else {
+        guard privateCredentialAdmissions.count + privateEnrollmentAdmissions.count < Self.maximumPending
+        else {
             throw TractandaError("serviceBusy", "Private operator admission is full.")
         }
-        try beginWork(); defer { finishWork() }
-        let id = UUID(); privateEnrollmentAdmissions[id] = control
+        try beginWork()
+        defer { finishWork() }
+        let id = UUID()
+        privateEnrollmentAdmissions[id] = control
         do {
             let output: PeerEnrollmentTargetOutput? = try await submit { service in
                 try control.check()
@@ -1851,32 +1981,52 @@ extension ServiceCoordinator {
                 return nil
             }
             guard accepting else { throw TractandaError("serviceClosed", "The service is closed.") }
-            try requireCanonicalGeneration(generation); try control.check(); try Task.checkCancellation()
-            return .init(id: id, owner: privateEnrollmentOwner, uid: uid, generation: generation,
+            try requireCanonicalGeneration(generation)
+            try control.check()
+            try Task.checkCancellation()
+            return .init(
+                id: id, owner: privateEnrollmentOwner, uid: uid, generation: generation,
                 request: request, control: control, output: output)
         } catch {
-            privateEnrollmentAdmissions.removeValue(forKey: id); control.cancel(); throw error
+            privateEnrollmentAdmissions.removeValue(forKey: id)
+            control.cancel()
+            throw error
         }
     }
     package func cancelNativeEnrollment(_ admission: PeerNativeEnrollmentAdmission) {
         guard admission.owner == privateEnrollmentOwner else { return }
         privateEnrollmentAdmissions[admission.id]?.cancel()
         if !privateEnrollmentCommitting.contains(admission.id) {
-            privateEnrollmentAdmissions.removeValue(forKey: admission.id); privateEnrollmentCompleted.remove(admission.id)
+            privateEnrollmentAdmissions.removeValue(forKey: admission.id)
+            privateEnrollmentCompleted.remove(admission.id)
         }
     }
-    package func finishNativeEnrollment(_ admission: PeerNativeEnrollmentAdmission,
-        input: PeerEnrollmentPairInput?) async throws -> Data {
-        guard admission.owner == privateEnrollmentOwner, privateEnrollmentAdmissions[admission.id] === admission.control,
-            !privateEnrollmentCommitting.contains(admission.id), !privateEnrollmentCompleted.contains(admission.id) else { throw NativePeerEnrollment.failure() }
-        try requireCanonicalGeneration(admission.generation); try admission.control.check(); try Task.checkCancellation()
-        try beginWork(); privateEnrollmentCommitting.insert(admission.id)
+    package func finishNativeEnrollment(
+        _ admission: PeerNativeEnrollmentAdmission,
+        input: PeerEnrollmentPairInput?
+    ) async throws -> Data {
+        guard admission.owner == privateEnrollmentOwner,
+            privateEnrollmentAdmissions[admission.id] === admission.control,
+            !privateEnrollmentCommitting.contains(admission.id),
+            !privateEnrollmentCompleted.contains(admission.id)
+        else { throw NativePeerEnrollment.failure() }
+        try requireCanonicalGeneration(admission.generation)
+        try admission.control.check()
+        try Task.checkCancellation()
+        try beginWork()
+        privateEnrollmentCommitting.insert(admission.id)
         var completed = false
         defer {
             privateEnrollmentCommitting.remove(admission.id)
-            if completed, admission.request.operation == .exportTarget, (try? admission.control.check()) != nil {
-                privateEnrollmentCompleted.insert(admission.id) // Retained until the actual native child closes.
-            } else { privateEnrollmentAdmissions.removeValue(forKey: admission.id); privateEnrollmentCompleted.remove(admission.id) }
+            if completed, admission.request.operation == .exportTarget,
+                (try? admission.control.check()) != nil
+            {
+                // Retained until the actual native child closes.
+                privateEnrollmentCompleted.insert(admission.id)
+            } else {
+                privateEnrollmentAdmissions.removeValue(forKey: admission.id)
+                privateEnrollmentCompleted.remove(admission.id)
+            }
             finishWork()
         }
         return try await withTaskCancellationHandler {
@@ -1884,51 +2034,85 @@ extension ServiceCoordinator {
                 try admission.control.check()
                 if admission.request.operation == .begin {
                     guard let input, input.count == admission.request.byteCount,
-                        try input.operationID == admission.request.operationID else { throw NativePeerEnrollment.failure() }
+                        try input.operationID == admission.request.operationID
+                    else { throw NativePeerEnrollment.failure() }
                     return try JSON.encode(service.store.nativeEnrollmentBegin(input, forUID: admission.uid))
                 }
-                guard input == nil, let output = admission.output else { throw NativePeerEnrollment.failure() }
+                guard input == nil, let output = admission.output else {
+                    throw NativePeerEnrollment.failure()
+                }
                 // Current author/security/private bytes are rehydrated after waiting, not a cached grant.
-                let fresh = try service.store.nativeEnrollmentExport(admission.request.operationID, forUID: admission.uid)
-                guard output.withBytes({ previous in fresh.withBytes { $0 == previous } }) else { throw NativePeerEnrollment.failure() }
+                let fresh = try service.store.nativeEnrollmentExport(
+                    admission.request.operationID, forUID: admission.uid)
+                guard output.withBytes({ previous in fresh.withBytes { $0 == previous } }) else {
+                    throw NativePeerEnrollment.failure()
+                }
                 try admission.control.check()
                 return output.withBytes { $0 }
             }
-            if admission.request.operation == .exportTarget { await privateEnrollmentPreparedHookForTesting?() }
-            try requireCanonicalGeneration(admission.generation); try admission.control.check(); try Task.checkCancellation()
+            if admission.request.operation == .exportTarget {
+                await privateEnrollmentPreparedHookForTesting?()
+            }
+            try requireCanonicalGeneration(admission.generation)
+            try admission.control.check()
+            try Task.checkCancellation()
             if admission.request.operation == .begin {
                 try await submit { service in
                     try admission.control.check()
-                    try service.store.nativeEnrollmentValidateDelivery(admission.request.operationID, forUID: admission.uid)
+                    try service.store.nativeEnrollmentValidateDelivery(
+                        admission.request.operationID, forUID: admission.uid)
                 }
-                try requireCanonicalGeneration(admission.generation); try admission.control.check()
+                try requireCanonicalGeneration(admission.generation)
+                try admission.control.check()
             }
             completed = true
             return result
-        } onCancel: { admission.control.cancel() }
+        } onCancel: {
+            admission.control.cancel()
+        }
     }
-    package func validateNativeEnrollmentExportDelivery(_ admission: PeerNativeEnrollmentAdmission) async throws {
-        guard admission.owner == privateEnrollmentOwner, privateEnrollmentAdmissions[admission.id] === admission.control,
-            privateEnrollmentCompleted.contains(admission.id), let previous = admission.output else { throw NativePeerEnrollment.failure() }
-        try requireCanonicalGeneration(admission.generation); try admission.control.check(); try Task.checkCancellation()
-        try beginWork(); defer { finishWork() }
+    package func validateNativeEnrollmentExportDelivery(_ admission: PeerNativeEnrollmentAdmission)
+        async throws
+    {
+        guard admission.owner == privateEnrollmentOwner,
+            privateEnrollmentAdmissions[admission.id] === admission.control,
+            privateEnrollmentCompleted.contains(admission.id), let previous = admission.output
+        else { throw NativePeerEnrollment.failure() }
+        try requireCanonicalGeneration(admission.generation)
+        try admission.control.check()
+        try Task.checkCancellation()
+        try beginWork()
+        defer { finishWork() }
         try await submit { service in
             try admission.control.check()
-            let current = try service.store.nativeEnrollmentExport(admission.request.operationID, forUID: admission.uid)
-            guard previous.withBytes({ before in current.withBytes { $0 == before } }) else { throw NativePeerEnrollment.failure() }
+            let current = try service.store.nativeEnrollmentExport(
+                admission.request.operationID, forUID: admission.uid)
+            guard previous.withBytes({ before in current.withBytes { $0 == before } }) else {
+                throw NativePeerEnrollment.failure()
+            }
         }
-        try requireCanonicalGeneration(admission.generation); try admission.control.check(); try Task.checkCancellation()
-    }
-    package func nativeEnrollmentCall(_ call: PeerEnrollmentNativeCall, forUID uid: UInt32) async throws -> Data {
+        try requireCanonicalGeneration(admission.generation)
+        try admission.control.check()
         try Task.checkCancellation()
-        let generation = canonicalWorkGeneration; try requireCanonicalGeneration(generation)
-        try beginWork(); defer { finishWork() }
+    }
+    package func nativeEnrollmentCall(_ call: PeerEnrollmentNativeCall, forUID uid: UInt32) async throws
+        -> Data
+    {
+        try Task.checkCancellation()
+        let generation = canonicalWorkGeneration
+        try requireCanonicalGeneration(generation)
+        try beginWork()
+        defer { finishWork() }
         let result = try await submit { service in try service.store.nativeEnrollmentCall(call, forUID: uid) }
-        try requireCanonicalGeneration(generation); try Task.checkCancellation()
+        try requireCanonicalGeneration(generation)
+        try Task.checkCancellation()
         // Historical accepted acknowledgments retain Core's exact author/global-admin rule.
         if call.action != "accept" && call.action != "register" {
-            try await submit { service in try service.store.nativeEnrollmentValidateDelivery(call.operationID, forUID: uid) }
-            try requireCanonicalGeneration(generation); try Task.checkCancellation()
+            try await submit { service in
+                try service.store.nativeEnrollmentValidateDelivery(call.operationID, forUID: uid)
+            }
+            try requireCanonicalGeneration(generation)
+            try Task.checkCancellation()
         }
         return result
     }

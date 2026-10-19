@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+
 @testable import TractandaCore
 
 final class UUIDHardwareNodeCacheTests: XCTestCase {
@@ -58,11 +59,35 @@ final class UUIDHardwareNodeCacheTests: XCTestCase {
         private var discoveries = 0
         private var values: [UInt64] = []
         private var failures = 0
-        func discovered() { lock.lock(); defer { lock.unlock() }; discoveries += 1 }
-        func append(_ value: UInt64) { lock.lock(); defer { lock.unlock() }; values.append(value) }
-        func failed() { lock.lock(); defer { lock.unlock() }; failures += 1 }
-        var discoveryCount: Int { lock.lock(); defer { lock.unlock() }; return discoveries }
-        var nodes: [UInt64] { lock.lock(); defer { lock.unlock() }; return values }
-        var failureCount: Int { lock.lock(); defer { lock.unlock() }; return failures }
+        func discovered() {
+            lock.lock()
+            defer { lock.unlock() }
+            discoveries += 1
+        }
+        func append(_ value: UInt64) {
+            lock.lock()
+            defer { lock.unlock() }
+            values.append(value)
+        }
+        func failed() {
+            lock.lock()
+            defer { lock.unlock() }
+            failures += 1
+        }
+        var discoveryCount: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return discoveries
+        }
+        var nodes: [UInt64] {
+            lock.lock()
+            defer { lock.unlock() }
+            return values
+        }
+        var failureCount: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return failures
+        }
     }
 }

@@ -65,8 +65,10 @@ enum AuthorityStore {
     }
     /// Initial authorization state is distinct from reader compatibility. The root writer
     /// captures it before any authority intake or new foreign file may exist.
-    static func initialState(root: URL, storeID: String, ownerUID: UInt32, files: DocumentContentFiles,
-                             allocateReplica: () throws -> UUID = UUID.makeVersion1) throws
+    static func initialState(
+        root: URL, storeID: String, ownerUID: UInt32, files: DocumentContentFiles,
+        allocateReplica: () throws -> UUID = UUID.makeVersion1
+    ) throws
         -> InitialState
     {
         let path = [".authority-initial-state.json"]
@@ -112,7 +114,8 @@ enum AuthorityStore {
             try CanonicalReaderRequirement.load(root: root, ownerUID: ownerUID)?.recordFormats.contains(2)
             == true
         let replica = try ReplicaIdentity.initialize(
-            root: root, storeID: storeID, ownerUID: ownerUID, hasModernOrigins: hasModern, allocate: allocateReplica)
+            root: root, storeID: storeID, ownerUID: ownerUID, hasModernOrigins: hasModern,
+            allocate: allocateReplica)
         let capture = Capture(
             profile: "tractanda.authority-capture.v1", storeID: storeID, replicaID: replica.replicaID)
         try savePrivate(try JSON.encode(capture), path: capturePath, files: files)
@@ -232,14 +235,18 @@ enum AuthorityStore {
             publication.localItemPath == row.path,
             row.descriptor.id == node.revision.revisionID, row.descriptor.sha256 == node.sha256,
             row.descriptor.length == node.originalBytes.count,
-            CanonicalRecordPath.validate(row.path, itemID: node.revision.itemID, revisionID: row.descriptor.id),
+            CanonicalRecordPath.validate(
+                row.path, itemID: node.revision.itemID, revisionID: row.descriptor.id),
             let replica = try ReplicaIdentity.load(root: root, storeID: storeID, ownerUID: ownerUID),
             publication.context.permittedOrigins == [replica.replicaID],
             try node.revision.provenance?.originReplicaID == nil
                 || node.revision.provenance?.originReplicaID == replica.replicaID,
-            let captureBytes = try files.readIfPresent(path: [".authority-initial-capture.json"], maximumBytes: 4096),
-            let stateBytes = try files.readIfPresent(path: [".authority-initial-state.json"], maximumBytes: 4096),
-            let sealedState = try files.readIfPresent(path: [".authority-initial-state-sealed.json"], maximumBytes: 4096),
+            let captureBytes = try files.readIfPresent(
+                path: [".authority-initial-capture.json"], maximumBytes: 4096),
+            let stateBytes = try files.readIfPresent(
+                path: [".authority-initial-state.json"], maximumBytes: 4096),
+            let sealedState = try files.readIfPresent(
+                path: [".authority-initial-state-sealed.json"], maximumBytes: 4096),
             stateBytes == sealedState,
             let proofBytes = try files.readIfPresent(
                 path: ["authority", "initial-history", row.descriptor.id], maximumBytes: 4096)
@@ -283,7 +290,9 @@ enum AuthorityStore {
 
     /// Local configuration is never a peer package object. The root writer serializes updates;
     /// immutable sequence files give a durable current value without a mutable pointer race.
-    static func configuration(root: URL, files: DocumentContentFiles, readBudget: ((Int) throws -> Void)? = nil) throws -> Configuration? {
+    static func configuration(
+        root: URL, files: DocumentContentFiles, readBudget: ((Int) throws -> Void)? = nil
+    ) throws -> Configuration? {
         let directory = root.appendingPathComponent(".peer-configuration")
         guard FileManager.default.fileExists(atPath: directory.path) else { return nil }
         var latest: String?
@@ -301,7 +310,9 @@ enum AuthorityStore {
         guard let latest else { return nil }
         let result = try PeerPackage.decode(
             Configuration.self,
-            files.read(path: [".peer-configuration", latest], maximumBytes: PeerPackage.maximumPageBytes, readBudget: readBudget))
+            files.read(
+                path: [".peer-configuration", latest], maximumBytes: PeerPackage.maximumPageBytes,
+                readBudget: readBudget))
         guard result.profile == "tractanda.peer-configuration.v1", result.peers.count <= 256,
             Set(result.peers.map(\.peerID)).count == result.peers.count
         else {

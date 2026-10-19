@@ -19,7 +19,8 @@ enum PeerFixtureCapacity {
         }
         let available = UInt64(status.f_bavail).multipliedReportingOverflow(by: UInt64(status.f_frsize))
         guard !available.overflow, available.partialValue >= reserveBytes + fixtureCapBytes else {
-            throw TractandaError("resourceLimit", "Tiny fixture requires 10GiB reserve and 128MiB clustering cap.")
+            throw TractandaError(
+                "resourceLimit", "Tiny fixture requires 10GiB reserve and 128MiB clustering cap.")
         }
     }
 }

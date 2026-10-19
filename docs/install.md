@@ -1,10 +1,8 @@
-# macOS preview installation
+# macOS and Debian preview installation
 
-The downloadable preview targets Apple Silicon Macs. It contains the server, terminal client, MCP adapter, native installer and their required runtime libraries. A bundle with semantic retrieval also contains the pinned Granite Embedding 311M multilingual R2 model and the vmlx-swift host. Running the downloaded bundle does not require Xcode, Swift, Python or a model download.
+The macOS `.pkg` targets Apple Silicon. The poc.15 release also provides direct Debian 13 `.deb` assets for amd64 and arm64, including the server, clients, Setup, CPU embeddings, Docling runtime and bundled models. Linux installation and first Raven–Stash synchronization must pass the release's isolated acceptance gates; package build receipts alone do not establish an installed service or live cluster.
 
 See [system requirements](system-requirements.md) for the macOS version/architecture floor and provisional RAM and disk planning guidance.
-
-Linux installation remains in development. The portable CPU embedding host can be built from source; see [embedding runtime build and checks](embedding-runtime.md). A supported Linux installer is a later step.
 
 ## Install an empty or sample database
 
@@ -29,6 +27,26 @@ The installer registers system LaunchDaemons for the server and, when included, 
 | Installed releases, connection registry and receipts | `/Users/Shared/Library/Application Support/Tractanda` |
 
 Each database occupies its own named subdirectory. Back up the complete canonical store, including its durable settings. Indexes can be regenerated.
+
+## Install a Debian package
+
+The poc.15 release provides direct `.deb` downloads for Debian 13 amd64 and arm64; there is no Tractanda APT repository or automatic-update channel. Download only the package matching the host architecture and verify its SHA-256 against `SHA256SUMS`, which covers all downloadable release assets. Install the local file through APT so Debian can satisfy its declared dependencies from the host's configured repositories:
+
+~~~sh
+sudo apt install ./tractanda_0.1.0~poc.15-1_amd64.deb
+~~~
+
+On arm64, use `tractanda_0.1.0~poc.15-1_arm64.deb`. The package requires Debian 13 with systemd and the existing `daemon` account; Setup does not create users or groups. Dpkg owns the active files in `/opt/tractanda/current`. A package install does not enroll a node or establish synchronization. Follow [cluster architecture and operations](clustering.md) for the separate peer setup and acceptance gates.
+
+After the package is installed, initialize a fresh standalone store and sample content by naming an existing human OS account:
+
+~~~sh
+sudo /opt/tractanda/current/bin/tractanda-setup install --name production --owner EXISTING_USERNAME --first-source --sample
+~~~
+
+Replace `EXISTING_USERNAME` with that account's login name. Use `--empty` instead of `--sample` to omit sample content. `--first-source` initializes this store as a standalone first source; it does not enroll another node. Prepared-replica adoption uses a separate command and independently supplied store and replica UUIDv1 pins; follow the cluster setup procedure for that workflow.
+
+Publication requires isolated package integrity/dependency/install/start/restart validation and live Raven–Stash synchronization acceptance. The broader Linux failure/retry, uninstall, purge/reinstall and downgrade matrix remains deferred. See [Linux package lifecycle validation](linux-package-validation.md) for the test sequence; it is a procedure, not a claim that those tests passed.
 
 The canonical store's `.tractanda-store-identity.json` is durable metadata and belongs in that backup. External indexes bind to its persistent UUIDv1; paths, device numbers and inodes are diagnostic only because they can change after moves, restores or reboots. Deleting a derived index must not delete the canonical identity. Early device/inode bindings upgrade only when their recorded identity still matches; a mismatched old index requires an explicit, data-preserving index rebuild.
 
@@ -62,7 +80,7 @@ Use the installed setup executable with `status`, `start`, `stop` or `restart` a
 sudo "/Users/Shared/Library/Application Support/Tractanda/current/bin/tractanda-setup" restart --name default
 ```
 
-The Setup `status` command reports the macOS LaunchDaemon state. In source builds with peer support, `tractanda peer status` reads the running daemon's nonsecret loaded peer-runtime and synchronization state; it does not start a service or check remote cluster convergence.
+The Setup `status` command reports the macOS LaunchDaemon state. Linux package/service status is platform-specific; use the release's Debian instructions and [cluster operations](clustering.md). In source builds with peer support, `tractanda peer status` reads the running daemon's nonsecret loaded peer-runtime and synchronization state; it does not start a service or check remote cluster convergence.
 
 To upgrade, unpack the new bundle and run its installer:
 
@@ -72,7 +90,7 @@ sudo ./bin/tractanda-setup upgrade --bundle . --name default
 
 Upgrade preserves the existing database, owner and connection settings. It verifies copied files, switches service definitions and the stable client link, and restores the previous registrations if startup fails. Prototype data formats may require an explicit migration or an index rebuild; backward compatibility is not promised before 1.0.
 
-The current source build also accepts `--peer-runtime-configuration INPUT_JSON` or `--disable-peer-runtime` on `plan`, `install` and `upgrade` only. Supply at most one. Omitting both preserves the configuration recorded for that instance; a new instance with no configuration remains disabled. The replacement input is a bounded, regular JSON file containing nonsecret endpoint and synchronization settings. `plan` validates and reports the proposed replacement or disable action without applying it; install and upgrade publish the chosen settings as a protected, per-instance service configuration. Disabling removes only that runtime configuration and leaves canonical pairings and private credentials intact. During install or upgrade, Setup checks the daemon's loaded status against the managed receipt before completing; a failed transition follows its existing rollback or recovery path. These options are source-only and are not present in installed or published poc.14. Linux installation and the Linux Setup status command remain unsupported.
+The current source build also accepts `--peer-runtime-configuration INPUT_JSON` or `--disable-peer-runtime` on `plan`, `install` and `upgrade` only. Supply at most one. Omitting both preserves the configuration recorded for that instance; a new instance with no configuration remains disabled. The replacement input is a bounded, regular JSON file containing nonsecret endpoint and synchronization settings. `plan` validates and reports the proposed replacement or disable action without applying it; install and upgrade publish the chosen settings as a protected, per-instance service configuration. Disabling removes only that runtime configuration and leaves canonical pairings and private credentials intact. During install or upgrade, Setup checks the daemon's loaded status against the managed receipt before completing; a failed transition follows its existing rollback or recovery path. These options are absent from the currently installed poc.14. The poc.15 Debian packages include the Linux implementation, subject to the package and live-sync acceptance gates above.
 
 Uninstall using:
 
@@ -131,9 +149,10 @@ LaunchDaemon definition bind model and filesystem paths. Configured readiness do
 that weights have loaded or that inference succeeded; actual converted-content validation is a
 separate gate. Document jobs stream originals and process bounded pages without a whole-document
 page ceiling. The current 1024-token/page output budget, quotas and coverage failures remain
-visible; arbitrary original size does not imply unlimited generated text. Linux document runtime
-packaging and managed startup remain in development. Source edits do not install or activate a
-release; a release/deployment still requires an explicit request.
+visible; arbitrary original size does not imply unlimited generated text. The poc.15 Debian
+packages include the local document runtime and model assets; their install/start/restart and
+live-sync acceptance remains a separate gate. Source edits do not install or activate a release;
+a release/deployment still requires an explicit request.
 
 ## Canonical reader compatibility
 

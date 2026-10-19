@@ -14,16 +14,31 @@ struct NativePeerEnrollmentSession: Sendable {
 enum NativePrivateSession: Sendable {
     case credential(NativeCredentialRegistrationSession)
     case enrollment(NativePeerEnrollmentSession)
-    var byteCount: Int { switch self { case .credential(let s): s.byteCount; case .enrollment(let s): s.byteCount } }
-    var ready: Data { switch self { case .credential: NativePeerCredentialRegistration.ready; case .enrollment: NativePeerEnrollment.ready } }
+    var byteCount: Int {
+        switch self {
+        case .credential(let s): s.byteCount
+        case .enrollment(let s): s.byteCount
+        }
+    }
+    var ready: Data {
+        switch self {
+        case .credential: NativePeerCredentialRegistration.ready
+        case .enrollment: NativePeerEnrollment.ready
+        }
+    }
     var maximumReply: Int {
         switch self {
         case .credential: NativePeerCredentialRegistration.maximumResult
-        case .enrollment(let s): s.operation == .exportTarget ? NativePeerEnrollment.maximumTargetOutputBytes : NativePeerEnrollment.maximumMetadata
+        case .enrollment(let s):
+            s.operation == .exportTarget
+                ? NativePeerEnrollment.maximumTargetOutputBytes : NativePeerEnrollment.maximumMetadata
         }
     }
     var outputOnly: Bool {
-        switch self { case .credential: false; case .enrollment(let s): s.operation == .exportTarget }
+        switch self {
+        case .credential: false
+        case .enrollment(let s): s.operation == .exportTarget
+        }
     }
     func complete(_ data: Data?) async throws -> Data {
         switch self {
@@ -34,19 +49,33 @@ enum NativePrivateSession: Sendable {
         }
     }
     func validateBeforeDelivery() async throws {
-        if case .enrollment(let s) = self { try await s.validateBeforeDelivery(); try s.control?.check() }
+        if case .enrollment(let s) = self {
+            try await s.validateBeforeDelivery()
+            try s.control?.check()
+        }
     }
     func checkDelivery() throws {
         if case .enrollment(let s) = self { try s.control?.check() }
     }
-    func cancel() async { switch self { case .credential(let s): await s.cancel(); case .enrollment(let s): await s.cancel() } }
+    func cancel() async {
+        switch self {
+        case .credential(let s): await s.cancel()
+        case .enrollment(let s): await s.cancel()
+        }
+    }
     func failure(_ error: any Error) -> Data {
-        switch self { case .credential: NativePeerCredentialRegistration.failure(error); case .enrollment: NativePeerEnrollment.failure(error) }
+        switch self {
+        case .credential: NativePeerCredentialRegistration.failure(error)
+        case .enrollment: NativePeerEnrollment.failure(error)
+        }
     }
 }
 
 extension DaemonApplication {
-    func beginPrivateEnrollment(_ data: Data, forUID uid: UInt32, control: PeerExchangeControl) async throws -> NativePeerEnrollmentSession {
-        try await makePrivateEnrollmentSession(NativePeerEnrollment.PrivateRequest.parse(data), forUID: uid, control: control)
+    func beginPrivateEnrollment(_ data: Data, forUID uid: UInt32, control: PeerExchangeControl) async throws
+        -> NativePeerEnrollmentSession
+    {
+        try await makePrivateEnrollmentSession(
+            NativePeerEnrollment.PrivateRequest.parse(data), forUID: uid, control: control)
     }
 }

@@ -27,9 +27,11 @@ func parse() throws -> (String, SetupOptions, URL?, URL?) {
     var owner: String?
     var mode: SetupOptions.Mode = .empty
     var port = 48_728
-    var bundle = SetupPlatform.host == .linux
+    var bundle =
+        SetupPlatform.host == .linux
         ? SetupRoots(platform: .linux).software.appendingPathComponent("current")
-        : URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent().deletingLastPathComponent()
+        : URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
+            .deletingLastPathComponent()
     var dataRoot: URL?
     var indexRoot: URL?
     var node: String?
@@ -39,7 +41,8 @@ func parse() throws -> (String, SetupOptions, URL?, URL?) {
     while let flag = args.first {
         args.removeFirst()
         switch flag {
-        case "--name", "--owner", "--bundle", "--port", "--data-root", "--index-root", "--uuid-node", "--store-id", "--replica-id":
+        case "--name", "--owner", "--bundle", "--port", "--data-root", "--index-root", "--uuid-node",
+            "--store-id", "--replica-id":
             guard let value = args.first else { throw SetupError("Missing value for \(flag).") }
             args.removeFirst()
             switch flag {
@@ -69,13 +72,19 @@ func parse() throws -> (String, SetupOptions, URL?, URL?) {
     }
     let storeSelection: SetupOptions.StoreSelection
     if selection == "--adopt-prepared" {
-        guard let selectedStore, let selectedReplica else { throw SetupError("Prepared adoption needs independent --store-id and --replica-id UUIDv1 pins.") }
+        guard let selectedStore, let selectedReplica else {
+            throw SetupError("Prepared adoption needs independent --store-id and --replica-id UUIDv1 pins.")
+        }
         storeSelection = .prepared(storeID: selectedStore, replicaID: selectedReplica)
     } else {
-        guard selectedStore == nil, selectedReplica == nil else { throw SetupError("Identity pins require --adopt-prepared.") }
+        guard selectedStore == nil, selectedReplica == nil else {
+            throw SetupError("Identity pins require --adopt-prepared.")
+        }
         storeSelection = selection == "--first-source" ? .standalone : .unconfigured
     }
-    if selection != nil, !["plan", "install", "upgrade"].contains(command) { throw SetupError("Store selection applies only to explicit plan/install/upgrade.") }
+    if selection != nil, !["plan", "install", "upgrade"].contains(command) {
+        throw SetupError("Store selection applies only to explicit plan/install/upgrade.")
+    }
     return (
         command,
         SetupOptions(
@@ -97,11 +106,14 @@ do {
     }
     if internalArguments.first == "--verify-prepared-target" {
         guard internalArguments.count == 5, getuid() != 0, getuid() == tractanda_uid(),
-            getuid() == (try SystemAccountDirectory().user(named: SetupPlatform.host.serviceUser)).uid else {
+            getuid() == (try SystemAccountDirectory().user(named: SetupPlatform.host.serviceUser)).uid
+        else {
             throw SetupError("Prepared target inspection requires the existing non-root service custodian.")
         }
-        try ItemStore.verifyPreparedReplicaForSetup(root: URL(fileURLWithPath: internalArguments[1]),
-            indexDirectory: URL(fileURLWithPath: internalArguments[2]), expectedStoreID: internalArguments[3], expectedReplicaID: internalArguments[4])
+        try ItemStore.verifyPreparedReplicaForSetup(
+            root: URL(fileURLWithPath: internalArguments[1]),
+            indexDirectory: URL(fileURLWithPath: internalArguments[2]), expectedStoreID: internalArguments[3],
+            expectedReplicaID: internalArguments[4])
         print("Prepared target identity, activation and authority-aware opening verified.")
         exit(0)
     }
@@ -121,23 +133,28 @@ do {
         guard getuid() != 0, getuid() == tractanda_uid() else {
             throw SetupError("Finite target activation requires matching non-root real/effective custody.")
         }
-        guard tractanda_start_signals() == 0 else { throw SetupError("Cannot install finite target cancellation handlers.") }
+        guard tractanda_start_signals() == 0 else {
+            throw SetupError("Cannot install finite target cancellation handlers.")
+        }
         // Process-global handlers belong to this standalone command exactly once.
         do {
             defer { tractanda_restore_signals() }
-            try PeerTargetEnrollment.run(root: URL(fileURLWithPath: target.root), pin: target.pin,
+            try PeerTargetEnrollment.run(
+                root: URL(fileURLWithPath: target.root), pin: target.pin,
                 inputFD: STDIN_FILENO, outputFD: STDOUT_FILENO)
         }
         exit(0)
     }
     if internalArguments.first == "--prepare-peer-target" {
         guard internalArguments.count == 4 else {
-            throw SetupError("Use --prepare-peer-target ROOT STORE_UUID SOURCE_REPLICA_UUID as the existing service user.")
+            throw SetupError(
+                "Use --prepare-peer-target ROOT STORE_UUID SOURCE_REPLICA_UUID as the existing service user.")
         }
         // The finite helper also requires effective UID == this real UID != 0.
         // OS invocation selects custody; this is never a canonical administrator claim.
         let uid = getuid()
-        let preparation = try PeerTargetPreparation.run(root: internalArguments[1], commonStoreID: internalArguments[2],
+        let preparation = try PeerTargetPreparation.run(
+            root: internalArguments[1], commonStoreID: internalArguments[2],
             sourceReplicaID: internalArguments[3], requiredOwnerUID: uid)
         FileHandle.standardOutput.write(preparation)
         exit(0)

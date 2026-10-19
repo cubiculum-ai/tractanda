@@ -116,16 +116,19 @@ extension ItemIndex {
     func peerInventoryReceiptPage(
         epoch: String, afterSequence: Int64, throughSequence: Int64, limit: Int = 128
     ) throws -> [PeerInventory.Receipt] {
-        try peerReceiptProjection(epoch: epoch, afterSequence: afterSequence,
-            throughSequence: throughSequence, limit: limit, includingVerifiedOrigin: false)
-            .map { .init(sequence: $0.sequence, retained: $0.retained) }
+        try peerReceiptProjection(
+            epoch: epoch, afterSequence: afterSequence,
+            throughSequence: throughSequence, limit: limit, includingVerifiedOrigin: false
+        )
+        .map { .init(sequence: $0.sequence, retained: $0.retained) }
     }
     /// Only receipt replay consumes this typed projection of origin derived during canonical
     /// retention/reconstruction. It is not public inventory output or membership authority.
     func peerOriginReplayReceiptPage(
         epoch: String, afterSequence: Int64, throughSequence: Int64, limit: Int = 128
     ) throws -> [OriginReplayReceipt] {
-        try peerReceiptProjection(epoch: epoch, afterSequence: afterSequence,
+        try peerReceiptProjection(
+            epoch: epoch, afterSequence: afterSequence,
             throughSequence: throughSequence, limit: limit, includingVerifiedOrigin: true)
     }
     private func peerReceiptProjection(
@@ -188,19 +191,28 @@ extension ItemIndex {
                     guard sqlite3_column_type(s, 10) == SQLITE_TEXT,
                         sqlite3_column_bytes(s, 10) <= 36,
                         let value = sqlite3_column_text(s, 10),
-                        let text = String(bytes: UnsafeBufferPointer(start: value,
-                            count: Int(sqlite3_column_bytes(s, 10))), encoding: .utf8), !text.contains("\0") else {
-                        throw TractandaError("peerInventoryChanged", "Verified receipt origin metadata is missing or malformed.")
+                        let text = String(
+                            bytes: UnsafeBufferPointer(
+                                start: value,
+                                count: Int(sqlite3_column_bytes(s, 10))), encoding: .utf8),
+                        !text.contains("\0")
+                    else {
+                        throw TractandaError(
+                            "peerInventoryChanged",
+                            "Verified receipt origin metadata is missing or malformed.")
                     }
                     if text.isEmpty {
                         guard retained.descriptor.kind != .authority else {
-                            throw TractandaError("peerInventoryChanged", "Canonical control lost its verified origin.")
+                            throw TractandaError(
+                                "peerInventoryChanged", "Canonical control lost its verified origin.")
                         }
                         origin = nil
                     } else {
                         origin = try AuthorityRecord.persistentID(.text(text))
                     }
-                } else { origin = nil }
+                } else {
+                    origin = nil
+                }
                 result.append(.init(sequence: sequence, retained: retained, origin: origin))
                 last = sequence
             }
@@ -234,16 +246,22 @@ extension ItemIndex {
     }
     /// Untrusted locators for the current initializer's root -> optional index -> page layout.
     /// Every returned reference and member must be checked against canonical bytes by the caller.
-    func peerInventoryBootstrapPath(revisionID: String, sha256: String, pin: AuthorityBinding) throws -> [AuthorityBinding]? {
+    func peerInventoryBootstrapPath(revisionID: String, sha256: String, pin: AuthorityBinding) throws
+        -> [AuthorityBinding]?
+    {
         try withCatalogueScanBudget(reusingActiveBudget: true) {
-            let sql = "SELECT '', '', page.id, page.sha256 FROM authority_dependencies member JOIN authority_objects page ON page.id=member.source AND page.control_kind='bootstrapPage' JOIN authority_dependencies root ON root.source=? AND root.kind='pages' AND root.target=page.id AND root.sha256=page.sha256 WHERE member.kind='bootstrapMember' AND member.target=? AND member.sha256=? UNION ALL SELECT idx.id,idx.sha256,page.id,page.sha256 FROM authority_dependencies member JOIN authority_objects page ON page.id=member.source AND page.control_kind='bootstrapPage' JOIN authority_dependencies child ON child.target=page.id AND child.sha256=page.sha256 AND child.kind='children' JOIN authority_objects idx ON idx.id=child.source AND idx.control_kind='bootstrapIndex' JOIN authority_dependencies root ON root.source=? AND root.kind='pages' AND root.target=idx.id AND root.sha256=idx.sha256 WHERE member.kind='bootstrapMember' AND member.target=? AND member.sha256=? LIMIT 2"
-            let statement = try corpusPrepare(sql, [pin.recordID, revisionID, sha256, pin.recordID, revisionID, sha256])
+            let sql =
+                "SELECT '', '', page.id, page.sha256 FROM authority_dependencies member JOIN authority_objects page ON page.id=member.source AND page.control_kind='bootstrapPage' JOIN authority_dependencies root ON root.source=? AND root.kind='pages' AND root.target=page.id AND root.sha256=page.sha256 WHERE member.kind='bootstrapMember' AND member.target=? AND member.sha256=? UNION ALL SELECT idx.id,idx.sha256,page.id,page.sha256 FROM authority_dependencies member JOIN authority_objects page ON page.id=member.source AND page.control_kind='bootstrapPage' JOIN authority_dependencies child ON child.target=page.id AND child.sha256=page.sha256 AND child.kind='children' JOIN authority_objects idx ON idx.id=child.source AND idx.control_kind='bootstrapIndex' JOIN authority_dependencies root ON root.source=? AND root.kind='pages' AND root.target=idx.id AND root.sha256=idx.sha256 WHERE member.kind='bootstrapMember' AND member.target=? AND member.sha256=? LIMIT 2"
+            let statement = try corpusPrepare(
+                sql, [pin.recordID, revisionID, sha256, pin.recordID, revisionID, sha256])
             defer { sqlite3_finalize(statement) }
             let status = catalogueStep(statement)
             if status == SQLITE_DONE { return nil }
             guard status == SQLITE_ROW else { throw graphSQLiteError() }
             func text(_ column: Int32) throws -> String {
-                guard sqlite3_column_bytes(statement, column) <= 64, let value = sqlite3_column_text(statement, column) else {
+                guard sqlite3_column_bytes(statement, column) <= 64,
+                    let value = sqlite3_column_text(statement, column)
+                else {
                     throw TractandaError("peerInventoryChanged", "Malformed bootstrap path locator.")
                 }
                 return String(cString: value)
@@ -252,7 +270,8 @@ extension ItemIndex {
             if try !text(0).isEmpty { path.append(try .init(recordID: text(0), sha256: text(1))) }
             path.append(try .init(recordID: text(2), sha256: text(3)))
             guard catalogueStep(statement) == SQLITE_DONE else {
-                throw TractandaError("peerInventoryChanged", "Initial membership has competing locator paths.")
+                throw TractandaError(
+                    "peerInventoryChanged", "Initial membership has competing locator paths.")
             }
             return path
         }

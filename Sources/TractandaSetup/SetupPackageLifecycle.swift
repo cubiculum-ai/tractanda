@@ -77,7 +77,11 @@ extension SetupEngine {
             ["list-unit-files", "--no-legend", "--no-pager", "tractanda-*.service"],
         ] {
             let result = try runner.run("/usr/bin/systemctl", arguments, environment: [:])
-            guard result.status == 0, result.output.utf8.count <= 262_144 else {
+            // systemd 257 reports an exact empty unit-file inventory with exit one.
+            let emptyUnitFiles =
+                arguments == ["list-unit-files", "--no-legend", "--no-pager", "tractanda-*.service"]
+                && result.status == 1 && result.output.isEmpty
+            guard result.status == 0 || emptyUnitFiles, result.output.utf8.count <= 262_144 else {
                 throw SetupError("Cannot establish bounded managed service inventory.")
             }
             var names = Set<String>()

@@ -59,10 +59,15 @@ enum PeerInventory {
         var maximumResultBytes = 128 * 1024
     }
 
-    private static func contextDigest(_ context: PeerPackage.Context, coordinator: PeerIntakeCoordinator,
-                                      readBudget: ((Int) throws -> Void)? = nil) throws -> String {
-        AuthorityRecordCodec.sha256(try JSON.encode([JSON.encode(context),
-            Data(coordinator.originAdmissionFrontier(readBudget: readBudget).utf8)]))
+    private static func contextDigest(
+        _ context: PeerPackage.Context, coordinator: PeerIntakeCoordinator,
+        readBudget: ((Int) throws -> Void)? = nil
+    ) throws -> String {
+        AuthorityRecordCodec.sha256(
+            try JSON.encode([
+                JSON.encode(context),
+                Data(coordinator.originAdmissionFrontier(readBudget: readBudget).utf8),
+            ]))
     }
     private static let receiptScope = "tractanda.peer-inventory.receipts.v1"
 
@@ -76,26 +81,36 @@ enum PeerInventory {
             proof.configurationLoaded = true
         }
         guard let pin = proof.configuration?.bootstrap,
-            let located = try index.peerInventoryLegacyPin(revisionID: node.revision.revisionID, sha256: node.sha256),
-            located.recordID == pin.recordID, located.sha256 == pin.sha256 else { return nil }
+            let located = try index.peerInventoryLegacyPin(
+                revisionID: node.revision.revisionID, sha256: node.sha256),
+            located.recordID == pin.recordID, located.sha256 == pin.sha256
+        else { return nil }
         let key = node.revision.revisionID + ":" + node.sha256
         if proof.members[key] == located { return located }
-        guard let path = try index.peerInventoryBootstrapPath(
-            revisionID: node.revision.revisionID, sha256: node.sha256, pin: located) else { return nil }
+        guard
+            let path = try index.peerInventoryBootstrapPath(
+                revisionID: node.revision.revisionID, sha256: node.sha256, pin: located)
+        else { return nil }
         func record(_ binding: AuthorityBinding) throws -> AuthorityRecordCodec.Verified {
             if let old = proof.records[binding.recordID] {
-                guard old.sha256 == binding.sha256 else { throw TractandaError("peerObjectCollision", "Bootstrap metadata digest changed.") }
+                guard old.sha256 == binding.sha256 else {
+                    throw TractandaError("peerObjectCollision", "Bootstrap metadata digest changed.")
+                }
                 return old
             }
-            guard let row = try index.retainedAuthorityObject(id: binding.recordID), row.descriptor.kind == .authority,
-                row.descriptor.sha256 == binding.sha256, row.permittedOrigin else {
+            guard let row = try index.retainedAuthorityObject(id: binding.recordID),
+                row.descriptor.kind == .authority,
+                row.descriptor.sha256 == binding.sha256, row.permittedOrigin
+            else {
                 throw TractandaError("missingDependencies", "Canonical initial membership proof is missing.")
             }
             let value = try AuthorityRecordCodec.decode(read(row))
             guard value.record.recordID == binding.recordID, value.sha256 == binding.sha256,
                 value.record.storeID == coordinator.storeID,
-                try coordinator.receiptContextPermits(row, origin: value.record.originReplicaID, index: index,
-                    configuration: proof.configuration, readBudget: charge) else {
+                try coordinator.receiptContextPermits(
+                    row, origin: value.record.originReplicaID, index: index,
+                    configuration: proof.configuration, readBudget: charge)
+            else {
                 throw TractandaError("untrustedPeer", "Canonical initial membership origin proof differs.")
             }
             proof.records[binding.recordID] = value
@@ -106,15 +121,20 @@ enum PeerInventory {
         for binding in path {
             let field = parent.kind == .bootstrap ? "pages" : "children"
             guard parent.kind == .bootstrap || parent.kind == .bootstrapIndex else { return nil }
-            let references = try AuthorityRecord.list(parent.payload[field]).map(AuthorityBinding.init(value:))
-            guard references.contains(binding), parent.parentAuthorityIDs == references.map(\.recordID).sorted() else { return nil }
+            let references = try AuthorityRecord.list(parent.payload[field]).map(
+                AuthorityBinding.init(value:))
+            guard references.contains(binding),
+                parent.parentAuthorityIDs == references.map(\.recordID).sorted()
+            else { return nil }
             let child = try record(binding).record
             guard child.payload["manifestID"] == .text(located.recordID),
-                child.kind == .bootstrapIndex || child.kind == .bootstrapPage else { return nil }
+                child.kind == .bootstrapIndex || child.kind == .bootstrapPage
+            else { return nil }
             parent = child
         }
         guard parent.kind == .bootstrapPage, parent.parentAuthorityIDs.isEmpty else { return nil }
-        let frontier = try node.revision.provenance?.kind == .automaticMerge
+        let frontier =
+            try node.revision.provenance?.kind == .automaticMerge
             ? node.revision.provenance!.frontier : [node.revision.revisionID]
         let matches = try AuthorityRecord.list(parent.payload["entries"]).filter { entry in
             guard let target = entry.map?["target"] else { return false }
@@ -129,34 +149,48 @@ enum PeerInventory {
     }
     /// The same relayed legacy proof used by inventory: current bootstrap receipt plus exact
     /// canonical membership. Foreign receipts do not require the source's private local seal.
-    static func canonicalLegacyProof(_ node: AuthorityRevision, coordinator: PeerIntakeCoordinator,
+    static func canonicalLegacyProof(
+        _ node: AuthorityRevision, coordinator: PeerIntakeCoordinator,
         index: ItemIndex, proof: BootstrapProof, read: (AuthorityStore.RetainedObject) throws -> Data,
-        charge: @escaping (Int) throws -> Void) throws -> Bool {
+        charge: @escaping (Int) throws -> Void
+    ) throws -> Bool {
         guard try node.revision.provenance == nil else { return false }
         if !proof.configurationLoaded {
             proof.configuration = try coordinator.configuration(readBudget: charge)
             proof.configurationLoaded = true
         }
         guard let pin = proof.configuration?.bootstrap,
-            let bound = try index.peerInventoryLegacyPin(revisionID: node.revision.revisionID, sha256: node.sha256),
+            let bound = try index.peerInventoryLegacyPin(
+                revisionID: node.revision.revisionID, sha256: node.sha256),
             bound.recordID == pin.recordID, bound.sha256 == pin.sha256,
             let control = try index.retainedAuthorityObject(id: pin.recordID),
-            control.descriptor.kind == .authority, control.descriptor.sha256 == pin.sha256 else { return false }
+            control.descriptor.kind == .authority, control.descriptor.sha256 == pin.sha256
+        else { return false }
         let manifest = try AuthorityRecordCodec.decode(read(control)).record
         guard manifest.kind == .bootstrap, manifest.recordID == pin.recordID,
-            manifest.storeID == coordinator.storeID else { return false }
-        var after: String?, current = false
+            manifest.storeID == coordinator.storeID
+        else { return false }
+        var after: String?
+        var current = false
         while !current {
             try charge(0)
-            let receipts = try index.authorityObjectReceiptPage(objectID: pin.recordID, afterPackageID: after, limit: 32)
+            let receipts = try index.authorityObjectReceiptPage(
+                objectID: pin.recordID, afterPackageID: after, limit: 32)
             if receipts.isEmpty { return false }
             for receipt in receipts {
-                try charge(0); after = receipt.packageID
-                if try coordinator.receiptContextPermits(receipt, origin: manifest.originReplicaID,
-                    index: index, configuration: proof.configuration, readBudget: charge) { current = true; break }
+                try charge(0)
+                after = receipt.packageID
+                if try coordinator.receiptContextPermits(
+                    receipt, origin: manifest.originReplicaID,
+                    index: index, configuration: proof.configuration, readBudget: charge)
+                {
+                    current = true
+                    break
+                }
             }
         }
-        return try canonicalInitialPin(node, coordinator: coordinator, index: index,
+        return try canonicalInitialPin(
+            node, coordinator: coordinator, index: index,
             proof: proof, read: read, charge: charge) != nil
     }
     static func initialLocalReceipt(
@@ -166,9 +200,13 @@ enum PeerInventory {
         guard row.peerID == "local" else { return false }
         // The reused proof reads four <=4096-byte originals plus the <=4096 identity.
         try charge(20 * 1024)
-        guard let publication = try coordinator.journal.publication(row.packageID, readBudget: charge) else { return false }
-        return try AuthorityStore.isInitialHistoryReceipt(row, node: node, publication: publication,
-            root: coordinator.root, storeID: coordinator.storeID, ownerUID: coordinator.ownerUID, files: coordinator.journal.files)
+        guard let publication = try coordinator.journal.publication(row.packageID, readBudget: charge) else {
+            return false
+        }
+        return try AuthorityStore.isInitialHistoryReceipt(
+            row, node: node, publication: publication,
+            root: coordinator.root, storeID: coordinator.storeID, ownerUID: coordinator.ownerUID,
+            files: coordinator.journal.files)
     }
     static func capture(
         context: PeerPackage.Context, after checkpoint: CompletionCheckpoint? = nil,
@@ -260,8 +298,11 @@ enum PeerInventory {
         }
         func chargeProof(_ count: Int) throws {
             try check()
-            guard count >= 0, UInt64(count) <= limits.maximumReadBytes - min(readBytes, limits.maximumReadBytes) else {
-                throw TractandaError("resourceLimit", "Initial membership proof exhausted inventory read budget.")
+            guard count >= 0,
+                UInt64(count) <= limits.maximumReadBytes - min(readBytes, limits.maximumReadBytes)
+            else {
+                throw TractandaError(
+                    "resourceLimit", "Initial membership proof exhausted inventory read budget.")
             }
             try proofReadBudget?(count)
             readBytes += UInt64(count)
@@ -309,14 +350,21 @@ enum PeerInventory {
                         if try currentReceipt(row, origin: origin) {
                             proof = .configuredOrigin
                         } else {
-                            guard try canonicalInitialPin(node, coordinator: coordinator, index: index,
-                                proof: bootstrapProof, read: proofOriginal, charge: chargeProof) != nil,
-                                try initialLocalReceipt(row, node: node, coordinator: coordinator, charge: chargeProof) else { continue }
+                            guard
+                                try canonicalInitialPin(
+                                    node, coordinator: coordinator, index: index,
+                                    proof: bootstrapProof, read: proofOriginal, charge: chargeProof) != nil,
+                                try initialLocalReceipt(
+                                    row, node: node, coordinator: coordinator, charge: chargeProof)
+                            else { continue }
                             proof = .pinnedInitialHistory
                         }
                     } else {
-                        guard try canonicalLegacyProof(node, coordinator: coordinator, index: index,
-                            proof: bootstrapProof, read: proofOriginal, charge: chargeProof) else { continue }
+                        guard
+                            try canonicalLegacyProof(
+                                node, coordinator: coordinator, index: index,
+                                proof: bootstrapProof, read: proofOriginal, charge: chargeProof)
+                        else { continue }
                         proof = .pinnedLegacy
                     }
                 } else {
@@ -359,7 +407,10 @@ enum PeerInventory {
         }
     }
     static func exportMaximumSequence(_ boundary: Boundary) -> Int64 { boundary.maximumSequence }
-    static func exportEpoch(_ boundary: Boundary, context: PeerPackage.Context, coordinator: PeerIntakeCoordinator, index: ItemIndex) throws
+    static func exportEpoch(
+        _ boundary: Boundary, context: PeerPackage.Context, coordinator: PeerIntakeCoordinator,
+        index: ItemIndex
+    ) throws
         -> String
     {
         let captured = try index.capturePeerInventory()
@@ -387,7 +438,8 @@ enum PeerInventory {
         let verified = try page(
             context: context, boundary: boundary, cursor: cursor, limit: 1,
             coordinator: coordinator, index: index, evaluationsAvailable: false, limits: .init(),
-            progress: nil, ownerScope: ownerScope, bootstrapProof: bootstrapProof, proofReadBudget: proofReadBudget)
+            progress: nil, ownerScope: ownerScope, bootstrapProof: bootstrapProof,
+            proofReadBudget: proofReadBudget)
         guard verified.entries.first?.sequence == entry.sequence,
             verified.entries.first?.descriptor == entry.descriptor,
             let row = try index.peerInventoryReceiptPage(

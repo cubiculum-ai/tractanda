@@ -100,13 +100,18 @@ final class ItemSearchTests: XCTestCase {
                     ? Array(available.prefix(1)) : available.filter { ids.contains($0.itemID) }
                 let unresolvedID = behavior == "unresolved" ? ids.first : nil
                 let blockedIDs = behavior == "unhydrated" || behavior == "oversized" ? ids : []
-                let readable = selected.filter { $0.itemID != unresolvedID && !blockedIDs.contains($0.itemID) }
+                let readable = selected.filter {
+                    $0.itemID != unresolvedID && !blockedIDs.contains($0.itemID)
+                }
                 result = [
                     "state": "stable",
                     "notFound": ids.filter { id in !available.contains { $0.itemID == id } },
-                    "remainingIDs": behavior == "continuation" && ids.count > 1 ? Array(ids.dropFirst()) : behavior == "unhydrated" ? blockedIDs : [],
+                    "remainingIDs": behavior == "continuation" && ids.count > 1
+                        ? Array(ids.dropFirst()) : behavior == "unhydrated" ? blockedIDs : [],
                     "oversizedIDs": behavior == "oversized" ? blockedIDs : [],
-                    "unresolved": unresolvedID.map { [["itemID": $0, "status": "conflicted", "stateToken": "token"]] } ?? [],
+                    "unresolved": unresolvedID.map {
+                        [["itemID": $0, "status": "conflicted", "stateToken": "token"]]
+                    } ?? [],
                     "list": try readable.map {
                         try JSONSerialization.jsonObject(with: TractandaCore.JSON.encode($0))
                     },
@@ -335,10 +340,13 @@ final class ItemSearchTests: XCTestCase {
         let hits = [first, second].map {
             ItemSearchHit(itemID: $0.itemID, revisionID: $0.revisionID, passage: "hit", similarity: 0.9)
         }
-        let loader = ItemSearchLoader(client: TractandaClient.ItemClient(
-            transport: Transport(items: [first, second], hits: hits, behavior: "unresolved")))
+        let loader = ItemSearchLoader(
+            client: TractandaClient.ItemClient(
+                transport: Transport(items: [first, second], hits: hits, behavior: "unresolved")))
         loader.start(text: "meaning", expression: "")
-        guard case .ready(let page) = try await ready(loader).outcome else { return XCTFail("Expected readable partial result") }
+        guard case .ready(let page) = try await ready(loader).outcome else {
+            return XCTFail("Expected readable partial result")
+        }
         XCTAssertEqual(page.items.map(\.itemID), [second.itemID])
         XCTAssertEqual(page.unresolved.map(\.itemID), [first.itemID])
         XCTAssertFalse(page.items.isEmpty)
@@ -353,10 +361,12 @@ final class ItemSearchTests: XCTestCase {
             "modifiedAt": .date(Timestamp.now()), "actor": .text("fixture"),
             "operationID": .text("fixture"), "requestIdentity": .text("fixture"),
         ])
-        let hit = ItemSearchHit(itemID: item.itemID, revisionID: item.revisionID, passage: "hit", similarity: 0.9)
+        let hit = ItemSearchHit(
+            itemID: item.itemID, revisionID: item.revisionID, passage: "hit", similarity: 0.9)
         for behavior in ["unhydrated", "oversized"] {
-            let loader = ItemSearchLoader(client: TractandaClient.ItemClient(
-                transport: Transport(items: [item], hits: [hit], behavior: behavior)))
+            let loader = ItemSearchLoader(
+                client: TractandaClient.ItemClient(
+                    transport: Transport(items: [item], hits: [hit], behavior: behavior)))
             loader.start(text: "meaning", expression: "")
             guard case .ready(let page) = try await ready(loader).outcome else {
                 return XCTFail("Expected a partial semantic result")

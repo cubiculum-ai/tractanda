@@ -125,9 +125,10 @@ private enum SelfCanonical {
     }
 
     static func isSHA256(_ value: String) -> Bool {
-        value.utf8.count == 64 && value.utf8.allSatisfy {
-            (48...57).contains($0) || (97...102).contains($0)
-        }
+        value.utf8.count == 64
+            && value.utf8.allSatisfy {
+                (48...57).contains($0) || (97...102).contains($0)
+            }
     }
 
     static func isPath(_ value: String, absolute: Bool) -> Bool {
@@ -145,5 +146,8 @@ private enum SelfCanonical {
 }
 
 private func peerEnrollmentActivateUsage() -> TractandaError {
-    TractandaError("usage", "Use tractanda [--profile NAME | --socket PATH] peer enrollment activate --operation-id UUID --file PATH --root ABSOLUTE_PATH --source-replica UUID --bootstrap-id UUID --bootstrap-sha256 HEX --approval-id UUID --approval-sha256 HEX [--target-user OS_USER] [--ssh-host HOST --ssh-login OS_USER --ssh-platform macos|linux]. This runs a finite local workflow with the current operating-system identity, or a fixed SSH remote workflow when all three SSH destination flags are supplied. Pins are independent assertions; it never starts a service or provisions accounts.")
+    TractandaError(
+        "usage",
+        "Use tractanda [--profile NAME | --socket PATH] peer enrollment activate --operation-id UUID --file PATH --root ABSOLUTE_PATH --source-replica UUID --bootstrap-id UUID --bootstrap-sha256 HEX --approval-id UUID --approval-sha256 HEX [--target-user OS_USER] [--ssh-host HOST --ssh-login OS_USER --ssh-platform macos|linux]. This runs a finite local workflow with the current operating-system identity, or a fixed SSH remote workflow when all three SSH destination flags are supplied. Pins are independent assertions; it never starts a service or provisions accounts."
+    )
 }

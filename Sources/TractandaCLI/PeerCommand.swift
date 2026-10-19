@@ -14,7 +14,10 @@ func peerCredentialRegistrationOptions(
 ) throws -> PeerCredentialRegistrationOptions? {
     guard arguments.first == "peer", arguments.dropFirst().first == "credential" else { return nil }
     guard arguments.count >= 3, arguments[2] == "register" else {
-        throw TractandaError("usage", "Use tractanda [--profile NAME | --socket PATH] peer credential register --file PATH --origin UUID [--origin UUID...] --operation-id UUID.")
+        throw TractandaError(
+            "usage",
+            "Use tractanda [--profile NAME | --socket PATH] peer credential register --file PATH --origin UUID [--origin UUID...] --operation-id UUID."
+        )
     }
 
     var filePath: String?
@@ -43,7 +46,9 @@ func peerCredentialRegistrationOptions(
                 uuid.version1Components != nil, uuid.uuidString.lowercased() == value,
                 seenOrigins.insert(value).inserted
             else {
-                throw TractandaError("usage", "Each --origin must be a unique canonical lowercase UUIDv1; at most 256 are allowed.")
+                throw TractandaError(
+                    "usage",
+                    "Each --origin must be a unique canonical lowercase UUIDv1; at most 256 are allowed.")
             }
             origins.append(value)
         default:
@@ -57,7 +62,10 @@ func peerCredentialRegistrationOptions(
         operationUUID.version1Components != nil,
         operationUUID.uuidString.lowercased() == operationID
     else {
-        throw TractandaError("usage", "Use tractanda [--profile NAME | --socket PATH] peer credential register --file PATH --origin UUID [--origin UUID...] --operation-id UUID.")
+        throw TractandaError(
+            "usage",
+            "Use tractanda [--profile NAME | --socket PATH] peer credential register --file PATH --origin UUID [--origin UUID...] --operation-id UUID."
+        )
     }
 
     var connection = options

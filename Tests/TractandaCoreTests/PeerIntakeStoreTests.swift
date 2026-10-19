@@ -60,8 +60,10 @@ final class PeerIntakeStoreTests: XCTestCase {
             guard UInt64(16 * 1024 * 1024) <= AttachmentFixtureCapacity.fixtureCapBytes else {
                 throw TractandaError("resourceLimit", "Fixture estimate")
             }
-            directory = try providedDirectory ?? GuardedFixtureDirectory.parent().appendingPathComponent(
-                "tractanda-peer-store-" + (try Self.id()))
+            directory =
+                try providedDirectory
+                ?? GuardedFixtureDirectory.parent().appendingPathComponent(
+                    "tractanda-peer-store-" + (try Self.id()))
             sourceRoot = directory.appendingPathComponent("source")
             receiverRoot = directory.appendingPathComponent("receiver")
             source = try Self.open(sourceRoot, sourceAccounts)

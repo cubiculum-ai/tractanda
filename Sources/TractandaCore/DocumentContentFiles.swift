@@ -13,24 +13,39 @@ final class DocumentContentFiles: @unchecked Sendable {
     private final class ReadObservation: @unchecked Sendable {
         private let lock = NSLock()
         private var active: (root: String, callback: @Sendable ([String], Int) -> Void)?
-        func withObserver<T>(root: URL, callback: @escaping @Sendable ([String], Int) -> Void,
-                             body: () throws -> T) throws -> T {
+        func withObserver<T>(
+            root: URL, callback: @escaping @Sendable ([String], Int) -> Void,
+            body: () throws -> T
+        ) throws -> T {
             lock.lock()
-            guard active == nil else { lock.unlock(); throw TractandaError("testObservationBusy", "Read observation is already scoped.") }
+            guard active == nil else {
+                lock.unlock()
+                throw TractandaError("testObservationBusy", "Read observation is already scoped.")
+            }
             active = (root.standardizedFileURL.resolvingSymlinksInPath().path, callback)
             lock.unlock()
-            defer { lock.lock(); active = nil; lock.unlock() }
+            defer {
+                lock.lock()
+                active = nil
+                lock.unlock()
+            }
             return try body()
         }
         func record(root: URL, path: [String], bytes: Int) {
-            lock.lock(); let current = active; lock.unlock()
-            guard let current, root.standardizedFileURL.resolvingSymlinksInPath().path == current.root else { return }
+            lock.lock()
+            let current = active
+            lock.unlock()
+            guard let current, root.standardizedFileURL.resolvingSymlinksInPath().path == current.root else {
+                return
+            }
             current.callback(path, bytes)
         }
     }
     private static let readObservation = ReadObservation()
-    static func observeReadsForTesting<T>(root: URL,
-        observation: @escaping @Sendable ([String], Int) -> Void, body: () throws -> T) throws -> T {
+    static func observeReadsForTesting<T>(
+        root: URL,
+        observation: @escaping @Sendable ([String], Int) -> Void, body: () throws -> T
+    ) throws -> T {
         try readObservation.withObserver(root: root, callback: observation, body: body)
     }
     var afterDirectoryRenameForTesting: (() throws -> Void)?
@@ -939,19 +954,26 @@ final class DocumentContentFiles: @unchecked Sendable {
             }
             let chain = try files.directories(base + suffix, create: false)
             do {
-                let metadata = try FileMetadata.read(at: (base + suffix).reduce(files.root) { $0.appendingPathComponent($1) })
+                let metadata = try FileMetadata.read(
+                    at: (base + suffix).reduce(files.root) { $0.appendingPathComponent($1) })
                 var opened = stat()
                 guard fstat(chain.last!, &opened) == 0,
-                    UInt64(opened.st_ino) == metadata.inode, UInt64(opened.st_dev) == metadata.device else {
+                    UInt64(opened.st_ino) == metadata.inode, UInt64(opened.st_dev) == metadata.device
+                else {
                     throw files.failure("Inspection directory binding changed during open.")
                 }
                 if parkable {
                     // Only bounded names/positions survive a fair yield; no directory descriptor.
-                    frames.append(.init(suffix: suffix, chain: nil, cursor: nil, metadata: metadata, initialCount: count))
+                    frames.append(
+                        .init(
+                            suffix: suffix, chain: nil, cursor: nil, metadata: metadata, initialCount: count))
                     files.closeAll(chain)
                 } else {
                     let cursor = try POSIXDirectory.Cursor(descriptor: chain.last!)
-                    frames.append(.init(suffix: suffix, chain: chain, cursor: cursor, metadata: metadata, initialCount: count))
+                    frames.append(
+                        .init(
+                            suffix: suffix, chain: chain, cursor: cursor, metadata: metadata,
+                            initialCount: count))
                 }
             } catch {
                 files.closeAll(chain)
@@ -968,7 +990,10 @@ final class DocumentContentFiles: @unchecked Sendable {
         private func withFrame<T>(_ index: Int, _ body: (Int32) throws -> T) throws -> T {
             if let chain = frames[index].chain { return try body(chain.last!) }
             let path = base + frames[index].suffix
-            guard try FileMetadata.read(at: path.reduce(files.root) { $0.appendingPathComponent($1) }) == frames[index].metadata else {
+            guard
+                try FileMetadata.read(at: path.reduce(files.root) { $0.appendingPathComponent($1) })
+                    == frames[index].metadata
+            else {
                 throw files.failure("Parked inspection directory changed.")
             }
             let chain = try files.directories(path, create: false)
@@ -976,13 +1001,16 @@ final class DocumentContentFiles: @unchecked Sendable {
             let expected = frames[index].metadata
             var opened = stat()
             guard fstat(chain.last!, &opened) == 0,
-                UInt64(opened.st_ino) == expected.inode, UInt64(opened.st_dev) == expected.device else {
+                UInt64(opened.st_ino) == expected.inode, UInt64(opened.st_dev) == expected.device
+            else {
                 throw files.failure("Parked inspection opened a different directory.")
             }
             let value = try body(chain.last!)
             guard fstat(chain.last!, &opened) == 0,
                 UInt64(opened.st_ino) == expected.inode, UInt64(opened.st_dev) == expected.device,
-                try FileMetadata.read(at: path.reduce(files.root) { $0.appendingPathComponent($1) }) == frames[index].metadata else {
+                try FileMetadata.read(at: path.reduce(files.root) { $0.appendingPathComponent($1) })
+                    == frames[index].metadata
+            else {
                 throw files.failure("Parked inspection directory changed while reading.")
             }
             return value
@@ -990,7 +1018,8 @@ final class DocumentContentFiles: @unchecked Sendable {
         private func nextName(_ top: Int, budget: PeerOriginalReadBudget) throws -> String? {
             if let cursor = frames[top].cursor { return try cursor.next() }
             if frames[top].names.isEmpty, !frames[top].exhausted {
-                var names: [String] = [], eligible = 0
+                var names: [String] = []
+                var eligible = 0
                 let after = frames[top].last
                 try withFrame(top) { descriptor in
                     try POSIXDirectory.withEntries(descriptor: descriptor) { name in
@@ -1003,15 +1032,20 @@ final class DocumentContentFiles: @unchecked Sendable {
                         if after == nil || name > after! {
                             eligible += 1
                             let position = names.firstIndex(where: { $0 > name }) ?? names.endIndex
-                            if position < 128 { names.insert(name, at: position); if names.count > 128 { names.removeLast() } }
+                            if position < 128 {
+                                names.insert(name, at: position)
+                                if names.count > 128 { names.removeLast() }
+                            }
                         }
                         return true
                     }
                 }
-                frames[top].names = names; frames[top].exhausted = eligible <= 128
+                frames[top].names = names
+                frames[top].exhausted = eligible <= 128
             }
             guard !frames[top].names.isEmpty else { return nil }
-            let name = frames[top].names.removeFirst(); frames[top].last = name
+            let name = frames[top].names.removeFirst()
+            frames[top].last = name
             return name
         }
         func checkRoot() throws {
@@ -1038,7 +1072,9 @@ final class DocumentContentFiles: @unchecked Sendable {
                     }
                     if synchronize {
                         try withFrame(top) { descriptor in
-                            if !(base.starts(with: ["documents", "content"]) && files.isReadOnly(descriptor)), fsync(descriptor) != 0 {
+                            if !(base.starts(with: ["documents", "content"]) && files.isReadOnly(descriptor)),
+                                fsync(descriptor) != 0
+                            {
                                 throw files.failure("Cannot synchronize inspected subtree.")
                             }
                         }

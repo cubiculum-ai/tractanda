@@ -5,7 +5,9 @@ import XCTest
 final class PeerExchangeCommitTests: XCTestCase {
     typealias Fixture = PeerIntakeStoreTests.Fixture
     private func fixture() throws -> Fixture {
-        try Fixture(directory: GuardedFixtureDirectory.create(prefix: "c", source: "PeerExchangeCommitTests", test: name))
+        try Fixture(
+            directory: GuardedFixtureDirectory.create(
+                prefix: "c", source: "PeerExchangeCommitTests", test: name))
     }
     private func state(_ f: Fixture) throws -> PeerExchangeState {
         let binding = try PeerExchangeBinding(
@@ -17,9 +19,12 @@ final class PeerExchangeCommitTests: XCTestCase {
             binding: binding, progress: {},
             { _, security in
                 var state = PeerExchangeState(binding: binding, securityBinding: security)
-                let declaration = try state.compatibility.advance(.declare, store: f.receiver, storeID: binding.storeID)
-                let ack = try state.compatibility.advance(.accept(declaration), store: f.receiver, storeID: binding.storeID)
-                _ = try state.compatibility.advance(.acknowledge(ack), store: f.receiver, storeID: binding.storeID)
+                let declaration = try state.compatibility.advance(
+                    .declare, store: f.receiver, storeID: binding.storeID)
+                let ack = try state.compatibility.advance(
+                    .accept(declaration), store: f.receiver, storeID: binding.storeID)
+                _ = try state.compatibility.advance(
+                    .acknowledge(ack), store: f.receiver, storeID: binding.storeID)
                 return state
             })
     }
@@ -122,9 +127,12 @@ final class PeerExchangeCommitTests: XCTestCase {
             binding: binding, progress: {},
             { _, security in
                 var state = PeerExchangeState(binding: binding, securityBinding: security)
-                let declaration = try state.compatibility.advance(.declare, store: f.receiver, storeID: binding.storeID)
-                let ack = try state.compatibility.advance(.accept(declaration), store: f.receiver, storeID: binding.storeID)
-                _ = try state.compatibility.advance(.acknowledge(ack), store: f.receiver, storeID: binding.storeID)
+                let declaration = try state.compatibility.advance(
+                    .declare, store: f.receiver, storeID: binding.storeID)
+                let ack = try state.compatibility.advance(
+                    .accept(declaration), store: f.receiver, storeID: binding.storeID)
+                _ = try state.compatibility.advance(
+                    .acknowledge(ack), store: f.receiver, storeID: binding.storeID)
                 return state
             })
         func call(_ operation: String, _ fields: [String: ItemValue]) throws -> [String: ItemValue] {

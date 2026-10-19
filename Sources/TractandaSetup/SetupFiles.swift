@@ -137,21 +137,30 @@ extension SetupEngine {
                 changes.allSatisfy({ role, change in
                     ["server", "embeddings", "authentication"].contains(role)
                         && change.old != change.desired
-                        && [change.old, change.desired].compactMap { $0 }.allSatisfy(SetupPackageCompatibility.isDigest)
-                }) else { throw SetupError("Invalid pending package definition commitments.") }
+                        && [change.old, change.desired].compactMap { $0 }.allSatisfy(
+                            SetupPackageCompatibility.isDigest)
+                })
+            else { throw SetupError("Invalid pending package definition commitments.") }
         }
         guard (receipt.preparedStoreID == nil) == (receipt.preparedReplicaID == nil) else {
             throw SetupError("Prepared instance identity pins are incomplete.")
         }
         if let store = receipt.preparedStoreID, let replica = receipt.preparedReplicaID {
-            try SetupOptions(name: name, bundle: packagePayload, storeSelection: .prepared(storeID: store, replicaID: replica)).validate()
+            try SetupOptions(
+                name: name, bundle: packagePayload,
+                storeSelection: .prepared(storeID: store, replicaID: replica)
+            ).validate()
         }
         guard receipt.state == .preparing || receipt.packageSetupOwner == nil else {
             throw SetupError("Live setup permission exists outside a preparing receipt.")
         }
         try requirePackageRelease(receipt.release)
         if roots.platform == .linux {
-            guard receipt.releases.keys.allSatisfy({ $0 == roots.software.appendingPathComponent("current").path }) else {
+            guard
+                receipt.releases.keys.allSatisfy({
+                    $0 == roots.software.appendingPathComponent("current").path
+                })
+            else {
                 throw SetupError("Linux receipt contains a program release not owned by the active package.")
             }
         }
@@ -183,7 +192,9 @@ extension SetupEngine {
         if roots.platform == .linux, let expected = receipt.authenticationDefinitionSHA256 {
             let definition = authenticationDefinitionURL(receipt.instance)
             try requireOwned(definition, uid: 0, directory: false)
-            guard try sha256(definition) == expected else { throw SetupError("The authentication service definition differs from its receipt.") }
+            guard try sha256(definition) == expected else {
+                throw SetupError("The authentication service definition differs from its receipt.")
+            }
         }
         if receipt.embedding != nil {
             let definition = embeddingDefinitionURL(receipt.instance)
@@ -204,8 +215,10 @@ extension SetupEngine {
             guard release.path == active.path, release.standardizedFileURL.path == active.path,
                 bundle.path == active.path, bundle.standardizedFileURL.path == active.path,
                 !isLink(active), try sha256(active.appendingPathComponent("bundle-manifest.json")) == digest,
-                try verifyBundle(at: active) == manifest else {
-                throw SetupError("Linux program payload is dpkg-owned; Setup cannot copy or replace a package release.")
+                try verifyBundle(at: active) == manifest
+            else {
+                throw SetupError(
+                    "Linux program payload is dpkg-owned; Setup cannot copy or replace a package release.")
             }
             try requireOwned(active, uid: 0, directory: true)
             return

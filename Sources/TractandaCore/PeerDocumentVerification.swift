@@ -51,36 +51,50 @@ final class PeerDocumentVerification {
         parked = parked.filter { !$0.key.hasPrefix(owner + ":") }
     }
     func inspectionCountsForTesting() -> (ordinary: Int, parked: Int, active: Int, descriptors: Int) {
-        (jobs.count, parked.count, activeInspections,
-            parked.values.filter { $0.inspection.retainsDirectoryDescriptors }.count)
+        (
+            jobs.count, parked.count, activeInspections,
+            parked.values.filter { $0.inspection.retainsDirectoryDescriptors }.count
+        )
     }
     private func job(_ key: String) -> Job? {
-        if let owner = originals.logicalVerificationOwner { return parked[owner].flatMap { $0.key == key ? $0 : nil } }
+        if let owner = originals.logicalVerificationOwner {
+            return parked[owner].flatMap { $0.key == key ? $0 : nil }
+        }
         return jobs[key]
     }
     private func removeJob(_ key: String) {
         if let owner = originals.logicalVerificationOwner {
             if parked[owner]?.key == key { parked.removeValue(forKey: owner) }
-        } else { jobs.removeValue(forKey: key) }
+        } else {
+            jobs.removeValue(forKey: key)
+        }
     }
     private func touchJob(_ key: String) {
         if let owner = originals.logicalVerificationOwner {
             if parked[owner]?.key == key { parked[owner]?.touched = ProcessInfo.processInfo.systemUptime }
-        } else { jobs[key]?.touched = ProcessInfo.processInfo.systemUptime }
+        } else {
+            jobs[key]?.touched = ProcessInfo.processInfo.systemUptime
+        }
     }
     private func inspection(_ key: String, base: [String]) throws -> DocumentContentFiles.PeerTreeInspection {
         if let owner = originals.logicalVerificationOwner {
             if let retained = parked[owner], retained.key != key {
-                throw TractandaError("peerVerificationBusy", "Finish the logical inspection slot before another object.")
+                throw TractandaError(
+                    "peerVerificationBusy", "Finish the logical inspection slot before another object.")
             }
             if parked[owner] == nil {
-                guard parked.count < 768 else { throw TractandaError("peerVerificationBusy", "Parked inspection slots are busy.") }
-                parked[owner] = .init(key: key, inspection: try contents.beginPeerInspection(base: base, parkable: true))
+                guard parked.count < 768 else {
+                    throw TractandaError("peerVerificationBusy", "Parked inspection slots are busy.")
+                }
+                parked[owner] = .init(
+                    key: key, inspection: try contents.beginPeerInspection(base: base, parkable: true))
             }
             return parked[owner]!.inspection
         }
         if jobs[key] == nil {
-            guard jobs.count < 8 else { throw TractandaError("peerVerificationBusy", "Inspection slots are busy.") }
+            guard jobs.count < 8 else {
+                throw TractandaError("peerVerificationBusy", "Inspection slots are busy.")
+            }
             jobs[key] = .init(key: key, inspection: try contents.beginPeerInspection(base: base))
         }
         return jobs[key]!.inspection
@@ -438,7 +452,9 @@ final class PeerDocumentVerification {
                 if job(jobKey)?.inspection.base != physical || job(jobKey)?.inspection.complete == true {
                     removeJob(jobKey)
                 }
-                guard activeInspections < 8 else { throw TractandaError("peerVerificationBusy", "Inspection execution slots are busy.") }
+                guard activeInspections < 8 else {
+                    throw TractandaError("peerVerificationBusy", "Inspection execution slots are busy.")
+                }
                 activeInspections += 1
                 defer { activeInspections -= 1 }
                 let inspection = try inspection(jobKey, base: physical)
@@ -478,8 +494,10 @@ final class PeerDocumentVerification {
                     }
                 }
                 touchJob(jobKey)
-                guard originals.logicalVerificationOwner == nil || inspection.retainedByteCount <= 48 * 1024 else {
-                    throw TractandaError("resourceLimit", "Parked inspection state exceeds its fixed reservation.")
+                guard originals.logicalVerificationOwner == nil || inspection.retainedByteCount <= 48 * 1024
+                else {
+                    throw TractandaError(
+                        "resourceLimit", "Parked inspection state exceeds its fixed reservation.")
                 }
                 inspectionAdvanced = inspection.count > initialInspectionCount
                 if complete {

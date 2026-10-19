@@ -31,9 +31,9 @@ let package = Package(
 )
 
 #if os(Linux)
-// The pinned native SwiftPM driver treats main.swift as a script unless this
-// explicit @main executable target is parsed as a library. Model code is unchanged.
-for target in package.targets where target.name == "TractandaEmbeddingsHost" {
-    target.swiftSettings?.append(.unsafeFlags(["-parse-as-library"]))
-}
+    // The pinned native SwiftPM driver treats main.swift as a script unless this
+    // explicit @main executable target is parsed as a library. Model code is unchanged.
+    for target in package.targets where target.name == "TractandaEmbeddingsHost" {
+        target.swiftSettings?.append(.unsafeFlags(["-parse-as-library"]))
+    }
 #endif

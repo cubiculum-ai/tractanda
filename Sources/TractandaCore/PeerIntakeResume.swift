@@ -31,7 +31,9 @@ extension PeerPackage {
             var frames: [Frame] = []
         }
         func retainedByteCount() throws -> Int {
-            let descriptors = frames.map(\.descriptor) + (document.map { [$0.manifest] + $0.frames.map(\.descriptor) } ?? [])
+            let descriptors =
+                frames.map(\.descriptor)
+                + (document.map { [$0.manifest] + $0.frames.map(\.descriptor) } ?? [])
             return try JSON.encode(descriptors).count + 2048
         }
         fileprivate let packageID: String

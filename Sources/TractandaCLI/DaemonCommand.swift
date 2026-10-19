@@ -100,7 +100,8 @@ func daemonConfiguration(from arguments: [String]) throws -> DaemonConfiguration
             let value = arguments[index + 1]
             switch flag {
             case "--http-port":
-                guard !seen.contains("http"), port != nil, let parsed = Int(value), (0...65_535).contains(parsed)
+                guard !seen.contains("http"), port != nil, let parsed = Int(value),
+                    (0...65_535).contains(parsed)
                 else { throw TractandaError("usage", usage) }
                 seen.insert("http")
                 port = parsed
@@ -131,10 +132,12 @@ func daemonConfiguration(from arguments: [String]) throws -> DaemonConfiguration
             case "--document-inspect-seconds", "--document-model-load-seconds", "--document-page-seconds",
                 "--document-no-progress-seconds", "--document-termination-grace-seconds":
                 guard documentResourceValues[flag] == nil, let seconds = Double(value),
-                    seconds.isFinite, seconds > 0 else { throw TractandaError("usage", usage) }
+                    seconds.isFinite, seconds > 0
+                else { throw TractandaError("usage", usage) }
                 documentResourceValues[flag] = seconds
             case "--rebuild-no-progress-seconds":
-                guard rebuildNoProgressSeconds == nil, let seconds = Double(value), seconds.isFinite, seconds > 0
+                guard rebuildNoProgressSeconds == nil, let seconds = Double(value), seconds.isFinite,
+                    seconds > 0
                 else { throw TractandaError("usage", usage) }
                 rebuildNoProgressSeconds = seconds
             case "--attachment-upload-idle-seconds":
@@ -166,12 +169,20 @@ func daemonConfiguration(from arguments: [String]) throws -> DaemonConfiguration
         DocumentConverterConfiguration(
             executablePath: $0, modelDirectory: documentModel!, scratchDirectory: documentScratch!)
     }
-    let documentResources: DocumentJobResources? = documentResourceValues.isEmpty ? nil : .init(
-        inspectSeconds: documentResourceValues["--document-inspect-seconds"] ?? DocumentJobResources.defaultInspectSeconds,
-        modelLoadSeconds: documentResourceValues["--document-model-load-seconds"] ?? DocumentJobResources.defaultModelLoadSeconds,
-        pageSeconds: documentResourceValues["--document-page-seconds"] ?? DocumentJobResources.defaultPageSeconds,
-        noProgressSeconds: documentResourceValues["--document-no-progress-seconds"] ?? DocumentJobResources.defaultNoProgressSeconds,
-        terminationGraceSeconds: documentResourceValues["--document-termination-grace-seconds"] ?? DocumentJobResources.defaultTerminationGraceSeconds)
+    let documentResources: DocumentJobResources? =
+        documentResourceValues.isEmpty
+        ? nil
+        : .init(
+            inspectSeconds: documentResourceValues["--document-inspect-seconds"]
+                ?? DocumentJobResources.defaultInspectSeconds,
+            modelLoadSeconds: documentResourceValues["--document-model-load-seconds"]
+                ?? DocumentJobResources.defaultModelLoadSeconds,
+            pageSeconds: documentResourceValues["--document-page-seconds"]
+                ?? DocumentJobResources.defaultPageSeconds,
+            noProgressSeconds: documentResourceValues["--document-no-progress-seconds"]
+                ?? DocumentJobResources.defaultNoProgressSeconds,
+            terminationGraceSeconds: documentResourceValues["--document-termination-grace-seconds"]
+                ?? DocumentJobResources.defaultTerminationGraceSeconds)
     let configuration = DaemonConfiguration(
         storePath: store, indexDirectory: indexDirectory, socketPath: socket, httpPort: port,
         managed: managed, viewItemID: view,

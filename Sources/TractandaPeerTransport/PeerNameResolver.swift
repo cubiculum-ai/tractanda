@@ -3,10 +3,11 @@ import NIOCore
 import NIOPosix
 import Synchronization
 import TractandaCore
+
 #if canImport(Darwin)
-import Darwin
+    import Darwin
 #else
-import Glibc
+    import Glibc
 #endif
 
 private final class PeerResolutionCompletion: Sendable {
@@ -32,8 +33,10 @@ package actor PeerNameResolver {
     private var active: (UUID, EventLoopFuture<[SocketAddress]>, PeerResolutionCompletion)?
     private var stopped = false
     private var closing: Task<Void, Error>?
-    package init(loop: any EventLoop,
-        resolving: (@Sendable (String, Int) throws -> [SocketAddress])? = nil) {
+    package init(
+        loop: any EventLoop,
+        resolving: (@Sendable (String, Int) throws -> [SocketAddress])? = nil
+    ) {
         self.loop = loop
         resolveAddress = resolving ?? { try Self.addresses(host: $0, port: $1) }
         pool = NIOThreadPool(numberOfThreads: 1)
@@ -49,12 +52,14 @@ package actor PeerNameResolver {
             throw TractandaError("deadlineExceeded", "Peer lookup deadline expired.")
         }
         try Task.checkCancellation()
-        let id = UUID(), completion = PeerResolutionCompletion(loop: loop)
+        let id = UUID()
+        let completion = PeerResolutionCompletion(loop: loop)
         let resolveAddress = resolveAddress
         let future = pool.runIfActive(eventLoop: loop) { try resolveAddress(host, port) }
         active = (id, future, completion)
         let deadline = loop.scheduleTask(in: .nanoseconds(Int64(seconds * 1_000_000_000))) {
-            completion.complete(.failure(TractandaError("deadlineExceeded", "Peer hostname lookup timed out.")))
+            completion.complete(
+                .failure(TractandaError("deadlineExceeded", "Peer hostname lookup timed out.")))
         }
         future.whenComplete { [self] result in
             deadline.cancel()
@@ -76,8 +81,9 @@ package actor PeerNameResolver {
     private static func boundedAddresses(_ input: [SocketAddress]) -> [SocketAddress] {
         var output: [SocketAddress] = []
         for address in input.prefix(64) where !output.contains(address) {
-            if output.count < 16 { output.append(address) }
-            else if !output.contains(where: { $0.protocolFamily == address.protocolFamily }) {
+            if output.count < 16 {
+                output.append(address)
+            } else if !output.contains(where: { $0.protocolFamily == address.protocolFamily }) {
                 // Keep OS order among retained entries while reserving a fallback in the other family.
                 output.removeLast()
                 output.append(address)
@@ -91,9 +97,9 @@ package actor PeerNameResolver {
         var hints = addrinfo()
         hints.ai_family = AF_UNSPEC
         #if canImport(Darwin)
-        hints.ai_socktype = SOCK_STREAM
+            hints.ai_socktype = SOCK_STREAM
         #else
-        hints.ai_socktype = Int32(SOCK_STREAM.rawValue)
+            hints.ai_socktype = Int32(SOCK_STREAM.rawValue)
         #endif
         hints.ai_protocol = Int32(IPPROTO_TCP)
         var result: UnsafeMutablePointer<addrinfo>?
@@ -101,20 +107,29 @@ package actor PeerNameResolver {
             throw TractandaError("connectionFailed", "Peer hostname lookup failed.")
         }
         defer { if let result { freeaddrinfo(result) } }
-        var cursor = result, addresses: [SocketAddress] = [], inspected = 0
+        var cursor = result
+        var addresses: [SocketAddress] = []
+        var inspected = 0
         while let row = cursor, inspected < 64 {
             inspected += 1
             cursor = row.pointee.ai_next
             guard let raw = row.pointee.ai_addr else { continue }
             let address: SocketAddress
-            if row.pointee.ai_family == AF_INET, Int(row.pointee.ai_addrlen) >= MemoryLayout<sockaddr_in>.size {
+            if row.pointee.ai_family == AF_INET, Int(row.pointee.ai_addrlen) >= MemoryLayout<sockaddr_in>.size
+            {
                 address = SocketAddress(UnsafeRawPointer(raw).load(as: sockaddr_in.self), host: host)
-            } else if row.pointee.ai_family == AF_INET6, Int(row.pointee.ai_addrlen) >= MemoryLayout<sockaddr_in6>.size {
+            } else if row.pointee.ai_family == AF_INET6,
+                Int(row.pointee.ai_addrlen) >= MemoryLayout<sockaddr_in6>.size
+            {
                 address = SocketAddress(UnsafeRawPointer(raw).load(as: sockaddr_in6.self), host: host)
-            } else { continue }
+            } else {
+                continue
+            }
             if !addresses.contains(address) { addresses.append(address) }
         }
-        guard !addresses.isEmpty else { throw TractandaError("connectionFailed", "Peer lookup has no TCP address.") }
+        guard !addresses.isEmpty else {
+            throw TractandaError("connectionFailed", "Peer lookup has no TCP address.")
+        }
         return addresses
     }
     private func finished(_ id: UUID) {
@@ -124,7 +139,8 @@ package actor PeerNameResolver {
         if let closing { return try await closing.value }
         stopped = true
         active?.2.complete(.failure(TractandaError("cancelled", "Peer resolver stopped.")))
-        let work = active?.1, pool = pool
+        let work = active?.1
+        let pool = pool
         let task = Task {
             if let work { _ = try? await work.get() }
             try await pool.shutdownGracefully()

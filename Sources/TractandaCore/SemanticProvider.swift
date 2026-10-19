@@ -29,7 +29,8 @@ actor SemanticEmbeddingProvider: SemanticEmbedding {
         session = URLSession(configuration: settings, delegate: RedirectBlocker(), delegateQueue: nil)
     }
 
-    static func sessionConfiguration(_ configuration: SemanticConfiguration) throws -> URLSessionConfiguration {
+    static func sessionConfiguration(_ configuration: SemanticConfiguration) throws -> URLSessionConfiguration
+    {
         try configuration.validate()
         let settings = URLSessionConfiguration.ephemeral
         settings.timeoutIntervalForRequest = configuration.effectiveProviderTimeoutSeconds
@@ -41,7 +42,9 @@ actor SemanticEmbeddingProvider: SemanticEmbedding {
         settings.connectionProxyDictionary = [:]
         return settings
     }
-    static func request(_ configuration: SemanticConfiguration, inputs: [String], query: Bool) throws -> URLRequest {
+    static func request(_ configuration: SemanticConfiguration, inputs: [String], query: Bool) throws
+        -> URLRequest
+    {
         try configuration.validate()
         guard let endpoint = URL(string: configuration.endpoint) else {
             throw TractandaError("semanticEndpoint", "Configured local endpoint is invalid.")

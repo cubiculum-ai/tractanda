@@ -7,7 +7,8 @@ public struct PeerOperatorStatus: Codable, Sendable {
     public let canonical: PeerCanonicalStatus
     public let runtime: PeerOperatorRuntimeStatus
     public init(canonical: PeerCanonicalStatus, runtime: PeerOperatorRuntimeStatus) {
-        self.canonical = canonical; self.runtime = runtime
+        self.canonical = canonical
+        self.runtime = runtime
     }
 }
 
@@ -32,31 +33,45 @@ public struct PeerSynchronizationStatus: Codable, Sendable {
     public let eligibleEdgeCount: Int?
     public let outcomeCounts: [String: Int]
     public let lastErrorCode: String?
-    public init(state: State, activeJobCount: Int? = nil, eligibleEdgeCount: Int? = nil,
-        outcomeCounts: [String: Int] = [:], lastErrorCode: String? = nil) throws {
+    public init(
+        state: State, activeJobCount: Int? = nil, eligibleEdgeCount: Int? = nil,
+        outcomeCounts: [String: Int] = [:], lastErrorCode: String? = nil
+    ) throws {
         guard activeJobCount.map({ (0...2).contains($0) }) ?? true,
             eligibleEdgeCount.map({ (0...256).contains($0) }) ?? true,
             outcomeCounts.count <= 7,
-            outcomeCounts.allSatisfy({ ["complete", "yielded", "held", "missing", "rejected", "repairRequired", "unsupported"].contains($0.key)
-                && (0...256).contains($0.value) }) else { throw Self.invalid() }
-        self.state = state; self.activeJobCount = activeJobCount; self.eligibleEdgeCount = eligibleEdgeCount
-        self.outcomeCounts = outcomeCounts; self.lastErrorCode = Self.safeCode(lastErrorCode)
+            outcomeCounts.allSatisfy({
+                ["complete", "yielded", "held", "missing", "rejected", "repairRequired", "unsupported"]
+                    .contains($0.key)
+                    && (0...256).contains($0.value)
+            })
+        else { throw Self.invalid() }
+        self.state = state
+        self.activeJobCount = activeJobCount
+        self.eligibleEdgeCount = eligibleEdgeCount
+        self.outcomeCounts = outcomeCounts
+        self.lastErrorCode = Self.safeCode(lastErrorCode)
     }
     static func safeCode(_ code: String?) -> String? {
         guard let code else { return nil }
         // Remote failures are untrusted strings. Do not reflect arbitrary error-code content.
-        let allowed: Set<String> = ["serviceClosed", "serviceBusy", "untrustedPeer", "invalidPeerCredential",
+        let allowed: Set<String> = [
+            "serviceClosed", "serviceBusy", "untrustedPeer", "invalidPeerCredential",
             "peerConfigurationChanged", "peerIntakeDisabled", "localReplicaRetired", "peerRetired",
             "recoveryRequired", "peerLeaseChanged", "peerSessionExhausted", "connectionFailed",
             "deadlineExceeded", "cancelled", "resourceLimit", "peerRepairRequired", "peerSyncWorkInvalid",
             "peerPayloadVerifying", "peerVerificationBusy", "peerExportChanged", "peerSyncUnavailable",
-            "peerRuntimeUnavailable", "invalidPeerResponse", "invalidPeerFrame", "unsupportedAuthorityContext",
+            "peerRuntimeUnavailable", "invalidPeerResponse", "invalidPeerFrame",
+            "unsupportedAuthorityContext",
             "invalidPeerConfiguration", "invalidOriginAdmission", "documentIntegrity", "invalidPeerPackage",
             "invalidPeerExport", "forbidden", "incompatiblePeer", "peerCompatibilityRequired",
-            "incompatibleCanonicalReader", "unknownCanonicalCompatibility"]
+            "incompatibleCanonicalReader", "unknownCanonicalCompatibility",
+        ]
         return allowed.contains(code) ? code : "peerRuntimeUnavailable"
     }
-    static func invalid() -> TractandaError { TractandaError("invalidPeerStatus", "Peer status exceeds its diagnostic bounds.") }
+    static func invalid() -> TractandaError {
+        TractandaError("invalidPeerStatus", "Peer status exceeds its diagnostic bounds.")
+    }
 }
 
 public struct PeerOperatorRuntimeStatus: Codable, Sendable {
@@ -73,25 +88,40 @@ public struct PeerOperatorRuntimeStatus: Codable, Sendable {
     public let pendingConnectionCount: Int?
     public let lastErrorCode: String?
     public let synchronization: PeerSynchronizationStatus
-    public init(state: State, configurationPath: String? = nil, settingsDigest: String? = nil,
-        synchronizationEnabled: Bool = false, listenerConfigured: Bool? = nil, responderPublished: Bool? = nil,
+    public init(
+        state: State, configurationPath: String? = nil, settingsDigest: String? = nil,
+        synchronizationEnabled: Bool = false, listenerConfigured: Bool? = nil,
+        responderPublished: Bool? = nil,
         incomingConnectionCount: Int? = nil, outgoingConnectionCount: Int? = nil,
         pendingConnectionCount: Int? = nil, lastErrorCode: String? = nil,
-        synchronization: PeerSynchronizationStatus) throws {
-        guard [incomingConnectionCount, outgoingConnectionCount, pendingConnectionCount].allSatisfy({ value in
-            value.map { (0...64).contains($0) } ?? true
-        }) else { throw PeerSynchronizationStatus.invalid() }
-        guard (configurationPath == nil) == (settingsDigest == nil),
-            configurationPath.map({ $0.hasPrefix("/") && $0.utf8.count <= 4096
-                && !$0.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) }) ?? true,
-            settingsDigest.map({ $0.utf8.count == 64 && $0.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) } }) ?? true
+        synchronization: PeerSynchronizationStatus
+    ) throws {
+        guard
+            [incomingConnectionCount, outgoingConnectionCount, pendingConnectionCount].allSatisfy({ value in
+                value.map { (0...64).contains($0) } ?? true
+            })
         else { throw PeerSynchronizationStatus.invalid() }
-        self.configurationPath = configurationPath; self.settingsDigest = settingsDigest
+        guard (configurationPath == nil) == (settingsDigest == nil),
+            configurationPath.map({
+                $0.hasPrefix("/") && $0.utf8.count <= 4096
+                    && !$0.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+            }) ?? true,
+            settingsDigest.map({
+                $0.utf8.count == 64
+                    && $0.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+            }) ?? true
+        else { throw PeerSynchronizationStatus.invalid() }
+        self.configurationPath = configurationPath
+        self.settingsDigest = settingsDigest
         self.synchronizationEnabled = synchronizationEnabled
-        self.state = state; self.listenerConfigured = listenerConfigured; self.responderPublished = responderPublished
-        self.incomingConnectionCount = incomingConnectionCount; self.outgoingConnectionCount = outgoingConnectionCount
+        self.state = state
+        self.listenerConfigured = listenerConfigured
+        self.responderPublished = responderPublished
+        self.incomingConnectionCount = incomingConnectionCount
+        self.outgoingConnectionCount = outgoingConnectionCount
         self.pendingConnectionCount = pendingConnectionCount
-        self.lastErrorCode = PeerSynchronizationStatus.safeCode(lastErrorCode); self.synchronization = synchronization
+        self.lastErrorCode = PeerSynchronizationStatus.safeCode(lastErrorCode)
+        self.synchronization = synchronization
     }
     private enum CodingKeys: String, CodingKey {
         case state, configurationPath, settingsDigest, synchronizationEnabled, listenerConfigured
@@ -100,7 +130,8 @@ public struct PeerOperatorRuntimeStatus: Codable, Sendable {
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        try self.init(state: c.decode(State.self, forKey: .state),
+        try self.init(
+            state: c.decode(State.self, forKey: .state),
             configurationPath: c.decodeIfPresent(String.self, forKey: .configurationPath),
             settingsDigest: c.decodeIfPresent(String.self, forKey: .settingsDigest),
             synchronizationEnabled: c.decode(Bool.self, forKey: .synchronizationEnabled),

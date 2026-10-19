@@ -53,7 +53,10 @@ public final class DaemonListener: @unchecked Sendable {
         }
         for child in children { await child.close() }
         if let socket { removeSocketIfOwned(socket) }
-        if let closeFailure { closeCompletion.fail(closeFailure); throw closeFailure }
+        if let closeFailure {
+            closeCompletion.fail(closeFailure)
+            throw closeFailure
+        }
         closeCompletion.succeed(())
     }
 }
@@ -111,27 +114,40 @@ public enum DaemonListeners {
         group: MultiThreadedEventLoopGroup, socketPath: String, permissions: UInt32, managed: Bool,
         handler: @escaping @Sendable (Data, UInt32) async throws -> Data
     ) async throws -> DaemonListener {
-        try await unixOwned(group: group, socketPath: socketPath, permissions: permissions, managed: managed,
+        try await unixOwned(
+            group: group, socketPath: socketPath, permissions: permissions, managed: managed,
             handler: handler, privateBegin: nil)
     }
     static func unixWithPrivateCredential(
         group: MultiThreadedEventLoopGroup, socketPath: String, permissions: UInt32, managed: Bool,
         connectionLimitForTesting: Int = maximumConnections,
         handler: @escaping @Sendable (Data, UInt32) async throws -> Data,
-        privateBegin: @escaping @Sendable (Data, UInt32, PeerExchangeControl) async throws -> NativeCredentialRegistrationSession,
-        enrollmentBegin: (@Sendable (Data, UInt32, PeerExchangeControl) async throws -> NativePeerEnrollmentSession)? = nil
+        privateBegin:
+            @escaping @Sendable (Data, UInt32, PeerExchangeControl) async throws ->
+            NativeCredentialRegistrationSession,
+        enrollmentBegin: (
+            @Sendable (Data, UInt32, PeerExchangeControl) async throws -> NativePeerEnrollmentSession
+        )? = nil
     ) async throws -> DaemonListener {
-        try await unixOwned(group: group, socketPath: socketPath, permissions: permissions, managed: managed,
-            handler: handler, privateBegin: privateBegin, enrollmentBegin: enrollmentBegin, connectionLimit: connectionLimitForTesting)
+        try await unixOwned(
+            group: group, socketPath: socketPath, permissions: permissions, managed: managed,
+            handler: handler, privateBegin: privateBegin, enrollmentBegin: enrollmentBegin,
+            connectionLimit: connectionLimitForTesting)
     }
     private static func unixOwned(
         group: MultiThreadedEventLoopGroup, socketPath: String, permissions: UInt32, managed: Bool,
         handler: @escaping @Sendable (Data, UInt32) async throws -> Data,
-        privateBegin: (@Sendable (Data, UInt32, PeerExchangeControl) async throws -> NativeCredentialRegistrationSession)?,
-        enrollmentBegin: (@Sendable (Data, UInt32, PeerExchangeControl) async throws -> NativePeerEnrollmentSession)? = nil,
+        privateBegin: (
+            @Sendable (Data, UInt32, PeerExchangeControl) async throws -> NativeCredentialRegistrationSession
+        )?,
+        enrollmentBegin: (
+            @Sendable (Data, UInt32, PeerExchangeControl) async throws -> NativePeerEnrollmentSession
+        )? = nil,
         connectionLimit: Int = maximumConnections
     ) async throws -> DaemonListener {
-        guard (1...maximumConnections).contains(connectionLimit) else { throw DaemonListenerError.invalidLimit }
+        guard (1...maximumConnections).contains(connectionLimit) else {
+            throw DaemonListenerError.invalidLimit
+        }
         guard !socketPath.contains("\0"), socketPath.utf8.count <= 103 else {
             throw DaemonListenerError.invalidSocketPath
         }
@@ -153,11 +169,17 @@ public enum DaemonListeners {
             .serverChannelOption(ChannelOptions.backlog, value: 64)
             .childChannelInitializer { channel in
                 let work = NativeConnectionWork(eventLoop: channel.eventLoop)
-                guard connections.admit(channel, nativeWork: work) else { work.finish(); work.channelClosed(); return channel.close() }
+                guard connections.admit(channel, nativeWork: work) else {
+                    work.finish()
+                    work.channelClosed()
+                    return channel.close()
+                }
                 let boundWork = NIOLoopBound(work, eventLoop: channel.eventLoop)
                 let installed = channel.eventLoop.submit {
                     try channel.pipeline.syncOperations.addHandler(
-                        UnixConnectionHandler(handler: handler, maximumFrame: maximumNativeFrame, privateBegin: privateBegin, enrollmentBegin: enrollmentBegin, work: boundWork.value))
+                        UnixConnectionHandler(
+                            handler: handler, maximumFrame: maximumNativeFrame, privateBegin: privateBegin,
+                            enrollmentBegin: enrollmentBegin, work: boundWork.value))
                 }
                 installed.whenComplete { _ in boundWork.value.finish() }
                 return installed
@@ -216,8 +238,11 @@ private struct ChildChannel: Sendable {
             channel.eventLoop.execute {
                 channel.value.close(promise: nil)
                 channel.value.closeFuture.whenComplete { _ in
-                    if waitForNativeWork, let nativeDrain { nativeDrain.whenComplete { _ in continuation.resume() } }
-                    else { continuation.resume() }
+                    if waitForNativeWork, let nativeDrain {
+                        nativeDrain.whenComplete { _ in continuation.resume() }
+                    } else {
+                        continuation.resume()
+                    }
                 }
             }
         }
@@ -238,7 +263,8 @@ private final class ConnectionRegistry: Sendable {
 
     func admit(_ channel: Channel, nativeWork: NativeConnectionWork? = nil) -> Bool {
         let identifier = ObjectIdentifier(channel)
-        let child = ChildChannel(channel: NIOLoopBound(channel, eventLoop: channel.eventLoop), nativeDrain: nativeWork?.drained)
+        let child = ChildChannel(
+            channel: NIOLoopBound(channel, eventLoop: channel.eventLoop), nativeDrain: nativeWork?.drained)
         let admitted = state.withLock { state in
             guard state.accepting, state.children.count < limit else { return false }
             state.children[identifier] = child
@@ -251,7 +277,9 @@ private final class ConnectionRegistry: Sendable {
                     let work = boundWork.value
                     work.channelClosed()
                     work.drained.whenComplete { [self] _ in remove(identifier) }
-                } else { remove(identifier) }
+                } else {
+                    remove(identifier)
+                }
             }
         }
         return admitted
@@ -282,12 +310,31 @@ private final class NativeConnectionWork {
     private var closed = false
     private var completed = false
     var drained: EventLoopFuture<Void> { promise.futureResult }
-    init(eventLoop: EventLoop) { loop = eventLoop; promise = eventLoop.makePromise(of: Void.self) }
-    func begin() { loop.assertInEventLoop(); precondition(!completed); pending += 1 }
-    func finish() { loop.assertInEventLoop(); precondition(pending > 0); pending -= 1; completeIfReady() }
-    func channelClosed() { loop.assertInEventLoop(); closed = true; completeIfReady() }
+    init(eventLoop: EventLoop) {
+        loop = eventLoop
+        promise = eventLoop.makePromise(of: Void.self)
+    }
+    func begin() {
+        loop.assertInEventLoop()
+        precondition(!completed)
+        pending += 1
+    }
+    func finish() {
+        loop.assertInEventLoop()
+        precondition(pending > 0)
+        pending -= 1
+        completeIfReady()
+    }
+    func channelClosed() {
+        loop.assertInEventLoop()
+        closed = true
+        completeIfReady()
+    }
     private func completeIfReady() {
-        if closed && pending == 0 && !completed { completed = true; promise.succeed(()) }
+        if closed && pending == 0 && !completed {
+            completed = true
+            promise.succeed(())
+        }
     }
 }
 
@@ -420,11 +467,15 @@ private final class HTTPConnectionHandler: ChannelInboundHandler {
 
 private final class UnixConnectionHandler: ChannelInboundHandler {
     typealias InboundIn = ByteBuffer
-    private enum Phase: Equatable { case initial, ordinary, authorizing, readyWriting, payload, committing, replying, closed }
+    private enum Phase: Equatable {
+        case initial, ordinary, authorizing, readyWriting, payload, committing, replying, closed
+    }
     private let handler: @Sendable (Data, UInt32) async throws -> Data
-    private let privateBegin: (@Sendable (Data, UInt32, PeerExchangeControl) async throws -> NativeCredentialRegistrationSession)?
+    private let privateBegin:
+        (@Sendable (Data, UInt32, PeerExchangeControl) async throws -> NativeCredentialRegistrationSession)?
     private let maximumFrame: Int
-    private let enrollmentBegin: (@Sendable (Data, UInt32, PeerExchangeControl) async throws -> NativePeerEnrollmentSession)?
+    private let enrollmentBegin:
+        (@Sendable (Data, UInt32, PeerExchangeControl) async throws -> NativePeerEnrollmentSession)?
     private var buffer = ByteBuffer()
     private var phase = Phase.initial
     private var markedBegin = false
@@ -434,46 +485,69 @@ private final class UnixConnectionHandler: ChannelInboundHandler {
     private let work: NativeConnectionWork
     private var handlerOwned = false
 
-    init(handler: @escaping @Sendable (Data, UInt32) async throws -> Data, maximumFrame: Int,
-        privateBegin: (@Sendable (Data, UInt32, PeerExchangeControl) async throws -> NativeCredentialRegistrationSession)?,
-        enrollmentBegin: (@Sendable (Data, UInt32, PeerExchangeControl) async throws -> NativePeerEnrollmentSession)?,
-        work: NativeConnectionWork) {
-        self.handler = handler; self.maximumFrame = maximumFrame; self.privateBegin = privateBegin
-        self.enrollmentBegin = enrollmentBegin; self.work = work
+    init(
+        handler: @escaping @Sendable (Data, UInt32) async throws -> Data, maximumFrame: Int,
+        privateBegin: (
+            @Sendable (Data, UInt32, PeerExchangeControl) async throws -> NativeCredentialRegistrationSession
+        )?,
+        enrollmentBegin: (
+            @Sendable (Data, UInt32, PeerExchangeControl) async throws -> NativePeerEnrollmentSession
+        )?,
+        work: NativeConnectionWork
+    ) {
+        self.handler = handler
+        self.maximumFrame = maximumFrame
+        self.privateBegin = privateBegin
+        self.enrollmentBegin = enrollmentBegin
+        self.work = work
     }
     func handlerAdded(context: ChannelHandlerContext) {
-        work.begin(); handlerOwned = true
+        work.begin()
+        handlerOwned = true
         let bound = NIOLoopBound(context, eventLoop: context.eventLoop)
         deadline = context.eventLoop.scheduleTask(in: .seconds(20)) { bound.value.close(promise: nil) }
     }
     private func clearBuffer() {
         // Best effort only: NIO/Data may have copied the bytes already.
-        _ = buffer.withUnsafeMutableReadableBytes { raw in raw.initializeMemory(as: UInt8.self, repeating: 0) }
+        _ = buffer.withUnsafeMutableReadableBytes { raw in raw.initializeMemory(as: UInt8.self, repeating: 0)
+        }
         buffer = ByteBuffer()
     }
     private func cleanup(context: ChannelHandlerContext) {
         guard phase != .closed else { return }
-        phase = .closed; deadline?.cancel(); control?.cancel(); clearBuffer()
+        phase = .closed
+        deadline?.cancel()
+        control?.cancel()
+        clearBuffer()
         if let session {
             self.session = nil
             cancelSession(session, context: context)
         }
-        if handlerOwned { handlerOwned = false; work.finish() }
+        if handlerOwned {
+            handlerOwned = false
+            work.finish()
+        }
     }
     private func cancelSession(_ session: NativePrivateSession, context: ChannelHandlerContext) {
         work.begin()
         let boundWork = NIOLoopBound(work, eventLoop: context.eventLoop)
-        context.eventLoop.makeFutureWithTask { await session.cancel() }.whenComplete { _ in boundWork.value.finish() }
+        context.eventLoop.makeFutureWithTask { await session.cancel() }.whenComplete { _ in
+            boundWork.value.finish()
+        }
     }
     func handlerRemoved(context: ChannelHandlerContext) { cleanup(context: context) }
-    func channelInactive(context: ChannelHandlerContext) { cleanup(context: context); context.fireChannelInactive() }
+    func channelInactive(context: ChannelHandlerContext) {
+        cleanup(context: context)
+        context.fireChannelInactive()
+    }
     func errorCaught(context: ChannelHandlerContext, error: any Error) { context.close(promise: nil) }
     private func reply(_ data: Data, context: ChannelHandlerContext) {
         guard phase != .closed else { return }
         phase = .replying
         let output = data.count <= maximumFrame ? data : listenerErrorData
         var framed = context.channel.allocator.buffer(capacity: output.count + 4)
-        framed.writeInteger(UInt32(output.count)); framed.writeBytes(output)
+        framed.writeInteger(UInt32(output.count))
+        framed.writeBytes(output)
         let bound = NIOLoopBound(context, eventLoop: context.eventLoop)
         context.writeAndFlush(NIOAny(framed)).whenComplete { _ in bound.value.close(promise: nil) }
     }
@@ -486,13 +560,18 @@ private final class UnixConnectionHandler: ChannelInboundHandler {
             try await session.validateBeforeDelivery()
             return data
         }.whenComplete { result in
-            let handler = boundHandler.value, context = boundContext.value
+            let handler = boundHandler.value
+            let context = boundContext.value
             defer { handler.work.finish() }
             guard handler.phase != .closed else { return }
             switch result {
             case .success(let data):
-                do { try session.checkDelivery(); handler.reply(data.count <= session.maximumReply ? data : session.failure(NativePeerEnrollment.failure()), context: context) }
-                catch { handler.reply(session.failure(error), context: context) }
+                do {
+                    try session.checkDelivery()
+                    handler.reply(
+                        data.count <= session.maximumReply
+                            ? data : session.failure(NativePeerEnrollment.failure()), context: context)
+                } catch { handler.reply(session.failure(error), context: context) }
             case .failure(let error): handler.reply(session.failure(error), context: context)
             }
         }
@@ -500,22 +579,36 @@ private final class UnixConnectionHandler: ChannelInboundHandler {
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         guard phase == .initial || phase == .payload else {
             // Only bytes observed in this phase are rejected; kernel queues cannot prove send-time.
-            control?.cancel(); context.close(promise: nil); return
+            control?.cancel()
+            context.close(promise: nil)
+            return
         }
         var incoming = unwrapInboundIn(data)
         if buffer.readableBytes < 4 {
             let count = min(4 - buffer.readableBytes, incoming.readableBytes)
             if var header = incoming.readSlice(length: count) { buffer.writeBuffer(&header) }
         }
-        guard buffer.readableBytes >= 4, let rawLength: UInt32 = buffer.getInteger(at: buffer.readerIndex) else { return }
-        markedBegin = phase == .initial && rawLength & 0x80000000 != 0
-        let length = markedBegin ? rawLength & 0x7fffffff : rawLength
-        let maximum = phase == .payload ? (session?.byteCount ?? 0)
+        guard buffer.readableBytes >= 4, let rawLength: UInt32 = buffer.getInteger(at: buffer.readerIndex)
+        else { return }
+        markedBegin = phase == .initial && rawLength & 0x8000_0000 != 0
+        let length = markedBegin ? rawLength & 0x7fff_ffff : rawLength
+        let maximum =
+            phase == .payload
+            ? (session?.byteCount ?? 0)
             : markedBegin ? NativePeerCredentialRegistration.maximumBegin : maximumFrame
-        guard length <= maximum else { context.close(promise: nil); return }
-        if phase == .payload, Int(length) != session?.byteCount { context.close(promise: nil); return }
+        guard length <= maximum else {
+            context.close(promise: nil)
+            return
+        }
+        if phase == .payload, Int(length) != session?.byteCount {
+            context.close(promise: nil)
+            return
+        }
         let cap = maximum + 4
-        guard incoming.readableBytes <= cap - buffer.readableBytes else { context.close(promise: nil); return }
+        guard incoming.readableBytes <= cap - buffer.readableBytes else {
+            context.close(promise: nil)
+            return
+        }
         buffer.writeBuffer(&incoming)
         guard buffer.readableBytes >= 4 + Int(length) else { return }
         let request = Data(buffer.getBytes(at: buffer.readerIndex + 4, length: Int(length)) ?? [])
@@ -523,19 +616,28 @@ private final class UnixConnectionHandler: ChannelInboundHandler {
         let boundHandler = NIOLoopBound(self, eventLoop: context.eventLoop)
         if phase == .payload {
             guard buffer.readableBytes == 4 + Int(length), let session, let control else {
-                context.close(promise: nil); return
+                context.close(promise: nil)
+                return
             }
-            clearBuffer(); phase = .committing
-            context.channel.setOption(ChannelOptions.autoRead, value: false).whenFailure { _ in boundContext.value.close(promise: nil) }
+            clearBuffer()
+            phase = .committing
+            context.channel.setOption(ChannelOptions.autoRead, value: false).whenFailure { _ in
+                boundContext.value.close(promise: nil)
+            }
             do {
                 try control.check()
                 work.begin()
-                context.eventLoop.makeFutureWithTask { try await session.complete(request) }.whenComplete { result in
-                    let handler = boundHandler.value, context = boundContext.value
+                context.eventLoop.makeFutureWithTask { try await session.complete(request) }.whenComplete {
+                    result in
+                    let handler = boundHandler.value
+                    let context = boundContext.value
                     defer { handler.work.finish() }
                     guard handler.phase != .closed else { return }
                     switch result {
-                    case .success(let result): handler.reply(result.count <= session.maximumReply ? result : session.failure(NativePeerEnrollment.failure()), context: context)
+                    case .success(let result):
+                        handler.reply(
+                            result.count <= session.maximumReply
+                                ? result : session.failure(NativePeerEnrollment.failure()), context: context)
                     case .failure(let error): handler.reply(session.failure(error), context: context)
                     }
                 }
@@ -543,46 +645,74 @@ private final class UnixConnectionHandler: ChannelInboundHandler {
             return
         }
         var uid: UInt32 = .max
-        _ = try? context.channel.pipeline.syncOperations.withUnsafeTransportIfAvailable(of: NIOBSDSocket.Handle.self) {
+        _ = try? context.channel.pipeline.syncOperations.withUnsafeTransportIfAvailable(
+            of: NIOBSDSocket.Handle.self
+        ) {
             _ = tractanda_peer_uid($0, &uid)
         }
-        guard uid != .max else { context.close(promise: nil); return }
+        guard uid != .max else {
+            context.close(promise: nil)
+            return
+        }
         let peer = uid
         if markedBegin {
-            guard buffer.readableBytes == 4 + Int(length), request.count <= NativePeerCredentialRegistration.maximumBegin else { context.close(promise: nil); return }
+            guard buffer.readableBytes == 4 + Int(length),
+                request.count <= NativePeerCredentialRegistration.maximumBegin
+            else {
+                context.close(promise: nil)
+                return
+            }
             let begin: @Sendable (Data, UInt32, PeerExchangeControl) async throws -> NativePrivateSession
             let enrollment = request.starts(with: NativePeerEnrollment.prefix)
             if enrollment {
-                guard let enrollmentBegin else { context.close(promise: nil); return }
+                guard let enrollmentBegin else {
+                    context.close(promise: nil)
+                    return
+                }
                 begin = { .enrollment(try await enrollmentBegin($0, $1, $2)) }
             } else {
-                guard let privateBegin else { context.close(promise: nil); return }
+                guard let privateBegin else {
+                    context.close(promise: nil)
+                    return
+                }
                 begin = { .credential(try await privateBegin($0, $1, $2)) }
             }
-            clearBuffer(); phase = .authorizing
-            context.channel.setOption(ChannelOptions.autoRead, value: false).whenFailure { _ in boundContext.value.close(promise: nil) }
+            clearBuffer()
+            phase = .authorizing
+            context.channel.setOption(ChannelOptions.autoRead, value: false).whenFailure { _ in
+                boundContext.value.close(promise: nil)
+            }
             do {
                 let control = try PeerExchangeControl(maximumSeconds: 20)
                 self.control = control
                 work.begin()
-                context.eventLoop.makeFutureWithTask { try await begin(request, peer, control) }.whenComplete { result in
-                    let handler = boundHandler.value, context = boundContext.value
+                context.eventLoop.makeFutureWithTask { try await begin(request, peer, control) }.whenComplete
+                { result in
+                    let handler = boundHandler.value
+                    let context = boundContext.value
                     defer { handler.work.finish() }
                     switch result {
-                    case .failure(let error): handler.reply(enrollment ? NativePeerEnrollment.failure(error) : NativePeerCredentialRegistration.failure(error), context: context)
+                    case .failure(let error):
+                        handler.reply(
+                            enrollment
+                                ? NativePeerEnrollment.failure(error)
+                                : NativePeerCredentialRegistration.failure(error), context: context)
                     case .success(let session):
                         guard handler.phase == .authorizing, context.channel.isActive,
-                            (try? control.check()) != nil else {
+                            (try? control.check()) != nil
+                        else {
                             control.cancel()
                             handler.cancelSession(session, context: context)
                             return
                         }
-                        handler.session = session; handler.phase = .readyWriting
+                        handler.session = session
+                        handler.phase = .readyWriting
                         var output = context.channel.allocator.buffer(capacity: session.ready.count + 4)
                         output.writeInteger(UInt32(session.ready.count))
                         output.writeBytes(session.ready)
                         context.writeAndFlush(NIOAny(output)).whenComplete { sent in
-                            let handler = boundHandler.value, context = boundContext.value
+                            let handler = boundHandler.value
+                            let context = boundContext.value
                             guard handler.phase == .readyWriting else { return }
                             switch sent {
                             case .success:
@@ -591,7 +721,8 @@ private final class UnixConnectionHandler: ChannelInboundHandler {
                                     handler.completePrivateOutput(session, context: context)
                                 } else {
                                     handler.phase = .payload
-                                    context.channel.setOption(ChannelOptions.autoRead, value: true).whenFailure { _ in boundContext.value.close(promise: nil) }
+                                    context.channel.setOption(ChannelOptions.autoRead, value: true)
+                                        .whenFailure { _ in boundContext.value.close(promise: nil) }
                                 }
                             case .failure: context.close(promise: nil)
                             }
@@ -600,11 +731,15 @@ private final class UnixConnectionHandler: ChannelInboundHandler {
                 }
             } catch { reply(NativePeerCredentialRegistration.failure(error), context: context) }
         } else {
-            phase = .ordinary; deadline?.cancel(); buffer = ByteBuffer()
+            phase = .ordinary
+            deadline?.cancel()
+            buffer = ByteBuffer()
             let callback = handler
             work.begin()
-            context.eventLoop.makeFutureWithTask { try await callback(request, peer) }.whenComplete { result in
-                let handler = boundHandler.value, context = boundContext.value
+            context.eventLoop.makeFutureWithTask { try await callback(request, peer) }.whenComplete {
+                result in
+                let handler = boundHandler.value
+                let context = boundContext.value
                 defer { handler.work.finish() }
                 switch result {
                 case .success(let response): handler.reply(response, context: context)

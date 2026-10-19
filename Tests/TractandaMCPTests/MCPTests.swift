@@ -524,7 +524,8 @@ final class MCPTests: XCTestCase {
             "tractanda-mcp-attachment-" + UUID().uuidString.lowercased(), isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let accounts = AttachmentAccounts()
-        let store = try ItemStore.initializeFresh(root: root, accounts: accounts,
+        let store = try ItemStore.initializeFresh(
+            root: root, accounts: accounts,
             initialAccessConfiguration: .object([
                 "profile": .text(AccessConfiguration.profile),
                 "users": .list([.text("alice"), .text("bob")]),

@@ -49,7 +49,10 @@ private actor MembershipPause {
 private final class CompatibilityWireFixture: ChannelOutboundHandler, @unchecked Sendable {
     typealias OutboundIn = ByteBuffer
     typealias OutboundOut = ByteBuffer
-    enum Mode: Equatable { case normal, coalesceReadyWithFirstRequest, omitAck, oldDeclaration, readyBeforeAck, duplicateReady, precommitHeader }
+    enum Mode: Equatable {
+        case normal, coalesceReadyWithFirstRequest, omitAck, oldDeclaration, readyBeforeAck, duplicateReady,
+            precommitHeader
+    }
     let mode: Mode
     private var heldReady: ByteBuffer?
     let didCoalesce = Mutex(false)
@@ -59,31 +62,52 @@ private final class CompatibilityWireFixture: ChannelOutboundHandler, @unchecked
         var buffer = unwrapOutboundIn(data)
         do {
             guard let length = buffer.getInteger(at: buffer.readerIndex, as: UInt32.self),
-                let raw = buffer.getBytes(at: buffer.readerIndex + 4, length: Int(length)) else {
-                context.write(wrapOutboundOut(buffer), promise: promise); return
+                let raw = buffer.getBytes(at: buffer.readerIndex + 4, length: Int(length))
+            else {
+                context.write(wrapOutboundOut(buffer), promise: promise)
+                return
             }
             let frame = try PeerExchangeCodec.decode(Data(raw))
             if mode == .omitAck, frame.kind == .acknowledgement || frame.kind == .ready {
                 if frame.kind == .acknowledgement { didOmitAck.withLock { $0 = true } }
-                promise?.succeed(()); return // Withhold the stream suffix, including later READY.
+                promise?.succeed(())
+                return  // Withhold the stream suffix, including later READY.
             }
             if mode == .oldDeclaration, frame.kind == .declaration {
-                buffer = try PeerExchangeCodec.encode(.init(version: 1, requestID: 0, kind: .declaration, body: frame.body), allocator: context.channel.allocator)
+                buffer = try PeerExchangeCodec.encode(
+                    .init(version: 1, requestID: 0, kind: .declaration, body: frame.body),
+                    allocator: context.channel.allocator)
             }
             if mode == .readyBeforeAck, frame.kind == .acknowledgement {
-                buffer = try PeerExchangeCodec.encode(.init(version: 2, requestID: 0, kind: .ready, body: Data()), allocator: context.channel.allocator)
+                buffer = try PeerExchangeCodec.encode(
+                    .init(version: 2, requestID: 0, kind: .ready, body: Data()),
+                    allocator: context.channel.allocator)
             }
-            if mode == .duplicateReady, frame.kind == .ready { var duplicate = buffer; buffer.writeBuffer(&duplicate) }
-            if mode == .precommitHeader, frame.kind == .ready { buffer.writeInteger(UInt32(PeerExchangeCodec.maximumFrameBytes)) }
+            if mode == .duplicateReady, frame.kind == .ready {
+                var duplicate = buffer
+                buffer.writeBuffer(&duplicate)
+            }
+            if mode == .precommitHeader, frame.kind == .ready {
+                buffer.writeInteger(UInt32(PeerExchangeCodec.maximumFrameBytes))
+            }
             if mode == .coalesceReadyWithFirstRequest {
-                if frame.kind == .ready { heldReady = buffer; promise?.succeed(()); return }
+                if frame.kind == .ready {
+                    heldReady = buffer
+                    promise?.succeed(())
+                    return
+                }
                 if frame.kind == .request, var heldReady {
-                    heldReady.writeBuffer(&buffer); buffer = heldReady; self.heldReady = nil
+                    heldReady.writeBuffer(&buffer)
+                    buffer = heldReady
+                    self.heldReady = nil
                     didCoalesce.withLock { $0 = true }
                 }
             }
             context.write(wrapOutboundOut(buffer), promise: promise)
-        } catch { promise?.fail(error); context.fireErrorCaught(error) }
+        } catch {
+            promise?.fail(error)
+            context.fireErrorCaught(error)
+        }
     }
 }
 
@@ -104,22 +128,26 @@ private final class ExchangePair {
     ) async throws {
         compatibilityWire = CompatibilityWireFixture(clientMode)
         let left = PeerExchangeConnection.install(
-            on: client, pairing: clientPairing, coordinator: source, limits: limits, authorizeAdmission: clientAdmission)
+            on: client, pairing: clientPairing, coordinator: source, limits: limits,
+            authorizeAdmission: clientAdmission)
         FileHandle.standardError.write(Data("fixture: install client\n".utf8))
         a = try await left.get()
         let wire = compatibilityWire
         let clientChannel = client
         try await client.eventLoop.submit {
-            let application = try clientChannel.pipeline.syncOperations.context(handlerType: PeerExchangeHandler.self)
+            let application = try clientChannel.pipeline.syncOperations.context(
+                handlerType: PeerExchangeHandler.self)
             try clientChannel.pipeline.syncOperations.addHandler(wire, position: .before(application.handler))
         }.get()
         let right: EventLoopFuture<PeerExchangeConnection>
         if let responder {
             right = PeerExchangeConnection.install(
-                on: server, responder: responder, coordinator: receiver, limits: limits, authorizeAdmission: serverAdmission)
+                on: server, responder: responder, coordinator: receiver, limits: limits,
+                authorizeAdmission: serverAdmission)
         } else {
             right = PeerExchangeConnection.install(
-                on: server, pairing: serverPairing, coordinator: receiver, limits: limits, authorizeAdmission: serverAdmission)
+                on: server, pairing: serverPairing, coordinator: receiver, limits: limits,
+                authorizeAdmission: serverAdmission)
         }
         FileHandle.standardError.write(Data("fixture: install server\n".utf8))
         b = try await right.get()
@@ -198,7 +226,10 @@ final class PeerExchangeTests: XCTestCase {
     typealias Fixture = PeerTransportStoreFixtures.Fixture
     private var guardedRoot: URL?
     private func fixture() throws -> Fixture {
-        if guardedRoot == nil { guardedRoot = try GuardedFixtureDirectory.create(prefix: "l", source: "PeerExchangeTests", test: name) }
+        if guardedRoot == nil {
+            guardedRoot = try GuardedFixtureDirectory.create(
+                prefix: "l", source: "PeerExchangeTests", test: name)
+        }
         return try Fixture(directory: guardedRoot!.appendingPathComponent(UUID().uuidString))
     }
     override func tearDownWithError() throws {
@@ -256,42 +287,60 @@ final class PeerExchangeTests: XCTestCase {
         let remote = try XCTUnwrap(f.receiver.replicaID)
         let pairingID = try Fixture.id()
         let secret = Array("private-test-key-never-exported!".utf8)
-        let left = try PeerCredential(binding: PeerExchangeBinding(
-            peerID: f.context.peerID, storeID: f.storeID, localReplicaID: f.origin,
-            remoteReplicaID: remote, pairingID: pairingID, localIsInitiator: true,
-            configurationDigest: f.context.configurationDigest), secret: secret)
-        let right = try PeerCredential(binding: PeerExchangeBinding(
-            peerID: f.context.peerID, storeID: f.storeID, localReplicaID: remote,
-            remoteReplicaID: f.origin, pairingID: pairingID, localIsInitiator: false,
-            configurationDigest: f.context.configurationDigest), secret: secret)
-        let a = TransportAccounts(f.sourceAccounts), b = TransportAccounts(f.receiverAccounts)
-        f.source = nil; f.receiver = nil
+        let left = try PeerCredential(
+            binding: PeerExchangeBinding(
+                peerID: f.context.peerID, storeID: f.storeID, localReplicaID: f.origin,
+                remoteReplicaID: remote, pairingID: pairingID, localIsInitiator: true,
+                configurationDigest: f.context.configurationDigest), secret: secret)
+        let right = try PeerCredential(
+            binding: PeerExchangeBinding(
+                peerID: f.context.peerID, storeID: f.storeID, localReplicaID: remote,
+                remoteReplicaID: f.origin, pairingID: pairingID, localIsInitiator: false,
+                configurationDigest: f.context.configurationDigest), secret: secret)
+        let a = TransportAccounts(f.sourceAccounts)
+        let b = TransportAccounts(f.receiverAccounts)
+        f.source = nil
+        f.receiver = nil
         let initialSource = try await coordinator(f.sourceRoot, a)
         let initialReceiver = try await coordinator(f.receiverRoot, b)
         do {
-            try await initialSource.registerPeerCredential(left, permittedOrigins: f.context.permittedOrigins,
-                expectedContextToken: initialSource.peerCredentialRegistrationContext(forUID: tractanda_uid()),
+            try await initialSource.registerPeerCredential(
+                left, permittedOrigins: f.context.permittedOrigins,
+                expectedContextToken: initialSource.peerCredentialRegistrationContext(
+                    forUID: tractanda_uid()),
                 operationID: Fixture.id(), forUID: tractanda_uid())
-            try await initialReceiver.registerPeerCredential(right, permittedOrigins: f.context.permittedOrigins,
-                expectedContextToken: initialReceiver.peerCredentialRegistrationContext(forUID: tractanda_uid()),
+            try await initialReceiver.registerPeerCredential(
+                right, permittedOrigins: f.context.permittedOrigins,
+                expectedContextToken: initialReceiver.peerCredentialRegistrationContext(
+                    forUID: tractanda_uid()),
                 operationID: Fixture.id(), forUID: tractanda_uid())
         } catch {
-            await initialSource.close(); await initialReceiver.close(); throw error
+            await initialSource.close()
+            await initialReceiver.close()
+            throw error
         }
-        await initialSource.close(); await initialReceiver.close()
-        let source = try await coordinator(f.sourceRoot, a), receiver = try await coordinator(f.receiverRoot, b)
+        await initialSource.close()
+        await initialReceiver.close()
+        let source = try await coordinator(f.sourceRoot, a)
+        let receiver = try await coordinator(f.receiverRoot, b)
         var pair: ExchangePair?
         do {
             let restoredLeft = try await PeerPairing.load(peerID: f.context.peerID, coordinator: source)
             let restoredRight = try await PeerPairing.load(peerID: f.context.peerID, coordinator: receiver)
-            pair = try await ExchangePair(clientPairing: restoredLeft, serverPairing: restoredRight,
+            pair = try await ExchangePair(
+                clientPairing: restoredLeft, serverPairing: restoredRight,
                 source: source, receiver: receiver)
             try await pair!.ready()
             let response = try await pair!.call(pair!.a, "inventory")
             XCTAssertFalse(response.isEmpty)
-            await pair!.close(); await source.close(); await receiver.close()
+            await pair!.close()
+            await source.close()
+            await receiver.close()
         } catch {
-            await pair?.close(); await source.close(); await receiver.close(); throw error
+            await pair?.close()
+            await source.close()
+            await receiver.close()
+            throw error
         }
         try f.capacity()
     }
@@ -766,11 +815,18 @@ final class PeerExchangeTests: XCTestCase {
             permittedOrigins: f.context.permittedOrigins)
         try f.receiver.rotatePeerIntakeCredential(
             peerID: f.context.peerID, replacement: replacement, operationID: Fixture.id())
-        let a = TransportAccounts(f.sourceAccounts), b = TransportAccounts(f.receiverAccounts)
-        f.source = nil; f.receiver = nil
-        let source = try await coordinator(f.sourceRoot, a), receiver = try await coordinator(f.receiverRoot, b)
-        defer { await source.close(); await receiver.close() }
-        let pair = try await ExchangePair(clientPairing: left, serverPairing: right,
+        let a = TransportAccounts(f.sourceAccounts)
+        let b = TransportAccounts(f.receiverAccounts)
+        f.source = nil
+        f.receiver = nil
+        let source = try await coordinator(f.sourceRoot, a)
+        let receiver = try await coordinator(f.receiverRoot, b)
+        defer {
+            await source.close()
+            await receiver.close()
+        }
+        let pair = try await ExchangePair(
+            clientPairing: left, serverPairing: right,
             source: source, receiver: receiver, responder: responder)
         defer { await pair.close() }
         do {
@@ -1124,21 +1180,34 @@ final class PeerExchangeTests: XCTestCase {
         XCTAssertEqual(try RecordCodec.encode(f.receiver.get(child.itemID)), try RecordCodec.encode(child))
         try f.capacity()
     }
-    func testCompatibilityReadyWaitsForBothSidesAndCoalescedFirstRequestSurvivesAsymmetricDelay() async throws {
-        let f = try fixture(); try f.bootstrap()
+    func testCompatibilityReadyWaitsForBothSidesAndCoalescedFirstRequestSurvivesAsymmetricDelay() async throws
+    {
+        let f = try fixture()
+        try f.bootstrap()
         let (left, right) = try paired(f)
-        let sourceAccounts = TransportAccounts(f.sourceAccounts), receiverAccounts = TransportAccounts(f.receiverAccounts)
-        f.source = nil; f.receiver = nil
-        let source = try await coordinator(f.sourceRoot, sourceAccounts), receiver = try await coordinator(f.receiverRoot, receiverAccounts)
-        defer { await source.close(); await receiver.close() }
+        let sourceAccounts = TransportAccounts(f.sourceAccounts)
+        let receiverAccounts = TransportAccounts(f.receiverAccounts)
+        f.source = nil
+        f.receiver = nil
+        let source = try await coordinator(f.sourceRoot, sourceAccounts)
+        let receiver = try await coordinator(f.receiverRoot, receiverAccounts)
+        defer {
+            await source.close()
+            await receiver.close()
+        }
         let gate = MembershipPause()
         await receiver.setPeerExchangeAuthorizationHookForTesting { await gate.visit() }
         defer { await gate.release() }
-        let pair = try await ExchangePair(clientPairing: left, serverPairing: right, source: source, receiver: receiver,
+        let pair = try await ExchangePair(
+            clientPairing: left, serverPairing: right, source: source, receiver: receiver,
             clientMode: .coalesceReadyWithFirstRequest)
         defer { await pair.close() }
         let completed = ExchangeCompletion<Void>()
-        pair.a.ready.whenComplete { result in completed.result.withLock { $0 = result.mapError { $0 as? TractandaError ?? .init("testFailure", "ready failed") } } }
+        pair.a.ready.whenComplete { result in
+            completed.result.withLock {
+                $0 = result.mapError { $0 as? TractandaError ?? .init("testFailure", "ready failed") }
+            }
+        }
         for _ in 0..<4096 {
             try await pair.pump()
             if await gate.paused { break }
@@ -1146,9 +1215,12 @@ final class PeerExchangeTests: XCTestCase {
         }
         let paused = await gate.paused
         XCTAssertTrue(paused)
-        XCTAssertNil(completed.result.withLock { $0 }, "Public ready cannot precede the remote final admission/READY")
-        do { _ = try await pair.value(pair.a.request(.init("inventory"))); XCTFail("Outgoing work preceded remote READY") }
-        catch {}
+        XCTAssertNil(
+            completed.result.withLock { $0 }, "Public ready cannot precede the remote final admission/READY")
+        do {
+            _ = try await pair.value(pair.a.request(.init("inventory")))
+            XCTFail("Outgoing work preceded remote READY")
+        } catch {}
         await gate.release()
         // Client's local READY is held by the test wire, but its peer READY can now arrive.
         try await pair.value(pair.a.ready)
@@ -1160,18 +1232,29 @@ final class PeerExchangeTests: XCTestCase {
     }
 
     func testCompatibilityOldMissingAndOutOfOrderReadyCannotReachOrdinaryExchange() async throws {
-        for mode in [CompatibilityWireFixture.Mode.oldDeclaration, .readyBeforeAck, .duplicateReady, .omitAck] {
-            let f = try fixture(); try f.bootstrap()
+        for mode in [
+            CompatibilityWireFixture.Mode.oldDeclaration, .readyBeforeAck, .duplicateReady, .omitAck,
+        ] {
+            let f = try fixture()
+            try f.bootstrap()
             let (left, right) = try paired(f)
             let before = try canonical(f.receiverRoot)
-            let sourceAccounts = TransportAccounts(f.sourceAccounts), receiverAccounts = TransportAccounts(f.receiverAccounts)
-            f.source = nil; f.receiver = nil
-            let source = try await coordinator(f.sourceRoot, sourceAccounts), receiver = try await coordinator(f.receiverRoot, receiverAccounts)
-            defer { await source.close(); await receiver.close() }
-            var limits = PeerExchangeLimits(); limits.operationSeconds = 1
+            let sourceAccounts = TransportAccounts(f.sourceAccounts)
+            let receiverAccounts = TransportAccounts(f.receiverAccounts)
+            f.source = nil
+            f.receiver = nil
+            let source = try await coordinator(f.sourceRoot, sourceAccounts)
+            let receiver = try await coordinator(f.receiverRoot, receiverAccounts)
+            defer {
+                await source.close()
+                await receiver.close()
+            }
+            var limits = PeerExchangeLimits()
+            limits.operationSeconds = 1
             var pair: ExchangePair?
             do {
-                pair = try await ExchangePair(clientPairing: left, serverPairing: right, source: source, receiver: receiver,
+                pair = try await ExchangePair(
+                    clientPairing: left, serverPairing: right, source: source, receiver: receiver,
                     limits: limits, clientMode: mode)
                 if mode == .omitAck, let pair {
                     for _ in 0..<4096 {
@@ -1182,8 +1265,10 @@ final class PeerExchangeTests: XCTestCase {
                     XCTAssertTrue(pair.compatibilityWire.didOmitAck.withLock { $0 })
                     await pair.client.testingEventLoop.advanceTime(by: .seconds(2))
                     await pair.server.testingEventLoop.advanceTime(by: .seconds(2))
-                    do { try await pair.value(pair.a.ready); XCTFail("Missing ACK did not time out") }
-                    catch { XCTAssertEqual((error as? TractandaError)?.code, "deadlineExceeded") }
+                    do {
+                        try await pair.value(pair.a.ready)
+                        XCTFail("Missing ACK did not time out")
+                    } catch { XCTAssertEqual((error as? TractandaError)?.code, "deadlineExceeded") }
                 } else {
                     try await pair!.ready()
                     if mode != .duplicateReady { XCTFail("Old/unordered compatibility controls admitted") }
@@ -1197,11 +1282,14 @@ final class PeerExchangeTests: XCTestCase {
                 }
                 XCTAssertFalse(pair.server.isActive, "Invalid preflight must close before fixture cleanup")
                 XCTAssertFalse(pair.client.isActive, "Invalid preflight must close before fixture cleanup")
-                do { _ = try await pair.value(pair.a.request(.init("inventory"))); XCTFail("Refused session dispatched ordinary exchange") }
-                catch {}
+                do {
+                    _ = try await pair.value(pair.a.request(.init("inventory")))
+                    XCTFail("Refused session dispatched ordinary exchange")
+                } catch {}
                 await pair.close()
             }
-            await source.close(); await receiver.close()
+            await source.close()
+            await receiver.close()
             XCTAssertEqual(try canonical(f.receiverRoot), before)
             try f.capacity()
         }
@@ -1210,16 +1298,24 @@ final class PeerExchangeTests: XCTestCase {
     func testCompatibilityFinalFreshnessRejectsFloorAdvanceAndCancellationBeforeReady() async throws {
         for scenario in 0..<3 {
             let advance = scenario == 0
-            let f = try fixture(); try f.bootstrap()
+            let f = try fixture()
+            try f.bootstrap()
             let (left, right) = try paired(f)
-            let sourceAccounts = TransportAccounts(f.sourceAccounts), receiverAccounts = TransportAccounts(f.receiverAccounts)
-            f.source = nil; f.receiver = nil
-            let source = try await coordinator(f.sourceRoot, sourceAccounts), receiver = try await coordinator(f.receiverRoot, receiverAccounts)
-            defer { await source.close(); await receiver.close() }
+            let sourceAccounts = TransportAccounts(f.sourceAccounts)
+            let receiverAccounts = TransportAccounts(f.receiverAccounts)
+            f.source = nil
+            f.receiver = nil
+            let source = try await coordinator(f.sourceRoot, sourceAccounts)
+            let receiver = try await coordinator(f.receiverRoot, receiverAccounts)
+            defer {
+                await source.close()
+                await receiver.close()
+            }
             let gate = MembershipPause()
             defer { await gate.release() }
             await receiver.setPeerExchangeAuthorizationHookForTesting { await gate.visit() }
-            let pair = try await ExchangePair(clientPairing: left, serverPairing: right, source: source, receiver: receiver,
+            let pair = try await ExchangePair(
+                clientPairing: left, serverPairing: right, source: source, receiver: receiver,
                 clientMode: scenario == 2 ? .precommitHeader : .normal)
             for _ in 0..<4096 {
                 try await pair.pump()
@@ -1232,23 +1328,32 @@ final class PeerExchangeTests: XCTestCase {
             let original = try Data(contentsOf: floor)
             if advance {
                 let prior = try JSON.decode(CanonicalReaderRequirement.self, original)
-                try JSON.encode(CanonicalReaderRequirement(storeID: prior.storeID, minimumReaderLevel: 15,
-                    recordFormats: prior.recordFormats, capabilities: prior.capabilities)).write(to: floor)
-            } else if scenario == 1 { try await pair.value(pair.b.close()) }
-            else {
+                try JSON.encode(
+                    CanonicalReaderRequirement(
+                        storeID: prior.storeID, minimumReaderLevel: 15,
+                        recordFormats: prior.recordFormats, capabilities: prior.capabilities)
+                ).write(to: floor)
+            } else if scenario == 1 {
+                try await pair.value(pair.b.close())
+            } else {
                 for _ in 0..<4096 {
                     try await pair.pump()
                     if !pair.server.isActive { break }
                     try await Task.sleep(for: .milliseconds(1))
                 }
-                XCTAssertFalse(pair.server.isActive, "A precommit ordinary header must refuse without reading its 2 MiB body")
+                XCTAssertFalse(
+                    pair.server.isActive,
+                    "A precommit ordinary header must refuse without reading its 2 MiB body")
             }
             await gate.release()
-            do { try await pair.ready(); XCTFail("Floor advance/cancel admitted ready") }
-            catch {}
+            do {
+                try await pair.ready()
+                XCTFail("Floor advance/cancel admitted ready")
+            } catch {}
             await pair.close()
             try original.write(to: floor)
-            await source.close(); await receiver.close()
+            await source.close()
+            await receiver.close()
             try f.capacity()
         }
     }

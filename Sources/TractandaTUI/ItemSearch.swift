@@ -41,7 +41,8 @@ struct ItemSearchPage: Sendable {
     ) {
         self.currentState = currentState
         let byID = Dictionary(current.map { ($0.itemID, $0) }, uniquingKeysWith: { first, _ in first })
-        let unresolvedByID = Dictionary(unresolved.map { ($0.itemID, $0) }, uniquingKeysWith: { first, _ in first })
+        let unresolvedByID = Dictionary(
+            unresolved.map { ($0.itemID, $0) }, uniquingKeysWith: { first, _ in first })
         var seen = Set<String>()
         var items: [TractandaCore.Revision] = []
         var hits: [String: ItemSearchHit] = [:]
@@ -206,16 +207,18 @@ struct ItemSearchLoader: Sendable {
             let unresolved = current.unresolved ?? []
             let remainingIDs = current.remainingIDs ?? []
             let oversizedIDs = current.oversizedIDs ?? []
-            let classified = current.list.map(\.itemID) + (current.notFound ?? [])
+            let classified =
+                current.list.map(\.itemID) + (current.notFound ?? [])
                 + unresolved.map(\.itemID) + remainingIDs + oversizedIDs
             guard Set(classified).count == classified.count, Set(classified) == Set(remaining) else {
                 throw TractandaCore.TractandaError(
                     "protocolError", "Semantic item delivery omitted or repeated requested IDs.")
             }
             unresolvedByID.merge(
-                Dictionary(uniqueKeysWithValues: unresolved.map { ($0.itemID, $0) })) {
-                    _, newer in newer
-                }
+                Dictionary(uniqueKeysWithValues: unresolved.map { ($0.itemID, $0) })
+            ) {
+                _, newer in newer
+            }
             unhydratedIDs.formUnion(remainingIDs)
             unhydratedIDs.formUnion(oversizedIDs)
             for item in current.list where ids.contains(item.itemID) {

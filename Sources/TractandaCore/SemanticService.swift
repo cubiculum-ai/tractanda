@@ -603,7 +603,8 @@ final class SemanticService {
                 queryTasks.removeValue(forKey: queryID)
                 let consumedAt = queryLifetimeClock()
                 guard completed.epoch == epoch, var query = queries[queryID],
-                    let expiry = Self.completedQueryExpiry(pendingExpiry: query.expiresAt, consumedAt: consumedAt)
+                    let expiry = Self.completedQueryExpiry(
+                        pendingExpiry: query.expiresAt, consumedAt: consumedAt)
                 else { continue }
                 // Retention starts when this completion is consumed, not when
                 // the asynchronous provider returned. Never revive expired pending work.

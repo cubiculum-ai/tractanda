@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+
 @testable import TractandaCore
 
 final class PeerCompatibilityDeclarationTests: XCTestCase {
@@ -52,7 +53,8 @@ final class PeerCompatibilityDeclarationTests: XCTestCase {
     }
 
     private func encodedObject(_ object: [String: Any]) throws -> Data {
-        try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+        try JSONSerialization.data(
+            withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
     }
 
     private func duplicateTopLevelProfile(_ data: Data) throws -> Data {
@@ -95,19 +97,23 @@ final class PeerCompatibilityDeclarationTests: XCTestCase {
     }
 
     func testRejectsPossibleWriterFormatsAndCapabilitiesTheOtherCannotRead() throws {
-        let reader = try declaration(support: support(
-            readerLevel: 3, writerLevel: 2, read: [1, 2], write: [2]),
+        let reader = try declaration(
+            support: support(
+                readerLevel: 3, writerLevel: 2, read: [1, 2], write: [2]),
             requirement: requirement(minimumReaderLevel: 2, recordFormats: [1, 2]))
-        let formatWriter = try declaration(support: support(
-            readerLevel: 3, writerLevel: 3, read: [1, 2, 3], write: [3]),
+        let formatWriter = try declaration(
+            support: support(
+                readerLevel: 3, writerLevel: 3, read: [1, 2, 3], write: [3]),
             requirement: requirement(minimumReaderLevel: 2, recordFormats: [1, 2]))
         XCTAssertThrowsError(try reader.requireCompatible(with: formatWriter))
 
-        let capabilityReader = try declaration(support: support(
-            capabilities: [capability], writeCapabilities: [capability]))
-        let capabilityWriter = try declaration(support: support(
-            capabilities: [capability, "tractanda.test.new-writer-semantics.v1"],
-            writeCapabilities: ["tractanda.test.new-writer-semantics.v1"]))
+        let capabilityReader = try declaration(
+            support: support(
+                capabilities: [capability], writeCapabilities: [capability]))
+        let capabilityWriter = try declaration(
+            support: support(
+                capabilities: [capability, "tractanda.test.new-writer-semantics.v1"],
+                writeCapabilities: ["tractanda.test.new-writer-semantics.v1"]))
         XCTAssertThrowsError(try capabilityReader.requireCompatible(with: capabilityWriter))
     }
 

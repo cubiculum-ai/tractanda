@@ -40,7 +40,8 @@ extension SetupEngine {
     }
     func loadEmbedding(_ receipt: InstallationReceipt) throws {
         guard receipt.embedding != nil else { return }
-        try serviceBackend.load(receipt.instance, role: .embeddings,
+        try serviceBackend.load(
+            receipt.instance, role: .embeddings,
             enableAtBoot: !(try packageStartupIsConfiguring(receipt.instance)))
     }
     func replaceEmbeddingRegistration(_ receipt: inout InstallationReceipt) throws {
@@ -66,13 +67,17 @@ extension SetupEngine {
                 "logs/" + receipt.instance + "-embeddings.log"
             ).path,
         ]
-        let bytes = roots.platform == .linux
-            ? try serviceBackend.systemdDefinition(instance: receipt.instance, role: .embeddings, arguments: arguments)
+        let bytes =
+            roots.platform == .linux
+            ? try serviceBackend.systemdDefinition(
+                instance: receipt.instance, role: .embeddings, arguments: arguments)
             : try PropertyListSerialization.data(fromPropertyList: dictionary, format: .xml, options: 0)
         try unloadEmbedding(receipt)
         if roots.platform == .linux {
             try publishPackageDefinition(bytes, role: .embeddings, receipt: &receipt)
-        } else { try writeProtected(bytes, to: embeddingDefinitionURL(receipt.instance), mode: 0o644) }
+        } else {
+            try writeProtected(bytes, to: embeddingDefinitionURL(receipt.instance), mode: 0o644)
+        }
         receipt.embeddingDefinitionSHA256 = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }
             .joined()
         try writeReceipt(receipt)

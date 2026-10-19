@@ -1,8 +1,3 @@
-#if canImport(CryptoKit)
-import CryptoKit
-#else
-import Crypto
-#endif
 import DoclingRaster
 import Foundation
 import MLX
@@ -12,6 +7,12 @@ import MLXNN
 import MLXVLM
 import TractandaClient
 import VMLXTokenizers
+
+#if canImport(CryptoKit)
+    import CryptoKit
+#else
+    import Crypto
+#endif
 
 struct Assets: Decodable {
     struct File: Decodable {
@@ -27,11 +28,13 @@ func verifyModel(_ directory: URL, progress: ((Int64, Int64) throws -> Void)? = 
     try require(
         Idefics3.tractandaVisionGELUPatchIdentifier == "idefics3-vision-gelu-f32-v1",
         "Required pinned-runtime inference patch is missing.")
-#if os(Linux)
-    _ = try LinuxNativeAdmission.active()
-#else
-    try require(DocumentConverterIdentity().converter == "tractanda.docling-native.v2-idefics3-gelu-f32", "Required converter identity is missing.")
-#endif
+    #if os(Linux)
+        _ = try LinuxNativeAdmission.active()
+    #else
+        try require(
+            DocumentConverterIdentity().converter == "tractanda.docling-native.v2-idefics3-gelu-f32",
+            "Required converter identity is missing.")
+    #endif
     let assets = try JSONDecoder().decode(
         Assets.self,
         from: Data(contentsOf: Bundle.module.url(forResource: "ModelAssets", withExtension: "json")!))
@@ -83,24 +86,26 @@ func expectedWeights(_ directory: URL) throws -> [String: [Int]] {
 
 @main struct TractandaDocumentConverter {
     static func main() async {
-#if os(Linux)
-        await runOnLinux()
-#else
-        await run()
-#endif
+        #if os(Linux)
+            await runOnLinux()
+        #else
+            await run()
+        #endif
     }
-#if os(Linux)
-    // Keep the task-local CPU scope outside the main actor. The pinned MLX
-    // async wrapper runs concurrently under Swift 6.4; run() retains its isolation.
-    nonisolated private static func runOnLinux() async {
-        await Device.withDefaultDevice(.cpu) { await run() }
-    }
-#endif
+    #if os(Linux)
+        // Keep the task-local CPU scope outside the main actor. The pinned MLX
+        // async wrapper runs concurrently under Swift 6.4; run() retains its isolation.
+        nonisolated private static func runOnLinux() async {
+            await Device.withDefaultDevice(.cpu) { await run() }
+        }
+    #endif
     private static func run() async {
-#if os(Linux)
-        do { _ = try LinuxNativeAdmission.active() }
-        catch { FileHandle.standardError.write(Data(("Unadmitted Linux document runtime: \(error)\n").utf8)); exit(1) }
-#endif
+        #if os(Linux)
+            do { _ = try LinuxNativeAdmission.active() } catch {
+                FileHandle.standardError.write(Data(("Unadmitted Linux document runtime: \(error)\n").utf8))
+                exit(1)
+            }
+        #endif
         let args = Array(CommandLine.arguments.dropFirst())
         if let mode = args.first, ["inspect-v1", "worker-v1"].contains(mode) {
             await NativeDocumentWorker.main(args)
@@ -136,7 +141,8 @@ func expectedWeights(_ directory: URL) throws -> [String: [Int]] {
             }!.1
             try require(visionWeight.dtype == .bfloat16, "Loaded vision weights are not BF16.")
             context.model.train(false)
-            context.processor = NativeDocumentInput(tokenizer: context.tokenizer, traceDirectory: nil, comparisonDirectory: nil)
+            context.processor = NativeDocumentInput(
+                tokenizer: context.tokenizer, traceDirectory: nil, comparisonDirectory: nil)
             if args[0] == "diagnose" {
                 try require(rasters.count == 1, "Diagnostic requires one page.")
                 try await diagnoseInference(

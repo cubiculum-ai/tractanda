@@ -154,7 +154,9 @@ public struct SetupRoots: Sendable {
         commands: URL? = nil
     ) {
         self.platform = platform
-        self.commands = commands ?? URL(fileURLWithPath: platform == .linux ? "/usr/bin" : "/usr/local/bin", isDirectory: true)
+        self.commands =
+            commands
+            ?? URL(fileURLWithPath: platform == .linux ? "/usr/bin" : "/usr/local/bin", isDirectory: true)
         switch platform {
         case .macos:
             self.software =
@@ -247,12 +249,17 @@ public struct SetupOptions: Equatable, Sendable {
             throw SetupError("Instance name or port is invalid.")
         }
         if let owner, !validAccountName(owner) { throw SetupError("Account name is invalid.") }
-        if case let .prepared(storeID, replicaID) = storeSelection {
+        if case .prepared(let storeID, let replicaID) = storeSelection {
             guard mode != .sample, storeID != replicaID,
                 [storeID, replicaID].allSatisfy({ value in
                     guard let uuid = UUID(uuidString: value) else { return false }
                     return uuid.version1Components != nil && uuid.uuidString.lowercased() == value
-                }) else { throw SetupError("Prepared adoption requires distinct canonical UUIDv1 store/replica pins and cannot seed sample content.") }
+                })
+            else {
+                throw SetupError(
+                    "Prepared adoption requires distinct canonical UUIDv1 store/replica pins and cannot seed sample content."
+                )
+            }
         }
         if let uuidNode {
             let compact = uuidNode.replacingOccurrences(of: ":", with: "")
@@ -293,23 +300,23 @@ public struct DocumentExtractionPayload: Codable, Equatable, Sendable {
 
     private static func descriptor(identity: DocumentConverterIdentity) -> Self {
         Self(
-        converterPath: "bin/tractanda-document-converter", identity: identity,
-        workerProtocol: "tractanda.native-document-worker.v1",
-        modelDirectory: "models/granite-docling-258m-mlx",
-        modelManifestPath: "licenses/Docling/ModelAssets.json",
-        modelManifestSHA256: "64894c93726b0b76d2eb5c20f001c61d6fc2eea1ef848b23773ba60cae9e00ef",
-        runtimeRepository: "osaurus-ai/vmlx-swift",
-        runtimePatchManifestPath: "licenses/Docling/runtime-patches.json",
-        runtimePatchManifestSHA256: "732b8d020e258b8ab5de5875f53bc3756143b089d9a1d7619f311ccbe4674635",
-        runtimePatchIdentifier: "idefics3-vision-gelu-f32-v1",
-        runtimePatchPath: "licenses/Docling/vmlx-61a4b20-idefics3-gelu-f32.patch",
-        runtimePatchSHA256: "4b45ae94cd5a9a2545025cf5165cd9e617f3c30c5a7b02e236c036ee943b9321",
-        noticePaths: [
-            "licenses/Docling/Granite-Docling-LICENSE",
-            "licenses/Docling/Granite-Docling-MODEL-NOTICE.md", "licenses/Docling/Pillow-LICENSE",
-            "licenses/optional-embedding-host/vmlx-swift/LICENSE",
-            "licenses/optional-embedding-host/vmlx-swift/ACKNOWLEDGMENTS.md",
-        ])
+            converterPath: "bin/tractanda-document-converter", identity: identity,
+            workerProtocol: "tractanda.native-document-worker.v1",
+            modelDirectory: "models/granite-docling-258m-mlx",
+            modelManifestPath: "licenses/Docling/ModelAssets.json",
+            modelManifestSHA256: "64894c93726b0b76d2eb5c20f001c61d6fc2eea1ef848b23773ba60cae9e00ef",
+            runtimeRepository: "osaurus-ai/vmlx-swift",
+            runtimePatchManifestPath: "licenses/Docling/runtime-patches.json",
+            runtimePatchManifestSHA256: "732b8d020e258b8ab5de5875f53bc3756143b089d9a1d7619f311ccbe4674635",
+            runtimePatchIdentifier: "idefics3-vision-gelu-f32-v1",
+            runtimePatchPath: "licenses/Docling/vmlx-61a4b20-idefics3-gelu-f32.patch",
+            runtimePatchSHA256: "4b45ae94cd5a9a2545025cf5165cd9e617f3c30c5a7b02e236c036ee943b9321",
+            noticePaths: [
+                "licenses/Docling/Granite-Docling-LICENSE",
+                "licenses/Docling/Granite-Docling-MODEL-NOTICE.md", "licenses/Docling/Pillow-LICENSE",
+                "licenses/optional-embedding-host/vmlx-swift/LICENSE",
+                "licenses/optional-embedding-host/vmlx-swift/ACKNOWLEDGMENTS.md",
+            ])
     }
 
     func validatePlatform(platform: String, arch: String) throws {
@@ -322,7 +329,8 @@ public struct DocumentExtractionPayload: Codable, Equatable, Sendable {
             expected = nil
         }
         guard let expected, identity.converter == expected else {
-            throw SetupError("Document payload is not the finite current profile for its platform/architecture.")
+            throw SetupError(
+                "Document payload is not the finite current profile for its platform/architecture.")
         }
         try identity.validate()
     }
@@ -336,7 +344,9 @@ public struct DocumentExtractionPayload: Codable, Equatable, Sendable {
 
     func validate(files: [BundleManifest.File]) throws {
         try identity.validate()
-        guard self == Self.descriptor(identity: identity) else { throw SetupError("Unsupported document payload descriptor.") }
+        guard self == Self.descriptor(identity: identity) else {
+            throw SetupError("Unsupported document payload descriptor.")
+        }
         guard Set(files.map(\.path)).count == files.count else {
             throw SetupError("Duplicate document inventory paths.")
         }
@@ -346,8 +356,10 @@ public struct DocumentExtractionPayload: Codable, Equatable, Sendable {
             let digest = String(identity.converter.dropFirst(linuxPrefix.count))
             guard entries["lib/tractanda/document-native-closure.json"]?.sha256 == digest,
                 entries["lib/tractanda/document-native/libtractanda_docling_pdf.so.1"] != nil,
-                entries["lib/tractanda/document-native/libtractanda_docling_images.so.1"] != nil else {
-                throw SetupError("Linux document payload is missing its exact native closure or private providers.")
+                entries["lib/tractanda/document-native/libtractanda_docling_images.so.1"] != nil
+            else {
+                throw SetupError(
+                    "Linux document payload is missing its exact native closure or private providers.")
             }
         }
         guard let converter = entries[converterPath], converter.mode & 0o111 != 0,

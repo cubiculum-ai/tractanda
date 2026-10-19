@@ -2,9 +2,9 @@ import Foundation
 import TractandaCore
 
 #if canImport(Darwin)
-import Darwin
+    import Darwin
 #else
-import Glibc
+    import Glibc
 #endif
 
 extension PeerRuntimeConfiguration {
@@ -19,10 +19,13 @@ private func readPrivateConfiguration(at path: String) throws -> Data {
     guard path.hasPrefix("/"), path != "/", path.utf8.count <= 4096,
         !path.contains("\0"), !path.contains("\n"), !path.contains("\r")
     else {
-        throw PeerRuntimeConfiguration.invalid("Peer runtime configuration path must be absolute and bounded.")
+        throw PeerRuntimeConfiguration.invalid(
+            "Peer runtime configuration path must be absolute and bounded.")
     }
     let descriptor = open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
-    guard descriptor >= 0 else { throw PeerRuntimeConfiguration.invalid("Cannot open private peer runtime configuration.") }
+    guard descriptor >= 0 else {
+        throw PeerRuntimeConfiguration.invalid("Cannot open private peer runtime configuration.")
+    }
     defer { close(descriptor) }
 
     var before = stat()
@@ -53,12 +56,14 @@ private func readPrivateConfiguration(at path: String) throws -> Data {
         throw PeerRuntimeConfiguration.invalid("Cannot recheck private peer runtime configuration.")
     }
     #if canImport(Darwin)
-        let unchangedTimes = before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec
+        let unchangedTimes =
+            before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec
             && before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec
             && before.st_ctimespec.tv_sec == after.st_ctimespec.tv_sec
             && before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec
     #else
-        let unchangedTimes = before.st_mtim.tv_sec == after.st_mtim.tv_sec
+        let unchangedTimes =
+            before.st_mtim.tv_sec == after.st_mtim.tv_sec
             && before.st_mtim.tv_nsec == after.st_mtim.tv_nsec
             && before.st_ctim.tv_sec == after.st_ctim.tv_sec
             && before.st_ctim.tv_nsec == after.st_ctim.tv_nsec

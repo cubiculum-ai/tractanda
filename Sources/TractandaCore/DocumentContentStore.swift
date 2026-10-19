@@ -697,7 +697,9 @@ final class DocumentContentStore: @unchecked Sendable {
         }
     }
 
-    func beginPeerInspection(base: [String], parkable: Bool = false) throws -> DocumentContentFiles.PeerTreeInspection {
+    func beginPeerInspection(base: [String], parkable: Bool = false) throws
+        -> DocumentContentFiles.PeerTreeInspection
+    {
         try files.peerTreeInspection(base, parkable: parkable)
     }
     func validatePeerPage(

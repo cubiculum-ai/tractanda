@@ -9,7 +9,8 @@ struct NativeCredentialRegistrationSession: Sendable {
 
 extension DaemonApplication {
     func beginPrivateCredential(_ data: Data, forUID uid: UInt32, control: PeerExchangeControl) async throws
-        -> NativeCredentialRegistrationSession {
+        -> NativeCredentialRegistrationSession
+    {
         let request = try NativePeerCredentialRegistration.Begin.parse(data)
         return try await makePrivateCredentialSession(request, forUID: uid, control: control)
     }

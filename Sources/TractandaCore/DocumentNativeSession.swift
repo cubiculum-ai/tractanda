@@ -25,9 +25,9 @@ final class DocumentNativeSession {
     /// Production constructors always select this verifier. Only internal
     /// dependency injection in explicit @testable fixtures replaces it.
     static func verifyRuntime(_ configuration: DocumentConverterConfiguration) throws {
-#if os(Linux)
-        try DocumentLinuxRuntimeClosure.preflightIfAdmitted(configuration)
-#endif
+        #if os(Linux)
+            try DocumentLinuxRuntimeClosure.preflightIfAdmitted(configuration)
+        #endif
     }
 
     init(

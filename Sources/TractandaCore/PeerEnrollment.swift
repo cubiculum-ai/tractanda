@@ -111,10 +111,12 @@ package enum PeerEnrollment {
                 throw PeerEnrollmentActivation.failure("Target lost its required permanent preparation.")
             }
             guard try PeerEnrollmentActivation.loadReceipt(files) != nil else {
-                throw TractandaError("enrollmentPending", "Target enrollment is pending; ordinary store opening is disabled.")
+                throw TractandaError(
+                    "enrollmentPending", "Target enrollment is pending; ordinary store opening is disabled.")
             }
             guard try PeerEnrollmentActivation.loadRecord(files) != nil else {
-                throw PeerEnrollmentActivation.failure("Target lost its required immutable activation request.")
+                throw PeerEnrollmentActivation.failure(
+                    "Target lost its required immutable activation request.")
             }
             try PeerEnrollmentActivation.requireActivated(root: root, ownerUID: ownerUID)
         }

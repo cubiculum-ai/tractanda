@@ -31,7 +31,9 @@ package final class PeerExchangeResponder: Sendable {
     }
 }
 
-package typealias PeerLogicalLeaseFactory = @Sendable (PeerExchangeBinding, @escaping @Sendable () async -> Void) async throws -> PeerLogicalExchange.Lease
+package typealias PeerLogicalLeaseFactory =
+    @Sendable (PeerExchangeBinding, @escaping @Sendable () async -> Void) async throws ->
+    PeerLogicalExchange.Lease
 
 /// Package-only connection, installed on an inactive channel before TLS/application activity.
 package final class PeerExchangeConnection: Sendable {
@@ -56,7 +58,8 @@ package final class PeerExchangeConnection: Sendable {
             channel.eventLoop.submit {
                 let handler = PeerExchangeHandler(
                     pairings: [pairing.tls.profile.pairingID: pairing], coordinator: coordinator,
-                    limits: limits, loop: channel.eventLoop, authorizeAdmission: authorizeAdmission, logicalLease: logicalLease)
+                    limits: limits, loop: channel.eventLoop, authorizeAdmission: authorizeAdmission,
+                    logicalLease: logicalLease)
                 try channel.pipeline.syncOperations.addHandler(handler)
                 return PeerExchangeConnection(channel: channel, handler: handler)
             }
@@ -73,7 +76,8 @@ package final class PeerExchangeConnection: Sendable {
             channel.eventLoop.submit {
                 let handler = PeerExchangeHandler(
                     pairings: responder.pairings, coordinator: coordinator,
-                    limits: limits, loop: channel.eventLoop, authorizeAdmission: authorizeAdmission, logicalLease: logicalLease)
+                    limits: limits, loop: channel.eventLoop, authorizeAdmission: authorizeAdmission,
+                    logicalLease: logicalLease)
                 try channel.pipeline.syncOperations.addHandler(handler)
                 return PeerExchangeConnection(channel: channel, handler: handler)
             }
@@ -87,8 +91,10 @@ package final class PeerExchangeConnection: Sendable {
         }
     }
     /// Bind only this actual ready physical session into the host-owned local continuation.
-    package func admitLocalContinuation(_ lease: PeerLogicalExchange.Lease, expectedBinding: PeerExchangeBinding,
-        control: PeerExchangeControl) async throws {
+    package func admitLocalContinuation(
+        _ lease: PeerLogicalExchange.Lease, expectedBinding: PeerExchangeBinding,
+        control: PeerExchangeControl
+    ) async throws {
         let handler = handler
         let admission = try await channel.eventLoop.submit {
             try handler.value.currentAdmission(expectedBinding: expectedBinding, control: control)
@@ -98,7 +104,8 @@ package final class PeerExchangeConnection: Sendable {
         _ = try await channel.eventLoop.submit {
             try handler.value.currentAdmission(expectedBinding: expectedBinding, control: control)
         }.get()
-        try admission.checkLifetime(); try control.check()
+        try admission.checkLifetime()
+        try control.check()
     }
     package func close() -> EventLoopFuture<Void> { channel.close() }
 }
@@ -188,9 +195,11 @@ final class PeerExchangeHandler: ChannelDuplexHandler {
             fail(error)
             return
         }
-        self.control = control; self.preflightControl = control
-        startDeadline(context) // Binding, declarations/acks/READY and final readiness share this deadline.
-        preflightDeadline = operationDeadline; operationDeadline = nil
+        self.control = control
+        self.preflightControl = control
+        startDeadline(context)  // Binding, declarations/acks/READY and final readiness share this deadline.
+        preflightDeadline = operationDeadline
+        operationDeadline = nil
         authenticating = true
         _ = context.channel.setOption(ChannelOptions.autoRead, value: false)
         let coordinator = coordinator
@@ -205,16 +214,27 @@ final class PeerExchangeHandler: ChannelDuplexHandler {
                 try await authorizeAdmission()
                 let lease = try await logicalLease?(binding, { _ = try? await channel.close().get() })
                 do {
-                    let gateway = try await PeerExchangeGateway(coordinator: coordinator,
+                    let gateway = try await PeerExchangeGateway(
+                        coordinator: coordinator,
                         binding: binding, control: control, logicalLease: lease)
-                    do { result = .success((gateway, try await gateway.advanceCompatibility(.declare, control: control))) }
-                    catch { await gateway.detachLogicalLease(); throw error }
-                } catch { await lease?.detach(); throw error }
+                    do {
+                        result = .success(
+                            (gateway, try await gateway.advanceCompatibility(.declare, control: control)))
+                    } catch {
+                        await gateway.detachLogicalLease()
+                        throw error
+                    }
+                } catch {
+                    await lease?.detach()
+                    throw error
+                }
             } catch { result = .failure(error) }
             loop.execute {
                 let handler = bound.value
                 guard !handler.failed else {
-                    if case .success(let (gateway, _)) = result { Task { await gateway.detachLogicalLease() } }
+                    if case .success(let (gateway, _)) = result {
+                        Task { await gateway.detachLogicalLease() }
+                    }
                     return
                 }
                 handler.task = nil
@@ -228,7 +248,8 @@ final class PeerExchangeHandler: ChannelDuplexHandler {
                     handler.gateway = gateway
                     handler.authenticating = false
                     do {
-                        _ = try handler.write(.init(version: 2, requestID: 0, kind: .declaration, body: declaration))
+                        _ = try handler.write(
+                            .init(version: 2, requestID: 0, kind: .declaration, body: declaration))
                         if let context = handler.context {
                             _ = context.channel.setOption(ChannelOptions.autoRead, value: true)
                             handler.processPreflight()
@@ -247,45 +268,71 @@ final class PeerExchangeHandler: ChannelDuplexHandler {
         }
         var part = unwrapInboundIn(data)
         guard part.readableBytes <= limits.maximumWireBytes - received else {
-            fail(TractandaError("peerSessionExhausted", "Peer inbound byte budget exhausted.")); return
+            fail(TractandaError("peerSessionExhausted", "Peer inbound byte budget exhausted."))
+            return
         }
         received += part.readableBytes
         do {
             while part.readableBytes > 0 {
                 guard localCommitted || preflightReceived < 3 else {
-                    throw TractandaError("invalidPeerFrame", "Ordinary bytes preceded local compatibility commit.")
+                    throw TractandaError(
+                        "invalidPeerFrame", "Ordinary bytes preceded local compatibility commit.")
                 }
-                if localCommitted, active { throw TractandaError("serviceBusy", "Peer operation already active.") }
+                if localCommitted, active {
+                    throw TractandaError("serviceBusy", "Peer operation already active.")
+                }
                 var buffer = input ?? context.channel.allocator.buffer(capacity: 4)
                 if buffer.readableBytes < 4 {
                     let count = min(4 - buffer.readableBytes, part.readableBytes)
                     if var header = part.readSlice(length: count) { buffer.writeBuffer(&header) }
-                    guard buffer.readableBytes == 4 else { input = buffer; return }
+                    guard buffer.readableBytes == 4 else {
+                        input = buffer
+                        return
+                    }
                 }
-                let maximum = !localCommitted && preflightReceived < 3 ? 96 * 1024 : PeerExchangeCodec.maximumFrameBytes
+                let maximum =
+                    !localCommitted && preflightReceived < 3 ? 96 * 1024 : PeerExchangeCodec.maximumFrameBytes
                 guard let length = buffer.getInteger(at: buffer.readerIndex, as: UInt32.self),
-                    length > 0, length <= maximum else { throw TractandaError("resourceLimit", "Invalid peer frame length.") }
+                    length > 0, length <= maximum
+                else { throw TractandaError("resourceLimit", "Invalid peer frame length.") }
                 let count = min(4 + Int(length) - buffer.readableBytes, part.readableBytes)
                 if var body = part.readSlice(length: count) { buffer.writeBuffer(&body) }
-                guard buffer.readableBytes == 4 + Int(length) else { input = buffer; return }
+                guard buffer.readableBytes == 4 + Int(length) else {
+                    input = buffer
+                    return
+                }
                 buffer.moveReaderIndex(forwardBy: 4)
-                guard let bytes = buffer.readBytes(length: Int(length)) else { throw TractandaError("invalidPeerFrame", "Truncated peer frame.") }
+                guard let bytes = buffer.readBytes(length: Int(length)) else {
+                    throw TractandaError("invalidPeerFrame", "Truncated peer frame.")
+                }
                 input = nil
                 let frame = try PeerExchangeCodec.decode(Data(bytes))
-                if localCommitted && remoteReadyReceived && frame.kind == .request { try receive(frame, context: context) }
-                else if readyFinished { try receive(frame, context: context) }
-                else {
+                if localCommitted && remoteReadyReceived && frame.kind == .request {
+                    try receive(frame, context: context)
+                } else if readyFinished {
+                    try receive(frame, context: context)
+                } else {
                     if preflightReceived < 3 {
-                        let expected: PeerExchangeCodec.Kind = preflightReceived == 0 ? .declaration : preflightReceived == 1 ? .acknowledgement : .ready
+                        let expected: PeerExchangeCodec.Kind =
+                            preflightReceived == 0
+                            ? .declaration : preflightReceived == 1 ? .acknowledgement : .ready
                         guard frame.kind == expected,
-                            frame.body.count <= (expected == .declaration ? PeerCompatibilityDeclaration.maximumBytes : expected == .acknowledgement ? 4096 : 0)
-                        else { throw TractandaError("invalidPeerFrame", "Missing, duplicate or unordered compatibility control.") }
+                            frame.body.count
+                                <= (expected == .declaration
+                                    ? PeerCompatibilityDeclaration.maximumBytes
+                                    : expected == .acknowledgement ? 4096 : 0)
+                        else {
+                            throw TractandaError(
+                                "invalidPeerFrame", "Missing, duplicate or unordered compatibility control.")
+                        }
                         preflightReceived += 1
                         try chargeRequest()
-                        preflightFrames.append(frame) // Exactly three bounded controls in the entire attempt.
+                        // Exactly three bounded controls in the entire attempt.
+                        preflightFrames.append(frame)
                         processPreflight()
                     } else {
-                        throw TractandaError("invalidPeerFrame", "Ordinary peer work preceded local compatibility commit.")
+                        throw TractandaError(
+                            "invalidPeerFrame", "Ordinary peer work preceded local compatibility commit.")
                     }
                 }
             }
@@ -293,93 +340,134 @@ final class PeerExchangeHandler: ChannelDuplexHandler {
     }
     private func processPreflight() {
         guard !failed, !readyFinished, !active, task == nil, let gateway, let control = preflightControl,
-            let context, !preflightFrames.isEmpty else { return }
+            let context, !preflightFrames.isEmpty
+        else { return }
         let frame = preflightFrames.removeFirst()
         if frame.kind == .ready {
-            guard remoteAckValidated else { fail(TractandaError("invalidPeerFrame", "READY preceded compatibility acknowledgement.")); return }
+            guard remoteAckValidated else {
+                fail(TractandaError("invalidPeerFrame", "READY preceded compatibility acknowledgement."))
+                return
+            }
             remoteReadyReceived = true
             publishReady()
             return
         }
         active = true
-        let bound = NIOLoopBound(self, eventLoop: context.eventLoop), loop = context.eventLoop
+        let bound = NIOLoopBound(self, eventLoop: context.eventLoop)
+        let loop = context.eventLoop
         task = Task {
             let result: Result<Data, Error>
             do {
                 try control.check()
-                result = .success(try await gateway.advanceCompatibility(
-                    frame.kind == .declaration ? .accept(frame.body) : .acknowledge(frame.body), control: control))
+                result = .success(
+                    try await gateway.advanceCompatibility(
+                        frame.kind == .declaration ? .accept(frame.body) : .acknowledge(frame.body),
+                        control: control))
             } catch { result = .failure(error) }
             loop.execute {
                 let handler = bound.value
                 guard !handler.failed else { return }
-                handler.task = nil; handler.active = false
+                handler.task = nil
+                handler.active = false
                 do {
-                    let body = try result.get(); try control.check()
+                    let body = try result.get()
+                    try control.check()
                     if frame.kind == .declaration {
                         handler.ownAckSent = true
-                        let flushed = try handler.write(.init(version: 2, requestID: 0, kind: .acknowledgement, body: body))
+                        let flushed = try handler.write(
+                            .init(version: 2, requestID: 0, kind: .acknowledgement, body: body))
                         flushed.whenSuccess {
                             guard !bound.value.failed else { return }
-                            bound.value.ownAckFlushed = true; bound.value.completePreflight()
+                            bound.value.ownAckFlushed = true
+                            bound.value.completePreflight()
                         }
-                    } else { handler.remoteAckValidated = true }
-                    handler.processPreflight(); handler.completePreflight()
+                    } else {
+                        handler.remoteAckValidated = true
+                    }
+                    handler.processPreflight()
+                    handler.completePreflight()
                 } catch { handler.fail(error) }
             }
         }
     }
     private func completePreflight() {
         guard !failed, !readyFinished, !finalizing, !active, task == nil,
-            ownAckFlushed, remoteAckValidated, let gateway, let control = preflightControl, let context else { return }
-        finalizing = true; active = true
-        let loop = context.eventLoop, bound = NIOLoopBound(self, eventLoop: context.eventLoop)
+            ownAckFlushed, remoteAckValidated, let gateway, let control = preflightControl, let context
+        else { return }
+        finalizing = true
+        active = true
+        let loop = context.eventLoop
+        let bound = NIOLoopBound(self, eventLoop: context.eventLoop)
         let boundContext = NIOLoopBound(context, eventLoop: context.eventLoop)
         let lifetime = compatibilityLifetime
         task = Task {
             let result: Result<PeerCompatibilityAdmission, Error>
-            do { result = .success(try await gateway.compatibilityAdmission(lifetime: lifetime, control: control)) }
-            catch { result = .failure(error) }
+            do {
+                result = .success(
+                    try await gateway.compatibilityAdmission(lifetime: lifetime, control: control))
+            } catch { result = .failure(error) }
             loop.execute {
                 let handler = bound.value
                 let context = boundContext.value
                 guard !handler.failed else { return }
                 handler.task = nil
                 do {
-                    let admission = try result.get(); try control.check(); try lifetime.check()
-                    guard context.channel.isActive else { throw TractandaError("serviceClosed", "Peer channel closed.") }
+                    let admission = try result.get()
+                    try control.check()
+                    try lifetime.check()
+                    guard context.channel.isActive else {
+                        throw TractandaError("serviceClosed", "Peer channel closed.")
+                    }
                     handler.admittedCompatibility = admission
                     // Core admission/final freshness is committed before READY emission.
                     // No Store await separates this marker from the ordered READY write.
-                    handler.active = false; handler.localCommitted = true
-                    let flushed = try handler.write(.init(version: 2, requestID: 0, kind: .ready, body: Data()))
+                    handler.active = false
+                    handler.localCommitted = true
+                    let flushed = try handler.write(
+                        .init(version: 2, requestID: 0, kind: .ready, body: Data()))
                     flushed.whenSuccess {
                         guard !bound.value.failed else { return }
-                        bound.value.ownReadyFlushed = true; bound.value.publishReady()
+                        bound.value.ownReadyFlushed = true
+                        bound.value.publishReady()
                     }
-                    handler.processPreflight(); handler.publishReady()
+                    handler.processPreflight()
+                    handler.publishReady()
                     _ = context.channel.setOption(ChannelOptions.autoRead, value: true)
                     context.read()
                 } catch { handler.fail(error) }
             }
         }
     }
-    fileprivate func currentAdmission(expectedBinding: PeerExchangeBinding,
-        control: PeerExchangeControl) throws -> PeerCompatibilityAdmission {
+    fileprivate func currentAdmission(
+        expectedBinding: PeerExchangeBinding,
+        control: PeerExchangeControl
+    ) throws -> PeerCompatibilityAdmission {
         guard !failed, readyFinished, localCommitted, context?.channel.isActive == true,
-            let admission = admittedCompatibility else { throw TractandaError("peerCompatibilityRequired", "Actual physical admission is unavailable.") }
-        try control.check(); try admission.requireBinding(expectedBinding)
+            let admission = admittedCompatibility
+        else {
+            throw TractandaError("peerCompatibilityRequired", "Actual physical admission is unavailable.")
+        }
+        try control.check()
+        try admission.requireBinding(expectedBinding)
         return admission
     }
     private func publishReady() {
         guard !failed, !readyFinished, localCommitted, remoteReadyReceived, ownReadyFlushed else { return }
-        do { try preflightControl?.check() } catch { fail(error); return }
+        do { try preflightControl?.check() } catch {
+            fail(error)
+            return
+        }
         if control === preflightControl { control = nil }
-        preflightControl = nil; preflightDeadline?.cancel(); preflightDeadline = nil
-        readyFinished = true; ready.succeed(())
+        preflightControl = nil
+        preflightDeadline?.cancel()
+        preflightDeadline = nil
+        readyFinished = true
+        ready.succeed(())
     }
     private func receive(_ frame: PeerExchangeCodec.Frame, context: ChannelHandlerContext) throws {
-        guard localCommitted, remoteReadyReceived else { throw TractandaError("peerCompatibilityRequired", "Peer compatibility is incomplete.") }
+        guard localCommitted, remoteReadyReceived else {
+            throw TractandaError("peerCompatibilityRequired", "Peer compatibility is incomplete.")
+        }
         switch frame.kind {
         case .declaration, .acknowledgement, .ready:
             throw TractandaError("invalidPeerFrame", "Repeated peer compatibility control.")
@@ -460,7 +548,10 @@ final class PeerExchangeHandler: ChannelDuplexHandler {
         guard let context, let gateway, readyFinished, !failed, !active, pending == nil else {
             throw TractandaError("serviceBusy", "Peer session is unavailable or busy.")
         }
-        do { try chargeRequest() } catch { fail(error); throw error }
+        do { try chargeRequest() } catch {
+            fail(error)
+            throw error
+        }
         outboundID += 1
         let promise = context.eventLoop.makePromise(of: Data.self)
         let requestID = outboundID
@@ -597,8 +688,10 @@ final class PeerExchangeHandler: ChannelDuplexHandler {
     }
     func close(context: ChannelHandlerContext, mode: CloseMode, promise: EventLoopPromise<Void>?) {
         // Invalidate on close request, without waiting for graceful TLS shutdown to finish.
-        compatibilityLifetime.cancel(); admittedCompatibility = nil
-        control?.cancel(); preflightControl?.cancel()
+        compatibilityLifetime.cancel()
+        admittedCompatibility = nil
+        control?.cancel()
+        preflightControl?.cancel()
         context.close(mode: mode, promise: promise)
     }
     func channelInactive(context: ChannelHandlerContext) {
@@ -613,14 +706,18 @@ final class PeerExchangeHandler: ChannelDuplexHandler {
     private func fail(_ error: Error) {
         guard !failed else { return }
         failed = true
-        compatibilityLifetime.cancel(); admittedCompatibility = nil
-        control?.cancel(); preflightControl?.cancel()
+        compatibilityLifetime.cancel()
+        admittedCompatibility = nil
+        control?.cancel()
+        preflightControl?.cancel()
         task?.cancel()
         task = nil
-        input = nil; preflightFrames.removeAll()
+        input = nil
+        preflightFrames.removeAll()
         if let gateway { Task { await gateway.detachLogicalLease() } }
         gateway = nil
-        operationDeadline?.cancel(); preflightDeadline?.cancel()
+        operationDeadline?.cancel()
+        preflightDeadline?.cancel()
         sessionDeadline?.cancel()
         if !readyFinished {
             readyFinished = true

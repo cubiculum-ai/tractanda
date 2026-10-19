@@ -39,12 +39,13 @@ public enum ManagedServer {
             for value in [viewItemID, projectRootID, statusRootID, initialProjectID].compactMap({ $0 }) {
                 try Identifier.validate(value)
             }
-            guard peerRuntimeConfigurationPath == nil
-                || (peerRuntimeConfigurationPath!.hasPrefix("/") && peerRuntimeConfigurationPath! != "/"
-                    && peerRuntimeConfigurationPath!.utf8.count <= 4096
-                    && !peerRuntimeConfigurationPath!.contains("\0")
-                    && !peerRuntimeConfigurationPath!.contains("\n")
-                    && !peerRuntimeConfigurationPath!.contains("\r"))
+            guard
+                peerRuntimeConfigurationPath == nil
+                    || (peerRuntimeConfigurationPath!.hasPrefix("/") && peerRuntimeConfigurationPath! != "/"
+                        && peerRuntimeConfigurationPath!.utf8.count <= 4096
+                        && !peerRuntimeConfigurationPath!.contains("\0")
+                        && !peerRuntimeConfigurationPath!.contains("\n")
+                        && !peerRuntimeConfigurationPath!.contains("\r"))
             else {
                 throw TractandaError("invalidService", "Peer runtime configuration path must be absolute.")
             }
@@ -297,7 +298,8 @@ public enum ManagedServer {
             guard arguments[index] == "--project-root", index + 3 < arguments.count,
                 arguments[index + 2] == "--status-root"
             else {
-                throw TractandaError("invalidService", "Managed daemon registration has invalid board arguments.")
+                throw TractandaError(
+                    "invalidService", "Managed daemon registration has invalid board arguments.")
             }
             try Identifier.validate(arguments[index + 1])
             try Identifier.validate(arguments[index + 3])
@@ -310,17 +312,20 @@ public enum ManagedServer {
                 try Identifier.validate(arguments[index + 1])
                 index += 2
             } else if index < arguments.count, arguments[index] != "--peer-runtime-config" {
-                throw TractandaError("invalidService", "Managed daemon registration has invalid project arguments.")
+                throw TractandaError(
+                    "invalidService", "Managed daemon registration has invalid project arguments.")
             }
         } else if index < arguments.count, arguments[index] != "--peer-runtime-config" {
-            throw TractandaError("invalidService", "Managed daemon registration has invalid trailing arguments.")
+            throw TractandaError(
+                "invalidService", "Managed daemon registration has invalid trailing arguments.")
         }
         if index < arguments.count {
             guard index + 2 == arguments.count, arguments[index] == "--peer-runtime-config",
                 arguments[index + 1].hasPrefix("/"), arguments[index + 1] != "/",
                 arguments[index + 1].utf8.count <= 4096
             else {
-                throw TractandaError("invalidService", "Managed daemon registration has invalid peer runtime arguments.")
+                throw TractandaError(
+                    "invalidService", "Managed daemon registration has invalid peer runtime arguments.")
             }
         }
         return arguments

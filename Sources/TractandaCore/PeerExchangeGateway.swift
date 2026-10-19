@@ -181,7 +181,8 @@ struct PeerExchangeState: Sendable {
         guard let boundary, !inventoryComplete else {
             throw TractandaError("invalidPeerCursor", "No active finite inventory continuation.")
         }
-        let page = try store.peerInventoryPage(context: context, boundary: boundary, cursor: inventoryCursor, limit: limit)
+        let page = try store.peerInventoryPage(
+            context: context, boundary: boundary, cursor: inventoryCursor, limit: limit)
         entries = page.entries
         inventoryCursor = page.nextCursor
         checkpoint = page.completionCheckpoint
@@ -203,7 +204,8 @@ struct PeerExchangeState: Sendable {
     private mutating func resumePage(
         _ store: ItemStore, _ context: PeerPackage.Context, _ packageID: String, limit: Int
     ) throws -> [String: ItemValue] {
-        let page = try store.resumePeerIntake(context: context, packageID: packageID, cursor: resumeCursor, limit: limit)
+        let page = try store.resumePeerIntake(
+            context: context, packageID: packageID, cursor: resumeCursor, limit: limit)
         resumePackage = packageID
         resumeCursor = page.nextCursor
         resumeComplete = page.nextCursor == nil
@@ -227,7 +229,8 @@ struct PeerExchangeState: Sendable {
         return fields
     }
     mutating func perform(
-        _ data: Data, store: ItemStore, context: PeerPackage.Context, control: PeerExchangeControl, scanLimit: Int = 128
+        _ data: Data, store: ItemStore, context: PeerPackage.Context, control: PeerExchangeControl,
+        scanLimit: Int = 128
     ) throws -> Data {
         try control.check()
         try compatibility.requireAdmission(store: store, storeID: binding.storeID)
@@ -257,15 +260,23 @@ struct PeerExchangeState: Sendable {
         case "needsTransfer":
             try exact(fields, ["descriptors", "after"])
             let objects = try AuthorityRecord.list(fields["descriptors"]).map(Self.decodeDescriptor)
-            let results = try store.peerNeedsTransfer(context: context, objects: objects,
+            let results = try store.peerNeedsTransfer(
+                context: context, objects: objects,
                 after: integer(fields["after"], maximum: 128), progress: control.check)
-            output = ["nextOffset": .integer(Int64(results.nextOffset)), "complete": .boolean(results.complete),
-                "objects": .list(results.objects.map { result in
-                var fields: [String: ItemValue] = ["descriptor": Self.descriptor(result.descriptor),
-                    "state": .text(result.state.rawValue)]
-                if let disposition = result.disposition { fields["disposition"] = .text(disposition.rawValue) }
-                return .object(fields)
-            })]
+            output = [
+                "nextOffset": .integer(Int64(results.nextOffset)), "complete": .boolean(results.complete),
+                "objects": .list(
+                    results.objects.map { result in
+                        var fields: [String: ItemValue] = [
+                            "descriptor": Self.descriptor(result.descriptor),
+                            "state": .text(result.state.rawValue),
+                        ]
+                        if let disposition = result.disposition {
+                            fields["disposition"] = .text(disposition.rawValue)
+                        }
+                        return .object(fields)
+                    }),
+            ]
         case "exportBegin":
             try exact(fields, ["planID", "packageID"])
             guard let boundary else { throw TractandaError("invalidPeerCursor", "Capture inventory first.") }
@@ -276,19 +287,26 @@ struct PeerExchangeState: Sendable {
         case "pendingIntakes":
             try exact(fields, ["afterID"])
             guard case .text(let after) = fields["afterID"],
-                after.isEmpty || (try? id(.text(after))) != nil else {
+                after.isEmpty || (try? id(.text(after))) != nil
+            else {
                 throw TractandaError("invalidPeerCursor", "Invalid pending receipt continuation.")
             }
             let page = try store.peerPendingIntakes(context: context, after: after.isEmpty ? nil : after)
-            output = ["packages": .list(page.packages.map(ItemValue.text)),
-                "afterID": .text(page.after ?? ""), "complete": .boolean(page.complete)]
+            output = [
+                "packages": .list(page.packages.map(ItemValue.text)),
+                "afterID": .text(page.after ?? ""), "complete": .boolean(page.complete),
+            ]
         case "syncEpoch":
             try exact(fields, [])
             output = ["epoch": .text(try store.peerSyncEpoch()), "security": .text(securityBinding)]
         case "exportExists":
             try exact(fields, ["planID", "packageID"])
-            output = ["exists": .boolean(try store.peerExportExists(context: context,
-                planID: id(fields["planID"]), packageID: id(fields["packageID"])))]
+            output = [
+                "exists": .boolean(
+                    try store.peerExportExists(
+                        context: context,
+                        planID: id(fields["planID"]), packageID: id(fields["packageID"])))
+            ]
         case "exportReopen":
             try exact(fields, ["planID", "packageID"])
             export = try store.reopenPeerExport(
@@ -408,7 +426,8 @@ struct PeerExchangeState: Sendable {
         default:
             throw TractandaError("invalidPeerRequest", "Unknown peer operation.")
         }
-        try control.check(); try compatibility.requireLifetime()
+        try control.check()
+        try compatibility.requireLifetime()
         let response = try JSON.encode(output)
         guard
             response.count
@@ -425,9 +444,15 @@ package final class PeerCompatibilityLifetime: @unchecked Sendable {
     private let lock = NSLock()
     private var active = true
     package init() {}
-    package func cancel() { lock.lock(); active = false; lock.unlock() }
+    package func cancel() {
+        lock.lock()
+        active = false
+        lock.unlock()
+    }
     package func check() throws {
-        lock.lock(); let valid = active; lock.unlock()
+        lock.lock()
+        let valid = active
+        lock.unlock()
         guard valid else { throw PeerExchangeCompatibility.invalid() }
     }
 }
@@ -453,15 +478,19 @@ struct PeerExchangeCompatibility: Sendable {
     var lifetime: PeerCompatibilityLifetime?
     func requireLifetime() throws { try lifetime?.check() }
     static func current(store: ItemStore, storeID: String) throws -> PeerCompatibilityDeclaration {
-        guard let requirement = try CanonicalReaderRequirement.load(root: store.root, ownerUID: store.ownerUID),
-            requirement.storeID == storeID else { throw invalid() }
+        guard
+            let requirement = try CanonicalReaderRequirement.load(root: store.root, ownerUID: store.ownerUID),
+            requirement.storeID == storeID
+        else { throw invalid() }
         try CanonicalFormatSupport.current.require(requirement)
         return try .init(support: .current, requirement: requirement)
     }
     static func invalid() -> TractandaError {
-        TractandaError("peerCompatibilityRequired", "Current mutual peer compatibility admission is required.")
+        TractandaError(
+            "peerCompatibilityRequired", "Current mutual peer compatibility admission is required.")
     }
-    mutating func advance(_ action: PeerCompatibilityAction, store: ItemStore, storeID: String) throws -> Data {
+    mutating func advance(_ action: PeerCompatibilityAction, store: ItemStore, storeID: String) throws -> Data
+    {
         let current = try Self.current(store: store, storeID: storeID)
         switch action {
         case .declare:
@@ -492,7 +521,11 @@ struct PeerExchangeCompatibility: Sendable {
         try (local?.encoded().count ?? 0) + (remote?.encoded().count ?? 0)
     }
 }
-package enum PeerCompatibilityAction: Sendable { case declare, accept(Data), acknowledge(Data) }
+package enum PeerCompatibilityAction: Sendable {
+    case declare
+    case accept(Data)
+    case acknowledge(Data)
+}
 
 struct PeerExchangeStep: Sendable {
     let state: PeerExchangeState
@@ -518,29 +551,44 @@ package actor PeerExchangeGateway {
             control.cancel()
         }
     }
-    package func compatibilityAdmission(lifetime: PeerCompatibilityLifetime,
-        control: PeerExchangeControl) async throws -> PeerCompatibilityAdmission {
-        if let logicalLease { return try await logicalLease.compatibilityAdmission(lifetime: lifetime, control: control) }
+    package func compatibilityAdmission(
+        lifetime: PeerCompatibilityLifetime,
+        control: PeerExchangeControl
+    ) async throws -> PeerCompatibilityAdmission {
+        if let logicalLease {
+            return try await logicalLease.compatibilityAdmission(lifetime: lifetime, control: control)
+        }
         guard !busy, state.compatibility.lifetime == nil else { throw PeerExchangeCompatibility.invalid() }
-        busy = true; defer { busy = false }
+        busy = true
+        defer { busy = false }
         return try await withTaskCancellationHandler {
-            try control.check(); try lifetime.check()
-            var next = state; next.compatibility.lifetime = lifetime
+            try control.check()
+            try lifetime.check()
+            var next = state
+            next.compatibility.lifetime = lifetime
             try await coordinator.authorizePeerExchange(next, control: control)
-            try control.check(); try lifetime.check()
+            try control.check()
+            try lifetime.check()
             state = next
             return PeerCompatibilityAdmission(binding: state.binding, compatibility: state.compatibility)
-        } onCancel: { control.cancel() }
+        } onCancel: {
+            control.cancel()
+        }
     }
-    package func advanceCompatibility(_ action: PeerCompatibilityAction, control: PeerExchangeControl) async throws -> Data {
+    package func advanceCompatibility(_ action: PeerCompatibilityAction, control: PeerExchangeControl)
+        async throws -> Data
+    {
         if let logicalLease { return try await logicalLease.advanceCompatibility(action, control: control) }
         guard !busy else { throw TractandaError("serviceBusy", "One peer operation is already active.") }
-        busy = true; defer { busy = false }
+        busy = true
+        defer { busy = false }
         return try await withTaskCancellationHandler {
             let step = try await coordinator.advancePeerCompatibility(action, state: state, control: control)
             state = step.state
             return step.response
-        } onCancel: { control.cancel() }
+        } onCancel: {
+            control.cancel()
+        }
     }
     package func execute(_ request: Data, control: PeerExchangeControl) async throws -> Data {
         if let logicalLease { return try await logicalLease.execute(request, control: control) }
@@ -549,7 +597,8 @@ package actor PeerExchangeGateway {
         defer { busy = false }
         return try await withTaskCancellationHandler {
             let step = try await coordinator.performPeerExchange(request, state: state, control: control)
-            try state.compatibility.requireLifetime(); try control.check()
+            try state.compatibility.requireLifetime()
+            try control.check()
             state = step.state
             return step.response
         } onCancel: {
@@ -557,13 +606,18 @@ package actor PeerExchangeGateway {
         }
     }
     /// Host-only pending-work access. Peers cannot write this through a request operation.
-    package func syncWork(_ replacement: PeerSyncWork? = nil, control: PeerExchangeControl) async throws -> PeerSyncWork {
+    package func syncWork(_ replacement: PeerSyncWork? = nil, control: PeerExchangeControl) async throws
+        -> PeerSyncWork
+    {
         if let logicalLease { return try await logicalLease.syncWork(replacement, control: control) }
         guard !busy else { throw TractandaError("serviceBusy", "One peer operation is already active.") }
-        busy = true; defer { busy = false }
+        busy = true
+        defer { busy = false }
         return try await withTaskCancellationHandler {
             try await coordinator.peerSyncWork(state: state, replacement: replacement, control: control)
-        } onCancel: { control.cancel() }
+        } onCancel: {
+            control.cancel()
+        }
     }
     /// Authorize a transport boundary on the same owner as canonical retirement activation.
     /// An authorized bounded frame may already be queued when a later removal is learned.

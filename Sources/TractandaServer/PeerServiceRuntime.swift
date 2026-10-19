@@ -46,11 +46,15 @@ actor PeerServiceRuntime {
     private(set) var lastErrorCode: String?
     private static let maximumConnections = 64
 
-    init(configuration: PeerRuntimeConfiguration, coordinator: ServiceCoordinator,
+    init(
+        configuration: PeerRuntimeConfiguration, coordinator: ServiceCoordinator,
         group: MultiThreadedEventLoopGroup, limits: PeerConnectionLimits = .init(),
-        resolver: PeerNameResolver? = nil, logicalScanEntriesForTesting: Int = 128) throws {
+        resolver: PeerNameResolver? = nil, logicalScanEntriesForTesting: Int = 128
+    ) throws {
         try limits.validate()
-        guard (1...128).contains(logicalScanEntriesForTesting) else { throw TractandaError("resourceLimit", "Invalid logical scan window.") }
+        guard (1...128).contains(logicalScanEntriesForTesting) else {
+            throw TractandaError("resourceLimit", "Invalid logical scan window.")
+        }
         self.logicalScanEntries = logicalScanEntriesForTesting
         self.configuration = configuration
         self.coordinator = coordinator
@@ -89,7 +93,8 @@ actor PeerServiceRuntime {
             // Same-generation private-file loss/substitution is not an automatic key rotation.
             if let previous = lastAccepted, previous.securityToken == snapshot.securityToken {
                 guard previous.hasSameCredentials(as: snapshot) else {
-                    throw TractandaError("peerConfigurationChanged", "Private peer credentials changed without rotation.")
+                    throw TractandaError(
+                        "peerConfigurationChanged", "Private peer credentials changed without rotation.")
                 }
             }
             guard !stopped, refreshRequest == request else { return }
@@ -97,7 +102,10 @@ actor PeerServiceRuntime {
             publication = Publication(snapshot: snapshot, responder: responder)
             lastAccepted = snapshot
             lastErrorCode = nil
-            if changed { await invalidateLogical(); await closeConnections() }
+            if changed {
+                await invalidateLogical()
+                await closeConnections()
+            }
         } catch {
             guard !stopped, refreshRequest == request else { return }
             publication = nil
@@ -109,30 +117,41 @@ actor PeerServiceRuntime {
 
     /// One retained host-owned context per exact current credential. The opaque context ID
     /// never bypasses TLS, current private witnesses, canonical generation or security gates.
-    private func logicalLease(_ binding: PeerExchangeBinding, publication expected: Publication,
-        close: @escaping @Sendable () async -> Void) async throws -> PeerLogicalExchange.Lease {
+    private func logicalLease(
+        _ binding: PeerExchangeBinding, publication expected: Publication,
+        close: @escaping @Sendable () async -> Void
+    ) async throws -> PeerLogicalExchange.Lease {
         try await authorize(expected)
-        guard !binding.localIsInitiator else { throw TractandaError("invalidPeerRole", "Responder logical context requires its fixed role.") }
-        guard expected.snapshot.credentials.contains(where: {
-            $0.binding.peerID == binding.peerID && $0.binding.pairingID == binding.pairingID
-                && $0.binding.localIsInitiator == binding.localIsInitiator
-                && $0.binding.configurationDigest == binding.configurationDigest
-        }) else { throw TractandaError("untrustedPeer", "Logical context does not match current pairing.") }
+        guard !binding.localIsInitiator else {
+            throw TractandaError("invalidPeerRole", "Responder logical context requires its fixed role.")
+        }
+        guard
+            expected.snapshot.credentials.contains(where: {
+                $0.binding.peerID == binding.peerID && $0.binding.pairingID == binding.pairingID
+                    && $0.binding.localIsInitiator == binding.localIsInitiator
+                    && $0.binding.configurationDigest == binding.configurationDigest
+            })
+        else { throw TractandaError("untrustedPeer", "Logical context does not match current pairing.") }
         if let old = logical[binding.peerID], !old.snapshot.hasSameAdmission(as: expected.snapshot) {
             logical.removeValue(forKey: binding.peerID)
             if let context = try? await old.task.value { await context.invalidate() }
         }
         if logical[binding.peerID] == nil {
-            guard logical.count < 256 else { throw TractandaError("resourceLimit", "Logical pairing capacity reached.") }
-            let coordinator = coordinator, scanEntries = logicalScanEntries
-            let task = Task { try await PeerLogicalExchange(coordinator: coordinator, binding: binding,
-                snapshot: expected.snapshot, maximumScanEntries: scanEntries) }
+            guard logical.count < 256 else {
+                throw TractandaError("resourceLimit", "Logical pairing capacity reached.")
+            }
+            let coordinator = coordinator
+            let scanEntries = logicalScanEntries
+            let task = Task {
+                try await PeerLogicalExchange(
+                    coordinator: coordinator, binding: binding,
+                    snapshot: expected.snapshot, maximumScanEntries: scanEntries)
+            }
             logical[binding.peerID] = Logical(id: UUID(), snapshot: expected.snapshot, task: task)
         }
         let entry = logical[binding.peerID]!
         let context: PeerLogicalExchange
-        do { context = try await entry.task.value }
-        catch {
+        do { context = try await entry.task.value } catch {
             if logical[binding.peerID]?.id == entry.id { logical.removeValue(forKey: binding.peerID) }
             throw error
         }
@@ -152,7 +171,8 @@ actor PeerServiceRuntime {
         }
     }
     private func invalidateLogical() async {
-        let entries = Array(logical.values); logical.removeAll()
+        let entries = Array(logical.values)
+        logical.removeAll()
         for entry in entries { if let context = try? await entry.task.value { await context.invalidate() } }
     }
 
@@ -178,8 +198,10 @@ actor PeerServiceRuntime {
         }
     }
     private func accept(_ channel: any Channel) async throws -> PeerExchangeConnection {
-        guard !stopped, admitting, incoming.count + outgoing.count + reservedPeers.count < Self.maximumConnections,
-            let publication, let responder = publication.responder else {
+        guard !stopped, admitting,
+            incoming.count + outgoing.count + reservedPeers.count < Self.maximumConnections,
+            let publication, let responder = publication.responder
+        else {
             throw TractandaError("untrustedPeer", "No current responder credentials are available.")
         }
         let id = UUID()
@@ -190,10 +212,14 @@ actor PeerServiceRuntime {
         do {
             try await authorize(publication)
             try Task.checkCancellation()
-            let connection = try await PeerExchangeConnection.install(on: channel, responder: responder,
+            let connection = try await PeerExchangeConnection.install(
+                on: channel, responder: responder,
                 coordinator: coordinator, limits: limits.exchange,
                 authorizeAdmission: { try await self.authorize(publication) },
-                logicalLease: { binding, close in try await self.logicalLease(binding, publication: publication, close: close) }).get()
+                logicalLease: { binding, close in
+                    try await self.logicalLease(binding, publication: publication, close: close)
+                }
+            ).get()
             try Task.checkCancellation()
             guard !stopped, incoming[id] === channel else { throw CancellationError() }
             incomingConnections[id] = connection
@@ -222,13 +248,15 @@ actor PeerServiceRuntime {
     /// Explicit, owned one-attempt connection; no background dialing or retry is started.
     func connect(peerID: String) async throws -> PeerExchangeConnection {
         guard !configuration.synchronization.enabled else {
-            throw TractandaError("serviceBusy", "The configured synchronization owner leases peer connections.")
+            throw TractandaError(
+                "serviceBusy", "The configured synchronization owner leases peer connections.")
         }
         return try await connectOwned(peerID: peerID)
     }
     private func connectOwned(peerID: String) async throws -> PeerExchangeConnection {
         guard !stopped, admitting, !reservedPeers.contains(peerID),
-            incoming.count + outgoing.count + reservedPeers.count < Self.maximumConnections else {
+            incoming.count + outgoing.count + reservedPeers.count < Self.maximumConnections
+        else {
             throw TractandaError("serviceBusy", "Peer connector is stopped or busy.")
         }
         reservedPeers.insert(peerID)
@@ -241,7 +269,8 @@ actor PeerServiceRuntime {
         await refreshNow()
         guard !stopped, let publication,
             let endpoint = configuration.peers.first(where: { $0.alias == peerID })?.endpoint,
-            let credential = publication.snapshot.credentials.first(where: { $0.binding.peerID == peerID }) else {
+            let credential = publication.snapshot.credentials.first(where: { $0.binding.peerID == peerID })
+        else {
             throw TractandaError("untrustedPeer", "Peer endpoint or current credentials are unavailable.")
         }
         guard credential.binding.localIsInitiator else {
@@ -254,14 +283,17 @@ actor PeerServiceRuntime {
         }
         let pairing = try PeerPairing(credential: credential)
         let task = Task { [self] in
-            try await PeerConnector.connect(group: group, host: endpoint.host, port: endpoint.port,
+            try await PeerConnector.connect(
+                group: group, host: endpoint.host, port: endpoint.port,
                 pairing: pairing, coordinator: coordinator, resolver: resolver, limits: limits,
                 authorizeAdmission: { try await self.authorize(publication) })
         }
         connecting[peerID] = task
         let connection = try await withTaskCancellationHandler {
             try await task.value
-        } onCancel: { task.cancel() }
+        } onCancel: {
+            task.cancel()
+        }
         do {
             try Task.checkCancellation()
             try await authorize(publication)
@@ -318,7 +350,10 @@ actor PeerServiceRuntime {
         }
     }
     func deactivate() {
-        stopped = true; admitting = false; publication = nil; refreshRequest = UUID()
+        stopped = true
+        admitting = false
+        publication = nil
+        refreshRequest = UUID()
         refreshTask?.cancel()
     }
     func close() async {
@@ -343,8 +378,10 @@ actor PeerServiceRuntime {
     }
 
     func operatorStatus(synchronization: PeerSynchronizationStatus) throws -> PeerOperatorRuntimeStatus {
-        try .init(state: stopped ? .stopped : admitting ? .active : .unavailable,
-            listenerConfigured: configuration.listen != nil, responderPublished: publication?.responder != nil,
+        try .init(
+            state: stopped ? .stopped : admitting ? .active : .unavailable,
+            listenerConfigured: configuration.listen != nil,
+            responderPublished: publication?.responder != nil,
             incomingConnectionCount: incoming.count, outgoingConnectionCount: outgoing.count,
             pendingConnectionCount: reservedPeers.count, lastErrorCode: lastErrorCode,
             synchronization: synchronization)

@@ -42,8 +42,10 @@ let package = Package(
             ]),
         .target(
             name: "CTractandaPlatform",
-            linkerSettings: [.linkedLibrary("pam"), .linkedLibrary("uuid", .when(platforms: [.linux])),
-                .linkedLibrary("proc", .when(platforms: [.macOS]))]),
+            linkerSettings: [
+                .linkedLibrary("pam"), .linkedLibrary("uuid", .when(platforms: [.linux])),
+                .linkedLibrary("proc", .when(platforms: [.macOS])),
+            ]),
         .executableTarget(name: "TractandaAuthHelper", dependencies: ["CTractandaPlatform"]),
         .executableTarget(
             name: "TractandaSetup",
@@ -117,12 +119,15 @@ let package = Package(
             ]),
         .executableTarget(
             name: "TractandaCLI",
-            dependencies: ["TractandaCore", "TractandaKanban", "TractandaWeb", "TractandaServer", "CTractandaPlatform"]),
+            dependencies: [
+                "TractandaCore", "TractandaKanban", "TractandaWeb", "TractandaServer", "CTractandaPlatform",
+            ]),
         .testTarget(name: "TractandaCLITests", dependencies: ["TractandaCLI", "TractandaCore"]),
         .testTarget(
             name: "TractandaCoreTests", dependencies: ["TractandaCore"], resources: [.copy("Fixtures")]),
         // Offline development support is compiled only into this opt-in test executable.
-        .testTarget(name: "FirstSourceConversionTests", dependencies: ["TractandaCore"],
+        .testTarget(
+            name: "FirstSourceConversionTests", dependencies: ["TractandaCore"],
             path: "scripts/development/first-source-conversion", exclude: ["README.md", "run.py"]),
         .testTarget(name: "TractandaSetupTests", dependencies: ["TractandaSetup"]),
         .testTarget(

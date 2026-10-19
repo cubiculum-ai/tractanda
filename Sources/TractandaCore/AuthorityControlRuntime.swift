@@ -329,7 +329,8 @@ extension PeerIntakeCoordinator {
         if let reservedPageID {
             _ = try AuthorityRecord.persistentID(.text(reservedPageID))
             guard values.count <= 256 else {
-                throw TractandaError("resourceLimit", "Reserved local framing requires a single bounded page.")
+                throw TractandaError(
+                    "resourceLimit", "Reserved local framing requires a single bounded page.")
             }
         }
         var objects = values

@@ -1,11 +1,12 @@
 import CoreFoundation
-#if os(Linux)
-import Glibc
-#else
-import Darwin
-#endif
 import Foundation
 import TractandaClient
+
+#if os(Linux)
+    import Glibc
+#else
+    import Darwin
+#endif
 
 public struct NativeSourceFileIdentity: Codable, Equatable, Sendable {
     public let device: UInt64

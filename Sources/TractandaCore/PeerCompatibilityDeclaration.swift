@@ -111,14 +111,16 @@ package struct PeerCompatibilityAcknowledgement: Codable, Equatable, Sendable {
         try validate()
         let data = try JSON.encode(self)
         guard data.count <= Self.maximumBytes else {
-            throw TractandaError("resourceLimit", "Peer compatibility acknowledgement exceeds its byte limit.")
+            throw TractandaError(
+                "resourceLimit", "Peer compatibility acknowledgement exceeds its byte limit.")
         }
         return data
     }
 
     package static func decode(_ data: Data) throws -> Self {
         guard data.count <= maximumBytes else {
-            throw TractandaError("resourceLimit", "Peer compatibility acknowledgement exceeds its byte limit.")
+            throw TractandaError(
+                "resourceLimit", "Peer compatibility acknowledgement exceeds its byte limit.")
         }
         let value = try JSON.decode(Self.self, data)
         try value.validate()
@@ -143,9 +145,10 @@ package struct PeerCompatibilityAcknowledgement: Codable, Equatable, Sendable {
     }
 
     private static func isSHA256(_ value: String) -> Bool {
-        value.utf8.count == 64 && value.utf8.allSatisfy {
-            (48...57).contains($0) || (97...102).contains($0)
-        }
+        value.utf8.count == 64
+            && value.utf8.allSatisfy {
+                (48...57).contains($0) || (97...102).contains($0)
+            }
     }
 
     private static func failure(_ message: String) -> TractandaError {

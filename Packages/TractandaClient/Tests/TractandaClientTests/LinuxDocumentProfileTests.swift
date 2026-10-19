@@ -1,16 +1,21 @@
 import Foundation
 import XCTest
+
 @testable import TractandaClient
 
 final class LinuxDocumentProfileTests: XCTestCase {
     private func identity(_ values: [String: String]) throws -> DocumentConverterIdentity {
-        var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(DocumentConverterIdentity())) as! [String: String]
+        var object =
+            try JSONSerialization.jsonObject(with: JSONEncoder().encode(DocumentConverterIdentity()))
+            as! [String: String]
         object.merge(values) { _, value in value }
-        return try JSONDecoder().decode(DocumentConverterIdentity.self, from: JSONSerialization.data(withJSONObject: object))
+        return try JSONDecoder().decode(
+            DocumentConverterIdentity.self, from: JSONSerialization.data(withJSONObject: object))
     }
     func testFinitePackageLookupRejectsUnknownArchitecture() throws {
         XCTAssertNotNil(DocumentConverterIdentity.approvedLinuxConverter(architecture: "arm64"))
-        XCTAssertEqual(DocumentConverterIdentity.approvedLinuxConverter(architecture: "amd64"),
+        XCTAssertEqual(
+            DocumentConverterIdentity.approvedLinuxConverter(architecture: "amd64"),
             DocumentConverterIdentity.approvedLinuxConverter(architecture: "x86_64"))
         XCTAssertNil(DocumentConverterIdentity.approvedLinuxConverter(architecture: "riscv64"))
         XCTAssertNil(DocumentConverterIdentity.approvedLinuxConverter(architecture: ""))
@@ -25,13 +30,18 @@ final class LinuxDocumentProfileTests: XCTestCase {
         if value != DocumentConverterIdentity() { XCTAssertThrowsError(try value.validateCurrent()) }
     }
     func testHistoricalV1RemainsReadableButNotCurrent() throws {
-        let value = try identity(["converter": "tractanda.docling-native.v1", "preprocessing": "opaque-rgb2048-17tiles-v1"])
+        let value = try identity([
+            "converter": "tractanda.docling-native.v1", "preprocessing": "opaque-rgb2048-17tiles-v1",
+        ])
         try value.validate()
         XCTAssertThrowsError(try value.validateCurrent())
     }
     func testUnapprovedWellFormedRendererDigestIsRejected() throws {
         let known = Set(LinuxDocumentConverterProfiles.knownConverters)
-        let candidate = (0..<16).map { "tractanda.docling-native.v2-idefics3-gelu-f32+linux-raster." + String(repeating: String($0, radix: 16), count: 64) }.first { !known.contains($0) }!
+        let candidate = (0..<16).map {
+            "tractanda.docling-native.v2-idefics3-gelu-f32+linux-raster."
+                + String(repeating: String($0, radix: 16), count: 64)
+        }.first { !known.contains($0) }!
         XCTAssertThrowsError(try identity(["converter": candidate]).validate())
     }
     func testProfileDoesNotAuthorizeDifferentModelOrParser() throws {

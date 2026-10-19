@@ -136,8 +136,9 @@ final class ExtractedTextUnitToolTests: XCTestCase, @unchecked Sendable {
         private var service: ItemService?
         private var unitCalls = 0
         init(root: URL) throws {
-            service = ItemService(store: try ItemStore(
-                root: root, revisionProjectionEnabled: true, authorityIntakeEnabled: true))
+            service = ItemService(
+                store: try ItemStore(
+                    root: root, revisionProjectionEnabled: true, authorityIntakeEnabled: true))
         }
         func send(_ data: Data) throws -> Data {
             guard let service else { throw TractandaError("serviceClosed", "Fixture closed") }

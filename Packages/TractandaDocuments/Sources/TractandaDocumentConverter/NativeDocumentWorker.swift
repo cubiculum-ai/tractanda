@@ -1,8 +1,3 @@
-#if os(Linux)
-import Glibc
-#else
-import Darwin
-#endif
 import DoclingRaster
 import Foundation
 import MLX
@@ -12,6 +7,12 @@ import MLXNN
 import MLXVLM
 import TractandaClient
 import VMLXTokenizers
+
+#if os(Linux)
+    import Glibc
+#else
+    import Darwin
+#endif
 
 private final class ProtocolWriter {
     private let file: FileHandle
@@ -43,11 +44,11 @@ private final class ProtocolWriter {
 /// One trusted Core-bound descriptor and model context; durable state belongs to Core.
 enum NativeDocumentWorker {
     static func main(_ args: [String]) async {
-#if os(Linux)
-        await Device.withDefaultDevice(.cpu) { await run(args) }
-#else
-        await run(args)
-#endif
+        #if os(Linux)
+            await Device.withDefaultDevice(.cpu) { await run(args) }
+        #else
+            await run(args)
+        #endif
     }
     private static func run(_ args: [String]) async {
         // Reserve protocol stdout first, before any runtime operations can print.
@@ -122,7 +123,8 @@ enum NativeDocumentWorker {
                         }!.1
                         try require(vision.dtype == .bfloat16, "Loaded vision weights are not BF16.")
                         loaded.model.train(false)
-                        loaded.processor = NativeDocumentInput(tokenizer: loaded.tokenizer, traceDirectory: nil, comparisonDirectory: nil)
+                        loaded.processor = NativeDocumentInput(
+                            tokenizer: loaded.tokenizer, traceDirectory: nil, comparisonDirectory: nil)
                         context = loaded
                         try writer!.progress("modelReady", request: request, pageCount: session.pageCount)
                     } catch {

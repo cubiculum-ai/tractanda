@@ -5,15 +5,18 @@ import XCTest
 
 final class SetupPackageArgumentsTests: XCTestCase {
     func testParsesFiniteLifecycleActionsAndDescriptorActions() throws {
-        XCTAssertEqual(try SetupPackageArguments.parse(["--package-lifecycle", "prerm-upgrade"])?.action, .prermUpgrade)
-        XCTAssertEqual(try SetupPackageArguments.parse(["--package-lifecycle", "abort-upgrade"])?.action, .abortUpgrade)
+        XCTAssertEqual(
+            try SetupPackageArguments.parse(["--package-lifecycle", "prerm-upgrade"])?.action, .prermUpgrade)
+        XCTAssertEqual(
+            try SetupPackageArguments.parse(["--package-lifecycle", "abort-upgrade"])?.action, .abortUpgrade)
         XCTAssertEqual(try SetupPackageArguments.parse(["--package-lifecycle", "remove"])?.action, .remove)
 
         let descriptor = "/run/tractanda/incoming-descriptor.json"
         for action in ["preinst", "configure"] {
-            let parsed = try XCTUnwrap(SetupPackageArguments.parse([
-                "--package-lifecycle", action, "--descriptor", descriptor,
-            ]))
+            let parsed = try XCTUnwrap(
+                SetupPackageArguments.parse([
+                    "--package-lifecycle", action, "--descriptor", descriptor,
+                ]))
             XCTAssertEqual(parsed.action.rawValue, action)
             XCTAssertEqual(parsed.descriptor?.path, descriptor)
             XCTAssertNil(parsed.instance)
@@ -70,9 +73,10 @@ final class SetupPackageArgumentsTests: XCTestCase {
 
     func testDescriptorParsingDoesNotRequireThePathToExist() throws {
         let path = "/run/tractanda/nonexistent-descriptor.json"
-        let parsed = try XCTUnwrap(SetupPackageArguments.parse([
-            "--package-lifecycle", "preinst", "--descriptor", path,
-        ]))
+        let parsed = try XCTUnwrap(
+            SetupPackageArguments.parse([
+                "--package-lifecycle", "preinst", "--descriptor", path,
+            ]))
         XCTAssertEqual(parsed.descriptor?.path, path)
     }
 }

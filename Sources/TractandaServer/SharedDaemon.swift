@@ -37,25 +37,31 @@ public actor SharedDaemon {
         authenticator: any PasswordAuthenticating = SystemPasswordAuthenticator(),
         claimStartupReadiness: @Sendable () -> Bool = { true }
     ) async throws -> SharedDaemon {
-        try await startOwned(configuration: configuration, authenticator: authenticator,
+        try await startOwned(
+            configuration: configuration, authenticator: authenticator,
             claimStartupReadiness: claimStartupReadiness, makeAccountDirectory: { SystemAccountDirectory() },
             peerLimits: .init(), syncLimits: .init())
     }
     /// Host-only fixture injection; no request/CLI can select an account provider or deadlines.
-    static func startForTesting(configuration: DaemonConfiguration,
+    static func startForTesting(
+        configuration: DaemonConfiguration,
         makeAccountDirectory: @escaping @Sendable () -> any AccountDirectory,
         peerLimits: PeerConnectionLimits = .init(),
         syncLimits: PeerSyncLimits = .init(),
-        claimStartupReadiness: @escaping @Sendable () -> Bool = { true }) async throws -> SharedDaemon {
-        try await startOwned(configuration: configuration, authenticator: SystemPasswordAuthenticator(),
+        claimStartupReadiness: @escaping @Sendable () -> Bool = { true }
+    ) async throws -> SharedDaemon {
+        try await startOwned(
+            configuration: configuration, authenticator: SystemPasswordAuthenticator(),
             claimStartupReadiness: claimStartupReadiness, makeAccountDirectory: makeAccountDirectory,
             peerLimits: peerLimits, syncLimits: syncLimits)
     }
-    private static func startOwned(configuration: DaemonConfiguration,
+    private static func startOwned(
+        configuration: DaemonConfiguration,
         authenticator: any PasswordAuthenticating,
         claimStartupReadiness: @Sendable () -> Bool,
         makeAccountDirectory: @escaping @Sendable () -> any AccountDirectory,
-        peerLimits: PeerConnectionLimits, syncLimits: PeerSyncLimits) async throws -> SharedDaemon {
+        peerLimits: PeerConnectionLimits, syncLimits: PeerSyncLimits
+    ) async throws -> SharedDaemon {
         try configuration.validate()
         let peerConfiguration = try configuration.peerRuntimeConfigurationPath.map {
             try PeerRuntimeConfiguration.load(from: $0)
@@ -83,31 +89,40 @@ public actor SharedDaemon {
         var synchronization: PeerSyncRuntime?
         do {
             if let peerConfiguration {
-                let runtime = try PeerServiceRuntime(configuration: peerConfiguration,
+                let runtime = try PeerServiceRuntime(
+                    configuration: peerConfiguration,
                     coordinator: coordinator, group: group, limits: peerLimits)
                 peerRuntime = runtime
                 if peerConfiguration.synchronization.enabled {
-                    synchronization = try PeerSyncRuntime(configuration: peerConfiguration,
+                    synchronization = try PeerSyncRuntime(
+                        configuration: peerConfiguration,
                         coordinator: coordinator, network: runtime, limits: syncLimits)
                 }
                 if let endpoint = peerConfiguration.listen {
-                    peer = try await DaemonListeners.peer(group: group, host: endpoint.host, port: endpoint.port,
+                    peer = try await DaemonListeners.peer(
+                        group: group, host: endpoint.host, port: endpoint.port,
                         initialize: { runtime.install(on: $0) })
                 }
                 await runtime.refreshNow()
             }
-            let statusRuntime = peerRuntime, statusSynchronization = synchronization
+            let statusRuntime = peerRuntime
+            let statusSynchronization = synchronization
             await application.setPeerStatusProvider {
                 if let statusRuntime {
                     let sync: PeerSynchronizationStatus
-                    if let statusSynchronization { sync = try await statusSynchronization.operatorStatus() }
-                    else { sync = try .init(state: .disabled) }
+                    if let statusSynchronization {
+                        sync = try await statusSynchronization.operatorStatus()
+                    } else {
+                        sync = try .init(state: .disabled)
+                    }
                     let status = try await statusRuntime.operatorStatus(synchronization: sync)
-                    return try .init(state: status.state,
+                    return try .init(
+                        state: status.state,
                         configurationPath: configuration.peerRuntimeConfigurationPath,
                         settingsDigest: peerConfiguration?.settingsDigest,
                         synchronizationEnabled: peerConfiguration?.synchronization.enabled ?? false,
-                        listenerConfigured: status.listenerConfigured, responderPublished: status.responderPublished,
+                        listenerConfigured: status.listenerConfigured,
+                        responderPublished: status.responderPublished,
                         incomingConnectionCount: status.incomingConnectionCount,
                         outgoingConnectionCount: status.outgoingConnectionCount,
                         pendingConnectionCount: status.pendingConnectionCount,
@@ -125,16 +140,20 @@ public actor SharedDaemon {
                         ])
                     }
                     return try await application.native(request, forUID: uid)
-                }, privateBegin: { request, uid, control in
+                },
+                privateBegin: { request, uid, control in
                     guard await readiness.isReady() else {
                         throw TractandaError("serviceBusy", "Service is starting or stopping.")
                     }
-                    return try await application.beginPrivateCredential(request, forUID: uid, control: control)
-                }, enrollmentBegin: { request, uid, control in
+                    return try await application.beginPrivateCredential(
+                        request, forUID: uid, control: control)
+                },
+                enrollmentBegin: { request, uid, control in
                     guard await readiness.isReady() else {
                         throw TractandaError("serviceBusy", "Service is starting or stopping.")
                     }
-                    return try await application.beginPrivateEnrollment(request, forUID: uid, control: control)
+                    return try await application.beginPrivateEnrollment(
+                        request, forUID: uid, control: control)
                 })
             if let port = configuration.httpPort {
                 http = try await DaemonListeners.http(
@@ -152,7 +171,8 @@ public actor SharedDaemon {
             await coordinator.startCanonicalVerification()
             return SharedDaemon(
                 coordinator: coordinator, sessions: sessions, application: application, group: group,
-                unix: unix!, http: http, peer: peer, peerRuntime: peerRuntime, synchronization: synchronization, readiness: readiness,
+                unix: unix!, http: http, peer: peer, peerRuntime: peerRuntime,
+                synchronization: synchronization, readiness: readiness,
                 endpoints: .init(
                     socketPath: configuration.socketPath,
                     httpURL: http.map { "http://127.0.0.1:\($0.port ?? 0)" },

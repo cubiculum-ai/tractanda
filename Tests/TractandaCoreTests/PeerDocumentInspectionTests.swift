@@ -11,7 +11,8 @@ final class PeerDocumentInspectionTests: XCTestCase {
     }
 
     private func fixture(pageCount: Int = 3) throws -> Fixture {
-        let root = try GuardedFixtureDirectory.create(prefix: "i", source: "PeerDocumentInspectionTests", test: name)
+        let root = try GuardedFixtureDirectory.create(
+            prefix: "i", source: "PeerDocumentInspectionTests", test: name)
         do {
             let estimatedBytes = UInt64(pageCount) * 4096 + 64 * 1024
             guard estimatedBytes < AttachmentFixtureCapacity.fixtureCapBytes else {
@@ -119,9 +120,12 @@ final class PeerDocumentInspectionTests: XCTestCase {
             windows += 1
             XCTAssertLessThan(windows, 128)
             do {
-                _ = try inspection.step(budget: .init(bytes: 64 * 1024, maximumSteps: 8),
-                    synchronize: false, inspect: { path, file in
-                        try file.check(); visits[path, default: 0] += 1
+                _ = try inspection.step(
+                    budget: .init(bytes: 64 * 1024, maximumSteps: 8),
+                    synchronize: false,
+                    inspect: { path, file in
+                        try file.check()
+                        visits[path, default: 0] += 1
                     })
             } catch let error as TractandaError where error.code == "peerPayloadVerifying" {}
             XCTAssertFalse(inspection.retainsDirectoryDescriptors)
@@ -134,7 +138,8 @@ final class PeerDocumentInspectionTests: XCTestCase {
         let tree = base.reduce(f.root) { $0.appendingPathComponent($1) }
         let moved = tree.appendingPathExtension("retained")
         try FileManager.default.moveItem(at: tree, to: moved)
-        try FileManager.default.createDirectory(at: tree, withIntermediateDirectories: false,
+        try FileManager.default.createDirectory(
+            at: tree, withIntermediateDirectories: false,
             attributes: [.posixPermissions: 0o700])
         XCTAssertThrowsError(try stale.step(budget: .init(), synchronize: false, inspect: { _, _ in }))
         XCTAssertFalse(stale.retainsDirectoryDescriptors)

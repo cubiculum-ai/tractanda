@@ -41,7 +41,9 @@ final class CorpusReaderLifecycleTests: XCTestCase {
         }
     }
     private func store(_ root: URL, maximum: Int64 = 16 * 1024 * 1024) throws -> ItemStore {
-        if !FileManager.default.fileExists(atPath: root.path) { _ = try ItemStore.initializeFresh(root: root) }
+        if !FileManager.default.fileExists(atPath: root.path) {
+            _ = try ItemStore.initializeFresh(root: root)
+        }
         return try ItemStore(
             root: root, attachmentUploadPolicy: .init(maximumStagedBytes: maximum, minimumFreeBytes: reserve),
             revisionProjectionEnabled: true, authorityIntakeEnabled: true)

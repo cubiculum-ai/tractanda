@@ -19,12 +19,15 @@ package final class PeerPairing: Sendable {
         let input = try credential.withTLSInput { binding, bytes in
             let profile = try PeerTLSProfile(
                 storeID: binding.storeID,
-                initiatorReplicaID: binding.localIsInitiator ? binding.localReplicaID : binding.remoteReplicaID,
-                responderReplicaID: binding.localIsInitiator ? binding.remoteReplicaID : binding.localReplicaID,
+                initiatorReplicaID: binding.localIsInitiator
+                    ? binding.localReplicaID : binding.remoteReplicaID,
+                responderReplicaID: binding.localIsInitiator
+                    ? binding.remoteReplicaID : binding.localReplicaID,
                 pairingID: binding.pairingID)
             return (binding, profile, try PeerTLSSecret(bytes: bytes))
         }
-        try self.init(peerID: input.0.peerID, profile: input.1,
+        try self.init(
+            peerID: input.0.peerID, profile: input.1,
             role: input.0.localIsInitiator ? .initiator : .responder,
             configurationDigest: input.0.configurationDigest, secret: input.2)
     }

@@ -74,10 +74,13 @@ final class PeerIntakeCoordinator {
     private var operationReadCapacity: UInt64 = 0
     /// Read-only owning-operation budget evidence, inspected on this coordinator's serial owner.
     var operationReadBytesForTesting: UInt64 { operationReadCapacity - remainingReadBytes }
-    func withOperation<T>(recovery: Bool = false, maximumReadBytes: UInt64? = nil, _ body: () throws -> T) throws -> T {
+    func withOperation<T>(recovery: Bool = false, maximumReadBytes: UInt64? = nil, _ body: () throws -> T)
+        throws -> T
+    {
         var enclosing: (remaining: UInt64, capacity: UInt64, window: UInt64)?
         if operationDepth == 0 {
-            remainingReadBytes = recovery ? journal.limits.maximumRecoveryReadBytes : journal.limits.maximumReadBytes
+            remainingReadBytes =
+                recovery ? journal.limits.maximumRecoveryReadBytes : journal.limits.maximumReadBytes
             if let maximumReadBytes { remainingReadBytes = min(remainingReadBytes, maximumReadBytes) }
             operationReadCapacity = remainingReadBytes
         } else if let maximumReadBytes {
@@ -105,10 +108,13 @@ final class PeerIntakeCoordinator {
             try self.progress?()
             if self.operationDepth > 0 {
                 guard count >= 0, UInt64(count) <= self.remainingReadBytes else {
-                    throw TractandaError("resourceLimit", "Admission exhausted the owning operation read budget.")
+                    throw TractandaError(
+                        "resourceLimit", "Admission exhausted the owning operation read budget.")
                 }
                 self.remainingReadBytes -= UInt64(count)
-            } else { try local.charge(count) }
+            } else {
+                try local.charge(count)
+            }
         }
     }
     init(
@@ -126,7 +132,9 @@ final class PeerIntakeCoordinator {
     }
     func context(peerID: String, readBudget: ((Int) throws -> Void)? = nil) throws -> PeerPackage.Context {
         if peerID == "local" {
-            guard let identity = try ReplicaIdentity.load(root: root, storeID: storeID, ownerUID: ownerUID, readBudget: readBudget)
+            guard
+                let identity = try ReplicaIdentity.load(
+                    root: root, storeID: storeID, ownerUID: ownerUID, readBudget: readBudget)
             else {
                 throw TractandaError(
                     "missingReplicaIdentity", "Local publication requires its private replica identity.")
@@ -146,11 +154,19 @@ final class PeerIntakeCoordinator {
         return context
     }
     func requireIntakeCurrent(_ supplied: PeerPackage.Context, packageID: String?) throws {
-        if let provisioningScope, try provisioningScope.permits(supplied, packageID: packageID, readBudget: admissionReadBudget()) { return }
+        if let provisioningScope,
+            try provisioningScope.permits(supplied, packageID: packageID, readBudget: admissionReadBudget())
+        {
+            return
+        }
         try requireCurrent(supplied)
     }
     func intakePublicationIsCurrent(_ publication: PeerIntakeJournal.Publication) throws -> Bool {
-        if let provisioningScope, try provisioningScope.permits(publication, readBudget: admissionReadBudget()) { return true }
+        if let provisioningScope,
+            try provisioningScope.permits(publication, readBudget: admissionReadBudget())
+        {
+            return true
+        }
         return (try? context(peerID: publication.context.peerID)) == publication.context
     }
     func requireCurrent(_ supplied: PeerPackage.Context, readBudget: ((Int) throws -> Void)? = nil) throws {
@@ -177,18 +193,24 @@ final class PeerIntakeCoordinator {
     }
     /// Known bytes cannot bypass loss of the receipt that admitted them. This is read-only;
     /// a new package must not manufacture a replacement for missing published/origin proof.
-    func requireRetainedReceipt(_ row: AuthorityStore.RetainedObject, original: Data, index: ItemIndex) throws {
+    func requireRetainedReceipt(_ row: AuthorityStore.RetainedObject, original: Data, index: ItemIndex) throws
+    {
         guard row.permittedOrigin else { return }
         guard let publication = try journal.publication(row.packageID),
             publication.context.peerID == row.peerID,
-            publication.context.configurationDigest == row.configurationDigest else {
+            publication.context.configurationDigest == row.configurationDigest
+        else {
             throw TractandaError("peerRepairRequired", "Retained original lost its admitted receipt proof.")
         }
         let origin: String?
-        if row.descriptor.kind == .item { origin = try AuthorityRevision(originalBytes: original).revision.provenance?.originReplicaID }
-        else { origin = try AuthorityRecordCodec.decode(original).record.originReplicaID }
+        if row.descriptor.kind == .item {
+            origin = try AuthorityRevision(originalBytes: original).revision.provenance?.originReplicaID
+        } else {
+            origin = try AuthorityRecordCodec.decode(original).record.originReplicaID
+        }
         if let origin, !publication.context.permittedOrigins.contains(origin),
-            try !admittedReceiptPermits(packageID: row.packageID, origin: origin, index: index) {
+            try !admittedReceiptPermits(packageID: row.packageID, origin: origin, index: index)
+        {
             throw TractandaError("peerRepairRequired", "Retained original lost its admitted origin proof.")
         }
     }
@@ -368,7 +390,9 @@ final class PeerIntakeCoordinator {
                                 index: index, budget: budget, publish: publish,
                                 beforePublication: {
                                     try self.progress?()
-                                    if !recovering { try self.requireIntakeCurrent(begin.context, packageID: packageID) }
+                                    if !recovering {
+                                        try self.requireIntakeCurrent(begin.context, packageID: packageID)
+                                    }
                                 })
                             if complete { break }
                             throw TractandaError(
@@ -480,14 +504,20 @@ final class PeerIntakeCoordinator {
             let admitted: Bool
             if let origin, !publication.context.permittedOrigins.contains(origin), !recovering {
                 admitted = try sealAdmittedOrigin(packageID: packageID, origin: origin, index: index)
-            } else { admitted = false }
+            } else {
+                admitted = false
+            }
             if admitted, let old = try index.authorityReceipt(objectID: descriptor.id, packageID: packageID),
-                !old.permittedOrigin { try index.admitOriginReceipt(old) }
+                !old.permittedOrigin
+            {
+                try index.admitOriginReceipt(old)
+            }
             let row = AuthorityStore.RetainedObject(
                 descriptor: descriptor, path: path,
                 packageID: packageID, peerID: publication.context.peerID,
                 configurationDigest: publication.context.configurationDigest,
-                permittedOrigin: (origin.map(publication.context.permittedOrigins.contains) ?? false) || admitted)
+                permittedOrigin: (origin.map(publication.context.permittedOrigins.contains) ?? false)
+                    || admitted)
             try index.retainAuthorityObject(row, revision: revision, authority: authority)
             if applyAssessment, publication.context.peerID != "local", let revision {
                 try assessRetiredOriginalIfNeeded(revision, row: row, index: index)
@@ -543,7 +573,9 @@ final class PeerIntakeCoordinator {
                             if try AuthorityStore.isInitialHistoryReceipt(
                                 row, node: node, publication: publication,
                                 root: root, storeID: storeID, ownerUID: ownerUID, files: journal.files)
-                            { continue }
+                            {
+                                continue
+                            }
                             guard let origin = try node.revision.provenance?.originReplicaID,
                                 publication.context.permittedOrigins == [origin]
                             else {
@@ -660,14 +692,16 @@ final class PeerIntakeCoordinator {
         if value.evaluation.disposition == .unknownOrigin,
             let replacement = try journal.files.readIfPresent(
                 path: ["authority", "admitted-assessments", packageID, object.id],
-                maximumBytes: PeerPackage.maximumPageBytes) {
+                maximumBytes: PeerPackage.maximumPageBytes)
+        {
             let rebound = try PeerPackage.decode(AdmittedAssessment.self, replacement)
             guard rebound.object == object,
                 let proof = try originReceipt(packageID: packageID, origin: rebound.origin),
                 proof == rebound.receipt,
                 let publication = try journal.publication(packageID),
                 proof.manifestDigest == publication.manifestDigest,
-                proof.contextDigest == AuthorityRecordCodec.sha256(try JSON.encode(publication.context)) else {
+                proof.contextDigest == AuthorityRecordCodec.sha256(try JSON.encode(publication.context))
+            else {
                 throw PeerOriginAdmission.failure("Reconsidered assessment lost its exact origin receipt.")
             }
             value = rebound.assessment
@@ -694,16 +728,28 @@ final class PeerIntakeCoordinator {
                 guard prior.evaluation.disposition == .unknownOrigin,
                     evaluation.disposition != .unknownOrigin,
                     let original = try journal.object(object, packageID: packageID),
-                    let origin = try AuthorityRevision(originalBytes: original).revision.provenance?.originReplicaID,
-                    let proof = try originReceipt(packageID: packageID, origin: origin) else {
-                    throw TractandaError("authorityReconciliationRequired", "A prior assessment needs reviewed reconciliation.")
+                    let origin = try AuthorityRevision(originalBytes: original).revision.provenance?
+                        .originReplicaID,
+                    let proof = try originReceipt(packageID: packageID, origin: origin)
+                else {
+                    throw TractandaError(
+                        "authorityReconciliationRequired", "A prior assessment needs reviewed reconciliation."
+                    )
                 }
-                let replacement = AdmittedAssessment(object: object, origin: origin, receipt: proof, assessment: value)
+                let replacement = AdmittedAssessment(
+                    object: object, origin: origin, receipt: proof, assessment: value)
                 let path = ["authority", "admitted-assessments", packageID, object.id]
                 let bytes = try JSON.encode(replacement)
-                if let existing = try journal.files.readIfPresent(path: path, maximumBytes: PeerPackage.maximumPageBytes) {
-                    guard existing == bytes else { throw PeerOriginAdmission.failure("Reconsidered assessment differs.") }
-                } else { try journal.files.writeImmutable(bytes, path: path, maximumBytes: PeerPackage.maximumPageBytes) }
+                if let existing = try journal.files.readIfPresent(
+                    path: path, maximumBytes: PeerPackage.maximumPageBytes)
+                {
+                    guard existing == bytes else {
+                        throw PeerOriginAdmission.failure("Reconsidered assessment differs.")
+                    }
+                } else {
+                    try journal.files.writeImmutable(
+                        bytes, path: path, maximumBytes: PeerPackage.maximumPageBytes)
+                }
             }
         } else {
             try journal.files.writeImmutable(data, path: path, maximumBytes: PeerPackage.maximumPageBytes)
@@ -1047,8 +1093,10 @@ final class PeerIntakeCoordinator {
                             || result.disposition == .unknownOrigin)
                     {
                         if try assessment(packageID: packageID, object: row.descriptor) == nil
-                            || (assessment(packageID: packageID, object: row.descriptor)?.evaluation.disposition == .unknownOrigin
-                                && result.disposition != .unknownOrigin) {
+                            || (assessment(packageID: packageID, object: row.descriptor)?.evaluation
+                                .disposition == .unknownOrigin
+                                && result.disposition != .unknownOrigin)
+                        {
                             try recordAssessment(
                                 packageID: packageID, object: row.descriptor, evaluation: result)
                         }

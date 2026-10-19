@@ -3,9 +3,9 @@ import Foundation
 import TractandaClient
 
 #if canImport(Darwin)
-import Darwin
+    import Darwin
 #else
-import Glibc
+    import Glibc
 #endif
 
 private struct PeerRuntimeDynamicCodingKey: CodingKey {
@@ -47,7 +47,8 @@ public struct PeerRuntimeConfiguration: Codable, Equatable, Sendable {
         public init(from decoder: Decoder) throws {
             try rejectUnknownFields(decoder, allowed: ["host", "port"])
             let values = try decoder.container(keyedBy: CodingKeys.self)
-            try self.init(host: values.decode(String.self, forKey: .host), port: values.decode(Int.self, forKey: .port))
+            try self.init(
+                host: values.decode(String.self, forKey: .host), port: values.decode(Int.self, forKey: .port))
         }
 
         public func encode(to encoder: Encoder) throws {
@@ -63,14 +64,17 @@ public struct PeerRuntimeConfiguration: Codable, Equatable, Sendable {
             else { throw PeerRuntimeConfiguration.invalid("Peer endpoint host is malformed.") }
             if ["*", "0.0.0.0", "::"].contains(host) {
                 guard allowWildcard else {
-                    throw PeerRuntimeConfiguration.invalid("Remote peer destinations cannot be wildcard addresses.")
+                    throw PeerRuntimeConfiguration.invalid(
+                        "Remote peer destinations cannot be wildcard addresses.")
                 }
                 return
             }
             if host.contains(":") {
                 var address = in6_addr()
                 let parsed = host.withCString { inet_pton(AF_INET6, $0, &address) }
-                guard parsed == 1 else { throw PeerRuntimeConfiguration.invalid("Peer IPv6 address is malformed.") }
+                guard parsed == 1 else {
+                    throw PeerRuntimeConfiguration.invalid("Peer IPv6 address is malformed.")
+                }
                 let unspecified = withUnsafeBytes(of: &address) { bytes in
                     bytes.allSatisfy { $0 == 0 }
                         || (bytes.count == 16 && bytes.prefix(10).allSatisfy { $0 == 0 }
@@ -78,23 +82,28 @@ public struct PeerRuntimeConfiguration: Codable, Equatable, Sendable {
                             && bytes.suffix(4).allSatisfy { $0 == 0 })
                 }
                 guard allowWildcard || !unspecified else {
-                    throw PeerRuntimeConfiguration.invalid("Remote peer destinations cannot be wildcard addresses.")
+                    throw PeerRuntimeConfiguration.invalid(
+                        "Remote peer destinations cannot be wildcard addresses.")
                 }
                 return
             }
             if host.allSatisfy({ $0.isNumber || $0 == "." }) {
                 var address = in_addr()
                 let parsed = host.withCString { inet_pton(AF_INET, $0, &address) }
-                guard parsed == 1 else { throw PeerRuntimeConfiguration.invalid("Peer IPv4 address is malformed.") }
+                guard parsed == 1 else {
+                    throw PeerRuntimeConfiguration.invalid("Peer IPv4 address is malformed.")
+                }
                 return
             }
             let labels = host.split(separator: ".", omittingEmptySubsequences: false)
-            guard labels.allSatisfy({ label in
-                !label.isEmpty && label.utf8.count <= 63 && label.first != "-" && label.last != "-"
-                    && label.utf8.allSatisfy {
-                        (97...122).contains($0) || (48...57).contains($0) || $0 == 45
-                    }
-            }) else { throw PeerRuntimeConfiguration.invalid("Peer DNS host is malformed.") }
+            guard
+                labels.allSatisfy({ label in
+                    !label.isEmpty && label.utf8.count <= 63 && label.first != "-" && label.last != "-"
+                        && label.utf8.allSatisfy {
+                            (97...122).contains($0) || (48...57).contains($0) || $0 == 45
+                        }
+                })
+            else { throw PeerRuntimeConfiguration.invalid("Peer DNS host is malformed.") }
         }
 
         private enum CodingKeys: String, CodingKey, CaseIterable { case host, port }
@@ -111,7 +120,8 @@ public struct PeerRuntimeConfiguration: Codable, Equatable, Sendable {
                 throw PeerRuntimeConfiguration.invalid("Peer alias is invalid.")
             }
             guard alias != "local" else {
-                throw PeerRuntimeConfiguration.invalid("The reserved local peer alias cannot be configured remotely.")
+                throw PeerRuntimeConfiguration.invalid(
+                    "The reserved local peer alias cannot be configured remotely.")
             }
             self.alias = alias
             self.endpoint = try Endpoint(host: host, port: port)
@@ -222,7 +232,8 @@ public struct PeerRuntimeConfiguration: Codable, Equatable, Sendable {
         }
         let listen = values.contains(.listen) ? try values.decode(Endpoint.self, forKey: .listen) : nil
         let peers = values.contains(.peers) ? try values.decode([Peer].self, forKey: .peers) : []
-        let synchronization = values.contains(.synchronization)
+        let synchronization =
+            values.contains(.synchronization)
             ? try values.decode(Synchronization.self, forKey: .synchronization) : nil
         try self.init(listen: listen, peers: peers, synchronization: synchronization)
     }
@@ -248,8 +259,9 @@ public struct PeerRuntimeConfiguration: Codable, Equatable, Sendable {
         }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        let bytes = try encoder.encode(EffectiveSettings(
-            listen: listen, peers: peers, synchronization: synchronization))
+        let bytes = try encoder.encode(
+            EffectiveSettings(
+                listen: listen, peers: peers, synchronization: synchronization))
         return SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
     }
 

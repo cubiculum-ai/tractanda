@@ -13,13 +13,18 @@ extension SetupEngine {
         let directory = roots.configuration.appendingPathComponent("receipts")
         guard exists(directory) else { return [] }
         try requireOwned(directory, uid: 0, directory: true)
-        let entries = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        let entries = try FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: nil)
         if roots.platform == .linux {
-            guard entries.count <= 1024, entries.allSatisfy({
-                $0.pathExtension == "json" && SetupPackageState.validInstance($0.deletingPathExtension().lastPathComponent)
-            }) else { throw SetupError("Unknown or excessive Linux installation receipt inventory.") }
+            guard entries.count <= 1024,
+                entries.allSatisfy({
+                    $0.pathExtension == "json"
+                        && SetupPackageState.validInstance($0.deletingPathExtension().lastPathComponent)
+                })
+            else { throw SetupError("Unknown or excessive Linux installation receipt inventory.") }
         }
-        return try entries
+        return
+            try entries
             .filter { $0.pathExtension == "json" }.sorted { $0.path < $1.path }
             .compactMap { try readReceipt($0.deletingPathExtension().lastPathComponent) }
     }
@@ -28,7 +33,9 @@ extension SetupEngine {
     func currentClientRelease() throws -> String? {
         guard exists(clientLink) else { return nil }
         if roots.platform == .linux {
-            guard !isLink(clientLink) else { throw SetupError("Linux active package payload must be a protected real directory.") }
+            guard !isLink(clientLink) else {
+                throw SetupError("Linux active package payload must be a protected real directory.")
+            }
             try requireOwned(clientLink, uid: 0, directory: true)
             _ = try verifyBundle(at: clientLink)
             return clientLink.path
@@ -57,8 +64,10 @@ extension SetupEngine {
         let link = clientLink
         if roots.platform == .linux {
             guard let release, release == clientLink.path,
-                try currentClientRelease() == release else {
-                throw SetupError("Linux active program files belong to dpkg; Setup cannot retarget or remove them.")
+                try currentClientRelease() == release
+            else {
+                throw SetupError(
+                    "Linux active program files belong to dpkg; Setup cannot retarget or remove them.")
             }
             // There is no Linux client retarget: dpkg already replaced the one shared payload.
             // The package transaction admits every store before restart; old receipt digests may
@@ -79,7 +88,7 @@ extension SetupEngine {
         }
     }
     func removeClientLink(_ receipt: InstallationReceipt) throws {
-        if roots.platform == .linux { return } // dpkg owns the real active payload directory.
+        if roots.platform == .linux { return }  // dpkg owns the real active payload directory.
         guard let target = try currentClientRelease(), receipt.releases[target] != nil else { return }
         let remaining = try installationReceipts().filter {
             $0.instance != receipt.instance && $0.state == .active

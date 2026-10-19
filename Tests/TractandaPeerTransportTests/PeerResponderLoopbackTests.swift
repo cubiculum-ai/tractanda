@@ -37,21 +37,25 @@ final class PeerResponderLoopbackTests: XCTestCase {
         _ context: PeerPackage.Context, local: String, remote: String, pairingID: String,
         initiator: Bool, key: UInt8
     ) throws -> PeerCredential {
-        try PeerCredential(binding: PeerExchangeBinding(
-            peerID: context.peerID, storeID: context.storeID, localReplicaID: local,
-            remoteReplicaID: remote, pairingID: pairingID, localIsInitiator: initiator,
-            configurationDigest: context.configurationDigest), secret: [UInt8](repeating: key, count: 32))
+        try PeerCredential(
+            binding: PeerExchangeBinding(
+                peerID: context.peerID, storeID: context.storeID, localReplicaID: local,
+                remoteReplicaID: remote, pairingID: pairingID, localIsInitiator: initiator,
+                configurationDigest: context.configurationDigest), secret: [UInt8](repeating: key, count: 32))
     }
 
     func testTwoDistinctReplicasShareLoopbackResponderAndRejectUnpairedOrWrongKeyClients() async throws {
         try AttachmentFixtureCapacity.requireFree()
         // Three tiny stores and their WALs are estimated below24MiB; no payload/scale fixture.
         XCTAssertLessThanOrEqual(24 * 1024 * 1024, AttachmentFixtureCapacity.fixtureCapBytes)
-        let f = try Fixture(directory: GuardedFixtureDirectory.create(prefix: "l", source: "PeerResponderLoopbackTests", test: name))
+        let f = try Fixture(
+            directory: GuardedFixtureDirectory.create(
+                prefix: "l", source: "PeerResponderLoopbackTests", test: name))
         try f.bootstrap()
         let thirdRoot = f.directory.appendingPathComponent("third")
         let thirdAccounts = PeerTransportStoreFixtures.Accounts()
-        var third: ItemStore? = try ItemStore(root: thirdRoot, accounts: thirdAccounts,
+        var third: ItemStore? = try ItemStore(
+            root: thirdRoot, accounts: thirdAccounts,
             revisionProjectionEnabled: true)
         third = nil
         // The same explicit fixture-only clone mechanism as the existing two-store fixture:
@@ -59,14 +63,16 @@ final class PeerResponderLoopbackTests: XCTestCase {
         let identity = ".tractanda-store-identity.json"
         try Data(contentsOf: f.sourceRoot.appendingPathComponent(identity)).write(
             to: thirdRoot.appendingPathComponent(identity), options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600],
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
             ofItemAtPath: thirdRoot.appendingPathComponent(identity).path)
         try FileManager.default.removeItem(at: thirdRoot.appendingPathComponent("index"))
         third = try Fixture.open(thirdRoot, thirdAccounts)
         let thirdID = try XCTUnwrap(third?.replicaID)
         let receiverID = try XCTUnwrap(f.receiver.replicaID)
         let origins = [f.origin, receiverID, thirdID].sorted()
-        let bootstrap = try PeerPackage.Context(peerID: "third-bootstrap", storeID: f.storeID,
+        let bootstrap = try PeerPackage.Context(
+            peerID: "third-bootstrap", storeID: f.storeID,
             configurationDigest: AuthorityRecordCodec.sha256(Data("third-bootstrap".utf8)),
             permittedOrigins: origins)
         try third!.configurePeerIntake(peers: [bootstrap])
@@ -74,36 +80,46 @@ final class PeerResponderLoopbackTests: XCTestCase {
         f.context = bootstrap
         try f.bootstrap(to: third)
         f.context = old
-        let first = try PeerPackage.Context(peerID: "first", storeID: f.storeID,
+        let first = try PeerPackage.Context(
+            peerID: "first", storeID: f.storeID,
             configurationDigest: AuthorityRecordCodec.sha256(Data("first-generation".utf8)),
             permittedOrigins: origins)
-        let second = try PeerPackage.Context(peerID: "second", storeID: f.storeID,
+        let second = try PeerPackage.Context(
+            peerID: "second", storeID: f.storeID,
             configurationDigest: AuthorityRecordCodec.sha256(Data("second-generation".utf8)),
             permittedOrigins: origins)
         try f.source.configurePeerIntake(peers: [first])
         try f.receiver.configurePeerIntake(peers: [old, first, second])
         try third!.configurePeerIntake(peers: [bootstrap, second])
-        let firstID = try Fixture.id(), secondID = try Fixture.id()
-        let firstClient = try credential(first, local: f.origin, remote: receiverID,
+        let firstID = try Fixture.id()
+        let secondID = try Fixture.id()
+        let firstClient = try credential(
+            first, local: f.origin, remote: receiverID,
             pairingID: firstID, initiator: true, key: 0x51)
-        let firstServer = try credential(first, local: receiverID, remote: f.origin,
+        let firstServer = try credential(
+            first, local: receiverID, remote: f.origin,
             pairingID: firstID, initiator: false, key: 0x51)
-        let secondClient = try credential(second, local: thirdID, remote: receiverID,
+        let secondClient = try credential(
+            second, local: thirdID, remote: receiverID,
             pairingID: secondID, initiator: true, key: 0x72)
-        let secondServer = try credential(second, local: receiverID, remote: thirdID,
+        let secondServer = try credential(
+            second, local: receiverID, remote: thirdID,
             pairingID: secondID, initiator: false, key: 0x72)
         for (store, context, credential) in [
             (f.source!, first, firstClient), (f.receiver!, first, firstServer),
             (third!, second, secondClient), (f.receiver!, second, secondServer),
         ] {
-            try store.registerPeerCredential(credential, context: context,
+            try store.registerPeerCredential(
+                credential, context: context,
                 expectedContextToken: store.peerIntakeContextToken(), operationID: Fixture.id())
         }
         try f.capacity()
         let sourceAccounts = ResponderAccounts(f.sourceAccounts)
         let receiverAccounts = ResponderAccounts(f.receiverAccounts)
         let remainingAccounts = ResponderAccounts(thirdAccounts)
-        f.source = nil; f.receiver = nil; third = nil
+        f.source = nil
+        f.receiver = nil
+        third = nil
         let source = try await coordinator(f.sourceRoot, accounts: sourceAccounts)
         defer { await source.close() }
         let receiver = try await coordinator(f.receiverRoot, accounts: receiverAccounts)
@@ -118,7 +134,8 @@ final class PeerResponderLoopbackTests: XCTestCase {
         let right = try await PeerPairing.load(peerID: second.peerID, coordinator: remaining)
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { try? await group.shutdownGracefully() }
-        let accepted = LoopbackConnections(), clients = LoopbackConnections()
+        let accepted = LoopbackConnections()
+        let clients = LoopbackConnections()
         var settings = PeerExchangeLimits()
         settings.maximumRequests = 8
         settings.maximumWireBytes = 1024 * 1024
@@ -128,8 +145,10 @@ final class PeerResponderLoopbackTests: XCTestCase {
         let listener = try await ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 4)
             .childChannelInitializer { channel in
-                PeerExchangeConnection.install(on: channel, responder: responder,
-                    coordinator: receiver, limits: limits).map { accepted.append($0) }
+                PeerExchangeConnection.install(
+                    on: channel, responder: responder,
+                    coordinator: receiver, limits: limits
+                ).map { accepted.append($0) }
             }.bind(host: "127.0.0.1", port: 0).get()
         defer {
             try? await listener.close().get()
@@ -142,10 +161,13 @@ final class PeerResponderLoopbackTests: XCTestCase {
             let installed = LoopbackConnections()
             _ = try await ClientBootstrap(group: group).connectTimeout(.seconds(3))
                 .channelInitializer { channel in
-                    PeerExchangeConnection.install(on: channel, pairing: pairing,
-                        coordinator: coordinator, limits: limits).map {
-                            installed.append($0); clients.append($0)
-                        }
+                    PeerExchangeConnection.install(
+                        on: channel, pairing: pairing,
+                        coordinator: coordinator, limits: limits
+                    ).map {
+                        installed.append($0)
+                        clients.append($0)
+                    }
                 }.connect(host: "127.0.0.1", port: port).get()
             let connection = try XCTUnwrap(installed.snapshot().first)
             try await connection.ready.get()
@@ -159,27 +181,33 @@ final class PeerResponderLoopbackTests: XCTestCase {
             let response = try await server.request(.init("inventory")).get()
             XCTAssertNotNil(try JSON.decode([String: ItemValue].self, response)["entries"])
         }
-        let unknown = try credential(first, local: f.origin, remote: receiverID,
+        let unknown = try credential(
+            first, local: f.origin, remote: receiverID,
             pairingID: Fixture.id(), initiator: true, key: 0x51)
-        let wrong = try credential(first, local: f.origin, remote: receiverID,
+        let wrong = try credential(
+            first, local: f.origin, remote: receiverID,
             pairingID: firstID, initiator: true, key: 0x52)
         for input in [unknown, wrong] {
             let pairing = try PeerPairing(credential: input)
             let installed = LoopbackConnections()
             _ = try await ClientBootstrap(group: group).connectTimeout(.seconds(3))
                 .channelInitializer { channel in
-                    PeerExchangeConnection.install(on: channel, pairing: pairing,
-                        coordinator: source, limits: limits).map {
-                            installed.append($0); clients.append($0)
-                        }
+                    PeerExchangeConnection.install(
+                        on: channel, pairing: pairing,
+                        coordinator: source, limits: limits
+                    ).map {
+                        installed.append($0)
+                        clients.append($0)
+                    }
                 }.connect(host: "127.0.0.1", port: port).get()
             let connection = try XCTUnwrap(installed.snapshot().first)
             do {
                 try await connection.ready.get()
                 XCTFail("unpaired or wrong-key client reached application readiness")
             } catch {
-                XCTAssertTrue(error as? PeerTLSError == .handshakeRejected
-                    || (error as? TractandaError)?.code == "serviceClosed")
+                XCTAssertTrue(
+                    error as? PeerTLSError == .handshakeRejected
+                        || (error as? TractandaError)?.code == "serviceClosed")
             }
         }
         XCTAssertEqual(accepted.snapshot().count, 4)

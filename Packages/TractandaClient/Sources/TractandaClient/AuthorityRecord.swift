@@ -207,12 +207,14 @@ public struct AuthorityRecord: Equatable, Sendable {
                 "sourceControl",
             ]
         case .enrollmentApproval:
-            keys = ["approvalProfile", "operationID", "preparationDigest", "targetReplicaID", "pairingID",
+            keys = [
+                "approvalProfile", "operationID", "preparationDigest", "targetReplicaID", "pairingID",
                 "sourceIsInitiator", "credentialProfile", "sourcePeer", "targetPeer",
                 "sourceConfiguration", "targetConfiguration", "sourceOrigins", "targetOrigins",
                 "sourceCredential", "targetCredential", "bootstrap", "securityBinding",
                 "cut", "administrationPolicies", "sourceAdministration", "sourceUID", "groups",
-                "planID", "packageID", "manifestDigest", "boundaryDigest"]
+                "planID", "packageID", "manifestDigest", "boundaryDigest",
+            ]
             if fields["issuerAdmission"] != nil { keys.insert("issuerAdmission") }
         case .originRetirement:
             keys =
@@ -263,7 +265,9 @@ public struct AuthorityRecord: Equatable, Sendable {
         switch kind {
         case .enrollmentApproval:
             if let issuer = fields["issuerAdmission"] {
-                guard try controlBindings(issuer).count == 1 else { throw invalid("Enrollment requires one exact issuer admission.") }
+                guard try controlBindings(issuer).count == 1 else {
+                    throw invalid("Enrollment requires one exact issuer admission.")
+                }
             }
             guard fields["approvalProfile"] == .text("tractanda.peer-enrollment-approval.v1"),
                 fields["credentialProfile"] == .text("org.tractanda.peer-proof/1"),
@@ -281,8 +285,10 @@ public struct AuthorityRecord: Equatable, Sendable {
                 _ = try persistentID(fields[key])
             }
             for key in ["sourcePeer", "targetPeer"] { _ = try text(fields[key]) }
-            for key in ["preparationDigest", "sourceConfiguration", "targetConfiguration",
-                        "sourceCredential", "targetCredential", "securityBinding", "manifestDigest", "boundaryDigest"] {
+            for key in [
+                "preparationDigest", "sourceConfiguration", "targetConfiguration",
+                "sourceCredential", "targetCredential", "securityBinding", "manifestDigest", "boundaryDigest",
+            ] {
                 _ = try digest(fields[key])
             }
             _ = try AuthorityBinding(value: fields["cut"]!)

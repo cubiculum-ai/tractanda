@@ -1,5 +1,5 @@
-import Foundation
 import CTractandaPlatform
+import Foundation
 import TractandaCore
 import TractandaKanban
 import TractandaServer
@@ -174,7 +174,9 @@ func run() throws {
     }
     if try handleConnectionCommand(args) { return }
     if let activation = try peerEnrollmentActivateOptions(arguments: args, options: options) {
-        guard tractanda_start_signals() == 0 else { throw TractandaError("cancelled", "Cannot install finite workflow cancellation handlers.") }
+        guard tractanda_start_signals() == 0 else {
+            throw TractandaError("cancelled", "Cannot install finite workflow cancellation handlers.")
+        }
         defer { tractanda_restore_signals() }
         output(try activation.execute())
         return
@@ -186,11 +188,12 @@ func run() throws {
     if let credentialOptions = try peerCredentialRegistrationOptions(arguments: args, options: options) {
         let input = try PeerPrivateCredentialInput.capture(path: credentialOptions.filePath)
         let connection = try credentialOptions.connection.resolve()
-        output(try NativePeerCredentialRegistration.register(
-            connection: connection,
-            input: input,
-            permittedOrigins: credentialOptions.permittedOrigins,
-            operationID: credentialOptions.operationID))
+        output(
+            try NativePeerCredentialRegistration.register(
+                connection: connection,
+                input: input,
+                permittedOrigins: credentialOptions.permittedOrigins,
+                operationID: credentialOptions.operationID))
         return
     }
     if let statusOptions = try peerStatusOptions(arguments: args, options: options) {
@@ -225,8 +228,11 @@ func run() throws {
         let isManaged = command == "serve" && args.contains("--managed")
         let root = URL(fileURLWithPath: args[1], isDirectory: true)
         let store: ItemStore
-        if command == "init" || (command == "seed" && !FileManager.default.fileExists(
-            atPath: root.appendingPathComponent("canonical-reader.json").path)) {
+        if command == "init"
+            || (command == "seed"
+                && !FileManager.default.fileExists(
+                    atPath: root.appendingPathComponent("canonical-reader.json").path))
+        {
             store = try ItemStore.initializeFresh(root: root, indexDirectory: indexDirectory)
         } else {
             store = try ItemStore.openInitialized(root: root, indexDirectory: indexDirectory)
@@ -242,9 +248,11 @@ func run() throws {
         if command == "configure-access" {
             try require(4)
             let value = try JSON.decode(ItemValue.self, Data(contentsOf: URL(fileURLWithPath: args[2])))
-            output(try JSON.encode(store.withAccess(forUID: store.ownerUID) {
-                try store.configureAccess(value, operationID: args[3])
-            }))
+            output(
+                try JSON.encode(
+                    store.withAccess(forUID: store.ownerUID) {
+                        try store.configureAccess(value, operationID: args[3])
+                    }))
             return
         }
         try require(3)

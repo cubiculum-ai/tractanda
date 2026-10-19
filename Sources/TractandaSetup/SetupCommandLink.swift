@@ -21,7 +21,7 @@ extension SetupEngine {
     }
 
     func publishTUICommand() throws {
-        if roots.platform == .linux { return } // /usr/bin entrypoints are dpkg payload.
+        if roots.platform == .linux { return }  // /usr/bin entrypoints are dpkg payload.
         if exists(tuiCommand) {
             if !ownsTUICommand() {
                 FileHandle.standardError.write(

@@ -79,7 +79,8 @@ struct CategoryPreviewPage: Sendable {
             return CategoryPreviewPage(
                 rows: [], position: position, total: page.total, queryState: page.queryState,
                 consumedCount: 0, unresolvedCount: 0, unhydratedCount: 0,
-                incomplete: page.completeness == "unresolvedItems", conflictsAvailable: page.conflictsAvailable ?? false)
+                incomplete: page.completeness == "unresolvedItems",
+                conflictsAvailable: page.conflictsAvailable ?? false)
         }
         let got = try JSON.decode(
             GetResult.self, client.call("TractandaItem/get", arguments: ["ids": page.ids]))
@@ -87,7 +88,8 @@ struct CategoryPreviewPage: Sendable {
             throw TractandaError("stateChanged", "Refresh the changing board.")
         }
         let unresolved = got.unresolved ?? []
-        let classifiedIDs = got.list.map(\.itemID) + unresolved.map(\.itemID)
+        let classifiedIDs =
+            got.list.map(\.itemID) + unresolved.map(\.itemID)
             + (got.remainingIDs ?? []) + (got.oversizedIDs ?? [])
         guard Set(classifiedIDs).count == classifiedIDs.count, Set(classifiedIDs) == Set(page.ids) else {
             throw TractandaError("protocolError", "Category preview omitted or repeated query IDs.")

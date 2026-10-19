@@ -64,12 +64,13 @@ public struct DaemonConfiguration: Codable, Sendable {
         guard socketPath.hasPrefix("/"), !socketPath.contains("\0"), socketPath.utf8.count <= 103 else {
             throw TractandaError("invalidConfiguration", "Choose a short absolute socket path.")
         }
-        guard peerRuntimeConfigurationPath == nil
-            || (peerRuntimeConfigurationPath!.hasPrefix("/") && peerRuntimeConfigurationPath! != "/"
-                && peerRuntimeConfigurationPath!.utf8.count <= 4096
-                && !peerRuntimeConfigurationPath!.contains("\0")
-                && !peerRuntimeConfigurationPath!.contains("\n")
-                && !peerRuntimeConfigurationPath!.contains("\r"))
+        guard
+            peerRuntimeConfigurationPath == nil
+                || (peerRuntimeConfigurationPath!.hasPrefix("/") && peerRuntimeConfigurationPath! != "/"
+                    && peerRuntimeConfigurationPath!.utf8.count <= 4096
+                    && !peerRuntimeConfigurationPath!.contains("\0")
+                    && !peerRuntimeConfigurationPath!.contains("\n")
+                    && !peerRuntimeConfigurationPath!.contains("\r"))
         else {
             throw TractandaError("invalidConfiguration", "Peer runtime configuration path must be absolute.")
         }

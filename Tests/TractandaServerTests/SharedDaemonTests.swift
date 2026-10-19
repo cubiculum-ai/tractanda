@@ -18,13 +18,18 @@ import XCTest
 
 // Kept identical in the three boundary-test targets; no product API or shared runtime state.
 enum GuardedFixtureDirectory {
-    struct Context { let root: URL; let proof: URL }
+    struct Context {
+        let root: URL
+        let proof: URL
+    }
     static func validate(_ url: URL) throws -> stat {
         var info = stat()
         guard url.path.hasPrefix("/"), url.path == url.standardizedFileURL.resolvingSymlinksInPath().path,
             lstat(url.path, &info) == 0, info.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR),
-            info.st_uid == geteuid(), info.st_mode & 0o777 == 0o700 else {
-            throw TractandaError("fixtureRoot", "Fixture override must be an existing private owned physical directory.")
+            info.st_uid == geteuid(), info.st_mode & 0o777 == 0o700
+        else {
+            throw TractandaError(
+                "fixtureRoot", "Fixture override must be an existing private owned physical directory.")
         }
         return info
     }
@@ -37,13 +42,16 @@ enum GuardedFixtureDirectory {
         guard guarded == "1", let root, let proof, !root.contains("\0"), !proof.contains("\0") else {
             throw TractandaError("fixtureRoot", "Guarded fixture overrides are incomplete.")
         }
-        let result = Context(root: URL(fileURLWithPath: root, isDirectory: true),
+        let result = Context(
+            root: URL(fileURLWithPath: root, isDirectory: true),
             proof: URL(fileURLWithPath: proof, isDirectory: true))
         guard root.hasPrefix("/"), proof.hasPrefix("/"), result.root.path == root,
             result.proof.path == proof, result.root.path != result.proof.path,
             result.root.deletingLastPathComponent().path == result.proof.deletingLastPathComponent().path,
-            try validate(result.root).st_dev == validate(result.proof).st_dev else {
-            throw TractandaError("fixtureRoot", "Fixture and proof overrides must be physical sibling directories.")
+            try validate(result.root).st_dev == validate(result.proof).st_dev
+        else {
+            throw TractandaError(
+                "fixtureRoot", "Fixture and proof overrides must be physical sibling directories.")
         }
         return result
     }
@@ -62,46 +70,65 @@ enum GuardedFixtureDirectory {
         let root = parent.appendingPathComponent(prefix + String(UUID().uuidString.prefix(7)))
         if let socket {
             #if os(Linux)
-            let limit = 108
+                let limit = 108
             #else
-            let limit = 104
+                let limit = 104
             #endif
             guard root.appendingPathComponent(socket).path.utf8.count < limit else {
-                throw TractandaError("resourceLimit", "Configured fixture root leaves no room for a Unix socket.")
+                throw TractandaError(
+                    "resourceLimit", "Configured fixture root leaves no room for a Unix socket.")
             }
         }
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false,
+        try FileManager.default.createDirectory(
+            at: root, withIntermediateDirectories: false,
             attributes: [.posixPermissions: 0o700])
         if let context {
             let actual = root.resolvingSymlinksInPath()
             _ = try validate(actual)
             guard actual.path == root.path, actual.deletingLastPathComponent().path == context.root.path,
-                test.utf8.count <= 256 else { throw TractandaError("fixtureRoot", "Fixture escaped its override.") }
-            let fact: [String: Any] = ["profile": "tractanda.fixture-root-proof.v1", "source": source,
+                test.utf8.count <= 256
+            else { throw TractandaError("fixtureRoot", "Fixture escaped its override.") }
+            let fact: [String: Any] = [
+                "profile": "tractanda.fixture-root-proof.v1", "source": source,
                 "test": test, "root": actual.path, "expectedRoot": context.root.path,
-                "proofRoot": context.proof.path, "uid": Int(geteuid()), "pid": Int(getpid()), "phase": "created"]
+                "proofRoot": context.proof.path, "uid": Int(geteuid()), "pid": Int(getpid()),
+                "phase": "created",
+            ]
             let bytes = try JSONSerialization.data(withJSONObject: fact, options: [.sortedKeys])
-            guard bytes.count <= 2048 else { throw TractandaError("fixtureRoot", "Fixture proof exceeds its bound.") }
-            let temporary = context.root.appendingPathComponent(".fixture-proof-" + UUID().uuidString + ".tmp")
+            guard bytes.count <= 2048 else {
+                throw TractandaError("fixtureRoot", "Fixture proof exceeds its bound.")
+            }
+            let temporary = context.root.appendingPathComponent(
+                ".fixture-proof-" + UUID().uuidString + ".tmp")
             let descriptor = open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
             guard descriptor >= 0 else { throw TractandaError("fixtureRoot", "Cannot create fixture proof.") }
             defer { _ = close(descriptor) }
             try bytes.withUnsafeBytes { buffer in
                 var offset = 0
                 while offset < bytes.count {
-                    let count = write(descriptor, buffer.baseAddress!.advanced(by: offset), bytes.count - offset)
+                    let count = write(
+                        descriptor, buffer.baseAddress!.advanced(by: offset), bytes.count - offset)
                     if count < 0, errno == EINTR { continue }
-                    guard count > 0 else { throw TractandaError("fixtureRoot", "Cannot write fixture proof.") }
+                    guard count > 0 else {
+                        throw TractandaError("fixtureRoot", "Cannot write fixture proof.")
+                    }
                     offset += count
                 }
             }
-            guard fsync(descriptor) == 0 else { throw TractandaError("fixtureRoot", "Cannot sync fixture proof.") }
-            try FileManager.default.moveItem(at: temporary,
+            guard fsync(descriptor) == 0 else {
+                throw TractandaError("fixtureRoot", "Cannot sync fixture proof.")
+            }
+            try FileManager.default.moveItem(
+                at: temporary,
                 to: context.proof.appendingPathComponent(source + "-" + root.lastPathComponent + ".json"))
             let directory = open(context.proof.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-            guard directory >= 0 else { throw TractandaError("fixtureRoot", "Cannot open fixture proof directory.") }
+            guard directory >= 0 else {
+                throw TractandaError("fixtureRoot", "Cannot open fixture proof directory.")
+            }
             defer { _ = close(directory) }
-            guard fsync(directory) == 0 else { throw TractandaError("fixtureRoot", "Cannot sync fixture proof directory.") }
+            guard fsync(directory) == 0 else {
+                throw TractandaError("fixtureRoot", "Cannot sync fixture proof directory.")
+            }
         }
         return root
     }
@@ -324,8 +351,11 @@ final class SharedDaemonTests: XCTestCase {
         try FileManager.default.createDirectory(at: model, withIntermediateDirectories: false)
         let scratch = root.appendingPathComponent("scratch")
         let socket = root.appendingPathComponent("s")
-        do { _ = try ItemStore.initializeFresh(root: root.appendingPathComponent("store"),
-            indexDirectory: root.appendingPathComponent("index")) }
+        do {
+            _ = try ItemStore.initializeFresh(
+                root: root.appendingPathComponent("store"),
+                indexDirectory: root.appendingPathComponent("index"))
+        }
         let daemon = try await SharedDaemon.start(
             configuration: .init(
                 storePath: root.appendingPathComponent("store").path,
@@ -386,21 +416,27 @@ final class SharedDaemonTests: XCTestCase {
                 indexDirectory: root.appendingPathComponent("index")))
     }
     func testStrictStartupRejectsMissingLegacyPendingUnsupportedAndUnsafeStores() async throws {
-        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let root = try directory()
+        defer { try? FileManager.default.removeItem(at: root) }
         let missing = root.appendingPathComponent("missing")
         let legacy = root.appendingPathComponent("legacy")
         do { _ = try ItemStore(root: legacy) }
         let pending = root.appendingPathComponent("pending")
         let user = try SystemAccountDirectory().user(forUID: getuid()).name
-        XCTAssertThrowsError(try ItemStore.createInitialized(root: pending,
-            initialAccessConfiguration: .object(["profile": .text(AccessConfiguration.profile),
-                "users": .list([.text(user)])]), actorUID: getuid(),
-            operationID: UUID.makeVersion1().uuidString.lowercased(),
-            progress: { if $0 == "beforePin" { throw CancellationError() } }))
+        XCTAssertThrowsError(
+            try ItemStore.createInitialized(
+                root: pending,
+                initialAccessConfiguration: .object([
+                    "profile": .text(AccessConfiguration.profile),
+                    "users": .list([.text(user)]),
+                ]), actorUID: getuid(),
+                operationID: UUID.makeVersion1().uuidString.lowercased(),
+                progress: { if $0 == "beforePin" { throw CancellationError() } }))
         let unsupported = root.appendingPathComponent("unsupported")
         do { _ = try ItemStore.initializeFresh(root: unsupported) }
         let declaration = unsupported.appendingPathComponent("canonical-reader.json")
-        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: declaration)) as? [String: Any])
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: declaration)) as? [String: Any])
         object["minimumReaderLevel"] = 999
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: declaration.path)
         try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]).write(to: declaration)
@@ -409,8 +445,9 @@ final class SharedDaemonTests: XCTestCase {
         for candidate in [missing, legacy, pending, unsupported, unsafe] {
             let socket = root.appendingPathComponent("r")
             do {
-                let daemon = try await SharedDaemon.start(configuration: .init(
-                    storePath: candidate.path, socketPath: socket.path, httpPort: nil))
+                let daemon = try await SharedDaemon.start(
+                    configuration: .init(
+                        storePath: candidate.path, socketPath: socket.path, httpPort: nil))
                 await daemon.close()
                 XCTFail("Daemon adopted invalid store \(candidate.lastPathComponent)")
             } catch {}
@@ -422,7 +459,8 @@ final class SharedDaemonTests: XCTestCase {
 }
 
 extension SharedDaemonTests {
-    private func writePeerConfiguration(_ configuration: PeerRuntimeConfiguration, root: URL) throws -> String {
+    private func writePeerConfiguration(_ configuration: PeerRuntimeConfiguration, root: URL) throws -> String
+    {
         let file = root.appendingPathComponent("peer.json")
         try JSONEncoder().encode(configuration).write(to: file, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
@@ -440,25 +478,32 @@ extension SharedDaemonTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let store = root.appendingPathComponent("store")
         do { _ = try ItemStore.initializeFresh(root: store) }
-        let daemon = try await SharedDaemon.start(configuration: .init(storePath: store.path,
-            socketPath: root.appendingPathComponent("s").path, httpPort: nil))
+        let daemon = try await SharedDaemon.start(
+            configuration: .init(
+                storePath: store.path,
+                socketPath: root.appendingPathComponent("s").path, httpPort: nil))
         let endpoints = await daemon.endpoints()
-        XCTAssertNil(endpoints.peerHost); XCTAssertNil(endpoints.peerPort)
+        XCTAssertNil(endpoints.peerHost)
+        XCTAssertNil(endpoints.peerPort)
         let runtime = await daemon.peerRuntimeForTesting()
         XCTAssertNil(runtime)
         await daemon.close()
         let path = try writePeerConfiguration(.init(synchronization: .init(enabled: true)), root: root)
         let missing = root.appendingPathComponent("must-not-create")
         do {
-            _ = try await SharedDaemon.start(configuration: .init(storePath: missing.path,
-                socketPath: root.appendingPathComponent("s").path, httpPort: nil,
-                peerRuntimeConfigurationPath: path))
+            _ = try await SharedDaemon.start(
+                configuration: .init(
+                    storePath: missing.path,
+                    socketPath: root.appendingPathComponent("s").path, httpPort: nil,
+                    peerRuntimeConfigurationPath: path))
             XCTFail("Synchronization implicitly created a store")
         } catch { XCTAssertNotEqual((error as? TractandaError)?.code, "peerSynchronizationUnavailable") }
         XCTAssertFalse(FileManager.default.fileExists(atPath: missing.path))
-        let configured = try await SharedDaemon.start(configuration: .init(storePath: store.path,
-            socketPath: root.appendingPathComponent("s").path, httpPort: nil,
-            peerRuntimeConfigurationPath: path))
+        let configured = try await SharedDaemon.start(
+            configuration: .init(
+                storePath: store.path,
+                socketPath: root.appendingPathComponent("s").path, httpPort: nil,
+                peerRuntimeConfigurationPath: path))
         let synchronization = await configured.synchronizationForTesting()
         XCTAssertNotNil(synchronization)
         await configured.close()
@@ -473,9 +518,11 @@ extension SharedDaemonTests {
         defer { try? await group.shutdownGracefully() }
         let port = try await availablePeerPort(group)
         let path = try writePeerConfiguration(.init(listen: .init(host: "127.0.0.1", port: port)), root: root)
-        let daemon = try await SharedDaemon.start(configuration: .init(storePath: store.path,
-            socketPath: root.appendingPathComponent("s").path, httpPort: nil,
-            peerRuntimeConfigurationPath: path))
+        let daemon = try await SharedDaemon.start(
+            configuration: .init(
+                storePath: store.path,
+                socketPath: root.appendingPathComponent("s").path, httpPort: nil,
+                peerRuntimeConfigurationPath: path))
         defer { await daemon.close() }
         let endpoints = await daemon.endpoints()
         XCTAssertEqual(endpoints.peerPort, port)
@@ -485,7 +532,7 @@ extension SharedDaemonTests {
         XCTAssertFalse(ready)
         let child = try await ClientBootstrap(group: group).connectTimeout(.seconds(2))
             .connect(host: "127.0.0.1", port: port).get()
-        try await child.closeFuture.get() // Bound socket alone grants no TLS/application admission.
+        try await child.closeFuture.get()  // Bound socket alone grants no TLS/application admission.
         let children = await runtime.connectionsForTesting()
         XCTAssertTrue(children.isEmpty)
         await daemon.close()
@@ -513,9 +560,13 @@ extension SharedDaemonTests {
         let occupied = try await ServerBootstrap(group: group).bind(host: "127.0.0.1", port: 0).get()
         let port = try XCTUnwrap(occupied.localAddress?.port)
         let path = try writePeerConfiguration(.init(listen: .init(host: "127.0.0.1", port: port)), root: root)
-        let configuration = DaemonConfiguration(storePath: store.path, socketPath: root.appendingPathComponent("s").path,
+        let configuration = DaemonConfiguration(
+            storePath: store.path, socketPath: root.appendingPathComponent("s").path,
             httpPort: nil, peerRuntimeConfigurationPath: path)
-        do { _ = try await SharedDaemon.start(configuration: configuration); XCTFail("Expected bind failure") } catch {}
+        do {
+            _ = try await SharedDaemon.start(configuration: configuration)
+            XCTFail("Expected bind failure")
+        } catch {}
         XCTAssertFalse(FileManager.default.fileExists(atPath: configuration.socketPath))
         do { _ = try ItemStore.openInitialized(root: store) }
         try await occupied.close().get()
@@ -538,22 +589,31 @@ extension SharedDaemonTests {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { try? await group.shutdownGracefully() }
         let port = try await availablePeerPort(group)
-        let targetPath = try writePeerConfiguration(.init(listen: .init(host: "127.0.0.1", port: port)), root: root)
+        let targetPath = try writePeerConfiguration(
+            .init(listen: .init(host: "127.0.0.1", port: port)), root: root)
         let accounts = f.accounts
-        let target = try await SharedDaemon.startForTesting(configuration: .init(storePath: f.targetRoot.path,
-            socketPath: root.appendingPathComponent("s").path, httpPort: nil,
-            peerRuntimeConfigurationPath: targetPath), makeAccountDirectory: { accounts })
+        let target = try await SharedDaemon.startForTesting(
+            configuration: .init(
+                storePath: f.targetRoot.path,
+                socketPath: root.appendingPathComponent("s").path, httpPort: nil,
+                peerRuntimeConfigurationPath: targetPath), makeAccountDirectory: { accounts })
         defer { await target.close() }
         // The first daemon already loaded immutable settings; a separate node-local document now configures source.
-        let sourcePath = try writePeerConfiguration(.init(peers: [.init(alias: "target", host: "127.0.0.1", port: port)]), root: root)
-        let source = try await SharedDaemon.startForTesting(configuration: .init(storePath: f.sourceRoot.path,
-            socketPath: root.appendingPathComponent("r").path, httpPort: nil,
-            peerRuntimeConfigurationPath: sourcePath), makeAccountDirectory: { accounts })
+        let sourcePath = try writePeerConfiguration(
+            .init(peers: [.init(alias: "target", host: "127.0.0.1", port: port)]), root: root)
+        let source = try await SharedDaemon.startForTesting(
+            configuration: .init(
+                storePath: f.sourceRoot.path,
+                socketPath: root.appendingPathComponent("r").path, httpPort: nil,
+                peerRuntimeConfigurationPath: sourcePath), makeAccountDirectory: { accounts })
         defer { await source.close() }
         let connection = try await source.connectPeer(peerID: "target")
         let response = try await connection.request(.init("inventory")).get()
         XCTAssertNotNil(try JSON.decode([String: ItemValue].self, response)["entries"])
-        do { _ = try await target.connectPeer(peerID: "source"); XCTFail("Responder opened outbound transport") } catch {}
+        do {
+            _ = try await target.connectPeer(peerID: "source")
+            XCTFail("Responder opened outbound transport")
+        } catch {}
         await target.close()
         try await connection.closed.get()
         await source.close()

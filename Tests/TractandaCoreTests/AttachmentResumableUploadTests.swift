@@ -113,8 +113,10 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
             return try create(initialized)
         }()
         try FileManager.default.removeItem(at: directory.appendingPathComponent("index"))
-        let store = try ItemStore.openInitialized(root: directory,
-            attachmentUploadPolicy: AttachmentUploadPolicy(maximumStagedBytes: 20 * 1024,
+        let store = try ItemStore.openInitialized(
+            root: directory,
+            attachmentUploadPolicy: AttachmentUploadPolicy(
+                maximumStagedBytes: 20 * 1024,
                 minimumFreeBytes: AttachmentFixtureCapacity.reserveBytes))
         store.attachmentClockForTesting = { Date(timeIntervalSince1970: 1_700_000_000) }
         let request = intent(base, bytes: Data("unused".utf8), count: .max)

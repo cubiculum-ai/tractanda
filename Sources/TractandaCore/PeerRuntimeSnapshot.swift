@@ -18,7 +18,8 @@ package final class PeerRuntimeSnapshot: Sendable, CustomStringConvertible, Cust
         let replicaID: String
         private let witnesses: [String: String]
 
-        init(credentials: [PeerCredential], securityToken: String, storeID: String, replicaID: String) throws {
+        init(credentials: [PeerCredential], securityToken: String, storeID: String, replicaID: String) throws
+        {
             self.credentials = credentials
             self.securityToken = securityToken
             self.storeID = storeID
@@ -28,15 +29,19 @@ package final class PeerRuntimeSnapshot: Sendable, CustomStringConvertible, Cust
             }
             var witnesses: [String: String] = [:]
             for credential in credentials {
-                guard try witnesses.updateValue(credential.privateBytesDigest,
-                    forKey: credential.binding.peerID) == nil else { throw PeerRuntimeSnapshot.changed() }
+                guard
+                    try witnesses.updateValue(
+                        credential.privateBytesDigest,
+                        forKey: credential.binding.peerID) == nil
+                else { throw PeerRuntimeSnapshot.changed() }
             }
             self.witnesses = witnesses
         }
 
         func requireCurrent(_ current: Self) throws {
             guard securityToken == current.securityToken, storeID == current.storeID,
-                replicaID == current.replicaID, witnesses == current.witnesses else {
+                replicaID == current.replicaID, witnesses == current.witnesses
+            else {
                 throw PeerRuntimeSnapshot.changed()
             }
         }

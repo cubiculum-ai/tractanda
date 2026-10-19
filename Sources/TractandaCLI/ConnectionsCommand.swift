@@ -93,8 +93,10 @@ func handleConnectionCommand(_ arguments: [String]) throws -> Bool {
                 guard !httpModeSet else { throw TractandaError("usage", usage) }
                 httpModeSet = true
                 httpPort = nil
-            } else if ["--http-port", "--view", "--project-root", "--status-root", "--project",
-                "--peer-runtime-config"].contains(
+            } else if [
+                "--http-port", "--view", "--project-root", "--status-root", "--project",
+                "--peer-runtime-config",
+            ].contains(
                 flag),
                 let value = remaining.first, !value.hasPrefix("--")
             {

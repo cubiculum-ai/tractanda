@@ -25,7 +25,8 @@ struct SetupPackageArguments: Equatable, Sendable {
         }
 
         guard command == "--package-lifecycle" else { return nil }
-        guard arguments.count >= 2, let action = Action(rawValue: arguments[1]), action != .runtimeGuard else {
+        guard arguments.count >= 2, let action = Action(rawValue: arguments[1]), action != .runtimeGuard
+        else {
             throw SetupError("Unknown or invalid package lifecycle action.")
         }
 

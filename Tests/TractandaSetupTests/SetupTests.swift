@@ -1,9 +1,9 @@
-import Crypto
 import CTractandaPlatform
+import Crypto
 import Foundation
-@testable import TractandaCore
 import XCTest
 
+@testable import TractandaCore
 @testable import TractandaSetup
 
 final class SetupTests: XCTestCase {
@@ -69,7 +69,8 @@ final class SetupTests: XCTestCase {
         if let guardedRoot {
             defer { try? FileManager.default.removeItem(at: guardedRoot) }
             var total: UInt64 = 0
-            let scan = try XCTUnwrap(FileManager.default.enumerator(at: guardedRoot, includingPropertiesForKeys: nil))
+            let scan = try XCTUnwrap(
+                FileManager.default.enumerator(at: guardedRoot, includingPropertiesForKeys: nil))
             while let url = scan.nextObject() as? URL {
                 let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
                 if values.isRegularFile == true { total += UInt64(values.fileSize ?? 0) }
@@ -82,7 +83,9 @@ final class SetupTests: XCTestCase {
         #if !os(macOS)
             throw XCTSkip("Managed macOS installation tests; Linux installer remains in development.")
         #endif
-        if guardedRoot == nil { guardedRoot = try GuardedFixtureDirectory.create(prefix: "u", source: "SetupTests", test: name) }
+        if guardedRoot == nil {
+            guardedRoot = try GuardedFixtureDirectory.create(prefix: "u", source: "SetupTests", test: name)
+        }
         let root = try XCTUnwrap(guardedRoot).appendingPathComponent("c" + String(fixtureNumber))
         fixtureNumber += 1
         let roots = SetupRoots(
@@ -317,8 +320,12 @@ final class SetupTests: XCTestCase {
     private struct HandoffAccounts: AccountDirectory {
         let ownerUID: UInt32 = 51001
         func user(forUID uid: UInt32) throws -> AccountIdentity {
-            if uid == tractanda_uid() { return .init(uid: uid, name: "daemon", primaryGroupName: "service", groupIDs: [71002]) }
-            if uid == ownerUID { return .init(uid: uid, name: "human", primaryGroupName: "staff", groupIDs: [71001]) }
+            if uid == tractanda_uid() {
+                return .init(uid: uid, name: "daemon", primaryGroupName: "service", groupIDs: [71002])
+            }
+            if uid == ownerUID {
+                return .init(uid: uid, name: "human", primaryGroupName: "staff", groupIDs: [71001])
+            }
             throw TractandaError("unresolvedPrincipal", "Unknown fixture user")
         }
         func user(named name: String) throws -> AccountIdentity {
@@ -333,29 +340,45 @@ final class SetupTests: XCTestCase {
         }
     }
     func testStoreBootstrapUsesServiceIdentityAndHandsAdministrationToSelectedHuman() throws {
-        let f = try fixture(); defer { try? FileManager.default.removeItem(at: f.root) }
-        let root = f.root.appendingPathComponent("handoff"), index = f.root.appendingPathComponent("handoff-index")
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let root = f.root.appendingPathComponent("handoff")
+        let index = f.root.appendingPathComponent("handoff-index")
         let accounts = HandoffAccounts()
         for _ in 0..<2 {
-            try StoreBootstrap.initialize(store: root, indexDirectory: index, owner: "human", instance: "handoff",
+            try StoreBootstrap.initialize(
+                store: root, indexDirectory: index, owner: "human", instance: "handoff",
                 accounts: accounts)
         }
         let store = try ItemStore.openInitialized(root: root, indexDirectory: index, accounts: accounts)
-        XCTAssertThrowsError(try store.withAccess(forUID: tractanda_uid()) { try store.requireAdministrator() })
+        XCTAssertThrowsError(
+            try store.withAccess(forUID: tractanda_uid()) { try store.requireAdministrator() })
         try store.withAccess(forUID: accounts.ownerUID) { try store.requireAdministrator() }
-        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent(".tractanda-first-source-complete.json").path))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent(".tractanda-replica-identity.json").path))
+        XCTAssertTrue(
+            FileManager.default.fileExists(
+                atPath: root.appendingPathComponent(".tractanda-first-source-complete.json").path))
+        XCTAssertTrue(
+            FileManager.default.fileExists(
+                atPath: root.appendingPathComponent(".tractanda-replica-identity.json").path))
     }
     func testStoreBootstrapRejectsLegacyRootAndChangedInitializationKey() throws {
-        let f = try fixture(); defer { try? FileManager.default.removeItem(at: f.root) }
-        let legacy = f.root.appendingPathComponent("legacy"), index = f.root.appendingPathComponent("legacy-index")
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let legacy = f.root.appendingPathComponent("legacy")
+        let index = f.root.appendingPathComponent("legacy-index")
         do { _ = try ItemStore(root: legacy, indexDirectory: index) }
-        XCTAssertThrowsError(try StoreBootstrap.initialize(store: legacy, indexDirectory: index,
-            owner: f.owner, instance: "legacy"))
-        let root = f.root.appendingPathComponent("fresh"), freshIndex = f.root.appendingPathComponent("fresh-index")
-        try StoreBootstrap.initialize(store: root, indexDirectory: freshIndex, owner: f.owner, instance: "original")
-        XCTAssertThrowsError(try StoreBootstrap.initialize(store: root, indexDirectory: freshIndex,
-            owner: f.owner, instance: "different"))
+        XCTAssertThrowsError(
+            try StoreBootstrap.initialize(
+                store: legacy, indexDirectory: index,
+                owner: f.owner, instance: "legacy"))
+        let root = f.root.appendingPathComponent("fresh")
+        let freshIndex = f.root.appendingPathComponent("fresh-index")
+        try StoreBootstrap.initialize(
+            store: root, indexDirectory: freshIndex, owner: f.owner, instance: "original")
+        XCTAssertThrowsError(
+            try StoreBootstrap.initialize(
+                store: root, indexDirectory: freshIndex,
+                owner: f.owner, instance: "different"))
     }
 
     func testUpgradeUsesRecordedStorageWithoutCreatingNewDefaultDirectories() throws {
@@ -757,7 +780,8 @@ final class SetupTests: XCTestCase {
             peerStatusCall: { _, _ in try .init(state: .disabled, synchronization: .init(state: .disabled)) },
             readinessCheck: { _, _, _ in
                 try CanonicalReaderRequirement.withWriterLock(root: root, ownerUID: tractanda_uid()) {
-                    try CanonicalReaderRequirement.beforeEnrollmentApprovalPublication(root: root, ownerUID: tractanda_uid())
+                    try CanonicalReaderRequirement.beforeEnrollmentApprovalPublication(
+                        root: root, ownerUID: tractanda_uid())
                 }
                 raised = try CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid())
                 throw SetupError("candidate health failed after actual requirement advance")
@@ -797,19 +821,25 @@ final class SetupTests: XCTestCase {
             try initial.install(f.options, upgrade: true)
             let previous = try XCTUnwrap(initial.readReceipt("preview"))
             let canonical = extraContent ? try publishFormat2Fixture(previous) : nil
-            let admitted = try XCTUnwrap(CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid()))
+            let admitted = try XCTUnwrap(
+                CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid()))
             XCTAssertNoThrow(try previousSupport.require(admitted))
             try rewriteCanonicalSupport(f, support: .current)
             let candidate = SetupEngine(
                 roots: f.roots, runner: runner, rootCheck: { true }, trustedOwnership: false,
-                peerStatusCall: { _, _ in try .init(state: .disabled, synchronization: .init(state: .disabled)) },
-                readinessCheck: { _, _, _ in throw SetupError("candidate health failed without requirement advance") })
+                peerStatusCall: { _, _ in
+                    try .init(state: .disabled, synchronization: .init(state: .disabled))
+                },
+                readinessCheck: { _, _, _ in
+                    throw SetupError("candidate health failed without requirement advance")
+                })
             XCTAssertThrowsError(try candidate.install(f.options, upgrade: true))
             let restored = try XCTUnwrap(candidate.readReceipt("preview"))
             XCTAssertEqual(restored.state, .active)
             XCTAssertEqual(restored.release, previous.release)
             XCTAssertTrue(runner.jobs.contains("system/ai.tractanda.server.preview"))
-            XCTAssertEqual(try CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid()), admitted)
+            XCTAssertEqual(
+                try CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid()), admitted)
             if let canonical { XCTAssertEqual(try Data(contentsOf: canonical.0), canonical.1) }
         }
     }
@@ -851,22 +881,30 @@ extension SetupTests {
     private final class LoadedPeerStatus {
         var value = try! PeerOperatorRuntimeStatus(state: .disabled, synchronization: .init(state: .disabled))
     }
-    private func peerInstaller(_ f: Fixture, runner: Runner, loaded: LoadedPeerStatus,
-        readiness: @escaping () throws -> Void = {}) -> SetupEngine {
+    private func peerInstaller(
+        _ f: Fixture, runner: Runner, loaded: LoadedPeerStatus,
+        readiness: @escaping () throws -> Void = {}
+    ) -> SetupEngine {
         runner.beforeRun = { executable, arguments in
             guard executable == "/bin/launchctl", arguments.first == "bootstrap" else { return }
-            let object = try PropertyListSerialization.propertyList(from: Data(contentsOf: URL(fileURLWithPath: arguments[2])), format: nil)
+            let object = try PropertyListSerialization.propertyList(
+                from: Data(contentsOf: URL(fileURLWithPath: arguments[2])), format: nil)
             let plist = try XCTUnwrap(object as? [String: Any])
             let argv = try XCTUnwrap(plist["ProgramArguments"] as? [String])
             if let index = argv.firstIndex(of: "--peer-runtime-configuration") {
                 let path = argv[index + 1]
                 let config = try PeerRuntimeConfiguration.decode(Data(contentsOf: URL(fileURLWithPath: path)))
-                loaded.value = try .init(state: .active, configurationPath: path, settingsDigest: config.settingsDigest,
-                    synchronizationEnabled: config.synchronization.enabled, listenerConfigured: config.listen != nil,
+                loaded.value = try .init(
+                    state: .active, configurationPath: path, settingsDigest: config.settingsDigest,
+                    synchronizationEnabled: config.synchronization.enabled,
+                    listenerConfigured: config.listen != nil,
                     synchronization: .init(state: config.synchronization.enabled ? .active : .disabled))
-            } else { loaded.value = try .init(state: .disabled, synchronization: .init(state: .disabled)) }
+            } else {
+                loaded.value = try .init(state: .disabled, synchronization: .init(state: .disabled))
+            }
         }
-        return SetupEngine(roots: f.roots, runner: runner, rootCheck: { true }, trustedOwnership: false,
+        return SetupEngine(
+            roots: f.roots, runner: runner, rootCheck: { true }, trustedOwnership: false,
             peerStatusCall: { _, _ in loaded.value }, readinessCheck: { _, _, _ in try readiness() })
     }
     private func peerOptions(_ f: Fixture, _ action: SetupOptions.PeerRuntimeAction) -> SetupOptions {
@@ -874,13 +912,16 @@ extension SetupTests {
     }
     private func peerInput(_ f: Fixture, listen: Bool = false) throws -> URL {
         let input = f.root.appendingPathComponent("operator-input.json")
-        try PeerRuntimeConfiguration(listen: listen ? .init(host: "127.0.0.1", port: 48730) : nil).encoded().write(to: input)
+        try PeerRuntimeConfiguration(listen: listen ? .init(host: "127.0.0.1", port: 48730) : nil).encoded()
+            .write(to: input)
         return input
     }
     func testManagedPeerFreshDisabledReplacePreserveDisableAndOmittedUpgrade() throws {
-        let f = try fixture(); defer { try? FileManager.default.removeItem(at: f.root) }
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
         try rewriteCanonicalSupport(f, support: .current)
-        let runner = Runner(), loaded = LoadedPeerStatus()
+        let runner = Runner()
+        let loaded = LoadedPeerStatus()
         let installer = peerInstaller(f, runner: runner, loaded: loaded)
         try installer.install(f.options)
         let target = installer.peerConfigurationURL("preview")
@@ -891,13 +932,19 @@ extension SetupTests {
         let configured = try XCTUnwrap(installer.readReceipt("preview"))
         XCTAssertNotNil(configured.peerRuntimeConfiguration)
         XCTAssertNil(configured.peerRuntimePrevious)
-        XCTAssertEqual(loaded.value.state, .active, "Explicit no-listener/sync-off remains a configured on-demand runtime")
+        XCTAssertEqual(
+            loaded.value.state, .active,
+            "Explicit no-listener/sync-off remains a configured on-demand runtime")
         let exact = try Data(contentsOf: target)
         try FileManager.default.removeItem(at: input)
         try installer.install(f.options, upgrade: true)
-        XCTAssertEqual(try installer.readReceipt("preview")?.peerRuntimeConfiguration, configured.peerRuntimeConfiguration)
+        XCTAssertEqual(
+            try installer.readReceipt("preview")?.peerRuntimeConfiguration,
+            configured.peerRuntimeConfiguration)
         XCTAssertEqual(try Data(contentsOf: target), exact)
-        let plist = try PropertyListSerialization.propertyList(from: Data(contentsOf: installer.definitionURL("preview")), format: nil) as? [String: Any]
+        let plist =
+            try PropertyListSerialization.propertyList(
+                from: Data(contentsOf: installer.definitionURL("preview")), format: nil) as? [String: Any]
         let argv = try XCTUnwrap(plist?["ProgramArguments"] as? [String])
         XCTAssertEqual(Array(argv.suffix(2)), ["--peer-runtime-configuration", target.path])
         XCTAssertFalse(argv.contains(input.path))
@@ -907,14 +954,21 @@ extension SetupTests {
         try installer.install(f.options, upgrade: true)
         XCTAssertNil(try installer.readReceipt("preview")?.peerRuntimeConfiguration)
         XCTAssertEqual(loaded.value.state, .disabled)
-        XCTAssertFalse(runner.calls.contains { ["/usr/sbin/dscl", "/usr/sbin/sysadminctl", "/usr/sbin/useradd"].contains($0.0) })
+        XCTAssertFalse(
+            runner.calls.contains {
+                ["/usr/sbin/dscl", "/usr/sbin/sysadminctl", "/usr/sbin/useradd"].contains($0.0)
+            })
     }
     func testManagedPeerFailureBeforeAndAfterPublicationRestoresExactConfiguration() throws {
-        let f = try fixture(); defer { try? FileManager.default.removeItem(at: f.root) }
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
         try rewriteCanonicalSupport(f, support: .current)
-        let runner = Runner(), loaded = LoadedPeerStatus()
+        let runner = Runner()
+        let loaded = LoadedPeerStatus()
         var failReadiness = false
-        let installer = peerInstaller(f, runner: runner, loaded: loaded) { if failReadiness { throw SetupError("fixture readiness failure") } }
+        let installer = peerInstaller(f, runner: runner, loaded: loaded) {
+            if failReadiness { throw SetupError("fixture readiness failure") }
+        }
         let input = try peerInput(f)
         try installer.install(peerOptions(f, .replace(input)))
         let old = try XCTUnwrap(installer.readReceipt("preview"))
@@ -925,13 +979,15 @@ extension SetupTests {
         var failUnload = true
         runner.beforeRun = { executable, arguments in
             if executable == "/bin/launchctl", arguments.first == "bootout", failUnload {
-                failUnload = false; throw SetupError("fixture before publication")
+                failUnload = false
+                throw SetupError("fixture before publication")
             }
             try originalHook?(executable, arguments)
         }
         XCTAssertThrowsError(try installer.install(peerOptions(f, .replace(input)), upgrade: true))
         XCTAssertEqual(try Data(contentsOf: installer.peerConfigurationURL("preview")), bytes)
-        XCTAssertEqual(try installer.readReceipt("preview")?.peerRuntimeConfiguration, old.peerRuntimeConfiguration)
+        XCTAssertEqual(
+            try installer.readReceipt("preview")?.peerRuntimeConfiguration, old.peerRuntimeConfiguration)
         failReadiness = true
         XCTAssertThrowsError(try installer.install(peerOptions(f, .replace(input)), upgrade: true))
         XCTAssertEqual(try Data(contentsOf: installer.peerConfigurationURL("preview")), bytes)
@@ -941,13 +997,17 @@ extension SetupTests {
         XCTAssertTrue(runner.loaded)
     }
     func testManagedPeerLoadedThenDiskDriftCannotCommitOrAutostartAndStopIgnoresDrift() throws {
-        let f = try fixture(); defer { try? FileManager.default.removeItem(at: f.root) }
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
         try rewriteCanonicalSupport(f, support: .current)
-        let runner = Runner(), loaded = LoadedPeerStatus()
+        let runner = Runner()
+        let loaded = LoadedPeerStatus()
         var drift = false
         var installer: SetupEngine!
         installer = peerInstaller(f, runner: runner, loaded: loaded) {
-            if drift { try Data("administrator drift".utf8).write(to: installer.peerConfigurationURL("preview")) }
+            if drift {
+                try Data("administrator drift".utf8).write(to: installer.peerConfigurationURL("preview"))
+            }
         }
         let input = try peerInput(f)
         try installer.install(peerOptions(f, .replace(input)))
@@ -955,20 +1015,25 @@ extension SetupTests {
         drift = true
         XCTAssertThrowsError(try installer.install(peerOptions(f, .replace(input)), upgrade: true))
         let stopped = try XCTUnwrap(installer.readReceipt("preview"))
-        XCTAssertEqual(stopped.state, .preparing); XCTAssertNotNil(stopped.peerRuntimePrevious)
+        XCTAssertEqual(stopped.state, .preparing)
+        XCTAssertNotNil(stopped.peerRuntimePrevious)
         XCTAssertNotNil(stopped.recoveryReason)
         XCTAssertFalse(runner.loaded)
         XCTAssertFalse(FileManager.default.fileExists(atPath: installer.definitionURL("preview").path))
-        XCTAssertEqual(try Data(contentsOf: installer.peerConfigurationURL("preview")), Data("administrator drift".utf8))
+        XCTAssertEqual(
+            try Data(contentsOf: installer.peerConfigurationURL("preview")), Data("administrator drift".utf8))
     }
     func testManagedPeerStartRefusesDriftWithoutBootstrapAndUninstallRemovesOnlyOwnedSettings() throws {
-        let f = try fixture(); defer { try? FileManager.default.removeItem(at: f.root) }
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
         try rewriteCanonicalSupport(f, support: .current)
-        let runner = Runner(), loaded = LoadedPeerStatus()
+        let runner = Runner()
+        let loaded = LoadedPeerStatus()
         let installer = peerInstaller(f, runner: runner, loaded: loaded)
         let input = try peerInput(f)
         try installer.install(peerOptions(f, .replace(input)))
-        let target = installer.peerConfigurationURL("preview"), original = try Data(contentsOf: target)
+        let target = installer.peerConfigurationURL("preview")
+        let original = try Data(contentsOf: target)
         try Data("changed".utf8).write(to: target)
         XCTAssertNoThrow(try installer.stop(f.options), "Stopping remains available when config has drifted")
         let before = runner.calls.filter { $0.1.first == "bootstrap" }.count
@@ -976,9 +1041,12 @@ extension SetupTests {
         XCTAssertEqual(runner.calls.filter { $0.1.first == "bootstrap" }.count, before)
         XCTAssertFalse(runner.loaded)
         // A second fresh owned instance exercises uninstall without bypassing stopped recovery.
-        let f2 = try fixture(); defer { try? FileManager.default.removeItem(at: f2.root) }
+        let f2 = try fixture()
+        defer { try? FileManager.default.removeItem(at: f2.root) }
         try rewriteCanonicalSupport(f2, support: .current)
-        let r2 = Runner(), l2 = LoadedPeerStatus(), i2 = peerInstaller(f2, runner: r2, loaded: l2)
+        let r2 = Runner()
+        let l2 = LoadedPeerStatus()
+        let i2 = peerInstaller(f2, runner: r2, loaded: l2)
         let input2 = try peerInput(f2)
         try i2.install(peerOptions(f2, .replace(input2)))
         let store = try XCTUnwrap(i2.readReceipt("preview")).store
@@ -988,9 +1056,11 @@ extension SetupTests {
         XCTAssertFalse(original.isEmpty)
     }
     func testManagedPeerCanonicalIncompatibleRollbackKeepsSnapshotAndServicesStopped() throws {
-        let f = try fixture(); defer { try? FileManager.default.removeItem(at: f.root) }
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
         try rewriteCanonicalSupport(f, support: .current)
-        let runner = Runner(), loaded = LoadedPeerStatus()
+        let runner = Runner()
+        let loaded = LoadedPeerStatus()
         let initial = peerInstaller(f, runner: runner, loaded: loaded)
         let input = try peerInput(f)
         try initial.install(peerOptions(f, .replace(input)))
@@ -998,7 +1068,8 @@ extension SetupTests {
         let store = URL(fileURLWithPath: first.store).resolvingSymlinksInPath()
         let before = try XCTUnwrap(CanonicalReaderRequirement.load(root: store, ownerUID: tractanda_uid()))
         XCTAssertLessThan(before.minimumReaderLevel, 12)
-        let older = CanonicalFormatSupport(readerLevel: before.minimumReaderLevel, writerLevel: before.minimumReaderLevel,
+        let older = CanonicalFormatSupport(
+            readerLevel: before.minimumReaderLevel, writerLevel: before.minimumReaderLevel,
             read: before.recordFormats, write: before.recordFormats,
             capabilities: before.capabilities, writeCapabilities: before.capabilities)
         XCTAssertNoThrow(try older.require(before))
@@ -1012,7 +1083,8 @@ extension SetupTests {
         var raised: CanonicalReaderRequirement?
         let candidate = peerInstaller(f, runner: runner, loaded: loaded) {
             try CanonicalReaderRequirement.withWriterLock(root: store, ownerUID: tractanda_uid()) {
-                try CanonicalReaderRequirement.beforeEnrollmentApprovalPublication(root: store, ownerUID: tractanda_uid())
+                try CanonicalReaderRequirement.beforeEnrollmentApprovalPublication(
+                    root: store, ownerUID: tractanda_uid())
             }
             raised = try CanonicalReaderRequirement.load(root: store, ownerUID: tractanda_uid())
             throw SetupError("fixture candidate health failed after actual publication-intent floor advance")
@@ -1024,13 +1096,22 @@ extension SetupTests {
         XCTAssertEqual(persisted, raised)
         XCTAssertEqual(persisted.storeID, before.storeID)
         XCTAssertEqual(persisted.recordFormats, before.recordFormats)
-        XCTAssertEqual(persisted.capabilities, Set(before.capabilities + [AuthorityStore.capability, "tractanda.shared-authority.v1",
-            AuthorityStore.causalCapability, PeerEnrollmentApproval.capability]).sorted())
+        XCTAssertEqual(
+            persisted.capabilities,
+            Set(
+                before.capabilities + [
+                    AuthorityStore.capability, "tractanda.shared-authority.v1",
+                    AuthorityStore.causalCapability, PeerEnrollmentApproval.capability,
+                ]
+            ).sorted())
         XCTAssertEqual(persisted.minimumReaderLevel, 12)
-        XCTAssertThrowsError(try older.require(persisted)) { XCTAssertEqual(($0 as? TractandaError)?.code, "incompatibleCanonicalReader") }
+        XCTAssertThrowsError(try older.require(persisted)) {
+            XCTAssertEqual(($0 as? TractandaError)?.code, "incompatibleCanonicalReader")
+        }
         XCTAssertNoThrow(try CanonicalFormatSupport.current.require(persisted))
         let stopped = try XCTUnwrap(candidate.readReceipt("preview"))
-        XCTAssertEqual(stopped.state, .preparing); XCTAssertEqual(stopped.peerRuntimePrevious?.bytes, old)
+        XCTAssertEqual(stopped.state, .preparing)
+        XCTAssertEqual(stopped.peerRuntimePrevious?.bytes, old)
         XCTAssertEqual(stopped.store, previous.store)
         XCTAssertFalse(runner.loaded)
         XCTAssertFalse(FileManager.default.fileExists(atPath: candidate.definitionURL("preview").path))
@@ -1039,16 +1120,20 @@ extension SetupTests {
 
 extension SetupTests {
     func testManagedPeerDisabledRetryAfterLeafRemovalCommitsWithoutReactivation() throws {
-        let f = try fixture(); defer { try? FileManager.default.removeItem(at: f.root) }
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
         try rewriteCanonicalSupport(f, support: .current)
-        let runner = Runner(), loaded = LoadedPeerStatus()
+        let runner = Runner()
+        let loaded = LoadedPeerStatus()
         let installer = peerInstaller(f, runner: runner, loaded: loaded)
         let input = try peerInput(f)
         try installer.install(peerOptions(f, .replace(input)))
         var interrupted = try XCTUnwrap(installer.readReceipt("preview"))
         let old = try Data(contentsOf: installer.peerConfigurationURL("preview"))
-        interrupted.peerRuntimePrevious = .init(configuration: interrupted.peerRuntimeConfiguration, bytes: old)
-        interrupted.peerRuntimeConfiguration = nil; interrupted.state = .preparing
+        interrupted.peerRuntimePrevious = .init(
+            configuration: interrupted.peerRuntimeConfiguration, bytes: old)
+        interrupted.peerRuntimeConfiguration = nil
+        interrupted.state = .preparing
         let disabledDefinition = try installer.serviceDefinition(interrupted)
         try installer.writeProtected(disabledDefinition, to: installer.definitionURL("preview"), mode: 0o644)
         interrupted.definitionSHA256 = ManagedPeerConfiguration.digest(disabledDefinition)
@@ -1058,7 +1143,8 @@ extension SetupTests {
         try installer.install(f.options, upgrade: true)
         let committed = try XCTUnwrap(installer.readReceipt("preview"))
         XCTAssertEqual(committed.state, .active)
-        XCTAssertNil(committed.peerRuntimeConfiguration); XCTAssertNil(committed.peerRuntimePrevious)
+        XCTAssertNil(committed.peerRuntimeConfiguration)
+        XCTAssertNil(committed.peerRuntimePrevious)
         XCTAssertEqual(loaded.value.state, .disabled)
         XCTAssertFalse(FileManager.default.fileExists(atPath: installer.peerConfigurationURL("preview").path))
     }

@@ -111,6 +111,11 @@ def run_systemctl(arguments, allow_not_found=False):
             stderr=subprocess.PIPE, text=True, timeout=10, check=False)
     except Exception as error:
         refuse("cannot prove systemd state: " + type(error).__name__)
+    # systemd 257 returns one for this exact empty unit-file inventory.
+    # A diagnostic, different query/status, or any output remains a failure.
+    if (tuple(arguments) == ("list-unit-files", "--no-legend", "--no-pager", "tractanda-*.service")
+            and result.returncode == 1 and result.stdout == "" and result.stderr == ""):
+        return ""
     if result.returncode != 0:
         fields = {}
         for line in result.stdout.splitlines():

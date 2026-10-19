@@ -413,7 +413,8 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
         guard let prior = try load(root: root, ownerUID: ownerUID) else {
             throw TractandaError("unknownCanonicalCompatibility", "Missing authority reader requirement.")
         }
-        let raised = Self(storeID: prior.storeID, minimumReaderLevel: max(12, prior.minimumReaderLevel),
+        let raised = Self(
+            storeID: prior.storeID, minimumReaderLevel: max(12, prior.minimumReaderLevel),
             recordFormats: prior.recordFormats,
             capabilities: Set(prior.capabilities + [PeerEnrollmentApproval.capability]).sorted())
         try CanonicalFormatSupport.current.require(raised)
@@ -424,7 +425,8 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
         guard let prior = try load(root: root, ownerUID: ownerUID) else {
             throw TractandaError("unknownCanonicalCompatibility", "Missing admission reader requirement.")
         }
-        let raised = Self(storeID: prior.storeID, minimumReaderLevel: max(13, prior.minimumReaderLevel),
+        let raised = Self(
+            storeID: prior.storeID, minimumReaderLevel: max(13, prior.minimumReaderLevel),
             recordFormats: prior.recordFormats,
             capabilities: Set(prior.capabilities + [PeerOriginAdmission.capability]).sorted())
         try CanonicalFormatSupport.current.require(raised)
@@ -435,7 +437,8 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
         guard let prior = try load(root: root, ownerUID: ownerUID) else {
             throw TractandaError("unknownCanonicalCompatibility", "Missing activation reader requirement.")
         }
-        let raised = Self(storeID: prior.storeID, minimumReaderLevel: max(14, prior.minimumReaderLevel),
+        let raised = Self(
+            storeID: prior.storeID, minimumReaderLevel: max(14, prior.minimumReaderLevel),
             recordFormats: prior.recordFormats,
             capabilities: Set(prior.capabilities + [PeerEnrollmentActivation.capability]).sorted())
         try CanonicalFormatSupport.current.require(raised)
@@ -446,7 +449,8 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
         guard let prior = try load(root: root, ownerUID: ownerUID) else {
             throw TractandaError("unknownCanonicalCompatibility", "Missing required target role marker.")
         }
-        let raised = Self(storeID: prior.storeID, minimumReaderLevel: max(14, prior.minimumReaderLevel),
+        let raised = Self(
+            storeID: prior.storeID, minimumReaderLevel: max(14, prior.minimumReaderLevel),
             recordFormats: prior.recordFormats,
             capabilities: Set(prior.capabilities + [PeerEnrollmentActivation.targetCapability]).sorted())
         try CanonicalFormatSupport.current.require(raised)

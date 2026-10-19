@@ -86,8 +86,10 @@ struct SemanticConfiguration: Codable, Equatable, Sendable {
         }
         guard effectiveProviderTimeoutSeconds.isFinite, effectiveProviderTimeoutSeconds > 0,
             pendingQueryLifetimeSeconds.isFinite,
-            pendingQueryLifetimeSeconds < Double(Int64.max) / 1_000_000_000 else {
-            throw TractandaError("semanticConfiguration", "Provider timeout must be finite, positive and addressable.")
+            pendingQueryLifetimeSeconds < Double(Int64.max) / 1_000_000_000
+        else {
+            throw TractandaError(
+                "semanticConfiguration", "Provider timeout must be finite, positive and addressable.")
         }
         try Self.validateLoopbackEndpoint(endpoint)
     }

@@ -59,7 +59,9 @@ package final class PeerCredential: Sendable, CustomStringConvertible, CustomDeb
         let header = try JSON.encode(Self.metadata(for: binding))
         guard header.count <= PeerCredentialStore.maximumBytes - 36 else { throw Self.failure() }
         let count = UInt32(header.count)
-        return Data([UInt8(count >> 24), UInt8((count >> 16) & 255), UInt8((count >> 8) & 255), UInt8(count & 255)])
+        return Data([
+            UInt8(count >> 24), UInt8((count >> 16) & 255), UInt8((count >> 8) & 255), UInt8(count & 255),
+        ])
             + header + Data(secret)
     }
     static func decode(_ bytes: Data) throws -> PeerCredential {
@@ -97,7 +99,9 @@ struct PeerCredentialStore {
     func stage(_ credential: PeerCredential) throws {
         do {
             let binding = credential.binding
-            let path = try prefix + Self.path(peerID: binding.peerID, configurationDigest: binding.configurationDigest)
+            let path =
+                try prefix
+                + Self.path(peerID: binding.peerID, configurationDigest: binding.configurationDigest)
             let bytes = try credential.encoded()
             if let old = try files.readIfPresent(path: path, maximumBytes: Self.maximumBytes) {
                 _ = try PeerCredential.decode(old)
@@ -109,16 +113,20 @@ struct PeerCredentialStore {
             }
         } catch { throw PeerCredential.failure() }
     }
-    func load(peerID: String, configurationDigest: String, readBudget: ((Int) throws -> Void)? = nil) throws -> PeerCredential {
+    func load(peerID: String, configurationDigest: String, readBudget: ((Int) throws -> Void)? = nil) throws
+        -> PeerCredential
+    {
         do {
             let credential = try PeerCredential.decode(
-                files.read(path: prefix + Self.path(peerID: peerID, configurationDigest: configurationDigest),
-                           maximumBytes: Self.maximumBytes, readBudget: readBudget))
+                files.read(
+                    path: prefix + Self.path(peerID: peerID, configurationDigest: configurationDigest),
+                    maximumBytes: Self.maximumBytes, readBudget: readBudget))
             guard credential.binding.peerID == peerID,
                 credential.binding.configurationDigest == configurationDigest
             else { throw PeerCredential.failure() }
             return credential
-        } catch let error as TractandaError where error.code == "resourceLimit" { throw error }
-        catch { throw PeerCredential.failure() }
+        } catch let error as TractandaError where error.code == "resourceLimit" { throw error } catch {
+            throw PeerCredential.failure()
+        }
     }
 }

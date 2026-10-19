@@ -150,7 +150,8 @@ final class ServiceCoordinatorTests: XCTestCase {
 
     func testSystemAdministrationRefreshesAdmissionAndNeverUsesServiceUID() async throws {
         try await fixture { root, accounts in
-            var seed: ItemStore? = try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            var seed: ItemStore? = try ItemStore(
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             _ = try seed!.configureAccess(systemConfiguration(), operationID: "system-policy")
             let created = try seed!.withAccess(forUID: accounts.alice) {
                 try seed!.commit(
@@ -180,7 +181,8 @@ final class ServiceCoordinatorTests: XCTestCase {
             }
             await coordinator.close()
             accounts.groups.removeValue(forKey: "operators")
-            let repair = try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            let repair = try ItemStore(
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             try repair.withAccess(forUID: 0) {
                 _ = try repair.configureAccess(
                     systemConfiguration(administratorGroup: "staff"), operationID: "root-repair")
@@ -190,7 +192,8 @@ final class ServiceCoordinatorTests: XCTestCase {
 
     func testCoordinatorSerializesDistinctPrincipalsAndReleasesWriterOnClose() async throws {
         try await fixture { root, accounts in
-            var seed: ItemStore? = try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            var seed: ItemStore? = try ItemStore(
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             _ = try seed!.configureAccess(systemConfiguration(), operationID: "system-policy")
             seed = nil
             let coordinator = try await ServiceCoordinator(opening: root, makeAccountDirectory: { accounts })
@@ -200,9 +203,13 @@ final class ServiceCoordinatorTests: XCTestCase {
             let administratorIdentity = try await administrator
             XCTAssertEqual(aliceIdentity.name, "alice")
             XCTAssertEqual(administratorIdentity.name, "operator")
-            XCTAssertThrowsError(try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true))
+            XCTAssertThrowsError(
+                try ItemStore(
+                    root: root, accounts: accounts, revisionProjectionEnabled: true,
+                    authorityIntakeEnabled: true))
             await coordinator.close()
-            let reopened = try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            let reopened = try ItemStore(
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             _ = reopened
             await assertCode("serviceClosed") {
                 _ = try await coordinator.accountIdentity(forUID: accounts.alice)
@@ -298,13 +305,17 @@ final class ServiceCoordinatorTests: XCTestCase {
             await fulfillment(of: [entered], timeout: 5)
             // Task.yield is not admission: explicitly observe accepted work before racing close.
             let closing = Task { await coordinator.close() }
-            XCTAssertThrowsError(try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true))
+            XCTAssertThrowsError(
+                try ItemStore(
+                    root: root, accounts: accounts, revisionProjectionEnabled: true,
+                    authorityIntakeEnabled: true))
             release.signal()
             let identity = try await request.value
             XCTAssertEqual(identity.name, "service")
             await closing.value
             accounts.beforeLookup = nil
-            let reopened = try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            let reopened = try ItemStore(
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             _ = reopened
             await assertCode("serviceClosed") {
                 _ = try await coordinator.accountIdentity(forUID: accounts.service)
@@ -314,7 +325,8 @@ final class ServiceCoordinatorTests: XCTestCase {
 
     func testPooledOrdinaryQueriesOverlapAndCursorContinuesOnCurrentState() async throws {
         try await fixture { root, accounts in
-            var seed: ItemStore? = try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            var seed: ItemStore? = try ItemStore(
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             for number in 0..<3 {
                 _ = try seed?.commit(
                     CommitRequest(
@@ -332,7 +344,8 @@ final class ServiceCoordinatorTests: XCTestCase {
                 _ = release.wait(timeout: .now() + 10)
             }
             // Fresh stores also retain a policy item; this paging oracle counts the three data Items.
-            let request = try nativeRequest("TractandaItem/query", ["expression": "classID == \"Item\"", "limit": 2])
+            let request = try nativeRequest(
+                "TractandaItem/query", ["expression": "classID == \"Item\"", "limit": 2])
             let first = Task { try await coordinator.handle(request, forUID: accounts.service) }
             let second = Task { try await coordinator.handle(request, forUID: accounts.service) }
             await fulfillment(of: [bothLeases], timeout: 5)
@@ -351,7 +364,9 @@ final class ServiceCoordinatorTests: XCTestCase {
             let result = try XCTUnwrap(calls[0][1] as? [String: Any])
             let cursor = try XCTUnwrap(result["nextCursor"] as? String)
             let next = try await coordinator.handle(
-                nativeRequest("TractandaItem/query", ["expression": "classID == \"Item\"", "cursor": cursor, "limit": 2]),
+                nativeRequest(
+                    "TractandaItem/query",
+                    ["expression": "classID == \"Item\"", "cursor": cursor, "limit": 2]),
                 forUID: accounts.service)
             XCTAssertEqual(try nativePage(next).total, 3)
             XCTAssertEqual(Set(try nativePage(firstData).ids + nativePage(next).ids).count, 3)
@@ -361,7 +376,8 @@ final class ServiceCoordinatorTests: XCTestCase {
 
     func testPooledScalarResidualQueriesMatchSerialUnicodeAndInt64Oracle() async throws {
         try await fixture { root, accounts in
-            var seed: ItemStore? = try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            var seed: ItemStore? = try ItemStore(
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             _ = try seed!.commit(
                 CommitRequest(
                     classID: "Item",
@@ -402,7 +418,8 @@ final class ServiceCoordinatorTests: XCTestCase {
 
     func testPooledCategoryRuleQueryMatchesExactManualMembership() async throws {
         try await fixture { root, accounts in
-            var seed: ItemStore? = try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            var seed: ItemStore? = try ItemStore(
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             let category = try seed!.commit(
                 CommitRequest(
                     classID: "Item",
@@ -459,7 +476,8 @@ final class ServiceCoordinatorTests: XCTestCase {
 
     func testPooledSavedCategoryViewUsesCurrentDefinitionAndExactMembership() async throws {
         try await fixture { root, accounts in
-            var seed: ItemStore? = try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            var seed: ItemStore? = try ItemStore(
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             let category = try seed!.commit(
                 CommitRequest(
                     classID: "Item",
@@ -516,7 +534,8 @@ final class ServiceCoordinatorTests: XCTestCase {
                     "group": .text("staff"), "mode": .integer(mode), "acl": .object([:]),
                 ])
             }
-            var seed: ItemStore? = try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            var seed: ItemStore? = try ItemStore(
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             _ = try seed!.configureAccess(systemConfiguration(), operationID: "pooled-get-policy")
             let item = try seed!.withAccess(forUID: accounts.alice) {
                 try seed!.commit(
@@ -556,7 +575,8 @@ final class ServiceCoordinatorTests: XCTestCase {
 
     func testPooledGetAndHistoryOverlapWithExactHistoryPage() async throws {
         try await fixture { root, accounts in
-            var seed: ItemStore? = try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            var seed: ItemStore? = try ItemStore(
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             var item = try seed!.commit(
                 CommitRequest(
                     classID: "Item", changes: ["subject": .text("first")],
@@ -620,7 +640,8 @@ final class ServiceCoordinatorTests: XCTestCase {
 
     func testPooledHistoryRefreshesAfterConcurrentRevisionBeforeDelivery() async throws {
         try await fixture { root, accounts in
-            var seed: ItemStore? = try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            var seed: ItemStore? = try ItemStore(
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             let first = try seed!.commit(
                 CommitRequest(
                     classID: "Item", changes: ["subject": .text("before")],
@@ -660,7 +681,8 @@ final class ServiceCoordinatorTests: XCTestCase {
 
     func testPooledHistoryAppendAfterSnapshotDoesNotReportDisconnectedChain() async throws {
         try await fixture { root, accounts in
-            var seed: ItemStore? = try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            var seed: ItemStore? = try ItemStore(
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             let first = try seed!.commit(
                 CommitRequest(
                     classID: "Item", changes: ["subject": .text("before snapshot")],
@@ -701,7 +723,8 @@ final class ServiceCoordinatorTests: XCTestCase {
 
     func testPooledRecordAndHistoryLimitsReturnErrorsWithoutPartialResults() async throws {
         try await fixture { root, accounts in
-            var seed: ItemStore? = try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            var seed: ItemStore? = try ItemStore(
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             var item = try seed!.commit(
                 CommitRequest(
                     classID: "Item", changes: ["subject": .text("first")],
@@ -765,7 +788,8 @@ final class ServiceCoordinatorTests: XCTestCase {
 
     func testMixedEnvelopeSerialHistoryCountsPastBatchBoundary() async throws {
         try await fixture { root, accounts in
-            var seed: ItemStore? = try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            var seed: ItemStore? = try ItemStore(
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             var item = try seed!.commit(
                 CommitRequest(
                     classID: "Item", changes: ["subject": .text("first")],
@@ -806,7 +830,8 @@ final class ServiceCoordinatorTests: XCTestCase {
 
     func testAuthorizedRebuildDrainsAcceptedPooledReaderBeforeIndexSwap() async throws {
         try await fixture { root, accounts in
-            var seed: ItemStore? = try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            var seed: ItemStore? = try ItemStore(
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             _ = try seed!.configureAccess(systemConfiguration(), operationID: "pool-drain-policy")
             _ = try seed!.withAccess(forUID: accounts.alice) {
                 try seed!.commit(
@@ -858,7 +883,8 @@ final class ServiceCoordinatorTests: XCTestCase {
 
     func testPooledFinalRecheckAllowsRebuildAndCloseToDrain() async throws {
         try await fixture { root, accounts in
-            var seed: ItemStore? = try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            var seed: ItemStore? = try ItemStore(
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             _ = try seed!.commit(
                 CommitRequest(
                     classID: "Item", changes: ["subject": .text("final recheck")],
@@ -918,7 +944,8 @@ final class ServiceCoordinatorTests: XCTestCase {
             await secondGate.release()
             _ = try await secondRead.value
             await closing.value
-            let reopened = try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            let reopened = try ItemStore(
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             XCTAssertTrue(reopened.isCanonicalTrusted)
         }
     }
@@ -933,7 +960,8 @@ final class ServiceCoordinatorTests: XCTestCase {
                     "group": .text("staff"), "mode": .integer(mode), "acl": .object([:]),
                 ])
             }
-            var seed: ItemStore? = try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            var seed: ItemStore? = try ItemStore(
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             _ = try seed!.configureAccess(systemConfiguration(), operationID: "pool-multi-policy")
             let shared = try seed!.withAccess(forUID: accounts.alice) {
                 try seed!.commit(
@@ -983,7 +1011,8 @@ final class ServiceCoordinatorTests: XCTestCase {
                 "profile": .text(ItemPermissions.profile), "owner": .text("alice"),
                 "group": .text("staff"), "mode": .integer(0o640), "acl": .object([:]),
             ])
-            var seed: ItemStore? = try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            var seed: ItemStore? = try ItemStore(
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             _ = try seed!.configureAccess(systemConfiguration(), operationID: "pool-personal-policy")
             let category = try seed!.withAccess(forUID: accounts.alice) {
                 try seed!.commit(
@@ -1065,7 +1094,8 @@ final class ServiceCoordinatorTests: XCTestCase {
 
     func testCancelledPooledRequestReleasesLeaseWithoutSerialRetry() async throws {
         try await fixture { root, accounts in
-            var seed: ItemStore? = try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            var seed: ItemStore? = try ItemStore(
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             _ = try seed!.commit(
                 CommitRequest(
                     classID: "Item", changes: ["subject": .text("cancel")],
@@ -1167,7 +1197,8 @@ final class ServiceCoordinatorTests: XCTestCase {
 
     func testAuthorizedRebuildDrainsHeldVerifierWithoutDrainingInvalidRequests() async throws {
         try await fixture { root, accounts in
-            var seed: ItemStore? = try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            var seed: ItemStore? = try ItemStore(
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             _ = try seed!.configureAccess(systemConfiguration(), operationID: "verifier-drain-policy")
             seed = nil
             let coordinator = try await ServiceCoordinator(opening: root, makeAccountDirectory: { accounts })
@@ -1214,7 +1245,8 @@ final class ServiceCoordinatorTests: XCTestCase {
         try await fixture { root, accounts in
             accounts.users[accounts.bob] = AccountIdentity(
                 uid: accounts.bob, name: "bob", primaryGroupName: "staff", groupIDs: [71_001])
-            var seed: ItemStore? = try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            var seed: ItemStore? = try ItemStore(
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             _ = try seed!.configureAccess(systemConfiguration(), operationID: "cursor-policy")
             var expected: [String] = []
             for index in 0..<3 {
@@ -1404,7 +1436,8 @@ final class ServiceCoordinatorTests: XCTestCase {
 
     func testDeepCursorSeekUsesOrderIndexAndDoesNotRecountPriorPages() async throws {
         try await fixture { root, accounts in
-            var store: ItemStore? = try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            var store: ItemStore? = try ItemStore(
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             for index in 0..<32 {
                 if index.isMultiple(of: 16) { try guardBoundedFixture(root, nextItems: 16) }
                 _ = try store!.commit(
@@ -1442,7 +1475,8 @@ final class ServiceCoordinatorTests: XCTestCase {
 
     func testBoundedPreparedQueriesActuallyOverlap() async throws {
         try await fixture { root, accounts in
-            var seed: ItemStore? = try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            var seed: ItemStore? = try ItemStore(
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             let first = try seed!.commit(
                 CommitRequest(
                     classID: "Item", changes: ["subject": .text("Alpha")], operationID: "parallel-a")
@@ -1471,7 +1505,8 @@ final class ServiceCoordinatorTests: XCTestCase {
 
     func testSelectiveIndexedParallelQueryWorksBeyondFullScanBound() async throws {
         try await fixture { root, accounts in
-            var seed: ItemStore? = try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            var seed: ItemStore? = try ItemStore(
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             var target: Revision?
             try guardBoundedFixture(root, nextItems: 513)
             for index in 0..<513 {
@@ -1516,7 +1551,8 @@ final class ServiceCoordinatorTests: XCTestCase {
                     "group": .text("staff"), "mode": .integer(mode), "acl": .object([:]),
                 ])
             }
-            var seed: ItemStore? = try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            var seed: ItemStore? = try ItemStore(
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             _ = try seed!.configureAccess(systemConfiguration(), operationID: "parallel-policy")
             let item = try seed!.withAccess(forUID: accounts.alice) {
                 try seed!.commit(
@@ -1564,7 +1600,8 @@ final class ServiceCoordinatorTests: XCTestCase {
 
     func testPreparedQueryReportsCanonicalDamageAsMethodError() async throws {
         try await fixture { root, accounts in
-            var seed: ItemStore? = try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            var seed: ItemStore? = try ItemStore(
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             let item = try seed!.commit(
                 CommitRequest(
                     classID: "Item", changes: ["subject": .text("Record")],
@@ -1611,7 +1648,8 @@ final class ServiceCoordinatorTests: XCTestCase {
 
     func testOversizedPreparedSnapshotUsesSerialQuery() async throws {
         try await fixture { root, accounts in
-            var seed: ItemStore? = try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            var seed: ItemStore? = try ItemStore(
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
             let item = try seed!.commit(
                 CommitRequest(
                     classID: "Item",

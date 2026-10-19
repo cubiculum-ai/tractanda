@@ -16,9 +16,12 @@ enum ReplicaIdentity {
         let replicaID: String
     }
 
-    static func load(root: URL, storeID: String, ownerUID: UInt32, readBudget: ((Int) throws -> Void)? = nil) throws -> Record? {
+    static func load(root: URL, storeID: String, ownerUID: UInt32, readBudget: ((Int) throws -> Void)? = nil)
+        throws -> Record?
+    {
         let files = DocumentContentFiles(root: root, ownerUID: ownerUID, minimumFreeBytes: 0)
-        guard let bytes = try files.readIfPresent(path: [name], maximumBytes: 4096, readBudget: readBudget) else { return nil }
+        guard let bytes = try files.readIfPresent(path: [name], maximumBytes: 4096, readBudget: readBudget)
+        else { return nil }
         guard let object = try JSONSerialization.jsonObject(with: bytes) as? [String: Any],
             Set(object.keys) == ["formatVersion", "storeID", "replicaID"]
         else { throw TractandaError("invalidReplicaIdentity", "Invalid local replica identity keys.") }

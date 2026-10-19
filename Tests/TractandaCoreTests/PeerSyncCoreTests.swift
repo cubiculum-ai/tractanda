@@ -5,18 +5,30 @@ import XCTest
 final class PeerSyncCoreTests: XCTestCase {
     typealias Fixture = PeerIntakeStoreTests.Fixture
     private func fixture() throws -> Fixture {
-        try Fixture(directory: GuardedFixtureDirectory.create(prefix: "c", source: "PeerSyncCoreTests", test: name))
+        try Fixture(
+            directory: GuardedFixtureDirectory.create(prefix: "c", source: "PeerSyncCoreTests", test: name))
     }
     private final class ReadCounter: @unchecked Sendable {
         private let lock = NSLock()
         private var value = 0
-        func add(_ bytes: Int) { lock.lock(); value += bytes; lock.unlock() }
-        var total: Int { lock.lock(); defer { lock.unlock() }; return value }
+        func add(_ bytes: Int) {
+            lock.lock()
+            value += bytes
+            lock.unlock()
+        }
+        var total: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return value
+        }
     }
 
-    private func compare(_ f: Fixture, _ objects: [PeerPackage.Object], after: Int = 0,
-        bytes: UInt64 = 32 * 1024 * 1024) throws -> PeerNeedsTransfer.Page {
-        try f.receiver.peerNeedsTransfer(context: f.context, objects: objects, after: after,
+    private func compare(
+        _ f: Fixture, _ objects: [PeerPackage.Object], after: Int = 0,
+        bytes: UInt64 = 32 * 1024 * 1024
+    ) throws -> PeerNeedsTransfer.Page {
+        try f.receiver.peerNeedsTransfer(
+            context: f.context, objects: objects, after: after,
             limits: .init(maximumReadBytes: bytes), progress: {})
     }
 
@@ -37,7 +49,8 @@ final class PeerSyncCoreTests: XCTestCase {
     }
 
     private func binding(_ f: Fixture) throws -> PeerExchangeBinding {
-        try PeerExchangeBinding(peerID: f.context.peerID, storeID: f.storeID,
+        try PeerExchangeBinding(
+            peerID: f.context.peerID, storeID: f.storeID,
             localReplicaID: try XCTUnwrap(f.receiver.replicaID),
             remoteReplicaID: f.origin, pairingID: try Fixture.id(), localIsInitiator: false,
             configurationDigest: f.context.configurationDigest)
@@ -49,7 +62,8 @@ final class PeerSyncCoreTests: XCTestCase {
         let accepted = try f.source.peerMetadataObjects(revisionID: f.base.revisionID)
         let before = try snapshot(f.receiverRoot)
         let acceptedPage = try compare(f, accepted.map(\.0))
-        XCTAssertEqual(acceptedPage.objects.map(\.state), Array(repeating: .knownComplete, count: accepted.count))
+        XCTAssertEqual(
+            acceptedPage.objects.map(\.state), Array(repeating: .knownComplete, count: accepted.count))
         XCTAssertEqual(try snapshot(f.receiverRoot), before)
 
         f.receiverAccounts.bobHasGroup = false
@@ -58,7 +72,8 @@ final class PeerSyncCoreTests: XCTestCase {
         XCTAssertEqual(try f.send(f.packet(heldObjects)).held, 1)
         let heldBefore = try snapshot(f.receiverRoot)
         let heldPage = try compare(f, heldObjects.map(\.0))
-        XCTAssertEqual(heldPage.objects.map(\.state), Array(repeating: .knownComplete, count: heldObjects.count))
+        XCTAssertEqual(
+            heldPage.objects.map(\.state), Array(repeating: .knownComplete, count: heldObjects.count))
         XCTAssertEqual(try snapshot(f.receiverRoot), heldBefore)
         try f.capacity()
     }
@@ -73,7 +88,9 @@ final class PeerSyncCoreTests: XCTestCase {
             fields["revisionID"] = .text(id)
             fields["actor"] = .text("user:retired")
             let raw = try RecordCodec.encode(Revision(fields: fields, formatVersion: 1))
-            return (.init(kind: .item, id: id, length: raw.count, sha256: AuthorityRecordCodec.sha256(raw)), raw)
+            return (
+                .init(kind: .item, id: id, length: raw.count, sha256: AuthorityRecordCodec.sha256(raw)), raw
+            )
         }
         let pinned = try legacy()
         try f.bootstrap(extra: [pinned])
@@ -121,11 +138,13 @@ final class PeerSyncCoreTests: XCTestCase {
         try f.bootstrap()
         let object = try XCTUnwrap(f.source.peerMetadataObjects(revisionID: f.base.revisionID).first?.0)
         let many = try (0..<129).map { _ in
-            PeerPackage.Object(kind: .item, id: try Fixture.id(), length: 1,
+            PeerPackage.Object(
+                kind: .item, id: try Fixture.id(), length: 1,
                 sha256: AuthorityRecordCodec.sha256(Data("x".utf8)))
         }
         XCTAssertThrowsError(try compare(f, many), "Descriptor count must be capped at 128.")
-        let collision = PeerPackage.Object(kind: object.kind, id: object.id,
+        let collision = PeerPackage.Object(
+            kind: object.kind, id: object.id,
             length: object.length + 1, sha256: AuthorityRecordCodec.sha256(Data("different".utf8)))
         XCTAssertThrowsError(try compare(f, [object, collision]))
         XCTAssertThrowsError(try compare(f, [collision])) {
@@ -138,36 +157,50 @@ final class PeerSyncCoreTests: XCTestCase {
         let f = try fixture()
         let payload = Data((0..<262_771).map { UInt8($0 % 251) })
         let (revision, attachment) = try f.source.withAccess(forUID: f.sourceAccounts.alice) {
-            let upload = try f.source.beginAttachment(.init(itemID: f.base.itemID,
-                expectedRevisionID: f.base.revisionID, operationID: try Fixture.id(),
-                filename: "small-window.bin", mediaType: "application/octet-stream",
-                byteCount: Int64(payload.count), sha256: AuthorityRecordCodec.sha256(payload)))
+            let upload = try f.source.beginAttachment(
+                .init(
+                    itemID: f.base.itemID,
+                    expectedRevisionID: f.base.revisionID, operationID: try Fixture.id(),
+                    filename: "small-window.bin", mediaType: "application/octet-stream",
+                    byteCount: Int64(payload.count), sha256: AuthorityRecordCodec.sha256(payload)))
             let uploadID = try XCTUnwrap(upload.uploadID)
             for offset in stride(from: 0, to: payload.count, by: PeerPackage.maximumPayloadChunkBytes) {
-                _ = try f.source.appendAttachment(uploadID: uploadID, offset: Int64(offset),
-                    data: Data(payload[offset..<min(payload.count, offset + PeerPackage.maximumPayloadChunkBytes)]))
+                _ = try f.source.appendAttachment(
+                    uploadID: uploadID, offset: Int64(offset),
+                    data: Data(
+                        payload[offset..<min(payload.count, offset + PeerPackage.maximumPayloadChunkBytes)]))
             }
             return (try f.source.finishAttachment(uploadID: uploadID).revision, upload.attachment)
         }
-        let object = PeerPackage.Object(kind: .attachment, id: attachment.attachmentID,
+        let object = PeerPackage.Object(
+            kind: .attachment, id: attachment.attachmentID,
             length: payload.count, sha256: attachment.sha256)
         try f.bootstrap(extra: [(object, payload)])
         f.receiver = nil
         f.receiver = try Fixture.open(f.receiverRoot, f.receiverAccounts)
         let limits = PeerNeedsTransfer.Limits(maximumReadBytes: 64 * 1024)
-        let revisionObject = try XCTUnwrap(f.source.peerMetadataObjects(revisionID: revision.revisionID)
-            .first(where: { $0.0.id == revision.revisionID })?.0)
-        let metadataReads = ReadCounter(), payloadReads = ReadCounter()
+        let revisionObject = try XCTUnwrap(
+            f.source.peerMetadataObjects(revisionID: revision.revisionID)
+                .first(where: { $0.0.id == revision.revisionID })?.0)
+        let metadataReads = ReadCounter()
+        let payloadReads = ReadCounter()
         func comparePayload() throws -> PeerNeedsTransfer.Page {
-            try f.receiver.observePeerOriginalReadsForTesting({ actual, count in
-                if actual == object { payloadReads.add(count) }
-            }) {
-                try DocumentContentFiles.observeReadsForTesting(root: f.receiverRoot,
-                    observation: { _, count in metadataReads.add(count) }) {
-                    try f.receiver.peerNeedsTransfer(context: f.context, objects: [revisionObject],
-                        limits: limits, progress: {})
+            try f.receiver.observePeerOriginalReadsForTesting(
+                { actual, count in
+                    if actual == object { payloadReads.add(count) }
+                },
+                body: {
+                    try DocumentContentFiles.observeReadsForTesting(
+                        root: f.receiverRoot,
+                        observation: { _, count in metadataReads.add(count) },
+                        body: {
+                            try f.receiver.peerNeedsTransfer(
+                                context: f.context, objects: [revisionObject],
+                                limits: limits, progress: {})
+                        }
+                    )
                 }
-            }
+            )
         }
         let first = try comparePayload()
         XCTAssertEqual(first.objects.map(\.state), [.deferred])
@@ -175,16 +208,21 @@ final class PeerSyncCoreTests: XCTestCase {
         XCTAssertLessThanOrEqual(payloadReads.total + metadataReads.total, Int(limits.maximumReadBytes))
         var page = first
         for _ in 0..<32 where page.objects.first?.state != .knownComplete {
-            let payloadBefore = payloadReads.total, metadataBefore = metadataReads.total
+            let payloadBefore = payloadReads.total
+            let metadataBefore = metadataReads.total
             page = try comparePayload()
             let payloadDelta = payloadReads.total - payloadBefore
             XCTAssertGreaterThan(payloadDelta, 0, "Same fixed allowance advances actual payload hashing.")
-            XCTAssertLessThanOrEqual(payloadDelta + metadataReads.total - metadataBefore,
+            XCTAssertLessThanOrEqual(
+                payloadDelta + metadataReads.total - metadataBefore,
                 Int(limits.maximumReadBytes), "Metadata and actual body reads share the fixed allowance.")
         }
         XCTAssertEqual(page.objects.map(\.state), [.knownComplete])
-        XCTAssertEqual(payloadReads.total, payload.count, "Exact payload bytes are read cumulatively once, without restarting the hash prefix.")
-        let scope = PeerIntakeCoordinator(root: f.receiverRoot, ownerUID: f.receiver.ownerUID, storeID: f.storeID)
+        XCTAssertEqual(
+            payloadReads.total, payload.count,
+            "Exact payload bytes are read cumulatively once, without restarting the hash prefix.")
+        let scope = PeerIntakeCoordinator(
+            root: f.receiverRoot, ownerUID: f.receiver.ownerUID, storeID: f.storeID)
         let charge = scope.admissionReadBudget()
         try scope.withOperation(maximumReadBytes: 1024) {
             try charge(100)
@@ -195,7 +233,9 @@ final class PeerSyncCoreTests: XCTestCase {
                     throw TractandaError("fixtureBudgetAbort", "Unwind this bounded test scope.")
                 }
             } catch { XCTAssertEqual((error as? TractandaError)?.code, "fixtureBudgetAbort") }
-            XCTAssertEqual(scope.operationReadBytesForTesting, 250, "Unwind restores parent capacity but never refunds consumed bytes.")
+            XCTAssertEqual(
+                scope.operationReadBytesForTesting, 250,
+                "Unwind restores parent capacity but never refunds consumed bytes.")
             try charge(774)
             XCTAssertThrowsError(try charge(1))
         }
@@ -217,18 +257,25 @@ final class PeerSyncCoreTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: evidence.path))
         let applied = intake.appendingPathComponent("applied.json")
         XCTAssertTrue(FileManager.default.fileExists(atPath: applied.path))
-        XCTAssertThrowsError(try f.receiver.commitPeerIntake(context: f.context,
-            packageID: packet.manifest.packageID, expectedContextToken: f.receiver.peerIntakeContextToken())) {
+        XCTAssertThrowsError(
+            try f.receiver.commitPeerIntake(
+                context: f.context,
+                packageID: packet.manifest.packageID,
+                expectedContextToken: f.receiver.peerIntakeContextToken())
+        ) {
             XCTAssertEqual(($0 as? TractandaError)?.code, "peerRepairRequired")
         }
-        XCTAssertFalse(FileManager.default.fileExists(atPath: seal.path), "Repair denial must not reseal the package.")
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: seal.path), "Repair denial must not reseal the package.")
         try FileManager.default.removeItem(at: applied)
         f.receiver = nil
         try FileManager.default.removeItem(at: f.receiverRoot.appendingPathComponent("index"))
         XCTAssertThrowsError(try Fixture.open(f.receiverRoot, f.receiverAccounts)) {
             XCTAssertEqual(($0 as? TractandaError)?.code, "peerRepairRequired")
         }
-        XCTAssertFalse(FileManager.default.fileExists(atPath: seal.path), "Cold recovery must not recreate the lost seal.")
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: seal.path),
+            "Cold recovery must not recreate the lost seal.")
         try f.capacity()
     }
 
@@ -236,36 +283,44 @@ final class PeerSyncCoreTests: XCTestCase {
         let f = try fixture()
         try f.bootstrap()
         let incoming = try f.edit(subject: "ordinary unsealed stage")
-        let object = try XCTUnwrap(f.source.peerMetadataObjects(revisionID: incoming.revisionID)
-            .first(where: { $0.0.id == incoming.revisionID })?.0)
+        let object = try XCTUnwrap(
+            f.source.peerMetadataObjects(revisionID: incoming.revisionID)
+                .first(where: { $0.0.id == incoming.revisionID })?.0)
         let packet = try f.packet(f.source.peerMetadataObjects(revisionID: incoming.revisionID))
         _ = try f.receiver.beginPeerIntake(context: f.context, manifestBytes: JSON.encode(packet.manifest))
         let rootPage = packet.objects[0]
         XCTAssertEqual(rootPage.0.kind, .index)
-        _ = try f.receiver.appendPeerObject(context: f.context, packageID: packet.manifest.packageID,
+        _ = try f.receiver.appendPeerObject(
+            context: f.context, packageID: packet.manifest.packageID,
             object: rootPage.0, offset: 0, bytes: rootPage.1)
         let staged = try f.receiver.resumePeerIntake(context: f.context, packageID: packet.manifest.packageID)
         XCTAssertEqual(staged.state.phase, .staged)
         XCTAssertTrue(staged.objects.contains { $0.descriptor.id == object.id && !$0.verifiedComplete })
         for body in packet.objects.dropFirst() {
             for offset in stride(from: 0, to: body.1.count, by: body.0.chunkBytes) {
-                _ = try f.receiver.appendPeerObject(context: f.context, packageID: packet.manifest.packageID,
+                _ = try f.receiver.appendPeerObject(
+                    context: f.context, packageID: packet.manifest.packageID,
                     object: body.0, offset: offset,
                     bytes: Data(body.1[offset..<min(body.1.count, offset + body.0.chunkBytes)]))
             }
         }
-        let result = try f.receiver.commitPeerIntake(context: f.context,
+        let result = try f.receiver.commitPeerIntake(
+            context: f.context,
             packageID: packet.manifest.packageID, expectedContextToken: f.receiver.peerIntakeContextToken())
         XCTAssertGreaterThan(result.accepted, 0)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: f.receiverRoot
-            .appendingPathComponent("authority/intake/\(packet.manifest.packageID)/sealed.json").path))
+        XCTAssertTrue(
+            FileManager.default.fileExists(
+                atPath: f.receiverRoot
+                    .appendingPathComponent("authority/intake/\(packet.manifest.packageID)/sealed.json").path)
+        )
         try f.capacity()
     }
 
     func testMissingInterruptedMalformedCASAndSecurityResetCheckpointBehavior() throws {
         let f = try fixture()
         let b = try binding(f)
-        let files = DocumentContentFiles(root: f.receiverRoot, ownerUID: f.receiver.ownerUID,
+        let files = DocumentContentFiles(
+            root: f.receiverRoot, ownerUID: f.receiver.ownerUID,
             minimumFreeBytes: 10 * 1024 * 1024 * 1024)
         let store = PeerSyncWorkStore(files: files)
         var initial = try store.load(binding: b, security: "security-a")
@@ -274,7 +329,8 @@ final class PeerSyncCoreTests: XCTestCase {
         initial.outbound = try PeerSyncWork.transfer(roots: [Fixture.id()])
 
         let checkpointDir = f.receiverRoot.appendingPathComponent("authority/sync-work/\(b.pairingID)")
-        try FileManager.default.createDirectory(at: checkpointDir, withIntermediateDirectories: true,
+        try FileManager.default.createDirectory(
+            at: checkpointDir, withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700])
         let interrupted = checkpointDir.appendingPathComponent(".peer-checkpoint-\(try Fixture.id()).tmp")
         try Data("partial publication".utf8).write(to: interrupted)
@@ -282,9 +338,11 @@ final class PeerSyncCoreTests: XCTestCase {
 
         let firstSaved = try store.save(initial, binding: b, security: "security-a")
         XCTAssertEqual(firstSaved.sequence, 1)
-        XCTAssertEqual(try store.load(binding: b, security: "security-a").outbound?.packageID,
+        XCTAssertEqual(
+            try store.load(binding: b, security: "security-a").outbound?.packageID,
             initial.outbound?.packageID)
-        XCTAssertThrowsError(try store.save(initial, binding: b, security: "security-a"),
+        XCTAssertThrowsError(
+            try store.save(initial, binding: b, security: "security-a"),
             "A stale sequence must fail compare-and-swap.")
         let reset = try store.load(binding: b, security: "security-b")
         XCTAssertEqual(reset.sequence, 1)
@@ -302,9 +360,11 @@ final class PeerSyncCoreTests: XCTestCase {
         try Data("{malformed".utf8).write(to: checkpoint, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: checkpoint.path)
         let malformed = try Data(contentsOf: checkpoint)
-        XCTAssertThrowsError(try store.load(binding: b, security: "security-a"),
+        XCTAssertThrowsError(
+            try store.load(binding: b, security: "security-a"),
             "Malformed present state must not be treated as a missing checkpoint.")
-        XCTAssertEqual(try Data(contentsOf: checkpoint), malformed, "Malformed state must not be silently replaced.")
+        XCTAssertEqual(
+            try Data(contentsOf: checkpoint), malformed, "Malformed state must not be silently replaced.")
         try f.capacity()
     }
 }

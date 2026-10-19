@@ -1,6 +1,7 @@
 import Foundation
 import TractandaCore
 import XCTest
+
 @testable import TractandaSetup
 
 final class PeerTargetActivationArgumentsTests: XCTestCase {
@@ -69,7 +70,7 @@ final class PeerTargetActivationArgumentsTests: XCTestCase {
 
     func testUUIDsMustBeCanonicalLowercaseV1AndDigestsExactLowercaseHex() {
         var invalid = [arguments()]
-        invalid[0][2] = "00000000-0000-4000-8000-000000000001" // UUIDv4
+        invalid[0][2] = "00000000-0000-4000-8000-000000000001"  // UUIDv4
         var uppercaseUUID = arguments()
         uppercaseUUID[2] = "00000000-0000-1000-8000-00000000000A"
         invalid.append(uppercaseUUID)

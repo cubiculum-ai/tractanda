@@ -2,7 +2,8 @@ import Foundation
 import TractandaCore
 
 enum PeerEnrollmentCommand {
-    case pair(preparationPath: String, outputPath: String, sourcePeerID: String, targetPeerID: String,
+    case pair(
+        preparationPath: String, outputPath: String, sourcePeerID: String, targetPeerID: String,
         sourceIsInitiator: Bool)
     case begin(filePath: String)
     case action(NativePeerEnrollment.Action, operationID: String)
@@ -16,24 +17,25 @@ struct PeerEnrollmentOptions {
 
     func execute() throws -> Data {
         switch command {
-        case let .pair(preparationPath, outputPath, sourcePeerID, targetPeerID, sourceIsInitiator):
+        case .pair(
+            let preparationPath, let outputPath, let sourcePeerID, let targetPeerID, let sourceIsInitiator):
             return try NativePeerEnrollment.createPair(
                 preparationPath: preparationPath,
                 outputPath: outputPath,
                 sourcePeerID: sourcePeerID,
                 targetPeerID: targetPeerID,
                 sourceIsInitiator: sourceIsInitiator)
-        case let .begin(filePath):
+        case .begin(let filePath):
             let input = try PeerEnrollmentPairInput.capture(path: filePath)
             let resolved = try connection.resolve()
             return try NativePeerEnrollment.begin(connection: resolved, input: input)
-        case let .action(action, operationID):
+        case .action(let action, let operationID):
             return try NativePeerEnrollment.call(
                 connection: connection.resolve(), action: action, operationID: operationID)
-        case let .exportTarget(operationID, outputPath):
+        case .exportTarget(let operationID, let outputPath):
             return try NativePeerEnrollment.exportTarget(
                 connection: connection.resolve(), operationID: operationID, outputPath: outputPath)
-        case let .read(operationID, descriptorPath, offset, maximumBytes, outputPath):
+        case .read(let operationID, let descriptorPath, let offset, let maximumBytes, let outputPath):
             return try NativePeerEnrollment.readObject(
                 connection: connection.resolve(), operationID: operationID,
                 descriptorPath: descriptorPath, offset: offset, maximumBytes: maximumBytes,
@@ -55,7 +57,8 @@ func peerEnrollmentOptions(
     let command: PeerEnrollmentCommand
     switch commandName {
     case "pair":
-        values = try peerEnrollmentValues(tail, allowed: ["--preparation", "--out", "--source-peer", "--target-peer", "--source-role"])
+        values = try peerEnrollmentValues(
+            tail, allowed: ["--preparation", "--out", "--source-peer", "--target-peer", "--source-role"])
         guard let preparation = values["--preparation"], let output = values["--out"],
             let source = values["--source-peer"], let target = values["--target-peer"],
             let role = values["--source-role"], role == "initiator" || role == "responder"
@@ -64,7 +67,8 @@ func peerEnrollmentOptions(
         try peerEnrollmentValidatePath(output)
         try peerEnrollmentValidateAlias(source)
         try peerEnrollmentValidateAlias(target)
-        command = .pair(preparationPath: preparation, outputPath: output,
+        command = .pair(
+            preparationPath: preparation, outputPath: output,
             sourcePeerID: source, targetPeerID: target, sourceIsInitiator: role == "initiator")
     case "begin":
         values = try peerEnrollmentValues(tail, allowed: ["--file"])
@@ -85,7 +89,8 @@ func peerEnrollmentOptions(
         try peerEnrollmentValidatePath(output)
         command = .exportTarget(operationID: operationID, outputPath: output)
     case "read":
-        values = try peerEnrollmentValues(tail, allowed: ["--operation-id", "--descriptor", "--offset", "--maximum-bytes", "--out"],
+        values = try peerEnrollmentValues(
+            tail, allowed: ["--operation-id", "--descriptor", "--offset", "--maximum-bytes", "--out"],
             optional: ["--maximum-bytes"])
         guard let operationID = values["--operation-id"], peerEnrollmentIsCanonicalV1(operationID),
             let descriptor = values["--descriptor"], let offsetText = values["--offset"],
@@ -102,7 +107,8 @@ func peerEnrollmentOptions(
         }
         try peerEnrollmentValidatePath(descriptor)
         try peerEnrollmentValidatePath(output)
-        command = .read(operationID: operationID, descriptorPath: descriptor, offset: offset,
+        command = .read(
+            operationID: operationID, descriptorPath: descriptor, offset: offset,
             maximumBytes: maximumBytes, outputPath: output)
     default:
         throw peerEnrollmentUsage()
@@ -150,5 +156,8 @@ private func peerEnrollmentIsCanonicalV1(_ value: String) -> Bool {
 }
 
 private func peerEnrollmentUsage() -> TractandaError {
-    TractandaError("usage", "Use tractanda [--profile NAME | --socket PATH] peer enrollment pair|begin|step|status|accept|register|export-target|read with the required command options.")
+    TractandaError(
+        "usage",
+        "Use tractanda [--profile NAME | --socket PATH] peer enrollment pair|begin|step|status|accept|register|export-target|read with the required command options."
+    )
 }

@@ -125,9 +125,11 @@ final class NavigationHistoryTests: XCTestCase {
                         return itemID != a.itemID && mode != 4 && mode != 5
                     }
                     if mode == 1 || mode == 2 {
-                        result["unresolved"] = [[
-                            "itemID": a.itemID, "status": "conflicted", "stateToken": "fixture-token",
-                        ]]
+                        result["unresolved"] = [
+                            [
+                                "itemID": a.itemID, "status": "conflicted", "stateToken": "fixture-token",
+                            ]
+                        ]
                     } else if mode == 4 {
                         result["remainingIDs"] = [b.itemID]
                     } else {

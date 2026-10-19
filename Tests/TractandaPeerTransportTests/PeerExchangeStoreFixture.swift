@@ -61,16 +61,20 @@ enum PeerTransportStoreFixtures {
             guard UInt64(16 * 1024 * 1024) <= AttachmentFixtureCapacity.fixtureCapBytes else {
                 throw TractandaError("resourceLimit", "Fixture estimate")
             }
-            directory = try providedDirectory ?? GuardedFixtureDirectory.parent().appendingPathComponent(
-                "tractanda-peer-store-" + (try Self.id()))
+            directory =
+                try providedDirectory
+                ?? GuardedFixtureDirectory.parent().appendingPathComponent(
+                    "tractanda-peer-store-" + (try Self.id()))
             sourceRoot = directory.appendingPathComponent("source")
             receiverRoot = directory.appendingPathComponent("receiver")
-            source = try ItemStore.initializeFresh(root: sourceRoot, accounts: sourceAccounts,
+            source = try ItemStore.initializeFresh(
+                root: sourceRoot, accounts: sourceAccounts,
                 initialAccessConfiguration: .object([
                     "profile": .text(AccessConfiguration.profile),
                     "users": .list([.text("admin"), .text("alice"), .text("bob")]),
                 ]))
-            configuration = try XCTUnwrap(source.candidates().first { $0.classID == AccessConfiguration.classID })
+            configuration = try XCTUnwrap(
+                source.candidates().first { $0.classID == AccessConfiguration.classID })
             base = try source.withAccess(forUID: sourceAccounts.alice) {
                 try source.commit(
                     CommitRequest(

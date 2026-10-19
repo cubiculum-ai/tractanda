@@ -195,13 +195,15 @@ final class PeerExportPlan {
     }
     private func chargeBootstrapProof(_ count: Int) throws {
         try check()
-        guard count >= 0, UInt64(count) <= window.maximumReadBytes - min(readBytes, window.maximumReadBytes) else {
+        guard count >= 0, UInt64(count) <= window.maximumReadBytes - min(readBytes, window.maximumReadBytes)
+        else {
             throw TractandaError("resourceLimit", "Initial membership proof exhausted export read window.")
         }
         readBytes += UInt64(count)
     }
     private func initialPin(_ node: AuthorityRevision) throws -> AuthorityBinding? {
-        try PeerInventory.canonicalInitialPin(node, coordinator: coordinator, index: index,
+        try PeerInventory.canonicalInitialPin(
+            node, coordinator: coordinator, index: index,
             proof: bootstrapProof, read: raw, charge: chargeBootstrapProof)
     }
     private func chargeDocumentMetadata(_ count: Int) throws {
@@ -221,7 +223,8 @@ final class PeerExportPlan {
         guard planID != packageID else {
             throw TractandaError("peerObjectCollision", "Plan and package identities must differ.")
         }
-        let epoch = try PeerInventory.exportEpoch(boundary, context: context, coordinator: coordinator, index: index)
+        let epoch = try PeerInventory.exportEpoch(
+            boundary, context: context, coordinator: coordinator, index: index)
         let begin = Begin(
             profile: "tractanda.peer-export.v3", planID: planID, packageID: packageID,
             context: context, securityBinding: securityBinding, boundary: boundary, epoch: epoch,
@@ -257,14 +260,22 @@ final class PeerExportPlan {
     }
     /// Distinguish a planned-but-not-created journal from lost/corrupt existing artifacts.
     func exists(planID: String, packageID: String) throws -> Bool {
-        if try files.readIfPresent(path: path(planID, ["begin.json"]), maximumBytes: PeerPackage.maximumPageBytes) != nil {
+        if try files.readIfPresent(
+            path: path(planID, ["begin.json"]), maximumBytes: PeerPackage.maximumPageBytes) != nil
+        {
             _ = try reopen(planID: planID, packageID: packageID)
             return true
         }
         var occupied = false
-        do { try files.withDirectoryEntries(path: path(planID, [])) { _ in occupied = true; return false } }
-        catch let error as TractandaError where error.osError == ENOENT { return false }
-        guard !occupied else { throw TractandaError("peerRepairRequired", "Export journal lost its begin binding.") }
+        do {
+            try files.withDirectoryEntries(path: path(planID, [])) { _ in
+                occupied = true
+                return false
+            }
+        } catch let error as TractandaError where error.osError == ENOENT { return false }
+        guard !occupied else {
+            throw TractandaError("peerRepairRequired", "Export journal lost its begin binding.")
+        }
         return false
     }
     /// A durable handle can be reopened by exact IDs; it is never a wire capability.
@@ -577,10 +588,17 @@ final class PeerExportPlan {
                 guard try initialPin(node) != nil else { return nil }
                 return data
             }
-            if let origin, try coordinator.receiptContextPermits(row, origin: origin, index: index, readBudget: chargeBootstrapProof) { return data }
+            if let origin,
+                try coordinator.receiptContextPermits(
+                    row, origin: origin, index: index, readBudget: chargeBootstrapProof)
+            {
+                return data
+            }
             guard try initialPin(node) != nil,
-                try PeerInventory.initialLocalReceipt(row, node: node, coordinator: coordinator,
-                    charge: chargeBootstrapProof) else { return nil }
+                try PeerInventory.initialLocalReceipt(
+                    row, node: node, coordinator: coordinator,
+                    charge: chargeBootstrapProof)
+            else { return nil }
             return data
         } else if row.descriptor.kind == .authority {
             let record = try AuthorityRecordCodec.decode(data).record
@@ -592,7 +610,10 @@ final class PeerExportPlan {
             throw TractandaError(
                 "unsupportedPeerDependency", "Payload transfer remains outside metadata export.")
         }
-        guard let origin, try coordinator.receiptContextPermits(row, origin: origin, index: index, readBudget: chargeBootstrapProof) else {
+        guard let origin,
+            try coordinator.receiptContextPermits(
+                row, origin: origin, index: index, readBudget: chargeBootstrapProof)
+        else {
             return nil
         }
         return data
@@ -600,10 +621,12 @@ final class PeerExportPlan {
     /// Reference extraction only. All semantics remain owned by existing verified record/reducers.
     private func supplemental(_ slot: Slot, bytes: Data) throws -> ([Reference], String?, Bool) {
         var refs: [Reference] = []
-        let origin = slot.kind == .item
+        let origin =
+            slot.kind == .item
             ? try AuthorityRevision(originalBytes: bytes).revision.provenance?.originReplicaID
             : try AuthorityRecordCodec.decode(bytes).record.originReplicaID
-        if let origin, let decision = try coordinator.originDecision(origin, readBudget: chargeBootstrapProof) {
+        if let origin, let decision = try coordinator.originDecision(origin, readBudget: chargeBootstrapProof)
+        {
             refs.append(.init(id: decision.approval.id, kind: .authority, digest: decision.approval.sha256))
         }
         func id(_ value: String, _ kind: PeerPackage.Kind? = nil, _ digest: String? = nil) {

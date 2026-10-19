@@ -119,7 +119,8 @@ enum AuthorityEligibility {
                 case .bootstrap: bindingFields = ["administrationPolicies"]
                 case .bootstrapPage: bindingFields = ["entries"]
                 case .bootstrapIndex: bindingFields = []
-                case .enrollmentApproval, .controlCommit, .visibilityWitness, .reconciliationWitness, .originRetirement,
+                case .enrollmentApproval, .controlCommit, .visibilityWitness, .reconciliationWitness,
+                    .originRetirement,
                     .originRetirementPage:
                     throw Self.invalid("Causal control semantics require the disk authority engine.")
                 case .reviewHold: bindingFields = ["revocations"]

@@ -10,8 +10,10 @@ enum PeerEnrollmentApproval {
         let context: PeerPackage.Context
         let validate: () throws -> Void
     }
-    static func requireExport(_ context: PeerPackage.Context, coordinator: PeerIntakeCoordinator,
-                              ownerScope: OwnerExportScope?) throws {
+    static func requireExport(
+        _ context: PeerPackage.Context, coordinator: PeerIntakeCoordinator,
+        ownerScope: OwnerExportScope?
+    ) throws {
         if let ownerScope {
             guard ownerScope.context == context else { throw failure("Enrollment export scope differs.") }
             try ownerScope.validate()
@@ -97,12 +99,17 @@ enum PeerEnrollmentApproval {
             _ = try AuthorityRecord.persistentID(.text(operationID))
             return [directory, operationID, name]
         }
-        func read<T: Codable>(_ type: T.Type, _ name: String, readBudget: ((Int) throws -> Void)? = nil) throws -> T? {
-            try files.readIfPresent(path: path(name), maximumBytes: PeerPackage.maximumPageBytes, readBudget: readBudget)
-                .map { try PeerPackage.decode(type, $0) }
+        func read<T: Codable>(_ type: T.Type, _ name: String, readBudget: ((Int) throws -> Void)? = nil)
+            throws -> T?
+        {
+            try files.readIfPresent(
+                path: path(name), maximumBytes: PeerPackage.maximumPageBytes, readBudget: readBudget
+            )
+            .map { try PeerPackage.decode(type, $0) }
         }
         func write<T: Encodable>(_ value: T, _ name: String) throws {
-            let bytes = try JSON.encode(value), path = try path(name)
+            let bytes = try JSON.encode(value)
+            let path = try path(name)
             guard bytes.count <= PeerPackage.maximumPageBytes else {
                 throw TractandaError("resourceLimit", "Enrollment metadata frame exceeds its window.")
             }
@@ -114,7 +121,9 @@ enum PeerEnrollmentApproval {
             }
         }
         func selection(maximumWork: Int) throws -> Selection? {
-            var sequence = 0, previous = "", last: Selection?
+            var sequence = 0
+            var previous = ""
+            var last: Selection?
             while let value = try read(Selection.self, "selection-\(sequence + 1).json") {
                 guard sequence < maximumWork, value.sequence == sequence + 1,
                     value.previousDigest == previous, last?.complete != true,
@@ -128,8 +137,9 @@ enum PeerEnrollmentApproval {
         }
     }
     static func preparation(_ bytes: Data) throws -> PeerEnrollment.Preparation {
-        let value = try PeerPackage.decode(PeerEnrollment.Preparation.self, bytes,
-                                          maximum: PeerEnrollment.maximumBytes)
+        let value = try PeerPackage.decode(
+            PeerEnrollment.Preparation.self, bytes,
+            maximum: PeerEnrollment.maximumBytes)
         let ids = [value.commonStoreID, value.sourceReplicaID, value.targetReplicaID, value.operationID]
         for id in ids { _ = try AuthorityRecord.persistentID(.text(id)) }
         guard value.formatVersion == 1, Set(ids).count == ids.count else {
@@ -138,15 +148,20 @@ enum PeerEnrollmentApproval {
         return value
     }
     static func compare(_ a: PeerCredential, _ b: PeerCredential) throws {
-        let same = try a.commitment == b.commitment && a.withTLSInput { _, secret in
-            b.withTLSInput { _, other in secret == other }
-        }
+        let same =
+            try a.commitment == b.commitment
+            && a.withTLSInput { _, secret in
+                b.withTLSInput { _, other in secret == other }
+            }
         guard same else { throw failure("Exact supplied private credential differs.") }
     }
-    static func checkPair(_ request: Request, source: String, storeID: String,
-                          trustedOrigins: [String]) throws -> Input {
+    static func checkPair(
+        _ request: Request, source: String, storeID: String,
+        trustedOrigins: [String]
+    ) throws -> Input {
         let preparation = try preparation(request.preparationBytes)
-        let a = request.sourceCredential.binding, b = request.targetCredential.binding
+        let a = request.sourceCredential.binding
+        let b = request.targetCredential.binding
         let sameSecret = request.sourceCredential.withTLSInput { _, secret in
             request.targetCredential.withTLSInput { _, other in secret == other }
         }
@@ -162,7 +177,8 @@ enum PeerEnrollmentApproval {
             request.sourceContext.permittedOrigins == [preparation.targetReplicaID],
             request.targetContext.permittedOrigins == trustedOrigins
         else { throw failure("Oriented preparation/credential/context binding differs.") }
-        return try .init(preparationBytes: request.preparationBytes,
+        return try .init(
+            preparationBytes: request.preparationBytes,
             sourceContext: request.sourceContext, targetContext: request.targetContext,
             sourceCredentialCommitment: request.sourceCredential.commitment,
             targetCredentialCommitment: request.targetCredential.commitment,

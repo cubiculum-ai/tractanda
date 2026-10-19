@@ -274,7 +274,8 @@ final class Workspace {
             throw TractandaError("stateChanged", "Items changed while marking; refresh first.")
         }
         guard (result.unresolved ?? []).isEmpty else {
-            throw TractandaError("itemUnresolved", "A section item needs review; no partial group was marked.")
+            throw TractandaError(
+                "itemUnresolved", "A section item needs review; no partial group was marked.")
         }
         let byID = Dictionary(uniqueKeysWithValues: result.list.map { ($0.itemID, $0) })
         guard page.ids.allSatisfy({ byID[$0] != nil }) else {
@@ -356,7 +357,8 @@ final class Workspace {
                         let unresolved = result.unresolved ?? []
                         let remainingIDs = result.remainingIDs ?? []
                         let oversizedIDs = result.oversizedIDs ?? []
-                        let classifiedIDs = returnedIDs + unresolved.map(\.itemID) + remainingIDs + oversizedIDs
+                        let classifiedIDs =
+                            returnedIDs + unresolved.map(\.itemID) + remainingIDs + oversizedIDs
                         guard Set(classifiedIDs).count == classifiedIDs.count,
                             Set(classifiedIDs) == Set(page.ids)
                         else {
@@ -364,9 +366,10 @@ final class Workspace {
                         }
                         let byID = Dictionary(uniqueKeysWithValues: result.list.map { ($0.itemID, $0) })
                         unresolvedByID.merge(
-                            Dictionary(uniqueKeysWithValues: unresolved.map { ($0.itemID, $0) })) { _, newer in
-                                newer
-                            }
+                            Dictionary(uniqueKeysWithValues: unresolved.map { ($0.itemID, $0) })
+                        ) { _, newer in
+                            newer
+                        }
                         completeness = completeness || page.completeness == "unresolvedItems"
                         conflictsAvailable = conflictsAvailable || (page.conflictsAvailable ?? false)
                         unhydratedIDs.formUnion(remainingIDs)
@@ -405,11 +408,16 @@ final class Workspace {
                     )
                 }
                 let cursor = cursors.indices.contains(index) ? cursors[index] : nil
-                var (page, pageItems, consumedCount, unresolved, unhydratedIDs, incomplete, conflictsAvailable) =
+                var (
+                    page, pageItems, consumedCount, unresolved, unhydratedIDs, incomplete, conflictsAvailable
+                ) =
                     try loadSectionPage(at: offset, cursor: cursor)
                 if offset > 0 && page.ids.isEmpty {
                     offset = 0
-                    (page, pageItems, consumedCount, unresolved, unhydratedIDs, incomplete, conflictsAvailable) =
+                    (
+                        page, pageItems, consumedCount, unresolved, unhydratedIDs, incomplete,
+                        conflictsAvailable
+                    ) =
                         try loadSectionPage(at: 0, cursor: nil)
                 }
                 if let initialState, initialState != page.queryState {
@@ -426,7 +434,8 @@ final class Workspace {
                         conflictsAvailable: conflictsAvailable))
             }
             let unresolvedIDs = Set(loaded.flatMap { $0.unresolved.map(\.itemID) })
-            let hasProjectionWarning = !unresolvedIDs.isEmpty
+            let hasProjectionWarning =
+                !unresolvedIDs.isEmpty
                 || loaded.contains { $0.completeness == "unresolvedItems" || $0.conflictsAvailable }
             let navigation = try categoryPath.isEmpty ? nil : CategoryHierarchy(self.categories())
             if navigation != nil, try client.state() != initialState {
@@ -434,11 +443,12 @@ final class Workspace {
             }
             sections = loaded
             let hasUnhydrated = loaded.contains { !$0.unhydratedIDs.isEmpty }
-            projectionNotice = hasUnhydrated
+            projectionNotice =
+                hasUnhydrated
                 ? "Some queried items could not be loaded; this page may be partial. Retry refresh."
                 : hasProjectionWarning
-                ? "Some accessible items need review; current readable rows remain visible. Use item-state/conflicts."
-                : nil
+                    ? "Some accessible items need review; current readable rows remain visible. Use item-state/conflicts."
+                    : nil
             let roots = Array(Set(columns.compactMap(\.categoryRootID))).sorted()
             if !roots.isEmpty && !loaded.flatMap(\.items).isEmpty {
                 guard let evaluatedAt = Timestamp.parse(queryDate) else {

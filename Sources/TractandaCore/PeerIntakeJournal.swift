@@ -137,7 +137,10 @@ final class PeerIntakeJournal {
     }
     func beginRecord(_ id: String, readBudget: ((Int) throws -> Void)? = nil) throws -> Begin {
         let record = try PeerPackage.decode(
-            Begin.self, files.read(path: path(id, ["begin.json"]), maximumBytes: PeerPackage.maximumPageBytes, readBudget: readBudget)
+            Begin.self,
+            files.read(
+                path: path(id, ["begin.json"]), maximumBytes: PeerPackage.maximumPageBytes,
+                readBudget: readBudget)
         )
         try record.manifest.validate(retained: true)
         guard record.manifest.packageID == id, record.manifest.storeID == record.context.storeID else {
@@ -365,7 +368,9 @@ final class PeerIntakeJournal {
         try afterBoundaryForTesting?(.chunk)
         return try self.status(packageID)
     }
-    func object(_ object: PeerPackage.Object, packageID: String, readBudget: ((Int) throws -> Void)? = nil) throws -> Data? {
+    func object(_ object: PeerPackage.Object, packageID: String, readBudget: ((Int) throws -> Void)? = nil)
+        throws -> Data?
+    {
         try object.validate()
         if object.kind == .attachment || object.kind == .document { return nil }
         if let publication = try publication(packageID, readBudget: readBudget), object.kind != .index,
@@ -491,8 +496,11 @@ final class PeerIntakeJournal {
         try afterBoundaryForTesting?(.sealed)
     }
     func preparedPublication(_ id: String, readBudget: ((Int) throws -> Void)? = nil) throws -> Publication? {
-        try files.readIfPresent(path: path(id, ["prepared.json"]), maximumBytes: PeerPackage.maximumPageBytes, readBudget: readBudget)
-            .map { try PeerPackage.decode(Publication.self, $0) }
+        try files.readIfPresent(
+            path: path(id, ["prepared.json"]), maximumBytes: PeerPackage.maximumPageBytes,
+            readBudget: readBudget
+        )
+        .map { try PeerPackage.decode(Publication.self, $0) }
     }
     /// Existing canonical locators are written only after sealing. They survive index loss and
     /// therefore distinguish missing admitted proof from a legitimate never-sealed partial stage.
@@ -500,20 +508,26 @@ final class PeerIntakeJournal {
         _ = try AuthorityRecord.persistentID(.text(id))
         var present = false
         do {
-            try files.withDirectoryEntries(path: ["authority", "locators", id]) { _ in present = true; return false }
+            try files.withDirectoryEntries(path: ["authority", "locators", id]) { _ in
+                present = true
+                return false
+            }
         } catch let error as TractandaError where error.osError == ENOENT { return false }
         return present
     }
     func publication(_ id: String, readBudget: ((Int) throws -> Void)? = nil) throws -> Publication? {
         let value = try files.readIfPresent(
-            path: path(id, ["sealed.json"]), maximumBytes: PeerPackage.maximumPageBytes, readBudget: readBudget
+            path: path(id, ["sealed.json"]), maximumBytes: PeerPackage.maximumPageBytes,
+            readBudget: readBudget
         )
         .map { try PeerPackage.decode(Publication.self, $0) }
         if value == nil {
-            let applied = try files.readIfPresent(path: path(id, ["applied.json"]),
+            let applied = try files.readIfPresent(
+                path: path(id, ["applied.json"]),
                 maximumBytes: PeerPackage.maximumPageBytes, readBudget: readBudget)
             guard applied == nil, try !hasPublishedEvidence(id) else {
-                throw TractandaError("peerRepairRequired", "Published intake lost its immutable receipt proof.")
+                throw TractandaError(
+                    "peerRepairRequired", "Published intake lost its immutable receipt proof.")
             }
         }
         guard value?.controlParents.isEmpty != false else {
@@ -618,17 +632,23 @@ final class PeerIntakeJournal {
         return String(stamp.prefix(16)).replacingOccurrences(of: "-", with: "/")
             .replacingOccurrences(of: "T", with: "/").replacingOccurrences(of: ":", with: "/")
     }
-    func retainedBytes(_ object: PeerPackage.Object, publication: Publication, readBudget: ((Int) throws -> Void)? = nil) throws -> Data? {
+    func retainedBytes(
+        _ object: PeerPackage.Object, publication: Publication, readBudget: ((Int) throws -> Void)? = nil
+    ) throws -> Data? {
         guard
             let locator = try files.readIfPresent(
-                path: canonicalPath(object, publication: publication), maximumBytes: 512, readBudget: readBudget),
+                path: canonicalPath(object, publication: publication), maximumBytes: 512,
+                readBudget: readBudget),
             let text = String(data: locator, encoding: .utf8)
         else { return nil }
         let destination = text.split(separator: "/").map(String.init)
         guard !text.hasPrefix("/"), !destination.contains(".."), !destination.contains("."),
             destination.joined(separator: "/") == text
         else { throw TractandaError("invalidPeerPackage", "Unsafe retained locator.") }
-        guard let bytes = try files.readIfPresent(path: destination, maximumBytes: object.length, readBudget: readBudget) else {
+        guard
+            let bytes = try files.readIfPresent(
+                path: destination, maximumBytes: object.length, readBudget: readBudget)
+        else {
             return nil
         }
         guard bytes.count == object.length, AuthorityRecordCodec.sha256(bytes) == object.sha256 else {
