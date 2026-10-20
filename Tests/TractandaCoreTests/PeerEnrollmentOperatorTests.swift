@@ -94,7 +94,7 @@ final class PeerEnrollmentOperatorTests: XCTestCase {
                 guard count <= 2048 else {
                     throw TractandaError("resourceLimit", "Operator fixture file cap.")
                 }
-                let relative = String(url.path.dropFirst(base.path.count + 1))
+                let relative = try GuardedFixtureDirectory.relativePath(url, beneath: base)
                 if relative == "index" {
                     scan.skipDescendants()
                     continue

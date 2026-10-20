@@ -131,6 +131,26 @@ final class PeerIntakeStoreTests: XCTestCase {
             return try ItemStore(
                 root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
         }
+        /// Lower-level authority fixture only: share logical identity before any derived state exists.
+        func openFreshSharedReplica(_ root: URL, _ accounts: Accounts) throws -> ItemStore {
+            try capacity()
+            guard root.deletingLastPathComponent().path == directory.path,
+                !(try FileManager.default.contentsOfDirectory(atPath: directory.path))
+                    .contains(root.lastPathComponent)
+            else { throw TractandaError("fixture", "Shared replica requires a new direct child root.") }
+            try FileManager.default.createDirectory(
+                at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            let identityName = ".tractanda-store-identity.json"
+            let original = try Data(contentsOf: sourceRoot.appendingPathComponent(identityName))
+            try PrivateConfiguration.write(original, to: root.appendingPathComponent(identityName))
+            let store = try Self.open(root, accounts)
+            XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(identityName)), original)
+            XCTAssertNotNil(store.replicaID)
+            XCTAssertNotEqual(store.replicaID, source.replicaID)
+            XCTAssertNotEqual(store.replicaID, receiver.replicaID)
+            try capacity()
+            return store
+        }
         func capacity() throws {
             try AttachmentFixtureCapacity.requireFree(at: directory)
             var bytes: UInt64 = 0

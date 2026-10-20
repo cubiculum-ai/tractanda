@@ -151,13 +151,93 @@ final class NavigationAndGroupTests: XCTestCase {
         XCTAssertEqual(marks.items.count, 1)
     }
 
+    func testWholeSectionMarkingRejectsLaterChunkFailuresWithoutChangingMarks() throws {
+        let fixture = try Fixture()
+        let category = try fixture.category("Tasks", rule: "rank >= 0")
+        var items: [Revision] = []
+        for rank in 0..<66 {
+            items.append(try fixture.item("Task \(rank)", ["rank": .integer(Int64(rank))]))
+        }
+        let retained = try fixture.item("Already marked")
+        for mode in [
+            "state", "duplicate", "missing", "unexpected", "unresolved", "remaining", "oversized", "notFound",
+            "forbidden",
+        ] {
+            var hydrating = false
+            var chunks: [[String]] = []
+            let client = ItemClient(transport: { data in
+                let request = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+                let calls = request["methodCalls"] as! [[Any]]
+                let ids =
+                    calls.first?[0] as? String == "TractandaItem/get"
+                    ? (calls[0][1] as? [String: Any])?["ids"] as? [String] : nil
+                if hydrating, let ids {
+                    XCTAssertLessThanOrEqual(ids.count, 64)
+                    chunks.append(ids)
+                    if chunks.count == 2 {
+                        if mode == "forbidden" { throw TractandaError("forbidden", "Later chunk denied.") }
+                        if mode == "state" {
+                            _ = try fixture.revise(items[0], ["subject": .text("Changed during hydration")])
+                        }
+                    }
+                }
+                let original = try fixture.service.handle(data, peerUID: fixture.store.ownerUID)
+                guard hydrating, let ids, chunks.count == 2 else { return original }
+                var envelope = try JSONSerialization.jsonObject(with: original) as! [String: Any]
+                var responses = envelope["methodResponses"] as! [[Any]]
+                var result = responses[0][1] as! [String: Any]
+                var list = result["list"] as! [[String: Any]]
+                switch mode {
+                case "duplicate": list.append(try XCTUnwrap(list.first))
+                case "missing": list.removeFirst()
+                case "unexpected":
+                    list.append(
+                        try JSONSerialization.jsonObject(with: JSON.encode(retained)) as! [String: Any])
+                case "unresolved":
+                    list.removeFirst()
+                    result["unresolved"] = [
+                        ["itemID": ids[0], "status": "conflicted", "stateToken": "fixture-token"]
+                    ]
+                case "remaining", "oversized", "notFound":
+                    list.removeFirst()
+                    result[
+                        mode == "remaining"
+                            ? "remainingIDs" : mode == "oversized" ? "oversizedIDs" : "notFound"] = [ids[0]]
+                default: break
+                }
+                result["list"] = list
+                responses[0][1] = result
+                envelope["methodResponses"] = responses
+                return try JSONSerialization.data(withJSONObject: envelope)
+            })
+            let workspace = Workspace(client: client)
+            workspace.sectionCategories = [category]
+            try workspace.refresh()
+            var marks = MarkedItems()
+            try marks.toggle(retained)
+            hydrating = true
+            let expected = [
+                "state": "stateChanged", "duplicate": "protocolError", "missing": "protocolError",
+                "unexpected": "protocolError", "unresolved": "itemUnresolved", "remaining": "limit",
+                "oversized": "limit", "notFound": "stateChanged", "forbidden": "forbidden",
+            ]
+            XCTAssertThrowsError(try marks.toggle(workspace.items(inSectionAt: 0)), mode) {
+                XCTAssertEqual(($0 as? TractandaError)?.code, expected[mode], mode)
+            }
+            XCTAssertEqual(chunks.map(\.count), [64, 2], mode)
+            XCTAssertEqual(Set(chunks.flatMap { $0 }).count, 66, mode)
+            XCTAssertEqual(marks.items, [retained], mode)
+        }
+    }
+
     func testMarkLimitRejectsAnEntireOversizedAddition() throws {
         let fixture = try Fixture()
         let original = try fixture.item("Template")
         let items = try (0..<257).map { _ -> Revision in
             var fields = original.fields
-            fields["itemID"] = .text(Identifier.make())
-            return try Revision(fields: fields)
+            fields["itemID"] = .text(try UUID.makeVersion1().uuidString.lowercased())
+            fields["revisionID"] = .text(try UUID.makeVersion1().uuidString.lowercased())
+            return try Revision(fields: fields, formatVersion: original.formatVersion)
         }
         var marks = MarkedItems()
         try marks.toggle(items[0])

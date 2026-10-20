@@ -223,10 +223,9 @@ final class GlobalAdministratorScopeTests: XCTestCase {
         let receiverOrigin = try replicaID(f.receiverRoot, storeID: f.storeID)
         let outbound = try PeerPackage.Context(
             peerID: "retirement-destination", storeID: f.storeID,
-            configurationDigest: AuthorityRecordCodec.sha256(Data("untrusted destination".utf8)),
+            configurationDigest: AuthorityRecordCodec.sha256(Data("retirement destination".utf8)),
             permittedOrigins: [receiverOrigin])
         try f.source.configurePeerIntake(peers: [outbound])
-
         XCTAssertThrowsError(
             try f.source.withAccess(forUID: f.sourceAccounts.bob) {
                 try f.source.removePeerIntake(
@@ -235,30 +234,67 @@ final class GlobalAdministratorScopeTests: XCTestCase {
             }
         ) { XCTAssertEqual(($0 as? TractandaError)?.code, "forbidden") }
 
-        try f.source.removePeerIntake(
-            peerID: outbound.peerID, retiredOriginIDs: [receiverOrigin], operationID: try Fixture.id())
-        let unauthorizedOrigin = try PeerPackage.Context(
-            peerID: "spoofed-origin", storeID: f.storeID,
-            configurationDigest: AuthorityRecordCodec.sha256(Data("wrong origin".utf8)),
+        let relay = try PeerPackage.Context(
+            peerID: "configured-relay", storeID: f.storeID,
+            configurationDigest: AuthorityRecordCodec.sha256(Data("relay origin proof".utf8)),
             permittedOrigins: [receiverOrigin])
-        try f.receiver.configurePeerIntake(peers: [f.context, unauthorizedOrigin])
-        let rows = try canonicalObjects(f.sourceRoot, fixture: f)
-        do {
-            _ = try f.send(f.packet(rows), context: unauthorizedOrigin, to: f.receiver)
-        } catch {
-            XCTAssertTrue(error is TractandaError)
+        try f.receiver.configurePeerIntake(peers: [f.context, relay])
+        // A genuine third issuer has no receiver-side enrollment/admission. Sharing a
+        // StoreID and knowing the canonical administrator policy cannot manufacture it.
+        guard AttachmentFixtureCapacity.fixtureCapBytes >= 24 * 1024 * 1024 else {
+            throw TractandaError("resourceLimit", "Three-store authority fixture estimates24MiB")
         }
-
-        XCTAssertEqual(try f.receiver.get(f.base.itemID).revisionID, f.base.revisionID)
+        let thirdRoot = f.directory.appendingPathComponent("unadmitted-issuer")
+        let third = try f.openFreshSharedReplica(thirdRoot, f.sourceAccounts)
+        try third.configurePeerIntake(peers: [f.context])
+        try f.bootstrap(to: third)
+        let thirdOrigin = try replicaID(thirdRoot, storeID: f.storeID)
+        XCTAssertNotEqual(thirdOrigin, sourceOrigin)
+        XCTAssertNotEqual(thirdOrigin, receiverOrigin)
+        try third.configurePeerIntake(peers: [f.context, outbound])
+        try third.removePeerIntake(
+            peerID: outbound.peerID, retiredOriginIDs: [receiverOrigin], operationID: try Fixture.id())
+        let untrustedRows = try canonicalObjects(thirdRoot, fixture: f)
+        let untrustedRetirement = try XCTUnwrap(
+            untrustedRows.first {
+                $0.0.kind == .authority
+                    && (try? AuthorityRecordCodec.decode($0.1).record.kind) == .originRetirement
+            })
+        XCTAssertEqual(
+            try AuthorityRecordCodec.decode(untrustedRetirement.1).record.originReplicaID, thirdOrigin)
+        _ = try f.send(f.packet(untrustedRows), context: relay, to: f.receiver)
+        let diagnostic = try ItemIndex(
+            path: f.receiver.indexDirectory.appendingPathComponent("items.sqlite").path, create: false)
+        defer { diagnostic.close() }
+        XCTAssertFalse(
+            try diagnostic.peerRetirementIsActive(
+                AuthorityBinding(recordID: untrustedRetirement.0.id, sha256: untrustedRetirement.0.sha256)))
+        XCTAssertFalse(try diagnostic.peerOriginRetired(receiverOrigin))
         let write = try f.receiver.withAccess(forUID: f.receiverAccounts.alice) {
             try f.receiver.commit(
                 .init(
                     action: .revise, itemID: f.base.itemID, expectedRevisionID: f.base.revisionID,
-                    changes: ["subject": .text("unauthorized retirement did not fence")],
-                    operationID: "unauthorized-retirement-no-grant"))
+                    changes: ["subject": .text("unadmitted retirement did not fence")],
+                    operationID: "unadmitted-retirement-no-grant"))
         }
-        XCTAssertEqual(write.revision.fields["subject"], .text("unauthorized retirement did not fence"))
-        XCTAssertNotEqual(sourceOrigin, receiverOrigin)
+        XCTAssertEqual(write.revision.fields["subject"], .text("unadmitted retirement did not fence"))
+
+        // The bootstrap source is already admitted. Its authenticated administrator
+        // decision remains cluster-wide even when carried by this other configured relay.
+        try f.source.removePeerIntake(
+            peerID: outbound.peerID, retiredOriginIDs: [receiverOrigin], operationID: try Fixture.id())
+        _ = try f.send(f.packet(canonicalObjects(f.sourceRoot, fixture: f)), context: relay, to: f.receiver)
+        XCTAssertTrue(try diagnostic.peerOriginRetired(receiverOrigin))
+        XCTAssertEqual(try f.receiver.get(f.base.itemID), write.revision)
+        XCTAssertThrowsError(
+            try f.receiver.withAccess(forUID: f.receiverAccounts.alice) {
+                try f.receiver.commit(
+                    .init(
+                        action: .revise, itemID: f.base.itemID, expectedRevisionID: write.revision.revisionID,
+                        changes: ["subject": .text("retired local write")],
+                        operationID: "admitted-retirement-fence"))
+            }
+        ) { XCTAssertEqual(($0 as? TractandaError)?.code, "localOriginRetired") }
         try f.capacity()
     }
 }

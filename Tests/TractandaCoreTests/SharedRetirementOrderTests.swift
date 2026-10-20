@@ -38,15 +38,7 @@ final class SharedRetirementOrderTests: XCTestCase {
             throw TractandaError("resourceLimit", "Three stores estimate24MiB")
         }
         let root = f.directory.appendingPathComponent("third-retirement")
-        var initial: ItemStore? = try ItemStore(
-            root: root, accounts: f.receiverAccounts, revisionProjectionEnabled: true)
-        initial = nil
-        let name = ".tractanda-store-identity.json"
-        try Data(contentsOf: f.sourceRoot.appendingPathComponent(name)).write(
-            to: root.appendingPathComponent(name))
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o600], ofItemAtPath: root.appendingPathComponent(name).path)
-        let store = try Fixture.open(root, f.receiverAccounts)
+        let store = try f.openFreshSharedReplica(root, f.receiverAccounts)
         try store.configurePeerIntake(peers: [f.context])
         try f.bootstrap(to: store)
         return (store, root)

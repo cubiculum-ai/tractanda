@@ -164,8 +164,8 @@ final class PeerSyncMeshTests: XCTestCase {
             else {
                 throw TractandaError("resourceLimit", "Tiny document parts estimate exceeded")
             }
-            let relative = String(file.path.dropFirst(base.path.count + 1)).split(separator: "/").map(
-                String.init)
+            let relative = try GuardedFixtureDirectory.relativePath(file, beneath: base)
+                .split(separator: "/").map(String.init)
             _ = try PeerPackage.DocumentPart.from(relativePath: relative)
             let raw = try Data(contentsOf: file)
             bytes += raw.count

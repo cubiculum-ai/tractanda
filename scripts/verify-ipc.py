@@ -108,10 +108,14 @@ def server(binary, store, path):
                     log.seek(0)
                     raise RuntimeError(log.read().decode())
                 time.sleep(0.02)
-            assert path.stat().st_mode & 0o777 == 0o600
             # Exercise the shipped Swift client as well as this independent wire client.
             info = json.loads(subprocess.check_output([binary, "info", str(path)]))
             assert info["ownerUID"] == os.geteuid()
+            # Fresh canonical stores admit kernel-authenticated accounts through their policy.
+            # Listener permissions follow the actual access mode, while item ACLs stay enforced.
+            assert info["accessMode"] in {"single-user", "multi-user"}, info
+            expected_mode = 0o666 if info["accessMode"] == "multi-user" else 0o600
+            assert path.stat().st_mode & 0o777 == expected_mode
             yield Client(path)
         finally:
             if process.poll() is None:

@@ -68,7 +68,10 @@ private actor ScenarioTransport: ItemTransport {
         case "TractandaItem/get":
             let ids = args["ids"] as! [String]
             let list = current.flatMap { ids.contains($0.itemID) && !hidesCurrent ? [$0] : nil } ?? []
-            return try reply(method, ["list": object(list), "notFound": [], "state": state])
+            // Every requested ID must be classified, including items hidden by current access.
+            let returnedIDs = Set(list.map(\.itemID))
+            let notFound = ids.filter { !returnedIDs.contains($0) }
+            return try reply(method, ["list": object(list), "notFound": notFound, "state": state])
         case "TractandaItem/commit":
             commitRequests.append(data)
             if holdsFirstCommit {

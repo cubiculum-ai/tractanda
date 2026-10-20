@@ -150,11 +150,19 @@ extension SetupEngine {
     /// Open each parent from its already checked descriptor, retaining the final directory.
     /// The existing untrustedOwnership test seam permits same-UID fixture parents only.
     func peerParent(_ instance: String, create: Bool) throws -> Int32 {
-        let configuration =
-            trustedOwnership
-            ? roots.configuration
-            : roots.configuration.deletingLastPathComponent()
-                .resolvingSymlinksInPath().appendingPathComponent(roots.configuration.lastPathComponent)
+        let configuration: URL
+        if trustedOwnership {
+            configuration = roots.configuration
+        } else {
+            // Foundation can rewrite the physical /private/var spelling back to /var on
+            // macOS. Keep the POSIX physical parent for the fixture seam; the configuration
+            // leaf and every subsequent component still pass the no-follow custody walk.
+            guard let parent = realpath(roots.configuration.deletingLastPathComponent().path, nil)
+            else { throw SetupError("Cannot resolve peer configuration fixture parent (errno \(errno)).") }
+            defer { free(parent) }
+            configuration = URL(fileURLWithPath: String(cString: parent))
+                .appendingPathComponent(roots.configuration.lastPathComponent)
+        }
         let path = configuration.appendingPathComponent("peer-runtime").path
         var fd = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC)
         guard fd >= 0 else { throw SetupError("Cannot inspect configuration parents.") }
@@ -171,7 +179,9 @@ extension SetupEngine {
                     }
                     next = openat(fd, String(component), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
                 }
-                guard next >= 0 else { throw SetupError("Unsafe peer configuration parent.") }
+                guard next >= 0 else {
+                    throw SetupError("Unsafe peer configuration parent at \(current) (errno \(errno)).")
+                }
                 close(fd)
                 fd = next
                 var metadata = stat()

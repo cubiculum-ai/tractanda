@@ -73,6 +73,30 @@ final class ServiceCoordinatorTests: XCTestCase {
         try await body(root, accounts)
     }
 
+    private func noAuthorityIntakeCoordinator(root: URL, accounts: Accounts) async throws
+        -> ServiceCoordinator
+    {
+        try await ServiceCoordinator(
+            opening: root, embeddingProviderForTesting: nil,
+            revisionProjectionEnabledForTesting: true, authorityIntakeEnabledForTesting: false,
+            makeAccountDirectory: { accounts })
+    }
+
+    private struct OriginalStoreIdentity: Codable {
+        let formatVersion: Int
+        let storeID: String
+    }
+
+    private func seedOriginalStoreIdentity(root: URL, ownerUID: UInt32) throws {
+        try FileManager.default.createDirectory(
+            at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let storeID = try UUID.makeVersion1().uuidString.lowercased()
+        try PrivateConfiguration.write(
+            try JSON.encode(OriginalStoreIdentity(formatVersion: 1, storeID: storeID)),
+            to: root.appendingPathComponent(".tractanda-store-identity.json"))
+        XCTAssertEqual(try CanonicalReaderRequirement.storeIdentity(root: root, ownerUID: ownerUID), storeID)
+    }
+
     private func guardBoundedFixture(_ root: URL, nextItems: Int) throws {
         let gib = UInt64(1024 * 1024 * 1024)
         let cap = gib
@@ -122,7 +146,8 @@ final class ServiceCoordinatorTests: XCTestCase {
         var fields = revision.fields
         fields["actor"] = .text("uid:\(actorUID)")
         fields["operationID"] = .text(operationID)
-        let copied = try Revision(fields: fields)
+        fields.removeValue(forKey: "revisionAncestry")
+        let copied = try Revision(fields: fields, formatVersion: 1)
         let items = root.appendingPathComponent("items")
         guard case .date(let modifiedAt)? = copied.fields["modifiedAt"],
             let date = Timestamp.parse(modifiedAt)
@@ -272,6 +297,7 @@ final class ServiceCoordinatorTests: XCTestCase {
             source = nil
 
             let migrated = root.appendingPathComponent("migrated")
+            try seedOriginalStoreIdentity(root: migrated, ownerUID: accounts.service)
             try legacyCopy(first, actorUID: accounts.alice, operationID: "first", into: migrated)
             try legacyCopy(second, actorUID: accounts.bob, operationID: "second", into: migrated)
             try legacyCopy(collisionA, actorUID: accounts.alice, operationID: "collision", into: migrated)
@@ -574,9 +600,10 @@ final class ServiceCoordinatorTests: XCTestCase {
     }
 
     func testPooledGetAndHistoryOverlapWithExactHistoryPage() async throws {
-        try await fixture { root, accounts in
+        try await fixture(initialize: false) { root, accounts in
             var seed: ItemStore? = try ItemStore(
-                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: false
+            )
             var item = try seed!.commit(
                 CommitRequest(
                     classID: "Item", changes: ["subject": .text("first")],
@@ -597,8 +624,7 @@ final class ServiceCoordinatorTests: XCTestCase {
                     operationID: "pooled-history-third")
             ).revision
             seed = nil
-            let coordinator = try await ServiceCoordinator(
-                opening: root, makeAccountDirectory: { accounts })
+            let coordinator = try await noAuthorityIntakeCoordinator(root: root, accounts: accounts)
             let bothLeases = expectation(description: "Pooled get and history overlap")
             bothLeases.expectedFulfillmentCount = 2
             let release = DispatchSemaphore(value: 0)
@@ -639,17 +665,17 @@ final class ServiceCoordinatorTests: XCTestCase {
     }
 
     func testPooledHistoryRefreshesAfterConcurrentRevisionBeforeDelivery() async throws {
-        try await fixture { root, accounts in
+        try await fixture(initialize: false) { root, accounts in
             var seed: ItemStore? = try ItemStore(
-                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: false
+            )
             let first = try seed!.commit(
                 CommitRequest(
                     classID: "Item", changes: ["subject": .text("before")],
                     operationID: "pool-history-concurrent-first")
             ).revision
             seed = nil
-            let coordinator = try await ServiceCoordinator(
-                opening: root, makeAccountDirectory: { accounts })
+            let coordinator = try await noAuthorityIntakeCoordinator(root: root, accounts: accounts)
             let gate = PreparedReadGate()
             await coordinator.setPooledReadBeforeFinishHookForTesting { await gate.pause() }
             let request = try nativeRequest("TractandaItem/history", ["itemID": first.itemID])
@@ -680,17 +706,17 @@ final class ServiceCoordinatorTests: XCTestCase {
     }
 
     func testPooledHistoryAppendAfterSnapshotDoesNotReportDisconnectedChain() async throws {
-        try await fixture { root, accounts in
+        try await fixture(initialize: false) { root, accounts in
             var seed: ItemStore? = try ItemStore(
-                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: false
+            )
             let first = try seed!.commit(
                 CommitRequest(
                     classID: "Item", changes: ["subject": .text("before snapshot")],
                     operationID: "pool-history-snapshot-first")
             ).revision
             seed = nil
-            let coordinator = try await ServiceCoordinator(
-                opening: root, makeAccountDirectory: { accounts })
+            let coordinator = try await noAuthorityIntakeCoordinator(root: root, accounts: accounts)
             let entered = expectation(description: "History captured its short initial WAL snapshot")
             let release = DispatchSemaphore(value: 0)
             await coordinator.setPooledHistoryAfterSnapshotHookForTesting {
@@ -894,7 +920,8 @@ final class ServiceCoordinatorTests: XCTestCase {
                 opening: root, makeAccountDirectory: { accounts })
             let gate = PreparedReadGate()
             await coordinator.setPooledReadBeforeFinishHookForTesting { await gate.pause() }
-            let query = try nativeRequest("TractandaItem/query", ["limit": 1])
+            let query = try nativeRequest(
+                "TractandaItem/query", ["expression": "classID == \"Item\"", "limit": 1])
             let rebuildingRequest = try nativeRequest("TractandaStore/rebuild", [:])
             let reading = Task { try await coordinator.handle(query, forUID: accounts.service) }
             try await waitForPreparedReads(1, gate: gate)
@@ -1109,7 +1136,8 @@ final class ServiceCoordinatorTests: XCTestCase {
                 entered.fulfill()
                 _ = release.wait(timeout: .now() + 10)
             }
-            let request = try nativeRequest("TractandaItem/query", ["limit": 1])
+            let request = try nativeRequest(
+                "TractandaItem/query", ["expression": "classID == \"Item\"", "limit": 1])
             let reading = Task { try await coordinator.handle(request, forUID: accounts.service) }
             await fulfillment(of: [entered], timeout: 5)
             reading.cancel()
@@ -1383,7 +1411,7 @@ final class ServiceCoordinatorTests: XCTestCase {
             let otherRoot = FileManager.default.temporaryDirectory.appendingPathComponent(
                 "tractanda-cursor-other-\(Identifier.make())")
             defer { try? FileManager.default.removeItem(at: otherRoot) }
-            var otherSeed: ItemStore? = try ItemStore(root: otherRoot, accounts: accounts)
+            var otherSeed: ItemStore? = try ItemStore.initializeFresh(root: otherRoot, accounts: accounts)
             _ = try otherSeed!.configureAccess(systemConfiguration(), operationID: "cursor-other-policy")
             otherSeed = nil
             let otherCoordinator = try await ServiceCoordinator(
@@ -1489,7 +1517,11 @@ final class ServiceCoordinatorTests: XCTestCase {
             let gate = PreparedReadGate()
             await coordinator.setPreparedReadHookForTesting { await gate.pause() }
             let request = try nativeRequest(
-                "TractandaItem/query", ["sort": [["property": "subject", "isAscending": true]]])
+                "TractandaItem/query",
+                [
+                    "expression": "classID == \"Item\"",
+                    "sort": [["property": "subject", "isAscending": true]],
+                ])
             async let firstResponse = coordinator.handle(request, forUID: accounts.service)
             async let secondResponse = coordinator.handle(request, forUID: accounts.service)
             try await waitForPreparedReads(2, gate: gate)
@@ -1663,7 +1695,11 @@ final class ServiceCoordinatorTests: XCTestCase {
             let counter = ReadCounter()
             await coordinator.setPreparedReadHookForTesting { await counter.record() }
             let request = try nativeRequest(
-                "TractandaItem/query", ["sort": [["property": "subject", "isAscending": true]]])
+                "TractandaItem/query",
+                [
+                    "expression": "classID == \"Item\"",
+                    "sort": [["property": "subject", "isAscending": true]],
+                ])
             let page = try nativePage(try await coordinator.handle(request, forUID: accounts.service))
             XCTAssertEqual(page.ids, [item.itemID])
             let parallelEvaluations = await counter.count()

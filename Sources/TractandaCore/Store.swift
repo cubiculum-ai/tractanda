@@ -3443,6 +3443,12 @@ public final class ItemStore {
                 let linear = try staging.verifiedLinearProjectionSnapshot(
                     row: row, revision: revision,
                     progress: { try self.rebuildControl?.graphProgress() })
+                guard !linear.analysis.needsMaterialization else {
+                    throw TractandaError(
+                        "revisionProjectionRequired",
+                        "Linear recovery needs clock reconciliation; use a reader with revision projection enabled."
+                    )
+                }
                 let ready = try projectionState(for: linear)
                 try staging.replaceCurrentProjection(
                     snapshot: linear, state: ready,

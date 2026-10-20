@@ -192,6 +192,7 @@ def exercise(binary, adapter, root, checks):
         assert info["connection"]["socketPath"] == str(stale)
         assert "server" not in info
     checks.append("offline tractanda_info preserves the bound socket and adapter identity without claiming server facts")
+    subprocess.check_output([binary, "init", str(store)])
     with wire.server(binary, store, socket) as native:
         check_cli_options(adapter, socket, root)
         checks.append("mixed socket/profile/no-start/result-format CLI permutations and missing/duplicate socket validation")
@@ -201,8 +202,15 @@ def exercise(binary, adapter, root, checks):
             client.initialize()
             catalog = client.request("tools/list")["tools"]
             catalog_names = {tool["name"] for tool in catalog}
-            assert len(catalog) == 38 and len(catalog_names) == 38
+            assert len(catalog) == len(catalog_names), "Tool names must be unique"
             assert {
+                "tractanda_info", "tractanda_describe", "tractanda_query", "tractanda_get",
+                "tractanda_extracted_text", "tractanda_memberships", "tractanda_history",
+                "tractanda_revision", "tractanda_resolve", "tractanda_explain", "tractanda_commit",
+                "tractanda_learning_status", "tractanda_learning_train", "tractanda_learning_suggest",
+                "tractanda_learning_categories", "tractanda_learning_feedback",
+                "tractanda_learning_settings", "tractanda_learning_reset",
+                "tractanda_state", "tractanda_conflicts", "tractanda_resolve_conflict",
                 "tractanda_capture_preview", "tractanda_capture_commit",
                 "tractanda_semantic_status", "tractanda_semantic_search", "tractanda_semantic_results",
                 "tractanda_semantic_configure", "tractanda_semantic_rebuild", "tractanda_semantic_reset",
@@ -211,7 +219,7 @@ def exercise(binary, adapter, root, checks):
                 "tractanda_document_job_status", "tractanda_document_job_cancel",
                 "tractanda_document_job_resume", "tractanda_document_job_rebase",
                 "tractanda_document_job_page", "tractanda_document_job_discard", "tractanda_document_jobs",
-            } <= catalog_names
+            } == catalog_names
             for tool in catalog:
                 assert tool["inputSchema"]["additionalProperties"] is False
                 assert tool["annotations"]["openWorldHint"] is False

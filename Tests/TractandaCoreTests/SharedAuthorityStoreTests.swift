@@ -62,19 +62,11 @@ final class SharedAuthorityStoreTests: XCTestCase {
         }
         try f.capacity()
         let root = f.directory.appendingPathComponent("third")
-        var store: ItemStore? = try ItemStore(
-            root: root, accounts: f.receiverAccounts, revisionProjectionEnabled: true)
-        store = nil
-        let name = ".tractanda-store-identity.json"
-        try Data(contentsOf: f.sourceRoot.appendingPathComponent(name)).write(
-            to: root.appendingPathComponent(name), options: .atomic)
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o600], ofItemAtPath: root.appendingPathComponent(name).path)
-        store = try Fixture.open(root, f.receiverAccounts)
-        try store!.configurePeerIntake(peers: [f.context])
+        let store = try f.openFreshSharedReplica(root, f.receiverAccounts)
+        try store.configurePeerIntake(peers: [f.context])
         try f.bootstrap(to: store)
         try f.capacity()
-        return (store!, root)
+        return (store, root)
     }
 
     func testDelayedRemovalDemotesAlreadyAcceptedPostEventWorkAndExactReviewSurvivesColdRebuild() throws {

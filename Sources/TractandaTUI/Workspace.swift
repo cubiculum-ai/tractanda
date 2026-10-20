@@ -262,24 +262,46 @@ final class Workspace {
         guard page.queryState == queryState else {
             throw TractandaError("stateChanged", "Items changed; refresh before marking the section.")
         }
+        guard Set(page.ids).count == page.ids.count else {
+            throw TractandaError("protocolError", "Section query repeats item IDs.")
+        }
         struct Response: Decodable {
             let list: [Revision]
             let notFound: [String]
             let unresolved: [ItemUnresolvedState]?
+            let remainingIDs: [String]?
+            let oversizedIDs: [String]?
             let state: String
         }
-        let result = try JSON.decode(
-            Response.self, client.call("TractandaItem/get", arguments: ["ids": page.ids]))
-        guard result.state == page.queryState, result.notFound.isEmpty else {
-            throw TractandaError("stateChanged", "Items changed while marking; refresh first.")
-        }
-        guard (result.unresolved ?? []).isEmpty else {
-            throw TractandaError(
-                "itemUnresolved", "A section item needs review; no partial group was marked.")
-        }
-        let byID = Dictionary(uniqueKeysWithValues: result.list.map { ($0.itemID, $0) })
-        guard page.ids.allSatisfy({ byID[$0] != nil }) else {
-            throw TractandaError("protocolError", "Missing section item.")
+        var byID: [String: Revision] = [:]
+        for start in stride(from: 0, to: page.ids.count, by: Self.pageSize) {
+            let ids = Array(page.ids[start..<min(start + Self.pageSize, page.ids.count)])
+            let result = try JSON.decode(
+                Response.self, client.call("TractandaItem/get", arguments: ["ids": ids]))
+            guard result.state == page.queryState else {
+                throw TractandaError("stateChanged", "Items changed while marking; refresh first.")
+            }
+            let unresolved = result.unresolved ?? []
+            let remaining = result.remainingIDs ?? []
+            let oversized = result.oversizedIDs ?? []
+            let classified =
+                result.list.map(\.itemID) + result.notFound + unresolved.map(\.itemID) + remaining
+                + oversized
+            guard Set(classified).count == classified.count, Set(classified) == Set(ids) else {
+                throw TractandaError("protocolError", "Get results omit or repeat section item IDs.")
+            }
+            guard result.notFound.isEmpty else {
+                throw TractandaError("stateChanged", "Items changed while marking; refresh first.")
+            }
+            guard unresolved.isEmpty else {
+                throw TractandaError(
+                    "itemUnresolved", "A section item needs review; no partial group was marked.")
+            }
+            guard remaining.isEmpty, oversized.isEmpty else {
+                throw TractandaError(
+                    "limit", "A section item could not be hydrated; no partial group was marked.")
+            }
+            for revision in result.list { byID[revision.itemID] = revision }
         }
         return page.ids.compactMap { byID[$0] }
     }

@@ -268,9 +268,13 @@ def main():
     checks = []; snapshots = []
     with tempfile.TemporaryDirectory(prefix="trac-tui-", dir="/tmp") as directory:
         root = Path(directory); path = root / "s"; recovery = root / "recovery" / "pending.json"
+        subprocess.check_output([binary, "init", str(root / "store")])
         with wire.server(binary, root / "store", path) as client:
             with terminal(tui, path, recovery) as ui:
-                ui.wait("No items")
+                ui.wait("Store access configuration")
+                founding = client.call("TractandaItem/query", {})
+                assert founding["total"] == 1
+                assert client.get(founding["ids"][0])["fields"]["classID"] == wire.text("AccessConfigurationItem")
                 assert termios.tcgetattr(ui.slave) != ui.original
                 ui.send("c"); ui.wait("Category manager")
                 ui.send(ESC + b"n"); ui.wait("New category")

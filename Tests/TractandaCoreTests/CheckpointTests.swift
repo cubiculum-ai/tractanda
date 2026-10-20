@@ -317,14 +317,20 @@ final class CheckpointTests: XCTestCase {
         XCTAssertFalse(StoreCheckpoint.isDirty(root: root))
         store = nil
         let historicalURL = root.appendingPathComponent(row.path)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: historicalURL.path)
+        let historicalBytes = try Data(contentsOf: historicalURL)
+        // Private 0600 metadata drift is accepted after digest verification. Unsafe group
+        // readability must still be discovered when this historical original is read.
+        try FileManager.default.setAttributes([.posixPermissions: 0o640], ofItemAtPath: historicalURL.path)
 
         store = try ItemStore(root: root)
         XCTAssertEqual(store?.startupRecovery["mode"], "checkpoint")
         XCTAssertEqual(try XCTUnwrap(store).get(initial.itemID), latest)
         XCTAssertThrowsError(try XCTUnwrap(store).history(initial.itemID)) {
-            XCTAssertEqual(($0 as? TractandaError)?.code, "recoveryError")
+            XCTAssertEqual($0 as? PooledCanonicalRecordError, .unsafePermissions)
         }
+        XCTAssertEqual(try Data(contentsOf: historicalURL), historicalBytes)
+        try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: historicalURL.path)
+        XCTAssertEqual(try XCTUnwrap(store).history(initial.itemID), [latest, initial])
     }
 
     func testUncertainPublicationKeepsMarkerUntilFullRecovery() throws {
@@ -417,6 +423,14 @@ final class CheckpointTests: XCTestCase {
             CommitRequest(
                 classID: "Item", changes: ["subject": .text("marker fault")], operationID: "marker-fault")
         ).revision
+        let originalRow = try XCTUnwrap(
+            store!.exportCatalogueForVerification().first {
+                $0.revisionID == item.revisionID
+            })
+        let canonicalURL = root.appendingPathComponent(originalRow.path)
+        let canonicalBytes = try Data(contentsOf: canonicalURL)
+        let identityURL = root.appendingPathComponent(".tractanda-store-identity.json")
+        let identityBytes = try Data(contentsOf: identityURL)
         let database = root.appendingPathComponent("index/items.sqlite")
         let damaged = try ItemIndex(path: database.path, create: false)
         try damaged.execute(
@@ -442,13 +456,16 @@ final class CheckpointTests: XCTestCase {
         damaged.close()
         store = nil
         store = try ItemStore(root: root)
-        XCTAssertEqual(
-            store?.startupRecovery["mode"], "checkpoint",
-            "Without a durable marker, the next process may trust the old checkpoint.")
-        XCTAssertThrowsError(try XCTUnwrap(store).get(item.itemID))
-        XCTAssertFalse(try XCTUnwrap(store).isCanonicalTrusted)
+        XCTAssertEqual(store?.startupRecovery["mode"], "fullRecovery")
+        XCTAssertEqual(store?.startupRecovery["reason"], "checkpointInvalidOrIncompatible")
+        XCTAssertTrue(try XCTUnwrap(store).isCanonicalTrusted)
+        XCTAssertEqual(try XCTUnwrap(store).get(item.itemID), item)
+        XCTAssertEqual(try Data(contentsOf: canonicalURL), canonicalBytes)
+        XCTAssertEqual(try Data(contentsOf: identityURL), identityBytes)
         try store?.rebuildIndex()
         XCTAssertEqual(try XCTUnwrap(store).get(item.itemID), item)
+        XCTAssertEqual(try Data(contentsOf: canonicalURL), canonicalBytes)
+        XCTAssertEqual(try Data(contentsOf: identityURL), identityBytes)
     }
 
     func testReadyStoreQuarantinesAfterCurrentHeadDigestMismatch() throws {

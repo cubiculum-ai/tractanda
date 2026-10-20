@@ -216,11 +216,30 @@ final class PeerExchangeCommitTests: XCTestCase {
                 try index.execute("UPDATE current_projection SET dirty=1 WHERE item=?", [child.itemID])
             }
             XCTAssertFalse(try index.peerItemRootHasNoLocalPolicyHistory(itemID: child.itemID))
-            XCTAssertThrowsError(try f.send(packet)) {
-                XCTAssertEqual(($0 as? TractandaError)?.code, "projectionRequired")
-            }
+            let result = try f.send(packet)
+            XCTAssertGreaterThan(result.accepted, 0)
+            XCTAssertEqual(try f.receiver.get(child.itemID), child)
+            let policies = try index.currentPolicyWitnesses(itemID: child.itemID)
+            XCTAssertEqual(policies.map(\.revisionID), [child.revisionID])
+            XCTAssertEqual(policies.map(\.permissions), [f.base.fields["permissions"]])
+            XCTAssertFalse(try index.peerItemRootHasNoLocalPolicyHistory(itemID: child.itemID))
             try f.capacity()
         }
+        // Missing accepted history is different from a recoverable projection cache.
+        // Keep known policy/history markers and require an explicit unavailable proof.
+        let f = try fixture()
+        try f.bootstrap()
+        let index = try ItemIndex(
+            path: f.receiver.indexDirectory.appendingPathComponent("items.sqlite").path, create: false)
+        defer { index.close() }
+        try index.execute("DELETE FROM current_projection WHERE item=?", [f.base.itemID])
+        try index.execute("DELETE FROM revision_catalog WHERE item=?", [f.base.itemID])
+        XCTAssertEqual(try index.revisionCount(itemID: f.base.itemID), 0)
+        XCTAssertFalse(try index.peerItemRootHasNoLocalPolicyHistory(itemID: f.base.itemID))
+        XCTAssertThrowsError(try index.currentPolicyWitnesses(itemID: f.base.itemID)) {
+            XCTAssertEqual(($0 as? TractandaError)?.code, "projectionRequired")
+        }
+        try f.capacity()
     }
     func testGenuinelyNewRootStillHoldsAuthorOwnerMismatch() throws {
         let f = try fixture()

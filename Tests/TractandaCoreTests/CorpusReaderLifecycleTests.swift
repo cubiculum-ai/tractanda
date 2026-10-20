@@ -171,7 +171,8 @@ final class CorpusReaderLifecycleTests: XCTestCase {
             fields["revisionID"] = .text(try UUID.makeVersion1().uuidString.lowercased())
             fields["body"] = .text("private retired source")
             let input = try PageCorpusInput(
-                storeID: current.input.binding.storeID, revision: Revision(fields: fields))
+                storeID: current.input.binding.storeID,
+                revision: Revision(fields: fields, formatVersion: revision.formatVersion))
             let orphan = try PageCorpusProjection.prepare(
                 input: input, provider: current.provider,
                 root: root.appendingPathComponent("spools"),

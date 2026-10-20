@@ -2,10 +2,12 @@
 """Offline tests for prepare-agent-access plan generation."""
 
 import argparse
+import copy
 import importlib.util
 import json
 import os
 import platform
+import subprocess
 import grp
 import pwd
 from pathlib import Path
@@ -188,6 +190,7 @@ def _native_verify(binary):
         owner = pwd.getpwuid(os.getuid()).pw_name
         group = grp.getgrgid(os.getgid()).gr_name
 
+        subprocess.check_output([str(peer), "init", str(store)])
         with WIRE.server(str(peer), store, socket) as client:
             baseline_subjects = {}
             baseline_bodies = {}
@@ -236,6 +239,25 @@ def _native_verify(binary):
             grants_path = base / "grants.json"
             _write_json(snapshot_path, snapshot)
             _write_json(grants_path, grants)
+            policy = client.call("TractandaItem/query", {"expression": 'classID == "AccessConfigurationItem"'})
+            _assert(policy["total"] == 1, "fresh store has one founding access policy")
+            founding_policy = client.get(policy["ids"][0])
+            canonical_before = WIRE.manifest(store)
+            try:
+                PLANNER.build_plan(snapshot_path, grants_path, owner, group, agent)
+            except PLANNER.PlanError as error:
+                _assert("already has permissions" in str(error), "fresh snapshot must fail its existing-permissions guard")
+            else:
+                raise AssertionError("legacy planner accepted an already-configured fresh snapshot")
+            _assert(WIRE.manifest(store) == canonical_before, "refused fresh-store plan must write no canonical revisions")
+
+            # Planner-only legacy input: current native stores are already configured.
+            # Its first-phase guarded requests can still exercise native permission/replay
+            # contracts; this is not an end-to-end legacy migration or policy activation.
+            legacy_projection = copy.deepcopy(snapshot)
+            for row in legacy_projection["items"]:
+                del row["fields"]["permissions"]
+            _write_json(snapshot_path, legacy_projection)
             plan = PLANNER.build_plan(snapshot_path, grants_path, owner, group, agent)
 
             revision_after_apply = {}
@@ -258,10 +280,11 @@ def _native_verify(binary):
                     "replay must not create a duplicate revision",
                 )
 
-            create_request = plan["phases"][1]["requests"][0]
-            client.commit(create_request)
+            # The old planner's configuration-create phase is inapplicable to a fresh
+            # store. Keep its existing founding policy and verify it was not changed.
             info = client.call("TractandaStore/info")
-            _assert(info.get("accessMode") == "multi-user", "planner config should switch to multi-user mode")
+            _assert(info.get("accessMode") == "multi-user", "fresh store must retain its configured access mode")
+            _assert(client.get(policy["ids"][0]) == founding_policy, "permission rewrites must preserve founding policy")
 
             untouched = [item_id for item_id in query_ids if item_id not in grants["read"] + grants["edit"]][0]
             current = client.get(untouched)
@@ -430,13 +453,13 @@ def run_tests(binary=None):
         def case_native_protocol():
             result = _native_verify(binary)
             if result["status"] == "skip":
-                record_skip("native protocol roundtrip and replay guards", result["reason"])
+                record_skip("fresh-store plan refusal and native permission replay guards", result["reason"])
                 return
             _assert(result["status"] == "pass", result.get("reason") or "native verification failed")
         if binary:
-            record("native protocol roundtrip and replay guards", case_native_protocol)
+            record("fresh-store plan refusal and native permission replay guards", case_native_protocol)
         elif binary is None:
-            record_skip("native protocol roundtrip and replay guards", "Binary not provided")
+            record_skip("fresh-store plan refusal and native permission replay guards", "Binary not provided")
 
     return passed, failed, skipped, report
 

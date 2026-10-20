@@ -427,17 +427,22 @@ final class CoreTests: XCTestCase {
         // A competing canonical successor must be diagnosed, never chosen by filename/date.
         var fields = first.fields
         fields["supersedes"] = .text(first.revisionID)
-        fields["revisionID"] = .text(Identifier.make())
+        fields["revisionID"] = .text(try UUID.makeVersion1().uuidString.lowercased())
         fields["operationID"] = .text("competing")
-        let branch = try Revision(fields: fields)
+        let originReplicaID = try XCTUnwrap(try first.provenance?.originReplicaID)
+        fields["revisionAncestry"] = try RevisionProvenance(
+            kind: .authored, originReplicaID: originReplicaID, parents: [first.revisionID],
+            writtenFields: [], unsetFields: [], frontier: []
+        ).itemValue
+        let branch = try Revision(fields: fields, formatVersion: 2)
         let branchPath = firstPath.deletingLastPathComponent().appendingPathComponent(
             branch.revisionID + ".tractanda")
         try RecordCodec.encode(branch).write(to: branchPath)
         try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: branchPath.path)
         // Offline edits require an explicit full rebuild under the checkpoint trust policy.
-        assertCode("recoveryError") { try store!.rebuildIndex() }
+        assertCode("revisionProjectionRequired") { try store!.rebuildIndex() }
         store = nil
-        assertCode("recoveryError") { _ = try ItemStore(root: root) }
+        assertCode("revisionProjectionRequired") { _ = try ItemStore(root: root) }
         XCTAssertEqual(files(root).count, 3)  // Diagnosis leaves canonical evidence intact.
         try FileManager.default.removeItem(at: branchPath)
         store = try ItemStore(root: root)
@@ -460,11 +465,16 @@ final class CoreTests: XCTestCase {
                 "action": .text("accept"), "revisionID": .text(Identifier.make()),
             ])
             var fields = first.fields
-            fields["revisionID"] = .text(Identifier.make())
+            fields["revisionID"] = .text(try UUID.makeVersion1().uuidString.lowercased())
             fields["supersedes"] = .text(first.revisionID)
             fields["operationID"] = .text("feedback-revision")
             fields["learningFeedback"] = .object([Identifier.make(): feedback])
-            let corrupt = try Revision(fields: fields)
+            let originReplicaID = try XCTUnwrap(try first.provenance?.originReplicaID)
+            fields["revisionAncestry"] = try RevisionProvenance(
+                kind: .authored, originReplicaID: originReplicaID, parents: [first.revisionID],
+                writtenFields: ["learningFeedback"], unsetFields: [], frontier: []
+            ).itemValue
+            let corrupt = try Revision(fields: fields, formatVersion: 2)
             let path = root.appendingPathComponent("items/\(corrupt.revisionID).tractanda")
             try RecordCodec.encode(corrupt).write(to: path)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
@@ -481,9 +491,9 @@ final class CoreTests: XCTestCase {
                 CommitRequest(classID: "Item", operationID: "duplicate-operation")
             ).revision
             var fields = first.fields
-            fields["itemID"] = .text(Identifier.make())
-            fields["revisionID"] = .text(Identifier.make())
-            let duplicate = try Revision(fields: fields)
+            fields["itemID"] = .text(try UUID.makeVersion1().uuidString.lowercased())
+            fields["revisionID"] = .text(try UUID.makeVersion1().uuidString.lowercased())
+            let duplicate = try Revision(fields: fields, formatVersion: 2)
             let duplicateURL = root.appendingPathComponent(
                 "items/\(duplicate.revisionID).tractanda")
             try RecordCodec.encode(duplicate).write(to: duplicateURL)
@@ -542,7 +552,7 @@ final class CoreTests: XCTestCase {
         let writtenLatest = try edit(store!, first, ["subject": .text("latest")])
         var latestFields = writtenLatest.fields
         latestFields["modifiedAt"] = .date("2000-01-01T00:00:00Z")
-        let latest = try Revision(fields: latestFields)
+        let latest = try Revision(fields: latestFields, formatVersion: writtenLatest.formatVersion)
         let firstPath = try XCTUnwrap(
             files(root).first { $0.lastPathComponent == first.revisionID + ".tractanda" })
         let latestPath = try XCTUnwrap(
@@ -553,12 +563,43 @@ final class CoreTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: firstPath.path))
         store = nil
 
-        let recovered = try ItemStore(root: root)
+        var recovered: ItemStore? = try ItemStore(root: root)
         // This test changed a canonical file out of band. A clean sealed checkpoint is
         // trusted until the required explicit rebuild after that external edit.
-        try recovered.rebuildIndex()
-        XCTAssertEqual(try recovered.get(first.itemID), latest)
-        XCTAssertEqual(try recovered.history(first.itemID), [latest, first])
+        let canonicalBefore = try Dictionary(
+            uniqueKeysWithValues: files(root).map { ($0.path, try Data(contentsOf: $0)) })
+        assertCode("revisionProjectionRequired") { try recovered!.rebuildIndex() }
+        XCTAssertFalse(recovered!.isCanonicalTrusted)
+        XCTAssertEqual(
+            try Dictionary(uniqueKeysWithValues: files(root).map { ($0.path, try Data(contentsOf: $0)) }),
+            canonicalBefore)
+        recovered = nil
+
+        // The supported projector preserves the causal child's content and reconciles
+        // its old clock against the real accepted ancestor; it never selects that ancestor's content.
+        let projected = try ItemStore(root: root, revisionProjectionEnabled: true)
+        try projected.rebuildIndex()
+        let current = try projected.get(first.itemID)
+        XCTAssertEqual(current.fields["subject"], latest.fields["subject"])
+        XCTAssertEqual(RevisionMerge.semanticFields(current), RevisionMerge.semanticFields(latest))
+        let provenance = try XCTUnwrap(current.provenance)
+        XCTAssertEqual(provenance.kind, .automaticMerge)
+        XCTAssertEqual(provenance.frontier, [latest.revisionID])
+        XCTAssertEqual(Set(provenance.parents), Set([first.revisionID, latest.revisionID]))
+        XCTAssertGreaterThan(
+            try RevisionTimestamp(current.modifiedAt), try RevisionTimestamp(first.modifiedAt))
+        XCTAssertGreaterThan(
+            try RevisionTimestamp(current.modifiedAt), try RevisionTimestamp(latest.modifiedAt))
+        XCTAssertEqual(try projected.get(first.itemID, revisionID: first.revisionID), first)
+        XCTAssertEqual(try projected.get(first.itemID, revisionID: latest.revisionID), latest)
+        XCTAssertEqual(try projected.history(first.itemID).count, 3)
+        for (path, bytes) in canonicalBefore {
+            XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), bytes)
+        }
+        let reconciledID = current.revisionID
+        try projected.rebuildIndex()
+        XCTAssertEqual(try projected.get(first.itemID).revisionID, reconciledID)
+        XCTAssertEqual(try projected.history(first.itemID).count, 3)
     }
 
     func testAbandonedPublicationAndCorruptIndexRecovery() throws {
@@ -739,7 +780,7 @@ final class CoreTests: XCTestCase {
             "TractandaItem/get",
             ["ids": [oversized.itemID], "properties": ["subject", "customInt"]])
         let projectedRecord = (projected["list"] as! [[String: Any]])[0]
-        XCTAssertEqual(projectedRecord["formatVersion"] as? Int, 1)
+        XCTAssertEqual(projectedRecord["formatVersion"] as? Int, oversized.formatVersion)
         let fields = projectedRecord["fields"] as! [String: Any]
         XCTAssertNotNil(fields["itemID"])
         XCTAssertNotNil(fields["customInt"])

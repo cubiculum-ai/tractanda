@@ -11,15 +11,39 @@ import XCTest
     import Glibc
 #endif
 
-// Kept identical in the three boundary-test targets; no product API or shared runtime state.
+// Boundary-test fixture ownership only; no product API or shared runtime state.
 enum GuardedFixtureDirectory {
     struct Context {
         let root: URL
         let proof: URL
     }
+    static func physical(_ url: URL) throws -> URL {
+        guard url.path.hasPrefix("/"), !url.path.contains("\0"),
+            let path = realpath(url.path, nil)
+        else { throw TractandaError("fixtureRoot", "Cannot resolve physical fixture path.") }
+        defer { free(path) }
+        // Foundation resolution can rewrite /private/var back to the symlink /var.
+        return URL(fileURLWithPath: String(cString: path), isDirectory: true)
+    }
+    static func relativePath(_ url: URL, beneath root: URL) throws -> String {
+        let prefix = root.path + "/"
+        var info = stat()
+        guard try physical(root).path == root.path,
+            lstat(root.path, &info) == 0, info.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR),
+            info.st_uid == geteuid(), info.st_mode & 0o022 == 0,
+            url.path.hasPrefix(prefix),
+            try physical(url.deletingLastPathComponent()).path == url.deletingLastPathComponent().path
+        else { throw TractandaError("fixtureRoot", "Enumerated fixture escaped its physical owned root.") }
+        let relative = String(url.path.dropFirst(prefix.count))
+        guard !relative.isEmpty,
+            relative.split(separator: "/", omittingEmptySubsequences: false)
+                .allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." })
+        else { throw TractandaError("fixtureRoot", "Invalid relative fixture path.") }
+        return relative
+    }
     static func validate(_ url: URL) throws -> stat {
         var info = stat()
-        guard url.path.hasPrefix("/"), url.path == url.standardizedFileURL.resolvingSymlinksInPath().path,
+        guard url.path.hasPrefix("/"), try physical(url).path == url.path,
             lstat(url.path, &info) == 0, info.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR),
             info.st_uid == geteuid(), info.st_mode & 0o777 == 0o700
         else {
@@ -50,10 +74,12 @@ enum GuardedFixtureDirectory {
         }
         return result
     }
-    static func parent() throws -> URL { try context()?.root ?? FileManager.default.temporaryDirectory }
+    static func parent() throws -> URL {
+        try context()?.root ?? physical(FileManager.default.temporaryDirectory)
+    }
     static func create(prefix: String, source: String, test: String, socket: String? = nil) throws -> URL {
         let context = try context()
-        let parent = context?.root ?? FileManager.default.temporaryDirectory
+        let parent = try context?.root ?? physical(FileManager.default.temporaryDirectory)
         var capacity = statvfs()
         guard statvfs(parent.path, &capacity) == 0, capacity.f_frsize > 0 else {
             throw TractandaError("resourceLimit", "Cannot inspect genuine fixture capacity.")
@@ -78,7 +104,7 @@ enum GuardedFixtureDirectory {
             at: root, withIntermediateDirectories: false,
             attributes: [.posixPermissions: 0o700])
         if let context {
-            let actual = root.resolvingSymlinksInPath()
+            let actual = try physical(root)
             _ = try validate(actual)
             guard actual.path == root.path, actual.deletingLastPathComponent().path == context.root.path,
                 test.utf8.count <= 256
@@ -264,6 +290,32 @@ final class DocumentJobCoordinatorTests: XCTestCase {
                     ])
             })
         XCTAssertEqual(attempts, 1)
+    }
+
+    func testFixturePhysicalPathsRejectAliasesAndEscapedRelativeEntries() throws {
+        let root = try GuardedFixtureDirectory.create(
+            prefix: "j", source: "DocumentJobCoordinatorTests", test: name)
+        defer { try? FileManager.default.removeItem(at: root) }
+        XCTAssertEqual(try GuardedFixtureDirectory.physical(root).path, root.path)
+        _ = try GuardedFixtureDirectory.validate(root)
+        let child = root.appendingPathComponent("child")
+        try FileManager.default.createDirectory(
+            at: child, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let file = child.appendingPathComponent("value")
+        try Data([1]).write(to: file)
+        XCTAssertEqual(try GuardedFixtureDirectory.relativePath(file, beneath: root), "child/value")
+        XCTAssertThrowsError(try GuardedFixtureDirectory.relativePath(root, beneath: child))
+        let alias = root.appendingPathComponent("alias")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: child)
+        XCTAssertThrowsError(try GuardedFixtureDirectory.validate(alias))
+        XCTAssertThrowsError(
+            try GuardedFixtureDirectory.relativePath(alias.appendingPathComponent("value"), beneath: root))
+        let leaf = child.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(at: leaf, withDestinationURL: file)
+        XCTAssertEqual(try GuardedFixtureDirectory.relativePath(leaf, beneath: root), "child/link")
+        var metadata = stat()
+        XCTAssertEqual(lstat(leaf.path, &metadata), 0)
+        XCTAssertEqual(metadata.st_mode & mode_t(S_IFMT), mode_t(S_IFLNK))
     }
 
     func testFixtureCapacityFollowsOnlyOwnedSealedPromotionCounterpart() throws {

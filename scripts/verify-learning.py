@@ -32,6 +32,8 @@ def main():
             store.mkdir(mode=0o700)
             shutil.copytree(args.import_from/'items', store/'items')
             manifest = json.loads((args.import_from/'manifest.json').read_text())
+        else:
+            subprocess.check_output([binary, "init", str(store)])
         with ipc.server(binary, store, socket) as client:
             def call(name, **arguments):
                 return client.call('TractandaLearning/'+name, arguments)
@@ -46,6 +48,8 @@ def main():
                 return client.commit(ipc.intent('create', 'create-'+text, class_id='Item', changes=fields))['revision']
 
             if not args.import_from:
+                founding = client.call('TractandaItem/query', {'expression': 'classID == "AccessConfigurationItem"'})
+                check(founding['total'] == 1, 'Fresh store has exactly one founding access policy')
                 category_revision = client.commit(ipc.intent('create', 'category', class_id='Item', changes={
                     'subject':ipc.text('Chess'),
                     'selection':{'type':'object','value':{'language':ipc.text('tractanda.spotlight.v0'),
@@ -63,7 +67,7 @@ def main():
                 check(cli('suggest',category)['list'] == [], 'Suggest does not train implicitly')
                 model = cli('learn',category)
                 check(model['status'] == 'ready', 'CLI trains a category through the server')
-                check((model['positiveExamples'],model['negativeExamples'],model['unknownItems']) == (2,2,2), 'Unassigned items remain unknown')
+                check((model['positiveExamples'],model['negativeExamples'],model['unknownItems']) == (2,2,3), 'Two unassigned examples and the founding policy remain unknown')
                 check(client.call('TractandaStore/info')['state'] == before, 'Training does not revise canonical state')
                 check(cli('learn',category)['modelID'] == model['modelID'], 'Repeated unchanged training preserves model identity')
                 suggestions = cli('suggest',category)

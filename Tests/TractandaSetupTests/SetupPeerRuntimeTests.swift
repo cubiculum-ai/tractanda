@@ -14,7 +14,8 @@ import XCTest
 final class SetupPeerRuntimeTests: XCTestCase {
     private func fixture(_ body: (URL, SetupEngine) throws -> Void) throws {
         let root = try GuardedFixtureDirectory.create(
-            prefix: "u", source: "SetupPeerRuntimeTests", test: name)
+            prefix: "u", source: "SetupPeerRuntimeTests", test: name
+        ).resolvingSymlinksInPath()
         defer { try? FileManager.default.removeItem(at: root) }
         let roots = SetupRoots(
             platform: .macos, software: root.appendingPathComponent("software"),

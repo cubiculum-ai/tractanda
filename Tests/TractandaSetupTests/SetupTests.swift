@@ -84,7 +84,9 @@ final class SetupTests: XCTestCase {
             throw XCTSkip("Managed macOS installation tests; Linux installer remains in development.")
         #endif
         if guardedRoot == nil {
-            guardedRoot = try GuardedFixtureDirectory.create(prefix: "u", source: "SetupTests", test: name)
+            guardedRoot = try GuardedFixtureDirectory.create(
+                prefix: "u", source: "SetupTests", test: name
+            ).resolvingSymlinksInPath()
         }
         let root = try XCTUnwrap(guardedRoot).appendingPathComponent("c" + String(fixtureNumber))
         fixtureNumber += 1
@@ -168,7 +170,7 @@ final class SetupTests: XCTestCase {
         try JSONEncoder().encode(
             BundleManifest(
                 version: "0.1.0-preview.2", platform: original.platform, arch: original.arch, files: files,
-                embedding: .granite)
+                embedding: .granite, canonicalFormats: original.canonicalFormats)
         ).write(to: manifestURL)
     }
 
@@ -434,6 +436,7 @@ final class SetupTests: XCTestCase {
     func testManagedPoc11GraniteConfigurationUpgradesAndRetriesIdempotently() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
+        try rewriteCanonicalSupport(f, support: .current)
         let runner = Runner()
         let initial = engine(f, runner: runner)
         let options = SetupOptions(name: "production", owner: f.owner, bundle: f.bundle)
@@ -504,6 +507,7 @@ final class SetupTests: XCTestCase {
     func testGraniteRuntimeUpgradeRefusesChangedSemanticConfiguration() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
+        try rewriteCanonicalSupport(f, support: .current)
         let runner = Runner()
         let installer = engine(f, runner: runner)
         try installer.install(f.options)
@@ -529,6 +533,7 @@ final class SetupTests: XCTestCase {
     func testPostConfigurationFailureRestoresManagedPoc11GraniteConfiguration() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
+        try rewriteCanonicalSupport(f, support: .current)
         let runner = Runner()
         let initial = engine(f, runner: runner)
         try initial.install(f.options)

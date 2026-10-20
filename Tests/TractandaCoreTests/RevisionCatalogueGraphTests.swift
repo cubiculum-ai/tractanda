@@ -222,8 +222,11 @@ final class RevisionCatalogueGraphTests: XCTestCase {
                 try insert(root, into: index)
                 try insert(child, into: index)
                 try index.validateRecoveryGraph(requireLinearProjection: false)
+                XCTAssertTrue(try index.acceptedGraphProofIsCurrent())
                 code("revisionProjectionRequired") { try index.validateRecoveryGraph() }
-                XCTAssertNil(try index.recoveryHead())
+                // A failed savepoint may retain the earlier physical-head table. It must
+                // invalidate admission proof, so strict recovery cannot serve those rows.
+                XCTAssertFalse(try index.acceptedGraphProofIsCurrent())
             }
         }
     }

@@ -113,6 +113,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="tsd-", dir="/private/tmp" if Path("/private/tmp").is_dir() else "/tmp") as root:
         root = Path(root)
         store, socket_path = root / "store", root / "s"
+        subprocess.check_output([binaries[0], "init", str(store)])
         daemon = subprocess.Popen(
             [binaries[0], "daemon", str(store), str(socket_path), "--http-port", "0"],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)

@@ -51,6 +51,24 @@ func revision(_ subject: String, itemID: String? = nil) throws -> Revision {
     #expect(result.oversizedIDs == [oversizedID])
 }
 
+@Test func getRejectsOmittedRepeatedAndUnrequestedIDs() async throws {
+    let item = try revision("Requested")
+    let unrequested = try revision("Unrequested")
+    let malformed = [
+        ItemGetResult(list: [], notFound: [], state: "state"),
+        ItemGetResult(list: [item], notFound: [item.itemID], state: "state"),
+        ItemGetResult(list: [unrequested], notFound: [], state: "state"),
+    ]
+    for result in malformed {
+        let transport = try ScriptedTransport([reply("TractandaItem/get", object(result))])
+        await #expect(
+            throws: TractandaError("protocolError", "Get result omitted or repeated requested IDs.")
+        ) {
+            try await ItemClient(transport: transport).revision(for: item.itemID)
+        }
+    }
+}
+
 @Test func getQueryAndHistoryKeepTypedHistoricalDispositions() async throws {
     let demoted = try revision("Formerly accepted")
     let dispositions = [demoted.revisionID: HistoricalDisposition.demoted]

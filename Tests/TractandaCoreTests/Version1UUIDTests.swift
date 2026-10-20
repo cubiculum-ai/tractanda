@@ -1,3 +1,4 @@
+import CTractandaPlatform
 import Foundation
 import XCTest
 
@@ -5,6 +6,22 @@ import XCTest
 
 @MainActor
 final class Version1UUIDTests: XCTestCase {
+    private struct OriginalStoreIdentity: Codable {
+        let formatVersion: Int
+        let storeID: String
+    }
+
+    private func seedOriginalStoreIdentity(root: URL) throws {
+        try FileManager.default.createDirectory(
+            at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let storeID = try UUID.makeVersion1().uuidString.lowercased()
+        let identityURL = root.appendingPathComponent(".tractanda-store-identity.json")
+        try PrivateConfiguration.write(
+            try JSON.encode(OriginalStoreIdentity(formatVersion: 1, storeID: storeID)), to: identityURL)
+        XCTAssertEqual(
+            try CanonicalReaderRequirement.storeIdentity(root: root, ownerUID: tractanda_uid()), storeID)
+    }
+
     private func publishOriginalRecord(_ revision: Revision, root: URL) throws -> (
         directory: URL, file: URL, bytes: Data
     ) {
@@ -141,6 +158,7 @@ final class Version1UUIDTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
             "trac-uuid-v1-" + Identifier.make())
         defer { try? FileManager.default.removeItem(at: root) }
+        try seedOriginalStoreIdentity(root: root)
         let oldItemID = try UUID.makeVersion1().uuidString.lowercased()
         let oldRevisionID = try UUID.makeVersion1().uuidString.lowercased()
         XCTAssertNotNil(UUID(uuidString: oldItemID)?.version1Components)
@@ -194,6 +212,7 @@ final class Version1UUIDTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
             "trac-uuid-v4-edit-" + Identifier.make())
         defer { try? FileManager.default.removeItem(at: root) }
+        try seedOriginalStoreIdentity(root: root)
         let oldItemID = Identifier.make()
         let oldRevisionID = Identifier.make()
         XCTAssertNil(UUID(uuidString: oldItemID)?.version1Components)

@@ -108,16 +108,18 @@ actor NativeGateway {
         return try NativeMethodResult.unwrap(response, method: method)
     }
 
-    /// MCP's ordinary write reply follows content projection and omits only the server-owned
-    /// request identity. This intentionally touches only revision.fields.requestIdentity,
-    /// never user keys at another path, and never the canonical record returned by the native
+    /// MCP's ordinary write reply follows content projection and omits the server-owned
+    /// request identity and revision ancestry. This intentionally touches only these top-level
+    /// revision fields, never user keys at another path or the canonical record returned by the native
     /// service. Explicit retrieval with projection=full remains byte-for-field native output.
     private func compactWriteResult(_ data: Data) throws -> Data {
         guard case .object(var result) = try JSONDecoder().decode(Value.self, from: data),
             case .object(var revision)? = result["revision"],
             case .object(var fields)? = revision["fields"]
         else { return data }
-        guard fields.removeValue(forKey: "requestIdentity") != nil else { return data }
+        let hadRequestIdentity = fields.removeValue(forKey: "requestIdentity") != nil
+        let hadRevisionAncestry = fields.removeValue(forKey: "revisionAncestry") != nil
+        guard hadRequestIdentity || hadRevisionAncestry else { return data }
         revision["fields"] = .object(fields)
         result["revision"] = .object(revision)
         return try JSONEncoder().encode(Value.object(result))

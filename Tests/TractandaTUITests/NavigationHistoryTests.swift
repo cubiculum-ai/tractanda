@@ -98,43 +98,50 @@ final class NavigationHistoryTests: XCTestCase {
             let original = try fixture.service.handle(data, peerUID: fixture.store.ownerUID)
             var envelope = try JSONSerialization.jsonObject(with: original) as! [String: Any]
             var responses = envelope["methodResponses"] as! [[Any]]
+            let request = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+            let calls = request["methodCalls"] as! [[Any]]
+            var queriedIDs: [String]?
             for index in responses.indices {
                 var response = responses[index]
                 let method = response[0] as! String
                 var result = response[1] as! [String: Any]
                 if method == "TractandaItem/query" {
-                    if mode == 1 {
-                        result["ids"] = [a.itemID]
-                        result["total"] = 1
-                    } else if mode == 4 {
-                        result["ids"] = [b.itemID]
-                        result["total"] = 1
-                    } else if mode == 5 {
-                        result["ids"] = [a.itemID]
-                        result["total"] = 1
-                    } else if mode == 3 {
-                        result["ids"] = [String]()
-                        result["total"] = 0
-                        result["conflictsAvailable"] = true
+                    let candidates = (result["ids"] as! [String]).filter {
+                        $0 == a.itemID || $0 == b.itemID
                     }
-                } else if method == "TractandaItem/get", mode == 1 || mode == 2 || mode == 4 || mode == 5 {
+                    let ids: [String]
+                    switch mode {
+                    case 1, 5: ids = [a.itemID]
+                    case 4: ids = [b.itemID]
+                    case 3: ids = []
+                    default: ids = candidates
+                    }
+                    result["ids"] = ids
+                    result["total"] = ids.count
+                    result["conflictsAvailable"] = mode == 3
+                    queriedIDs = ids
+                } else if method == "TractandaItem/get" {
+                    let call = try XCTUnwrap(calls.first { $0[2] as? String == response[2] as? String })
+                    let arguments = call[1] as! [String: Any]
+                    let requested = try XCTUnwrap(arguments["ids"] as? [String] ?? queriedIDs)
+                    let unresolved = (mode == 1 || mode == 2) && requested.contains(a.itemID)
+                    let remaining = mode == 4 && requested.contains(b.itemID)
+                    let oversized = mode == 5 && requested.contains(a.itemID)
                     let revisions = result["list"] as! [[String: Any]]
                     result["list"] = revisions.filter { revision in
                         let fields = revision["fields"] as! [String: Any]
                         let itemID = (fields["itemID"] as! [String: Any])["value"] as! String
-                        return itemID != a.itemID && mode != 4 && mode != 5
+                        return requested.contains(itemID)
+                            && !(unresolved && itemID == a.itemID)
+                            && !(remaining && itemID == b.itemID)
+                            && !(oversized && itemID == a.itemID)
                     }
-                    if mode == 1 || mode == 2 {
-                        result["unresolved"] = [
-                            [
-                                "itemID": a.itemID, "status": "conflicted", "stateToken": "fixture-token",
-                            ]
-                        ]
-                    } else if mode == 4 {
-                        result["remainingIDs"] = [b.itemID]
-                    } else {
-                        result["oversizedIDs"] = [a.itemID]
-                    }
+                    result["unresolved"] =
+                        unresolved
+                        ? [["itemID": a.itemID, "status": "conflicted", "stateToken": "fixture-token"]]
+                        : []
+                    result["remainingIDs"] = remaining ? [b.itemID] : []
+                    result["oversizedIDs"] = oversized ? [a.itemID] : []
                 }
                 response[1] = result
                 responses[index] = response
@@ -165,12 +172,14 @@ final class NavigationHistoryTests: XCTestCase {
         mode = 4
         try workspace.refresh(position: 0)
         XCTAssertTrue(workspace.items.isEmpty)
-        XCTAssertTrue(workspace.projectionNotice?.contains("could not be hydrated") == true)
+        XCTAssertEqual(workspace.sections.flatMap(\.unhydratedIDs), [b.itemID])
+        XCTAssertTrue(workspace.projectionNotice?.contains("could not be loaded") == true)
 
         mode = 5
         try workspace.refresh(position: 0)
         XCTAssertTrue(workspace.items.isEmpty)
-        XCTAssertTrue(workspace.projectionNotice?.contains("could not be hydrated") == true)
+        XCTAssertEqual(workspace.sections.flatMap(\.unhydratedIDs), [a.itemID])
+        XCTAssertTrue(workspace.projectionNotice?.contains("could not be loaded") == true)
     }
 
     func testRestoreRequeriesPagesSectionsAndRenamedCategories() throws {

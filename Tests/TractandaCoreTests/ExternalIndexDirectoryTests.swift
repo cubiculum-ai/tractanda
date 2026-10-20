@@ -233,34 +233,48 @@ final class ExternalIndexDirectoryTests: XCTestCase {
     }
 
     func testExactV1BindingMigratesButMismatchRequiresRebuild() throws {
-        let root = directory("canonical")
-        let external = directory("derived")
+        let root = directory("legacy-canonical")
+        let external = directory("legacy-derived")
+        let mismatchRoot = directory("mismatched-legacy-canonical")
+        let mismatchExternal = directory("mismatched-legacy-derived")
         defer {
-            try? FileManager.default.removeItem(at: root)
-            try? FileManager.default.removeItem(at: external)
+            for path in [root, external, mismatchRoot, mismatchExternal] {
+                try? FileManager.default.removeItem(at: path)
+            }
         }
-        var store: ItemStore? = try ItemStore(root: root, indexDirectory: external)
-        XCTAssertNotNil(store)
-        store = nil
+        // Model an empty pre-StoreID legacy store directly. Opening a current store first
+        // would create modern payload bindings, whose identity must never be discarded.
+        try PrivateConfiguration.makeDirectory(root)
         let metadata = try FileMetadata.read(at: root)
         let legacy: [String: Any] = [
             "formatVersion": 1, "canonicalPath": root.path, "canonicalDevice": metadata.device,
             "canonicalInode": metadata.inode,
         ]
         try writeBinding(legacy, to: external)
-        try FileManager.default.removeItem(at: identityURL(root))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: identityURL(root).path))
 
-        store = try ItemStore(root: root, indexDirectory: external)
+        var store: ItemStore? = try ItemStore(root: root, indexDirectory: external)
+        XCTAssertNotNil(store)
         XCTAssertEqual((try binding(external))["formatVersion"] as? Int, 2)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: identityURL(root).path))
+        let retainedIdentity = try Data(contentsOf: identityURL(root))
+        store = nil
+        store = try ItemStore(root: root, indexDirectory: external)
+        XCTAssertEqual(try Data(contentsOf: identityURL(root)), retainedIdentity)
         store = nil
 
-        try FileManager.default.removeItem(at: identityURL(root))
-        var staleLegacy = legacy
-        staleLegacy["canonicalDevice"] = metadata.device &+ 1
-        try writeBinding(staleLegacy, to: external)
-        assertCode("indexBindingMismatch") { _ = try ItemStore(root: root, indexDirectory: external) }
-        XCTAssertFalse(FileManager.default.fileExists(atPath: identityURL(root).path))
+        // A separate, never-opened legacy fixture supplies the negative binding case.
+        try PrivateConfiguration.makeDirectory(mismatchRoot)
+        let mismatchMetadata = try FileMetadata.read(at: mismatchRoot)
+        let staleLegacy: [String: Any] = [
+            "formatVersion": 1, "canonicalPath": mismatchRoot.path,
+            "canonicalDevice": mismatchMetadata.device &+ 1, "canonicalInode": mismatchMetadata.inode,
+        ]
+        try writeBinding(staleLegacy, to: mismatchExternal)
+        assertCode("indexBindingMismatch") {
+            _ = try ItemStore(root: mismatchRoot, indexDirectory: mismatchExternal)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: identityURL(mismatchRoot).path))
+        XCTAssertEqual(try Data(contentsOf: identityURL(root)), retainedIdentity)
     }
 
     func testUnsafeOrUnboundExternalPathsDoNotDamageExistingStore() throws {

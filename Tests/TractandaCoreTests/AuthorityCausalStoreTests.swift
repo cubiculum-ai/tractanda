@@ -455,16 +455,7 @@ final class AuthorityCausalStoreTests: XCTestCase {
         try AttachmentFixtureCapacity.requireFree(at: f.directory)
         let root = f.directory.appendingPathComponent("starlet")
         let accounts = PeerIntakeStoreTests.Accounts()
-        var p: ItemStore! = try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true)
-        p = nil
-        let identity = try Data(
-            contentsOf: f.sourceRoot.appendingPathComponent(".tractanda-store-identity.json"))
-        try identity.write(
-            to: root.appendingPathComponent(".tractanda-store-identity.json"), options: .atomic)
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o600],
-            ofItemAtPath: root.appendingPathComponent(".tractanda-store-identity.json").path)
-        p = try PeerIntakeStoreTests.Fixture.open(root, accounts)
+        var p: ItemStore! = try f.openFreshSharedReplica(root, accounts)
         defer { p = nil }
         let origins = [f.origin, try XCTUnwrap(f.receiver.replicaID), try XCTUnwrap(p.replicaID)].sorted()
         func context(_ peer: String) throws -> PeerPackage.Context {

@@ -8,23 +8,13 @@ final class SharedAuthorityExportTests: XCTestCase {
     typealias Fixture = PeerIntakeStoreTests.Fixture
 
     private func third(_ f: Fixture) throws -> ItemStore {
-        // Three tiny metadata stores estimate24MiB, inside the fixed32MiB fixture cap.
+        // Three tiny metadata stores estimate24MiB, within the configured fixture cap.
         guard AttachmentFixtureCapacity.fixtureCapBytes >= 24 * 1024 * 1024 else {
             throw TractandaError("resourceLimit", "Three-store fixture estimate")
         }
         try f.capacity()
         let root = f.directory.appendingPathComponent("export-third")
-        var initial: ItemStore? = try ItemStore(
-            root: root, accounts: f.receiverAccounts,
-            revisionProjectionEnabled: true)
-        initial = nil
-        let name = ".tractanda-store-identity.json"
-        try Data(contentsOf: f.sourceRoot.appendingPathComponent(name)).write(
-            to: root.appendingPathComponent(name))
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o600],
-            ofItemAtPath: root.appendingPathComponent(name).path)
-        let store = try Fixture.open(root, f.receiverAccounts)
+        let store = try f.openFreshSharedReplica(root, f.receiverAccounts)
         try store.configurePeerIntake(peers: [f.context])
         try f.bootstrap(to: store)
         return store

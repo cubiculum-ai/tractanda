@@ -91,6 +91,8 @@ def main():
                     shutil.copytree(source / 'items', store / 'items')
                     manifest = json.loads((source / 'manifest.json').read_text())
                     fixture = manifest['fixture']
+                if not options.import_from:
+                    cli('init', store)
                 native = subprocess.Popen([binary,'daemon',str(store),str(socket),'--no-http'], stdout=log, stderr=log)
                 wait_for(socket,native)
                 if not options.import_from:
