@@ -1,3 +1,4 @@
+import CTractandaPlatform
 import Crypto
 import Foundation
 import TractandaClient
@@ -156,6 +157,7 @@ enum GuardedFixtureDirectory {
 }
 
 final class DocumentJobCoordinatorTests: XCTestCase {
+    private var publicationContentionForTesting: (() -> Void)?
     private struct Transport: TractandaClient.ItemTransport {
         let coordinator: ServiceCoordinator
         var uid: UInt32 = UInt32(getuid())
@@ -236,7 +238,7 @@ final class DocumentJobCoordinatorTests: XCTestCase {
                     }
                     if exists, entry.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) {
                         try scan(url)
-                    } else if !exists, let promoted = promotedEntry(url, root: root),
+                    } else if !exists, let promoted = try promotedEntry(url, root: root),
                         promoted.1.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR)
                     {
                         try scan(promoted.0)
@@ -250,7 +252,7 @@ final class DocumentJobCoordinatorTests: XCTestCase {
                 }
             }
             do { try visit(directory) } catch FileMetadataError.posix(ENOENT) {
-                guard let promoted = promotedEntry(directory, root: root),
+                guard let promoted = try promotedEntry(directory, root: root),
                     promoted.1.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR)
                 else {
                     throw NSError(
@@ -368,9 +370,70 @@ final class DocumentJobCoordinatorTests: XCTestCase {
             try accountedBytes(page, root: root), "Never follow a canonical counterpart symlink")
     }
 
+    func testFixtureCapacityWaitsForConfirmedInFlightPublication() async throws {
+        let root = try GuardedFixtureDirectory.create(
+            prefix: "j", source: "DocumentJobCoordinatorTests", test: name)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = root.appendingPathComponent("store")
+        try FileManager.default.createDirectory(
+            at: store, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let content = DocumentContentStore(
+            root: store, ownerUID: getuid(), minimumFreeBytes: AttachmentFixtureCapacity.reserveBytes)
+        let id = try UUID.makeVersion1().uuidString.lowercased()
+        let source = try AttachmentDocumentSource(
+            itemID: id, revisionID: id, attachmentID: id, sha256: String(repeating: "a", count: 64),
+            byteCount: 3, mediaType: "application/pdf")
+        let writer = try content.begin(source: source, identity: .init())
+        try writer.append(
+            DocumentStoredPage(
+                pageNumber: 1, sourceSHA256: source.sha256,
+                status: "failed", failureCode: "syntheticFixture"))
+        let prepared = try writer.preparePublication()
+        let page = prepared.stage.reduce(store) { $0.appendingPathComponent($1) }
+            .appendingPathComponent("pages/0/1.json")
+        let pageBytes = try Data(contentsOf: page).count
+        let renamed = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        content.afterDirectoryRenameForTesting = {
+            renamed.signal()
+            guard release.wait(timeout: .now() + 30) == .success else {
+                throw TractandaError(
+                    "testTimeout", "Fixture inventory did not observe publication contention.")
+            }
+        }
+        var contentionCount = 0
+        publicationContentionForTesting = {
+            contentionCount += 1
+            release.signal()
+        }
+        defer { publicationContentionForTesting = nil }
+        var publisher: Task<DocumentContentReference, Error>?
+        do {
+            try capacity(root) { url in
+                if url.path == page.path {
+                    publisher = Task.detached { try content.publishPrepared(prepared) }
+                    guard renamed.wait(timeout: .now() + 30) == .success else {
+                        throw TractandaError("testTimeout", "Fixture publication did not reach its rename.")
+                    }
+                }
+            }
+        } catch {
+            release.signal()
+            _ = await publisher?.result
+            throw error
+        }
+        let publication = try XCTUnwrap(publisher)
+        let reference = try await publication.value
+        XCTAssertGreaterThan(contentionCount, 0, "The exact post-rename placement lock must be observed")
+        XCTAssertEqual(try accountedBytes(page, root: root), UInt64(pageBytes))
+        let canonical = try content.pageURLForTesting(reference, number: 1)
+        try FileManager.default.removeItem(at: canonical)
+        XCTAssertThrowsError(try accountedBytes(page, root: root))
+    }
+
     // Staging promotion changes paths, not data. Require the exact dated canonical counterpart
     // through the existing directory recipe; every component is inspected without following links.
-    private func promotedEntry(_ url: URL, root: URL) -> (URL, stat)? {
+    private func promotedEntry(_ url: URL, root: URL) throws -> (URL, stat)? {
         let staging = root.appendingPathComponent("store/documents/.staging").path + "/"
         guard url.path.hasPrefix(staging) else { return nil }
         let parts = url.path.dropFirst(staging.count).split(separator: "/").map(String.init)
@@ -396,10 +459,10 @@ final class DocumentJobCoordinatorTests: XCTestCase {
                 coverage: receipt.manifest.coverage)
         else { return nil }
         let content = DocumentContentStore(root: store, ownerUID: getuid())
-        guard let manifest = try? content.manifest(reference), manifest == receipt.manifest,
-            let destination = try? content.directory(reference.contentID)
+        guard let publication = try publicationDirectory(content, reference: reference),
+            publication.0 == receipt.manifest
         else { return nil }
-        let components = destination + Array(parts.dropFirst())
+        let components = publication.1 + Array(parts.dropFirst())
         var path = store
         var metadata = stat()
         for (index, component) in components.enumerated() {
@@ -418,6 +481,30 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         return directory || sealed ? (path, metadata) : nil
     }
 
+    private func publicationDirectory(
+        _ content: DocumentContentStore, reference: DocumentContentReference
+    ) throws -> (DocumentManifest, [String])? {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(30))
+        while true {
+            do {
+                return (try content.manifest(reference), try content.directory(reference.contentID))
+            } catch {
+                // tractanda_lock resets its thread-local cause on every attempt. Inspect it
+                // immediately after this exact placement-lock failure, before any other lookup.
+                let busy = tractanda_lock_was_busy() != 0
+                guard let failure = error as? TractandaError, failure.code == "documentIntegrity",
+                    failure.message == "Document placement is busy or unsafe.", busy
+                else { return nil }
+                publicationContentionForTesting?()
+                guard clock.now < deadline else {
+                    throw TractandaError("testTimeout", "Fixture publication placement remained busy.")
+                }
+                Thread.sleep(forTimeInterval: 0.001)
+            }
+        }
+    }
+
     private var temporaryDirectory: URL {
         get throws { try GuardedFixtureDirectory.parent() }
     }
@@ -431,7 +518,7 @@ final class DocumentJobCoordinatorTests: XCTestCase {
             return metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) ? UInt64(metadata.st_size) : 0
         }
         let failure = errno
-        if failure == ENOENT, let promoted = promotedEntry(url, root: root),
+        if failure == ENOENT, let promoted = try promotedEntry(url, root: root),
             promoted.1.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG)
         {
             return UInt64(promoted.1.st_size)

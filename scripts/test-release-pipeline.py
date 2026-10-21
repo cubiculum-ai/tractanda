@@ -4,6 +4,7 @@ import importlib.util
 import json
 import subprocess
 import shutil
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -23,6 +24,42 @@ packager = load('packager', 'package-macos.py')
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_install_stages_importable_activation_and_exact_source_guard(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            pipeline = release.Pipeline({'directory': temporary, 'configuration': {
+                'softwareRoot': '/unused', 'instance': 'production'}, 'version': 'test',
+                'steps': {'bundle': {'result': {'manifestSHA256': 'manifest'}},
+                          'artifacts': {'result': {'Tractanda-test-arm64.pkg': 'package'}}}})
+            scripts = pipeline.source / 'scripts'
+            scripts.mkdir(parents=True)
+            for name in ('activate-release.py', 'canonical-format-guard.py'):
+                shutil.copyfile(Path(__file__).with_name(name), scripts / name)
+            pipeline.package.write_bytes(b'fixture package; never installed')
+            observed = []
+
+            def run_command(name, args, cwd=None):
+                if name == 'stage-install':
+                    return  # Bundle copying is unrelated to helper import resolution.
+                self.assertEqual(name, 'install')
+                observed.append(name)
+                stage = Path(cwd)
+                self.assertEqual(release.sha(stage / 'activate.py'), release.sha(scripts / 'activate-release.py'))
+                self.assertEqual(release.sha(stage / 'canonical-format-guard.py'),
+                                 release.sha(scripts / 'canonical-format-guard.py'))
+                # A fresh interpreter imports the actual staged module and sibling.
+                # No activation main, administrator prompt, installer or service runs.
+                subprocess.run([sys.executable, '-c',
+                    "import runpy; m=runpy.run_path('activate.py', run_name='staging_import_probe'); "
+                    "assert callable(m['format_guard'].require_owned_reader)"],
+                    cwd=stage, check=True, capture_output=True, text=True)
+
+            with patch.object(pipeline, 'verify_notarization') as notarization, \
+                    patch.object(release.delivery, 'active', return_value=False), \
+                    patch.object(pipeline, 'run_command', side_effect=run_command):
+                pipeline.install()
+            notarization.assert_called_once_with()
+            self.assertEqual(observed, ['install'])
+
     def descendant_fixture(self, root):
         control, directory, installed, live, base_command, git = self.ci_repair_fixture(root)
         executable = live.parent / 'bin/tractanda'

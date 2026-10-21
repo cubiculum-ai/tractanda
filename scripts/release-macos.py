@@ -736,6 +736,7 @@ class Pipeline:
         with tempfile.TemporaryDirectory(prefix='tractanda-release-', dir='/private/tmp') as staging:
             staging = Path(staging)
             shutil.copyfile(self.source / 'scripts/activate-release.py', staging / 'activate.py')
+            shutil.copyfile(self.source / 'scripts/canonical-format-guard.py', staging / 'canonical-format-guard.py')
             self.run_command('stage-install', ['/usr/bin/ditto', '--noextattr', '--norsrc',
                                               self.bundle, staging / 'bundle'])
             shutil.copyfile(self.package, staging / 'release.pkg')
