@@ -792,7 +792,7 @@ public final class SetupEngine {
         ]
         if let peer = receipt.peerRuntimeConfiguration {
             try peer.validate(path: peerConfigurationURL(receipt.instance).path)
-            arguments += ["--peer-runtime-configuration", peer.path]
+            arguments += ["--peer-runtime-config", peer.path]
         }
         if let document = receipt.documentExtraction {
             guard document == .pinned else { throw SetupError("Unsupported document receipt.") }

@@ -246,7 +246,7 @@ final class SetupPeerRuntimeTests: XCTestCase {
                 try PropertyListSerialization.propertyList(
                     from: engine.serviceDefinition(receipt), format: nil) as? [String: Any]
             let argv = try XCTUnwrap(definition?["ProgramArguments"] as? [String])
-            XCTAssertEqual(Array(argv.suffix(2)), ["--peer-runtime-configuration", expected.path])
+            XCTAssertEqual(Array(argv.suffix(2)), ["--peer-runtime-config", expected.path])
             XCTAssertFalse(argv.contains(String(decoding: try bytes(sync: true), as: UTF8.self)))
             XCTAssertThrowsError(
                 try engine.start(.init(name: "preview", bundle: root, peerRuntime: .disable)))

@@ -129,7 +129,7 @@ let package = Package(
         .testTarget(
             name: "FirstSourceConversionTests", dependencies: ["TractandaCore"],
             path: "scripts/development/first-source-conversion", exclude: ["README.md", "run.py"]),
-        .testTarget(name: "TractandaSetupTests", dependencies: ["TractandaSetup"]),
+        .testTarget(name: "TractandaSetupTests", dependencies: ["TractandaSetup", "TractandaCLI"]),
         .testTarget(
             name: "TractandaVectorsTests", dependencies: ["TractandaVectors", "CSQLite", "CTractandaVec1"]),
         .testTarget(name: "TractandaMCPTests", dependencies: ["TractandaMCP", "TractandaCore"]),

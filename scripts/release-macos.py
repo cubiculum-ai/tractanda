@@ -509,6 +509,82 @@ def require_unpublished_cluster_repair(state):
             'gate': 'cluster-acceptance'}
 
 
+def require_unpublished_cluster_descendant_repair(state):
+    """Revise an uninstalled descendant while its archived cluster ancestor stays live."""
+    allowed = {'verify', 'release-build', 'bundle', 'package', 'notarization', 'artifacts'}
+    if (not delivery.active(state) or state.get('status') not in ('failed', 'paused')
+            or not set(state.get('steps', {})) <= allowed
+            or state.get('activeStep') not in allowed | {'archive', 'install-authorization'}
+            or state['delivery'].get('installAuthorization') or state['delivery'].get('acceptance')):
+        raise RuntimeError('Only a stopped, uninstalled cluster-repair descendant may be revised.')
+    runner_path = CONTROL / 'runner.json'
+    if runner_path.is_symlink() or not runner_path.is_file():
+        raise RuntimeError('Descendant runner termination is unproven.')
+    runner = read(runner_path)
+    pid = runner.get('pid')
+    if (runner.get('version') != state['version'] or runner.get('status') != state['status']
+            or not isinstance(runner.get('stoppedAt'), str) or type(pid) is not int or pid <= 0):
+        raise RuntimeError('Descendant runner termination does not match the candidate.')
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        pass
+    except OSError as error:
+        raise RuntimeError('Descendant runner presence is uncertain.') from error
+    else:
+        raise RuntimeError('Descendant runner is still present.')
+    current = Path(state['configuration']['softwareRoot']) / 'current/bundle-manifest.json'
+    if current.is_symlink() or not current.is_file():
+        raise RuntimeError('Installed cluster ancestor manifest is unavailable.')
+    manifest, digest = read(current), sha(current)
+    ancestors = [a for a in state.get('previousCandidates', [])
+                 if isinstance(a.get('unpublishedClusterRepair'), dict)
+                 and a['unpublishedClusterRepair'].get('liveManifestSHA256') == digest]
+    if len(ancestors) != 1:
+        raise RuntimeError('Installed cluster-repair ancestor is missing or ambiguous.')
+    ancestor = ancestors[0]
+    saved = ancestor['unpublishedClusterRepair']
+    required = allowed | {'install-authorization', 'install', 'health'}
+    if (set(ancestor.get('steps', {})) != required or saved.get('gate') != 'cluster-acceptance'
+            or saved.get('remoteReleaseAbsent') is not True or saved.get('remoteTag') != 'v' + state['version']
+            or manifest.get('version') != state['version']
+            or manifest.get('sourceCommit') != ancestor.get('commit')
+            or ancestor.get('delivery', {}).get('acceptance')):
+        raise RuntimeError('Archived cluster ancestor proof is inconsistent.')
+    authorization = ancestor['delivery']['installAuthorization']
+    history = Path(ancestor['deliveryEvidence'])
+    expected_history = Path(state['directory']) / 'delivery-history'
+    if history.parent != expected_history or any(p.is_symlink() for p in (expected_history, history, history / 'install-evidence')):
+        raise RuntimeError('Archived cluster authorization escaped its retained history.')
+    proof_path = history / 'install-evidence' / (authorization['sha256'] + '.json')
+    value, _raw, fingerprint = delivery.json_input(proof_path)
+    candidate = value.get('candidate', {})
+    if (fingerprint['sha256'] != authorization['sha256']
+            or value.get('profile') != 'tractanda.release-install-authorization.v1'
+            or value.get('candidateID') != saved.get('installCandidateID')
+            or value['candidateID'] != authorization.get('candidateID')
+            or value['candidateID'] != delivery.digest(delivery.canonical(candidate))
+            or candidate.get('commit') != ancestor['commit'] or candidate.get('version') != state['version']
+            or candidate.get('macBundleManifestSHA256') != digest
+            or candidate.get('installation') != {k: state['configuration'][k] for k in ('instance', 'softwareRoot')}
+            or value.get('raven') != authorization.get('raven')
+            or ancestor['steps']['install-authorization'].get('result') != authorization):
+        raise RuntimeError('Archived cluster authorization bytes or candidate binding changed.')
+    executable = current.parent / 'bin/tractanda'
+    health = ancestor['steps']['health'].get('result', {})
+    if (executable.is_symlink() or not executable.is_file()
+            or sha(executable) != saved.get('liveExecutableSHA256')
+            or health.get('server', {}).get('executableSHA256') != saved['liveExecutableSHA256']
+            or health.get('release') != str(current.parent.resolve())):
+        raise RuntimeError('Installed cluster ancestor executable/health identity changed.')
+    git('merge-base', '--is-ancestor', ancestor['commit'], state['commit'])
+    command(['/usr/bin/codesign', '--verify', '--strict', str(executable)])
+    return {**require_unpublished_version(state), 'gate': 'cluster-acceptance-descendant',
+            'installedAncestorCommit': ancestor['commit'], 'liveManifestSHA256': digest,
+            'liveExecutableSHA256': saved['liveExecutableSHA256'],
+            'archivedAuthorizationSHA256': fingerprint['sha256']}
+
+
 def require_ready_ci_descendant_repair(state):
     """Continue source-first repair while its proven installed ancestor stays pinned."""
     if state.get('status') != 'ready' or state.get('steps') != {}:
@@ -566,7 +642,9 @@ def revise(state, notes):
                    if any(name in state['steps'] for name in ('install', 'push')) else None)
     current = Path(state['configuration']['softwareRoot']) / 'current/bundle-manifest.json'
     if not repair_proof and current.exists() and read(current).get('version') == state['version']:
-        repair_proof = require_ready_ci_descendant_repair(state)
+        repair_proof = (require_unpublished_cluster_descendant_repair(state)
+                        if any(a.get('unpublishedClusterRepair') for a in state.get('previousCandidates', []))
+                        else require_ready_ci_descendant_repair(state))
     if (ROOT / 'VERSION').read_text().strip() != state['version']:
         raise RuntimeError('The pending candidate version must be retained during repair.')
     audit_path = CONTROL / 'repair-audit.json'
@@ -583,8 +661,9 @@ def revise(state, notes):
     state.setdefault('previousCandidates', []).append({
         'commit': state['commit'], 'steps': state['steps'], 'error': state.get('error'),
         'notarizationEvidence': notarization_history,
-        'unpublishedCIRepair': repair_proof if cluster_repair is None else None,
+        'unpublishedCIRepair': repair_proof if cluster_repair is None and (repair_proof or {}).get('gate') != 'cluster-acceptance-descendant' else None,
         'unpublishedClusterRepair': cluster_repair,
+        'unpublishedClusterDescendantRepair': repair_proof if (repair_proof or {}).get('gate') == 'cluster-acceptance-descendant' else None,
         'delivery': state.get('delivery')})
     state['previousCandidates'][-1]['deliveryEvidence'] = delivery.archive_for_revision(state)
     state.update(commit=commit, tree=git('rev-parse', 'HEAD^{tree}'), steps={}, status='ready',

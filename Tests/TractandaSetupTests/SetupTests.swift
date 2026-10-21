@@ -896,7 +896,7 @@ extension SetupTests {
                 from: Data(contentsOf: URL(fileURLWithPath: arguments[2])), format: nil)
             let plist = try XCTUnwrap(object as? [String: Any])
             let argv = try XCTUnwrap(plist["ProgramArguments"] as? [String])
-            if let index = argv.firstIndex(of: "--peer-runtime-configuration") {
+            if let index = argv.firstIndex(of: "--peer-runtime-config") {
                 let path = argv[index + 1]
                 let config = try PeerRuntimeConfiguration.decode(Data(contentsOf: URL(fileURLWithPath: path)))
                 loaded.value = try .init(
@@ -951,7 +951,7 @@ extension SetupTests {
             try PropertyListSerialization.propertyList(
                 from: Data(contentsOf: installer.definitionURL("preview")), format: nil) as? [String: Any]
         let argv = try XCTUnwrap(plist?["ProgramArguments"] as? [String])
-        XCTAssertEqual(Array(argv.suffix(2)), ["--peer-runtime-configuration", target.path])
+        XCTAssertEqual(Array(argv.suffix(2)), ["--peer-runtime-config", target.path])
         XCTAssertFalse(argv.contains(input.path))
         try installer.install(peerOptions(f, .disable), upgrade: true)
         XCTAssertFalse(FileManager.default.fileExists(atPath: target.path))

@@ -1,3 +1,4 @@
+import hashlib
 #!/usr/bin/env python3
 """Portable, side-effect-free checks for the release controller's safety gates."""
 import importlib.util
@@ -348,6 +349,86 @@ class ReleaseTests(unittest.TestCase):
                         patch.object(release.os, 'kill', side_effect=kill), \
                         patch.object(release.subprocess, 'run', return_value=tag):
                     with self.assertRaises(RuntimeError): release.require_unpublished_cluster_repair(state)
+
+    def cluster_descendant_fixture(self, root):
+        control, directory, ancestor, live, command, git = self.cluster_repair_fixture(root)
+        ancestor['configuration']['instance'] = 'production'
+        manifest = release.read(live); manifest['sourceCommit'] = ancestor['commit']; release.write(live, manifest)
+        digest = release.sha(live)
+        ancestor['steps']['bundle']['result']['manifestSHA256'] = digest
+        candidate = {'commit': ancestor['commit'], 'version': ancestor['version'],
+                     'macBundleManifestSHA256': digest,
+                     'installation': {k: ancestor['configuration'][k] for k in ('instance', 'softwareRoot')}}
+        candidate_id = release.delivery.digest(release.delivery.canonical(candidate))
+        value = {'profile': 'tractanda.release-install-authorization.v1', 'candidateID': candidate_id,
+                 'candidate': candidate, 'raven': {'storeID': 'store', 'replicaID': 'replica'}}
+        raw = json.dumps(value).encode(); proof_sha = hashlib.sha256(raw).hexdigest()
+        history = directory / 'delivery-history/installed-retained'; (history / 'install-evidence').mkdir(parents=True)
+        (history / 'install-evidence' / (proof_sha + '.json')).write_bytes(raw)
+        authorization = {'candidateID': candidate_id, 'sha256': proof_sha, 'raven': value['raven']}
+        ancestor['delivery']['installAuthorization'] = authorization
+        ancestor['steps']['install-authorization']['result'] = authorization
+        ancestor['deliveryEvidence'] = str(history)
+        ancestor['unpublishedClusterRepair'] = {'gate': 'cluster-acceptance', 'remoteReleaseAbsent': True,
+            'remoteTag': 'v' + ancestor['version'], 'installCandidateID': candidate_id,
+            'liveManifestSHA256': digest, 'liveExecutableSHA256': release.sha(live.parent / 'bin/tractanda')}
+        state = {**ancestor, 'commit': 'b' * 40, 'steps': {'verify': {'result': {}}},
+                 'status': 'failed', 'activeStep': 'archive', 'delivery': release.delivery.fresh(),
+                 'previousCandidates': [ancestor]}
+        release.write(control / 'runner.json', {'pid': 123, 'version': state['version'],
+                                              'status': 'failed', 'stoppedAt': 'verified'})
+        return control, directory, state, live, command, git
+
+    def test_uninstalled_cluster_descendant_revision_retains_live_ancestor_and_invalidates_gates(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            control, directory, state, live, command, git = self.cluster_descendant_fixture(root)
+            before = live.read_bytes()
+            with patch.object(release, 'ROOT', root), patch.object(release, 'CONTROL', control), \
+                    patch.object(release, 'command', side_effect=command), patch.object(release, 'git', side_effect=git), \
+                    patch.object(release.os, 'kill', side_effect=ProcessLookupError), \
+                    patch.object(release.subprocess, 'run', return_value=subprocess.CompletedProcess([], 2, stdout='', stderr='')):
+                revised = release.revise(state, 'fix generated daemon arguments')
+            self.assertEqual(revised['steps'], {})
+            self.assertEqual(revised['delivery'], release.delivery.fresh())
+            self.assertEqual(live.read_bytes(), before)
+            retained = revised['previousCandidates'][-1]
+            self.assertIsNone(retained['unpublishedCIRepair'])
+            self.assertEqual(retained['unpublishedClusterDescendantRepair']['gate'], 'cluster-acceptance-descendant')
+            self.assertEqual(len(revised['previousCandidates']), 2)
+
+    def test_cluster_descendant_refuses_uncertain_owner_drift_missing_history_and_publication(self):
+        for cause in ('active', 'uncertain', 'runner', 'running', 'installed', 'accepted', 'auth',
+                      'duplicate', 'manifest', 'binary', 'proof', 'proof-link', 'ancestor-source',
+                      'saved-proof', 'history', 'release', 'tag', 'network'):
+            with self.subTest(cause=cause), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                control, directory, state, live, command, git = self.cluster_descendant_fixture(root)
+                ancestor = state['previousCandidates'][0]
+                if cause == 'running': state['status'] = 'running'
+                if cause == 'installed': state['steps']['install'] = {'result': {}}
+                if cause == 'accepted': state['delivery']['acceptance'] = {'candidateID': 'accepted'}
+                if cause == 'auth': state['delivery']['installAuthorization'] = {'candidateID': 'unreviewed'}
+                if cause == 'duplicate': state['previousCandidates'].append(ancestor)
+                if cause == 'manifest': live.write_text('{}')
+                if cause == 'binary': (live.parent / 'bin/tractanda').write_bytes(b'drift')
+                if cause == 'ancestor-source': ancestor['commit'] = 'c' * 40
+                if cause == 'saved-proof': ancestor['unpublishedClusterRepair']['remoteReleaseAbsent'] = False
+                if cause == 'history': ancestor['deliveryEvidence'] = str(root / 'outside')
+                if cause == 'runner': (control / 'runner.json').unlink()
+                proof = Path(ancestor['deliveryEvidence']) / 'install-evidence' / (ancestor['delivery']['installAuthorization']['sha256'] + '.json')
+                if cause == 'proof': proof.write_bytes(b'{}')
+                if cause == 'proof-link':
+                    raw = proof.read_bytes(); proof.unlink(); other = root / 'other'; other.write_bytes(raw); proof.symlink_to(other)
+                def remote(args, **kwargs):
+                    if cause == 'release' and args[:3] == ['gh', 'api', '--paginate']: return 'v' + state['version']
+                    return command(args, **kwargs)
+                kill = None if cause == 'active' else PermissionError if cause == 'uncertain' else ProcessLookupError
+                tag = subprocess.CompletedProcess([], 0 if cause == 'tag' else 128 if cause == 'network' else 2, stdout='', stderr='')
+                with patch.object(release, 'CONTROL', control), patch.object(release, 'command', side_effect=remote), \
+                        patch.object(release, 'git', side_effect=git), patch.object(release.os, 'kill', side_effect=kill), \
+                        patch.object(release.subprocess, 'run', return_value=tag):
+                    with self.assertRaises((RuntimeError, OSError)): release.require_unpublished_cluster_descendant_repair(state)
 
     def test_revise_archives_uploaded_notarization_with_provenance_and_fresh_attempt(self):
         with tempfile.TemporaryDirectory() as temporary:
