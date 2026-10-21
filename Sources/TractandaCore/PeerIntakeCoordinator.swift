@@ -175,6 +175,12 @@ final class PeerIntakeCoordinator {
                 "peerConfigurationChanged", "Reauthenticate against current private peer configuration.")
         }
     }
+    /// Promotion's independent canonical recheck shares the owning admission counter.
+    func retainedCanonicalItemBytes(_ row: AuthorityStore.RetainedObject) throws -> Data? {
+        try InitialAuthorityBootstrap.retainedItemBytes(
+            root: root, path: row.path, object: row.descriptor, ownerUID: ownerUID,
+            readBudget: admissionReadBudget())
+    }
     func bytes(_ row: AuthorityStore.RetainedObject) throws -> Data {
         try progress?()
         if operationDepth > 0 {
@@ -183,8 +189,17 @@ final class PeerIntakeCoordinator {
             }
             remainingReadBytes -= UInt64(row.descriptor.length)
         }
-        let data = try journal.files.read(
-            path: row.path.split(separator: "/").map(String.init), maximumBytes: row.descriptor.length)
+        let data: Data
+        if row.descriptor.kind == .item {
+            guard
+                let original = try InitialAuthorityBootstrap.retainedItemBytes(
+                    root: root, path: row.path, object: row.descriptor, ownerUID: ownerUID)
+            else { throw TractandaError("peerObjectCollision", "Retained original is missing.") }
+            data = original
+        } else {
+            data = try journal.files.read(
+                path: row.path.split(separator: "/").map(String.init), maximumBytes: row.descriptor.length)
+        }
         guard data.count == row.descriptor.length, AuthorityRecordCodec.sha256(data) == row.descriptor.sha256
         else {
             throw TractandaError("peerObjectCollision", "Retained original digest changed.")
@@ -302,6 +317,10 @@ final class PeerIntakeCoordinator {
         // publication path. They are not foreign transfer manifests; cold canonical recovery
         // validates their original/document closure before READY as it did before peer v2.
         if begin.context.peerID == "local" { return }
+        // Foreign payload/document publication also moves private stages outside the journal.
+        // Keep its aggregate conservative across both successful and interrupted work.
+        journal.invalidateStageAccounting(packageID: packageID)
+        defer { journal.invalidateStageAccounting(packageID: packageID) }
         if recovering, try journal.publication(packageID) == nil {
             throw TractandaError("invalidPeerPackage", "Historical storage recovery needs an exact seal.")
         }
@@ -486,8 +505,8 @@ final class PeerIntakeCoordinator {
                     descriptor, bytes: data, publication: publication, existingPath: previouslyAccepted.path)
             } else if descriptor.kind == .item, publication.context.peerID == "local",
                 let selected = publication.localItemPath,
-                let existingBytes = try journal.files.readIfPresent(
-                    path: selected.split(separator: "/").map(String.init), maximumBytes: descriptor.length)
+                let existingBytes = try InitialAuthorityBootstrap.retainedItemBytes(
+                    root: root, path: selected, object: descriptor, ownerUID: ownerUID)
             {
                 guard let revision, existingBytes == data,
                     CanonicalRecordPath.validate(

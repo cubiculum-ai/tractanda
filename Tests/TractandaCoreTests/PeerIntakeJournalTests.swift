@@ -189,6 +189,160 @@ final class PeerIntakeJournalTests: XCTestCase {
             XCTAssertEqual(($0 as? TractandaError)?.code, "peerObjectCollision")
         }
     }
+    func testKnownPackageTransitionsKeepAggregateWorkLinearBeyondStatusCacheCapacity() throws {
+        let fixture = try Fixture(itemBytes: [Data("tiny".utf8)])
+        let override = ProcessInfo.processInfo.environment["TRACTANDA_QUOTA_MEASUREMENT_COUNT"]
+        let count = override.flatMap(Int.init) ?? 272
+        guard override == nil || [128, 256, 512, 1024].contains(count) else {
+            throw TractandaError("invalidArguments", "Unsupported bounded metadata measurement size.")
+        }
+        let started = ProcessInfo.processInfo.systemUptime
+        var guardSeconds = 0.0
+        func capacity() throws {
+            let start = ProcessInfo.processInfo.systemUptime
+            try fixture.checkCapacity()
+            guardSeconds += ProcessInfo.processInfo.systemUptime - start
+        }
+        func output(_ phase: String, completed: Int) throws {
+            guard let path = ProcessInfo.processInfo.environment["TRACTANDA_SCALING_RESULT"] else { return }
+            let value: [String: Any] = [
+                "profile": "tractanda.scaling-measurement.v1", "kind": "quota",
+                "phase": phase, "pid": Int(getpid()), "fixtureRoot": fixture.root.path,
+                "count": count, "completed": completed,
+                "wallSeconds": ProcessInfo.processInfo.systemUptime - started, "guardSeconds": guardSeconds,
+                "inventoryScans": fixture.journal.stagingInventoryScansForTesting,
+                "statusScans": fixture.journal.stagingStatusScansForTesting,
+                "beginDecodes": fixture.journal.beginDecodesForTesting,
+            ]
+            try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]).write(
+                to: URL(fileURLWithPath: path), options: .atomic)
+        }
+        try output("quota-staging", completed: 0)
+        guard UInt64(count * 32 * 1024) <= AttachmentFixtureCapacity.fixtureCapBytes else {
+            throw TractandaError("resourceLimit", "Metadata fixture estimate exceeds its cap.")
+        }
+        var packages: [String] = []
+        var expected: UInt64 = 0
+        for offset in 0..<count {
+            if offset % 16 == 0 { try capacity() }
+            if offset % 64 == 0 { try output("quota-staging", completed: offset) }
+            let id = try peerFixtureUUID()
+            let manifest = PeerPackage.Manifest(
+                packageID: id, storeID: fixture.context.storeID, root: fixture.manifest.root)
+            let manifestBytes = try JSON.encode(manifest)
+            _ = try fixture.journal.begin(context: fixture.context, manifestBytes: manifestBytes)
+            let publication = PeerIntakeJournal.Publication(
+                packageID: id, manifestDigest: AuthorityRecordCodec.sha256(manifestBytes),
+                context: fixture.context, contextToken: fixture.context.configurationDigest,
+                arrivalMinute: "2026/10/20/12/34")
+            try fixture.journal.prepare(publication)
+            try fixture.journal.seal(id)
+            expected += UInt64(
+                try JSON.encode(
+                    PeerIntakeJournal.Begin(
+                        manifest: manifest, context: fixture.context)
+                ).count + 2 * JSON.encode(publication).count)
+            XCTAssertEqual(try fixture.journal.stagedBytesForTesting(), expected)
+            packages.append(id)
+        }
+        XCTAssertEqual(
+            fixture.journal.stagingInventoryScansForTesting, 1,
+            "Known successful mutations must not rescan every previous package")
+        XCTAssertLessThanOrEqual(fixture.journal.stagingStatusScansForTesting, count * 4)
+        XCTAssertLessThanOrEqual(
+            fixture.journal.beginDecodesForTesting, count * 80,
+            "Immutable/authentication reads remain fresh but bounded per touched package")
+        XCTAssertEqual(
+            try fixture.makeJournal().stagedBytesForTesting(), expected,
+            "Restart reconstructs the same actual retained charge")
+        for (offset, id) in packages.enumerated() {
+            if offset % 16 == 0 { try capacity() }
+            if offset % 64 == 0 { try output("quota-applying", completed: offset) }
+            try fixture.journal.applied(id)
+        }
+        XCTAssertEqual(try fixture.journal.stagedBytesForTesting(), 0)
+        XCTAssertEqual(fixture.journal.stagingInventoryScansForTesting, 1)
+        XCTAssertEqual(try fixture.makeJournal().stagedBytesForTesting(), 0)
+        print(
+            "IntakeQuotaOperationEvidence packages=\(count) inventoryScans="
+                + "\(fixture.journal.stagingInventoryScansForTesting) statusScans="
+                + "\(fixture.journal.stagingStatusScansForTesting) beginDecodes=\(fixture.journal.beginDecodesForTesting)"
+        )
+        try capacity()
+        try output("complete", completed: count)
+    }
+    func testFailedPhaseMutationInvalidatesAggregateAndQuotaRefusalPreservesFiles() throws {
+        let began = try Fixture(itemBytes: [Data("failed begin".utf8)])
+        began.journal.afterBoundaryForTesting = {
+            if $0 == .began { throw InjectedCrash.boundary }
+        }
+        XCTAssertThrowsError(try began.begin())
+        XCTAssertEqual(
+            try began.journal.stagedBytesForTesting(), try began.makeJournal().stagedBytesForTesting())
+        XCTAssertEqual(
+            began.journal.stagingInventoryScansForTesting, 2,
+            "An uncertain Begin must reconstruct actual files before reusing quota")
+        let fixture = try Fixture(itemBytes: [Data("failure accounting".utf8)])
+        try fixture.stageAll()
+        _ = try fixture.journal.stagedBytesForTesting()
+        let scans = fixture.journal.stagingInventoryScansForTesting
+        let publication = fixture.publication()
+        fixture.journal.afterBoundaryForTesting = {
+            if $0 == .prepared { throw InjectedCrash.boundary }
+        }
+        XCTAssertThrowsError(try fixture.journal.prepare(publication))
+        let retained = try fixture.journal.stagedBytesForTesting()
+        XCTAssertEqual(fixture.journal.stagingInventoryScansForTesting, scans + 1)
+        XCTAssertEqual(retained, try fixture.makeJournal().stagedBytesForTesting())
+        fixture.journal.afterBoundaryForTesting = nil
+        try fixture.journal.prepare(publication)
+        try fixture.journal.seal(publication.packageID)
+        fixture.journal.afterBoundaryForTesting = {
+            if $0 == .applied { throw InjectedCrash.boundary }
+        }
+        XCTAssertThrowsError(try fixture.journal.applied(publication.packageID))
+        XCTAssertEqual(try fixture.journal.stagedBytesForTesting(), 0)
+        XCTAssertEqual(try fixture.makeJournal().stagedBytesForTesting(), 0)
+
+        let limited = try Fixture(itemBytes: [Data("quota refusal".utf8)])
+        try limited.stageAll()
+        let before = try limited.journal.stagedBytesForTesting()
+        let phase = limited.publication()
+        var limits = limited.limits
+        limits.maximumStagedBytes = before + UInt64(try JSON.encode(phase).count) - 1
+        let journal = PeerIntakeJournal(root: limited.root, ownerUID: limited.ownerUID, limits: limits)
+        XCTAssertEqual(try journal.stagedBytesForTesting(), before)
+        XCTAssertThrowsError(try journal.prepare(phase)) {
+            XCTAssertEqual(($0 as? TractandaError)?.code, "resourceLimit")
+        }
+        XCTAssertEqual(try journal.stagedBytesForTesting(), before)
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: limited.root.appendingPathComponent(
+                    "authority/intake/\(phase.packageID)/prepared.json"
+                ).path))
+        limits = limited.limits
+        limits.maximumObjects = 2  // Existing package has one index and one item stage.
+        let single = PeerIntakeJournal(root: limited.root, ownerUID: limited.ownerUID, limits: limits)
+        _ = try single.stagedBytesForTesting()
+        let second = PeerPackage.Manifest(
+            packageID: try peerFixtureUUID(), storeID: limited.context.storeID,
+            root: limited.manifest.root)
+        _ = try single.begin(context: limited.context, manifestBytes: JSON.encode(second))
+        let extraID = try peerFixtureUUID()
+        let extra = PeerPackage.Manifest(
+            packageID: extraID, storeID: limited.context.storeID,
+            root: limited.manifest.root)
+        XCTAssertThrowsError(try single.begin(context: limited.context, manifestBytes: JSON.encode(extra))) {
+            XCTAssertEqual(($0 as? TractandaError)?.code, "resourceLimit")
+        }
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: limited.root.appendingPathComponent(
+                    "authority/intake/\(extraID)"
+                ).path))
+        try limited.checkCapacity()
+    }
 
     func testResumeAfterNewJournalInstanceAtFramedChunkBoundary() throws {
         let payload = Data(repeating: 0x51, count: PeerPackage.maximumChunkBytes + 17)

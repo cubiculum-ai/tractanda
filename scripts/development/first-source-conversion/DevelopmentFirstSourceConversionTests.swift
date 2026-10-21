@@ -186,13 +186,14 @@ final class DevelopmentFirstSourceFixtureTests: XCTestCase {
         func open() throws -> ItemStore {
             try ItemStore(root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
         }
-        func assertOriginals(file: StaticString = #filePath, line: UInt = #line) throws {
+        func assertOriginals(maximumFixtureBytes: UInt64 = 32 * 1024 * 1024,
+            file: StaticString = #filePath, line: UInt = #line) throws {
             var total: UInt64 = 0
             let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)!
             for case let path as URL in enumerator {
                 let metadata = try FileMetadata.read(at: path)
                 if metadata.type == .regular { total += metadata.size }
-                guard total <= 32 * 1024 * 1024 else { throw TractandaError("resourceLimit", "Tiny fixture32MiBcap") }
+                guard total <= maximumFixtureBytes else { throw TractandaError("resourceLimit", "Fixture byte cap exceeded") }
             }
             for (path, bytes) in originals {
                 XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(path)), bytes, file: file, line: line)
@@ -203,10 +204,17 @@ final class DevelopmentFirstSourceFixtureTests: XCTestCase {
     func testLegacyConversionPreservesOriginalHistoryPermissionsPolicyAndNextWrite() throws {
         let root = try GuardedFixtureDirectory.create(prefix: "d", source: "DevelopmentFirstSourceFixtureTests", test: name)
         let f = try Fixture(directory: root); let operation = try Fixture.id()
+        // A real legacy store contains both owner-private writable and read-only originals.
+        let writable = try XCTUnwrap(f.originals.keys.sorted().first)
+        let writableURL = f.root.appendingPathComponent(writable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: writableURL.path)
+        f.permissions[writable] = try FileMetadata.read(at: writableURL).mode
         let storeIdentity = try InitialAuthorityBootstrap.storeIdentityBytes(root: f.root)
         let replica = try Data(contentsOf: f.root.appendingPathComponent(ReplicaIdentity.name))
         try f.run(operation)
         let request = try XCTUnwrap(InitialAuthorityBootstrap.load(root: f.root))
+        XCTAssertEqual(request.inventory?.originals.first { $0.path == writable }?.mode,
+            UInt32(S_IFREG) | 0o600)
         for package in request.inventory!.originals.map(\.packageID) + request.pages.map(\.packageID) + [request.packageID] {
             let path = f.root.appendingPathComponent("authority/intake/" + package)
             XCTAssertEqual(try Data(contentsOf: path.appendingPathComponent("applied.json")),
@@ -223,6 +231,329 @@ final class DevelopmentFirstSourceFixtureTests: XCTestCase {
             try store.commit(.init(action: .revise, itemID: f.revisions[0].itemID,
                 expectedRevisionID: f.revisions[1].revisionID, changes: ["subject": .text("next")], operationID: "next"))
         }
+    }
+    func testCanonicalOriginalReaderRejectsUnsafeCustodyChangedBytesAndSize() throws {
+        let f = try Fixture()
+        let path = try XCTUnwrap(f.originals.keys.sorted().first)
+        let url = f.root.appendingPathComponent(path)
+        let revision = try RecordCodec.decode(XCTUnwrap(f.originals[path]))
+        func original(length: Int? = nil, uid: UInt32? = nil, digest: String? = nil)
+            throws -> InitialAuthorityBootstrap.Original {
+            let metadata = try FileMetadata.read(at: url)
+            return .init(path: path, itemID: revision.itemID, revisionID: revision.revisionID,
+                sha256: digest ?? AuthorityRecordCodec.sha256(f.originals[path]!),
+                length: length ?? f.originals[path]!.count, currentAccessConfiguration: false,
+                mode: metadata.mode, uid: uid ?? metadata.uid,
+                packageID: try Fixture.id(), framingID: try Fixture.id())
+        }
+        XCTAssertEqual(try InitialAuthorityBootstrap.readOriginal(root: f.root, original: original()),
+            f.originals[path])
+        XCTAssertThrowsError(try InitialAuthorityBootstrap.readOriginal(root: f.root,
+            original: original(uid: tractanda_uid() == 0 ? 1 : 0)))
+        for mode in [0o640, 0o604, 0o666] {
+            try FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: url.path)
+            // Even a receipt matching the unsafe mode must not authorize it.
+            XCTAssertThrowsError(try InitialAuthorityBootstrap.readOriginal(root: f.root, original: original()))
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        let object = PeerPackage.Object(kind: .item, id: revision.revisionID,
+            length: f.originals[path]!.count, sha256: AuthorityRecordCodec.sha256(f.originals[path]!))
+        XCTAssertEqual(try InitialAuthorityBootstrap.retainedItemBytes(root: f.root, path: path,
+            object: object, ownerUID: tractanda_uid()), f.originals[path])
+        XCTAssertThrowsError(try InitialAuthorityBootstrap.retainedItemBytes(root: f.root, path: path,
+            object: object, ownerUID: tractanda_uid() == 0 ? 1 : 0))
+        let coordinator = PeerIntakeCoordinator(root: f.root, ownerUID: tractanda_uid(),
+            storeID: try Fixture.id())
+        let retained = AuthorityStore.RetainedObject(descriptor: object, path: path,
+            packageID: try Fixture.id(), peerID: "local", configurationDigest: object.sha256,
+            permittedOrigin: true)
+        try coordinator.withOperation(maximumReadBytes: UInt64(object.length)) {
+            XCTAssertEqual(try coordinator.retainedCanonicalItemBytes(retained), f.originals[path])
+            XCTAssertEqual(coordinator.operationReadBytesForTesting, UInt64(object.length),
+                "Promotion recheck charges its actual canonical hydration exactly once")
+        }
+        try coordinator.withOperation(maximumReadBytes: UInt64(object.length - 1)) {
+            XCTAssertThrowsError(try coordinator.retainedCanonicalItemBytes(retained)) {
+                XCTAssertEqual(($0 as? TractandaError)?.code, "resourceLimit")
+            }
+            XCTAssertEqual(coordinator.operationReadBytesForTesting, 0)
+        }
+        XCTAssertEqual(try Data(contentsOf: url), f.originals[path])
+        XCTAssertEqual(try FileMetadata.read(at: url).mode & 0o777, 0o600)
+        for length in [-1, 0, PooledCanonicalRecord.maximumRecordBytes + 1] {
+            var charged = false
+            let invalid = PeerPackage.Object(kind: .item, id: object.id, length: length, sha256: object.sha256)
+            XCTAssertThrowsError(try InitialAuthorityBootstrap.retainedItemBytes(root: f.root, path: path,
+                object: invalid, ownerUID: tractanda_uid(), readBudget: { _ in charged = true }))
+            XCTAssertFalse(charged, "Invalid descriptors must fail before accounting")
+        }
+        XCTAssertThrowsError(try InitialAuthorityBootstrap.files(f.root).read(
+            path: path.split(separator: "/").map(String.init), maximumBytes: object.length),
+            "The document/metadata reader must retain its strict immutable permissions policy")
+        XCTAssertThrowsError(try InitialAuthorityBootstrap.readOriginal(root: f.root,
+            original: original(digest: String(repeating: "0", count: 64))))
+        XCTAssertThrowsError(try InitialAuthorityBootstrap.readOriginal(root: f.root,
+            original: original(length: PooledCanonicalRecord.maximumRecordBytes + 1)))
+        let captured = try original()
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.truncate(atOffset: UInt64(PooledCanonicalRecord.maximumRecordBytes + 1))
+        try handle.close()
+        XCTAssertThrowsError(try InitialAuthorityBootstrap.readOriginal(root: f.root, original: captured))
+    }
+    func testCanonicalOriginalReaderRejectsSymlinkFileAndDirectory() throws {
+        let f = try Fixture()
+        let path = try XCTUnwrap(f.originals.keys.sorted().first)
+        let url = f.root.appendingPathComponent(path)
+        let revision = try RecordCodec.decode(XCTUnwrap(f.originals[path]))
+        let metadata = try FileMetadata.read(at: url)
+        let original = InitialAuthorityBootstrap.Original(path: path,
+            itemID: revision.itemID, revisionID: revision.revisionID,
+            sha256: AuthorityRecordCodec.sha256(f.originals[path]!), length: f.originals[path]!.count,
+            currentAccessConfiguration: false, mode: metadata.mode, uid: metadata.uid,
+            packageID: try Fixture.id(), framingID: try Fixture.id())
+        let saved = url.appendingPathExtension("saved")
+        try FileManager.default.moveItem(at: url, to: saved)
+        try FileManager.default.createSymbolicLink(at: url, withDestinationURL: saved)
+        XCTAssertThrowsError(try InitialAuthorityBootstrap.readOriginal(root: f.root, original: original))
+        try FileManager.default.removeItem(at: url)
+        try FileManager.default.moveItem(at: saved, to: url)
+        let directory = url.deletingLastPathComponent()
+        let savedDirectory = directory.appendingPathExtension("saved")
+        try FileManager.default.moveItem(at: directory, to: savedDirectory)
+        try FileManager.default.createSymbolicLink(at: directory, withDestinationURL: savedDirectory)
+        XCTAssertThrowsError(try InitialAuthorityBootstrap.readOriginal(root: f.root, original: original))
+    }
+    func testBootstrapPackingUsesCompleteEnvelopeAndPreservesPending1943Allocations() throws {
+        let storeID = try Fixture.id(), replicaID = try Fixture.id(), itemID = try Fixture.id()
+        let originals = try (0..<1943).map { _ -> InitialAuthorityBootstrap.Original in
+            let revision = try Fixture.id()
+            return .init(path: "items/2020/01/02/03/04/\(itemID)/\(revision).tractanda",
+                itemID: itemID, revisionID: revision, sha256: String(repeating: "0", count: 64),
+                length: 1, currentAccessConfiguration: false, mode: UInt32(S_IFREG) | 0o600,
+                uid: tractanda_uid(), packageID: try Fixture.id(), framingID: try Fixture.id())
+        }.sorted { $0.revisionID < $1.revisionID }
+        let entries: [ItemValue] = try originals.map { original in
+            .object(["target": try AuthorityStore.Target(itemID: original.itemID,
+                revisionID: original.revisionID, sha256: original.sha256).itemValue,
+                "frontier": .list([.text(original.revisionID)])])
+        }.sorted { $0.map!["target"]!.map!["revisionID"]!.string! < $1.map!["target"]!.map!["revisionID"]!.string! }
+        let inventory = InitialAuthorityBootstrap.Inventory(
+            storeIdentity: try JSONSerialization.data(withJSONObject: ["storeID": storeID]),
+            replicaIdentity: try JSON.encode(ReplicaIdentity.Record(formatVersion: 1,
+                storeID: storeID, replicaID: replicaID)), originals: originals)
+        func request(_ count: Int) throws -> InitialAuthorityBootstrap.Request {
+            try .make(operationID: Fixture.id(), actorUID: tractanda_uid(), policy: nil,
+                inventory: .init(storeIdentity: inventory.storeIdentity, replicaIdentity: inventory.replicaIdentity,
+                    originals: Array(originals.prefix(count))), actor: "rcfa",
+                conversionEntries: Array(entries.prefix(count)))
+        }
+        let pending = try request(1943)
+        XCTAssertEqual(pending.pages.count, 16, "The real pending allocation count can be reused exactly")
+        let before = try JSON.encode(pending)
+        let records = try InitialAuthorityBootstrap.records(entries: entries, policies: [], request: pending,
+            storeID: storeID, origin: replicaID, actor: pending.actor)
+        let bytes = try records.map(AuthorityRecordCodec.encode)
+        XCTAssertTrue(bytes.allSatisfy { $0.count <= AuthorityRecord.maximumBytes })
+        print("BootstrapPackingSwiftEvidence originals=1943 allocations=\(pending.pages.count) "
+            + "records=\(records.count) maximumEnvelopeBytes=\(bytes.map(\.count).max()!) cap=\(AuthorityRecord.maximumBytes)")
+        XCTAssertEqual(records.filter { $0.kind == .bootstrapPage }.reduce(0) {
+            $0 + ($1.payload["entries"]?.array?.count ?? 0)
+        }, 1943)
+        XCTAssertEqual(try InitialAuthorityBootstrap.records(entries: entries, policies: [], request: pending,
+            storeID: storeID, origin: replicaID, actor: pending.actor).map(AuthorityRecordCodec.encode), bytes)
+        XCTAssertEqual(try JSON.encode(pending), before, "Retry does not rewrite the pending request/IDs/hash")
+        for count in [128, 129] {
+            let small = try request(count)
+            XCTAssertEqual(small.pages.count, 2, "Count-only128 packing exceeds the actual pretty envelope")
+            let records = try InitialAuthorityBootstrap.records(entries: Array(entries.prefix(count)), policies: [],
+                request: small, storeID: storeID, origin: replicaID, actor: small.actor)
+            XCTAssertTrue(try records.map(AuthorityRecordCodec.encode).allSatisfy { $0.count <= AuthorityRecord.maximumBytes })
+        }
+        XCTAssertThrowsError(try AuthorityRecord(recordID: Fixture.id(), storeID: storeID,
+            originReplicaID: replicaID, kind: .bootstrapPage, actorPrincipal: "rcfa", createdAt: pending.createdAt,
+            payload: ["manifestID": .text(pending.rootID), "entries": .list(Array(entries.prefix(128)))])) {
+            XCTAssertEqual(($0 as? TractandaError)?.code, "resourceLimit",
+                "The old full128 page fails the actual Swift encoder, not a modeled size")
+        }
+    }
+    func testBootstrapPackingSplitsLargeFrontiersAndRejectsAnOversizedEntry() throws {
+        let id = try Fixture.id()
+        func entry(_ frontierCount: Int) throws -> ItemValue {
+            .object(["target": try AuthorityStore.Target(itemID: id, revisionID: Fixture.id(),
+                sha256: String(repeating: "0", count: 64)).itemValue,
+                "frontier": .list(try (0..<frontierCount).map { _ in .text(try Fixture.id()) })])
+        }
+        func groups(_ entries: [ItemValue]) throws -> [[ItemValue]] {
+            try InitialAuthorityBootstrap.pageGroups(entries: entries, placeholderID: id, manifestID: id,
+                storeID: id, origin: id, actor: "rcfa", createdAt: Timestamp.now())
+        }
+        let larger = try (0..<128).map { _ in try entry(16) }
+        XCTAssertGreaterThan(try groups(larger).count, 2, "Frontier width also consumes the byte budget")
+        XCTAssertThrowsError(try groups([entry(1024)])) {
+            XCTAssertEqual(($0 as? TractandaError)?.code, "resourceLimit")
+        }
+    }
+    func test129OriginalConversionRetryPreservesItsExactPendingReceipt() throws {
+        let f = try Fixture()
+        f.limits.maximumRecords = 256
+        f.limits.maximumWork = 1024
+        let additionalEstimate = 126 * ((try RecordCodec.encode(f.revisions[0])).count + 128)
+        guard additionalEstimate < f.limits.maximumBytes / 2 else {
+            throw TractandaError("resourceLimit", "Tiny129-original fixture estimate exceeds its bound.")
+        }
+        for offset in 0..<126 {
+            if offset % 16 == 0 {
+                try InitialAuthorityBootstrap.capacity(root: f.root, limits: f.limits)
+                try f.assertOriginals()
+            }
+            var fields = f.revisions[0].fields
+            let item = try Fixture.id(), revision = try Fixture.id()
+            let operation = "legacy-packing-\(offset)"
+            fields["itemID"] = .text(item); fields["revisionID"] = .text(revision)
+            fields["operationID"] = .text(operation)
+            fields["requestIdentity"] = .text(try JSON.encode(CommitRequest(classID: "Item",
+                changes: ["subject": .text("original")], operationID: operation)).base64EncodedString())
+            let bytes = try RecordCodec.encode(Revision(fields: fields))
+            let path = "items/2020/01/02/03/04/\(item)/\(revision).tractanda"
+            let url = f.root.appendingPathComponent(path)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700])
+            try bytes.write(to: url)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            f.originals[path] = bytes; f.permissions[path] = try FileMetadata.read(at: url).mode
+        }
+        try StoreCheckpoint.markDirty(root: f.root)
+        let operation = try Fixture.id()
+        XCTAssertThrowsError(try f.run(operation) {
+            if $0 == "beforeAuthorityOpen" { throw CancellationError() }
+        })
+        let pending = try XCTUnwrap(InitialAuthorityBootstrap.load(root: f.root))
+        XCTAssertEqual(pending.inventory?.originals.count, 129)
+        XCTAssertEqual(pending.pages.count, 2)
+        let receipt = try Data(contentsOf: f.root.appendingPathComponent(InitialAuthorityBootstrap.receiptName))
+        try f.run(operation)
+        XCTAssertTrue(try InitialAuthorityBootstrap.completed(root: f.root, request: pending))
+        XCTAssertEqual(try Data(contentsOf: f.root.appendingPathComponent(InitialAuthorityBootstrap.receiptName)), receipt)
+        try f.assertOriginals()
+        let store = try f.open()
+        XCTAssertEqual(try store.history(f.revisions[0].itemID).count, 2)
+    }
+    func testBoundedConversionScalingMeasurement() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let raw = env["TRACTANDA_CONVERSION_MEASUREMENT_COUNT"], let count = Int(raw),
+            [129, 257, 513].contains(count), let output = env["TRACTANDA_SCALING_RESULT"]
+        else { throw XCTSkip("Explicit bounded conversion measurement is not requested.") }
+        let setupStarted = ProcessInfo.processInfo.systemUptime
+        let f = try Fixture()
+        f.limits.maximumRecords = 1024; f.limits.maximumWork = 4096
+        f.limits.maximumBytes = 4 * 1024 * 1024
+        let cap: UInt64 = 128 * 1024 * 1024
+        let retainedEstimate = UInt64(8 * 1024 * 1024 + count * 160 * 1024)
+        guard retainedEstimate <= cap,
+            (count - 3) * ((try RecordCodec.encode(f.revisions[0])).count + 128) < f.limits.maximumBytes
+        else { throw TractandaError("resourceLimit", "Measurement estimate exceeds its admitted bounds.") }
+        var guardSeconds = 0.0
+        func capacity() throws {
+            let start = ProcessInfo.processInfo.systemUptime
+            var info = statvfs()
+            guard statvfs(f.root.path, &info) == 0, info.f_frsize > 0 else {
+                throw TractandaError("resourceLimit", "Cannot inspect measurement fixture capacity.")
+            }
+            let available = UInt64(info.f_bavail).multipliedReportingOverflow(by: UInt64(info.f_frsize))
+            guard !available.overflow, available.partialValue >= 10 * 1024 * 1024 * 1024 + retainedEstimate else {
+                throw TractandaError("resourceLimit", "Measurement requires genuine10GiB reserve plus estimate.")
+            }
+            try f.assertOriginals(maximumFixtureBytes: cap)
+            guardSeconds += ProcessInfo.processInfo.systemUptime - start
+        }
+        try capacity()
+        for offset in 0..<(count - 3) {
+            if offset % 16 == 0 { try capacity() }
+            var fields = f.revisions[0].fields
+            let item = try Fixture.id(), revision = try Fixture.id()
+            let operation = "legacy-scaling-\(offset)"
+            fields["itemID"] = .text(item); fields["revisionID"] = .text(revision)
+            fields["operationID"] = .text(operation)
+            fields["requestIdentity"] = .text(try JSON.encode(CommitRequest(classID: "Item",
+                changes: ["subject": .text("original")], operationID: operation)).base64EncodedString())
+            let bytes = try RecordCodec.encode(Revision(fields: fields))
+            let path = "items/2020/01/02/03/04/\(item)/\(revision).tractanda"
+            let url = f.root.appendingPathComponent(path)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700])
+            try bytes.write(to: url)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            f.originals[path] = bytes; f.permissions[path] = try FileMetadata.read(at: url).mode
+        }
+        try capacity()
+        try StoreCheckpoint.markDirty(root: f.root)
+        let setupSeconds = ProcessInfo.processInfo.systemUptime - setupStarted
+        let started = ProcessInfo.processInfo.systemUptime
+        let initialGuardSeconds = guardSeconds
+        var phase = "preflight", phaseStarted = started, retained = 0
+        var phases: [String: Double] = [:]
+        func resourceState() -> [String: Any] {
+            var usage = rusage()
+            #if canImport(Darwin)
+                let status = getrusage(RUSAGE_SELF, &usage)
+                let peak = Int64(usage.ru_maxrss)
+            #else
+                let status = getrusage(RUSAGE_SELF.rawValue, &usage)
+                let peak = Int64(usage.ru_maxrss) * 1024
+            #endif
+            guard status == 0 else { return [:] }
+            return ["cpuSeconds": Double(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec)
+                + Double(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) / 1_000_000,
+                "peakRSSBytes": peak]
+        }
+        func publish() throws {
+            let now = ProcessInfo.processInfo.systemUptime
+            var durations = phases
+            durations[phase, default: 0] += now - phaseStarted
+            var fact: [String: Any] = ["profile": "tractanda.scaling-measurement.v1", "kind": "conversion",
+                "phase": phase, "pid": Int(getpid()), "uid": Int(getuid()), "fixtureRoot": f.root.path,
+                "count": count, "retains": retained, "wallSeconds": now - started,
+                "setupSeconds": setupSeconds, "guardSeconds": guardSeconds - initialGuardSeconds,
+                "phaseSeconds": durations, "estimatedFixtureBytes": retainedEstimate]
+            for (key, value) in resourceState() { fact[key] = value }
+            try JSONSerialization.data(withJSONObject: fact, options: [.sortedKeys]).write(
+                to: URL(fileURLWithPath: output), options: .atomic)
+        }
+        func progress(_ next: String) throws {
+            let changed = next != phase
+            if changed {
+                let now = ProcessInfo.processInfo.systemUptime
+                phases[phase, default: 0] += now - phaseStarted
+                phase = next; phaseStarted = now
+            }
+            if next == "retain" { retained += 1 }
+            if changed || (next == "retain" && retained % 64 == 0) {
+                try capacity()
+                try publish()
+            }
+        }
+        try publish()
+        let operation = try Fixture.id()
+        XCTAssertThrowsError(try f.run(operation) {
+            try progress($0)
+            if $0 == "beforeAuthorityOpen" { throw CancellationError() }
+        })
+        let pending = try XCTUnwrap(InitialAuthorityBootstrap.load(root: f.root))
+        XCTAssertEqual(pending.inventory?.originals.count, count)
+        let receipt = try Data(contentsOf: f.root.appendingPathComponent(InitialAuthorityBootstrap.receiptName))
+        let metadata = try Dictionary(uniqueKeysWithValues: pending.inventory!.originals.map {
+            ($0.path, try FileMetadata.read(at: f.root.appendingPathComponent($0.path)))
+        })
+        try f.run(operation, progress: progress)
+        XCTAssertTrue(try InitialAuthorityBootstrap.completed(root: f.root, request: pending))
+        XCTAssertEqual(try Data(contentsOf: f.root.appendingPathComponent(InitialAuthorityBootstrap.receiptName)), receipt)
+        try capacity()
+        for (path, original) in metadata {
+            XCTAssertEqual(try FileMetadata.read(at: f.root.appendingPathComponent(path)), original)
+        }
+        do { let store = try f.open(); XCTAssertEqual(try store.history(f.revisions[0].itemID).count, 2) }
+        try progress("complete")
+        try publish()
     }
     func testConversionInterruptedBeforeAndAfterPinRetriesSameIDsAfterIndexLoss() throws {
         for boundary in ["retain", "beforePin", "afterPin"] {

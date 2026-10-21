@@ -73,7 +73,7 @@ enum InitialAuthorityBootstrap {
         static func make(
             operationID: String, actorUID: UInt32, policy: ItemValue?,
             inventory: Inventory?, limits: Limits = .init(), actor: String,
-            initializationKey: String? = nil
+            initializationKey: String? = nil, conversionEntries: [ItemValue]? = nil
         ) throws -> Self {
             _ = try AuthorityRecord.persistentID(.text(operationID))
             try limits.validate()
@@ -91,16 +91,57 @@ enum InitialAuthorityBootstrap {
                     actorUID: actorUID, actor: actor, origin: replicaID!, createdAt: createdAt,
                     itemID: id(), revisionID: id(), packageID: id(), framingID: id())
             }
-            return try .init(
+            let entries: [ItemValue]
+            let plannedStoreID: String
+            let plannedReplicaID: String
+            if let inventory {
+                guard let conversionEntries, conversionEntries.count == inventory.originals.count,
+                    let identity = try JSONSerialization.jsonObject(with: inventory.storeIdentity)
+                        as? [String: Any],
+                    let capturedStoreID = identity["storeID"] as? String
+                else {
+                    throw failure("Conversion planning requires its complete captured entries and identity.")
+                }
+                entries = conversionEntries
+                plannedStoreID = capturedStoreID
+                plannedReplicaID = try JSON.decode(ReplicaIdentity.Record.self, inventory.replicaIdentity)
+                    .replicaID
+            } else {
+                let original = founding!.original
+                entries = [
+                    .object([
+                        "target": try AuthorityStore.Target(
+                            itemID: original.itemID,
+                            revisionID: original.revisionID, sha256: original.sha256
+                        ).itemValue,
+                        "frontier": .list([.text(original.revisionID)]),
+                    ])
+                ]
+                plannedStoreID = storeID!
+                plannedReplicaID = replicaID!
+            }
+            let rootID = try id()
+            let groups = try pageGroups(
+                entries: entries, placeholderID: rootID, manifestID: rootID,
+                storeID: plannedStoreID, origin: plannedReplicaID, actor: actor, createdAt: createdAt)
+            let request = try Self.init(
                 profile: "tractanda.first-source.v2", operationID: operationID,
                 initializationKey: initializationKey, actorUID: actorUID, initialAccessConfiguration: policy,
                 inventory: inventory, limits: limits,
-                rootID: id(),
-                pages: (0..<max(1, ((inventory?.originals.count ?? 0) + 127) / 128)).map { _ in
+                rootID: rootID,
+                pages: groups.map { _ in
                     try Allocation(recordID: id(), packageID: id(), framingID: id())
                 }, indexID: id(), packageID: id(), framingID: id(),
                 createdAt: createdAt, actor: actor, freshStoreID: storeID,
                 freshReplicaID: replicaID, foundingPolicy: founding)
+            let policies = try admittedOriginals(request).filter(\.currentAccessConfiguration).map {
+                try AuthorityStore.Target(itemID: $0.itemID, revisionID: $0.revisionID, sha256: $0.sha256)
+                    .itemValue
+            }.sorted { $0.map!["revisionID"]!.string! < $1.map!["revisionID"]!.string! }
+            _ = try records(
+                entries: entries, policies: policies, request: request,
+                storeID: plannedStoreID, origin: plannedReplicaID, actor: actor)
+            return request
         }
     }
     struct Completion: Codable, Equatable { let requestDigest: String }
@@ -389,10 +430,8 @@ enum InitialAuthorityBootstrap {
         }
         return accepted
     }
-    static func records(root: URL, request: Request, storeID: String, origin: String, actor: String) throws
-        -> [AuthorityRecord]
-    {
-        let entries = try admittedOriginals(request).map { original -> ItemValue in
+    static func bootstrapEntries(root: URL, originals: [Original]) throws -> [ItemValue] {
+        try originals.map { original -> ItemValue in
             let bytes = try readOriginal(root: root, original: original)
             let revision = try RecordCodec.decode(bytes)
             return .object([
@@ -407,33 +446,61 @@ enum InitialAuthorityBootstrap {
         }.sorted {
             $0.map!["target"]!.map!["revisionID"]!.string! < $1.map!["target"]!.map!["revisionID"]!.string!
         }
-        guard request.pages.count == max(1, (entries.count + 127) / 128) else {
-            throw failure("Bootstrap page allocations differ from admitted inventory.")
+    }
+    private static func pageValue(
+        entries: [ItemValue], recordID: String, manifestID: String, storeID: String,
+        origin: String, actor: String, createdAt: String
+    ) -> ItemValue {
+        .object([
+            "profile": .text(AuthorityRecord.profile), "recordID": .text(recordID),
+            "storeID": .text(storeID), "originReplicaID": .text(origin), "kind": .text("bootstrapPage"),
+            "parentAuthorityIDs": .list([]), "actorPrincipal": .text(actor), "createdAt": .date(createdAt),
+            "payload": .object(["manifestID": .text(manifestID), "entries": .list(entries)]),
+        ])
+    }
+    /// Stable greedy boundaries use the actual pretty-printed complete-envelope byte window.
+    /// The placeholder is an already allocated UUIDv1: every eventual page ID has its exact width.
+    static func pageGroups(
+        entries: [ItemValue], placeholderID: String, manifestID: String, storeID: String,
+        origin: String, actor: String, createdAt: String
+    ) throws -> [[ItemValue]] {
+        _ = try AuthorityRecord.persistentID(.text(placeholderID))
+        func fits(_ values: [ItemValue]) throws -> Bool {
+            try AuthorityRecordCodec.encodedSize(
+                pageValue(
+                    entries: values, recordID: placeholderID, manifestID: manifestID,
+                    storeID: storeID, origin: origin, actor: actor, createdAt: createdAt),
+                recordID: placeholderID, storeID: storeID) <= AuthorityRecord.maximumBytes
         }
-        var pages: [AuthorityRecord] = []
-        for (offset, allocation) in request.pages.enumerated() {
-            pages.append(
-                try AuthorityRecord(
-                    recordID: allocation.recordID, storeID: storeID, originReplicaID: origin,
-                    kind: .bootstrapPage, actorPrincipal: actor, createdAt: request.createdAt,
-                    payload: [
-                        "manifestID": .text(request.rootID),
-                        "entries": .list(
-                            Array(entries[(offset * 128)..<min((offset + 1) * 128, entries.count)])),
-                    ]))
+        var groups: [[ItemValue]] = []
+        var offset = 0
+        while offset < entries.count {
+            try Task.checkCancellation()
+            var low = 1
+            var high = min(128, entries.count - offset)
+            var accepted = 0
+            while low <= high {
+                let count = low + (high - low) / 2
+                if try fits(Array(entries[offset..<(offset + count)])) {
+                    accepted = count
+                    low = count + 1
+                } else {
+                    high = count - 1
+                }
+            }
+            guard accepted > 0 else {
+                throw failure("resourceLimit", "One bootstrap entry exceeds its authority envelope window.")
+            }
+            groups.append(Array(entries[offset..<(offset + accepted)]))
+            offset += accepted
         }
-        func binding(_ record: AuthorityRecord) throws -> ItemValue {
-            try AuthorityBinding(
-                recordID: record.recordID,
-                sha256: AuthorityRecordCodec.sha256(AuthorityRecordCodec.encode(record))
-            ).itemValue
-        }
-        pages.sort { $0.recordID < $1.recordID }
-        let index = try AuthorityRecord(
-            recordID: request.indexID, storeID: storeID, originReplicaID: origin,
-            kind: .bootstrapIndex, parentAuthorityIDs: pages.map(\.recordID), actorPrincipal: actor,
-            createdAt: request.createdAt,
-            payload: ["manifestID": .text(request.rootID), "children": .list(try pages.map(binding))])
+        if groups.isEmpty { groups.append([]) }
+        return groups
+    }
+    static func records(root: URL, request: Request, storeID: String, origin: String, actor: String) throws
+        -> [AuthorityRecord]
+    {
+        let entries = try bootstrapEntries(root: root, originals: admittedOriginals(request))
         let policies = try admittedOriginals(request).compactMap { original -> ItemValue? in
             let bytes = try readOriginal(root: root, original: original)
             let revision = try RecordCodec.decode(bytes)
@@ -445,6 +512,40 @@ enum InitialAuthorityBootstrap {
                 sha256: original.sha256
             ).itemValue
         }.sorted { $0.map!["revisionID"]!.string! < $1.map!["revisionID"]!.string! }
+        return try records(
+            entries: entries, policies: policies, request: request,
+            storeID: storeID, origin: origin, actor: actor)
+    }
+    static func records(
+        entries: [ItemValue], policies: [ItemValue], request: Request,
+        storeID: String, origin: String, actor: String
+    ) throws -> [AuthorityRecord] {
+        let groups = try pageGroups(
+            entries: entries, placeholderID: request.rootID,
+            manifestID: request.rootID, storeID: storeID, origin: origin,
+            actor: actor, createdAt: request.createdAt)
+        guard request.pages.count == groups.count else {
+            throw failure("Bootstrap page allocations differ from the exact bounded entry grouping.")
+        }
+        let pages = try zip(request.pages, groups).map { allocation, entries in
+            try AuthorityRecord(
+                value: pageValue(
+                    entries: entries, recordID: allocation.recordID,
+                    manifestID: request.rootID, storeID: storeID, origin: origin,
+                    actor: actor, createdAt: request.createdAt))
+        }
+        func binding(_ record: AuthorityRecord) throws -> ItemValue {
+            try AuthorityBinding(
+                recordID: record.recordID,
+                sha256: AuthorityRecordCodec.sha256(AuthorityRecordCodec.encode(record))
+            ).itemValue
+        }
+        let sortedPages = pages.sorted { $0.recordID < $1.recordID }
+        let index = try AuthorityRecord(
+            recordID: request.indexID, storeID: storeID, originReplicaID: origin,
+            kind: .bootstrapIndex, parentAuthorityIDs: sortedPages.map(\.recordID), actorPrincipal: actor,
+            createdAt: request.createdAt,
+            payload: ["manifestID": .text(request.rootID), "children": .list(try sortedPages.map(binding))])
         let root = try AuthorityRecord(
             recordID: request.rootID, storeID: storeID, originReplicaID: origin,
             kind: .bootstrap, parentAuthorityIDs: [index.recordID], actorPrincipal: actor,
@@ -453,7 +554,9 @@ enum InitialAuthorityBootstrap {
                 "pages": .list([try binding(index)]), "initial": .boolean(true),
                 "administrationPolicies": .list(policies),
             ])
-        return pages + [index, root]
+        let result = pages + [index, root]
+        for record in result { _ = try AuthorityRecordCodec.encode(record) }
+        return result
     }
 }
 
@@ -468,18 +571,109 @@ extension InitialAuthorityBootstrap {
         return bytes
     }
     static func readOriginal(root: URL, original: Original) throws -> Data {
-        guard original.length > 0, original.length <= PooledCanonicalRecord.maximumRecordBytes,
+        try readCanonicalOriginal(
+            root: root, path: original.path, itemID: original.itemID, revisionID: original.revisionID,
+            length: original.length, sha256: original.sha256, mode: original.mode, uid: original.uid)
+    }
+    /// Retained item locators use canonical custody; authority records and document blobs do not.
+    /// The configured root has the same trusted-parent assumption as PooledCanonicalRecord;
+    /// the root itself and every component beneath it are opened without following symlinks.
+    static func retainedItemBytes(
+        root: URL, path: String, object: PeerPackage.Object, ownerUID: UInt32,
+        readBudget: ((Int) throws -> Void)? = nil
+    ) throws -> Data? {
+        let components = path.split(separator: "/", omittingEmptySubsequences: false)
+        guard object.kind == .item, object.length > 0,
+            object.length <= PooledCanonicalRecord.maximumRecordBytes, components.count == 8,
+            CanonicalRecordPath.validate(path, itemID: String(components[6]), revisionID: object.id)
+        else { throw failure("Invalid retained canonical item path.") }
+        do {
+            _ = try FileMetadata.read(at: root.appendingPathComponent(path))
+        } catch FileMetadataError.posix(let code) where code == ENOENT { return nil }
+        try readBudget?(object.length)
+        return try readCanonicalOriginal(
+            root: root, path: path, itemID: String(components[6]), revisionID: object.id,
+            length: object.length, sha256: object.sha256, ownerUID: ownerUID)
+    }
+    private static func readCanonicalOriginal(
+        root: URL, path: String, itemID: String, revisionID: String, length: Int, sha256: String,
+        mode: UInt32? = nil, uid: UInt32? = nil, ownerUID: UInt32 = tractanda_uid()
+    ) throws -> Data {
+        guard length > 0, length <= PooledCanonicalRecord.maximumRecordBytes,
             CanonicalRecordPath.validate(
-                original.path, itemID: original.itemID, revisionID: original.revisionID)
+                path, itemID: itemID, revisionID: revisionID)
         else { throw failure("Invalid reserved original path/length.") }
-        let path = original.path.split(separator: "/").map(String.init)
-        let bytes = try files(root).read(path: path, maximumBytes: original.length)
-        let metadata = try FileMetadata.read(at: root.appendingPathComponent(original.path))
-        guard bytes.count == original.length, AuthorityRecordCodec.sha256(bytes) == original.sha256,
-            metadata.mode == original.mode, metadata.uid == original.uid,
-            metadata.type == .regular, metadata.size == UInt64(original.length)
+        // Canonical originals predate the immutable document-blob format and may be 0600.
+        // Preserve their captured custody instead of applying the blob reader's exact 0400 rule.
+        let rootPath = root.standardizedFileURL.path
+        guard rootPath != "/", rootPath.hasPrefix("/"), !rootPath.utf8.contains(0) else {
+            throw failure("Invalid canonical original root.")
+        }
+        let rootDescriptor = rootPath.withCString {
+            open($0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        }
+        guard rootDescriptor >= 0 else { throw failure("Cannot open canonical original root.") }
+        var descriptors = [rootDescriptor]
+        defer { for descriptor in descriptors.reversed() { _ = close(descriptor) } }
+        let components = path.split(separator: "/").map(String.init)
+        for component in components.dropLast() {
+            let descriptor = component.withCString {
+                openat(descriptors.last!, $0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            }
+            guard descriptor >= 0 else { throw failure("Unsafe canonical original directory.") }
+            descriptors.append(descriptor)
+        }
+        let descriptor = components.last!.withCString {
+            openat(descriptors.last!, $0, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
+        }
+        guard descriptor >= 0 else { throw failure("Cannot open canonical original.") }
+        descriptors.append(descriptor)
+        let before = try originalMetadata(descriptor)
+        guard before.type == .regular, before.uid == ownerUID,
+            before.mode & 0o077 == 0, mode == nil || before.mode == mode, uid == nil || before.uid == uid,
+            before.size == UInt64(length)
+        else { throw failure("Reserved original bytes or permissions changed.") }
+        var bytes = Data()
+        bytes.reserveCapacity(length)
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            try Task.checkCancellation()
+            let count = buffer.withUnsafeMutableBytes {
+                #if canImport(Darwin)
+                    Darwin.read(descriptor, $0.baseAddress, $0.count)
+                #else
+                    Glibc.read(descriptor, $0.baseAddress, $0.count)
+                #endif
+            }
+            if count < 0, errno == EINTR { continue }
+            guard count >= 0 else { throw failure("Cannot read canonical original.") }
+            if count == 0 { break }
+            guard count <= length - bytes.count else {
+                throw failure("Canonical original exceeds its captured byte window.")
+            }
+            bytes.append(contentsOf: buffer.prefix(count))
+        }
+        guard try originalMetadata(descriptor) == before,
+            try FileMetadata.read(at: root.appendingPathComponent(path)) == before,
+            bytes.count == length, AuthorityRecordCodec.sha256(bytes) == sha256
         else { throw failure("Reserved original bytes or permissions changed.") }
         return bytes
+    }
+    private static func originalMetadata(_ descriptor: Int32) throws -> FileMetadata {
+        var raw = stat()
+        guard fstat(descriptor, &raw) == 0, raw.st_size >= 0 else {
+            throw failure("Cannot inspect canonical original.")
+        }
+        #if canImport(Darwin)
+            let timestamp = raw.st_mtimespec
+        #else
+            let timestamp = raw.st_mtim
+        #endif
+        return FileMetadata(
+            mode: UInt32(raw.st_mode), uid: UInt32(raw.st_uid), gid: UInt32(raw.st_gid),
+            size: UInt64(raw.st_size), inode: UInt64(raw.st_ino), device: UInt64(raw.st_dev),
+            modificationSeconds: Int64(timestamp.tv_sec),
+            modificationNanoseconds: Int32(timestamp.tv_nsec))
     }
     /// Independent filesystem walk bounds constructor capture and detects catalogue omissions.
     /// The actual immutable file is verified again at each retain, not copied into the receipt.

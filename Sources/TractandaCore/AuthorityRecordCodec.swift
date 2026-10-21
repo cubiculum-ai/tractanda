@@ -22,18 +22,26 @@ enum AuthorityRecordCodec {
     static func encode(_ record: AuthorityRecord) throws -> Data {
         _ = try AuthorityRecord(value: record.itemValue)
         _ = try RevisionTimestamp(record.createdAt)
+        let data = try envelope(record.itemValue, recordID: record.recordID, storeID: record.storeID)
+        guard data.count <= AuthorityRecord.maximumBytes else {
+            throw TractandaError("resourceLimit", "Complete authority envelope exceeds its byte window.")
+        }
+        return data
+    }
+    /// Planning only: the same complete envelope encoding as publication, without admission.
+    static func encodedSize(_ value: ItemValue, recordID: String, storeID: String) throws -> Int {
+        try envelope(value, recordID: recordID, storeID: storeID).count
+    }
+    private static func envelope(_ value: ItemValue, recordID: String, storeID: String) throws -> Data {
         let header = [
             "MIME-Version: 1.0",
             "Content-Type: application/vnd.tractanda.authority+json; charset=utf-8",
             "X-Tractanda-Authority-Profile: \(AuthorityRecord.profile)",
-            "X-Authority-ID: \(record.recordID)", "X-Store-ID: \(record.storeID)",
+            "X-Authority-ID: \(recordID)", "X-Store-ID: \(storeID)",
         ].joined(separator: "\r\n")
         var data = Data((header + "\r\n\r\n").utf8)
-        data.append(try JSON.encode(record.itemValue))
+        data.append(try JSON.encode(value))
         data.append(10)
-        guard data.count <= AuthorityRecord.maximumBytes else {
-            throw TractandaError("resourceLimit", "Complete authority envelope exceeds its byte window.")
-        }
         return data
     }
     static func decode(_ bytes: Data) throws -> Verified {

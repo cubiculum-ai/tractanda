@@ -7733,10 +7733,13 @@ extension ItemStore {
     private func authorityCatalogueRow(_ retained: AuthorityStore.RetainedObject, node: AuthorityRevision)
         throws -> ItemIndex.CatalogueRow
     {
+        let coordinator = try requirePeerIntake()
         let revision = node.revision
         let metadata = try FileMetadata.read(at: root.appendingPathComponent(retained.path))
         guard metadata.size == UInt64(node.originalBytes.count), metadata.type == .regular,
-            metadata.uid == ownerUID, metadata.mode & 0o777 == 0o400,
+            metadata.uid == ownerUID, metadata.mode & 0o077 == 0,
+            try coordinator.retainedCanonicalItemBytes(retained) == node.originalBytes,
+            try FileMetadata.read(at: root.appendingPathComponent(retained.path)) == metadata,
             CanonicalRecordPath.validate(
                 retained.path, itemID: revision.itemID, revisionID: revision.revisionID)
         else {
@@ -11980,7 +11983,9 @@ extension ItemStore {
             let request = try InitialAuthorityBootstrap.Request.make(
                 operationID: operationID,
                 actorUID: actorUID, policy: nil, inventory: inventory, limits: limits,
-                actor: accessContext?.account?.name ?? "uid:\(actorUID)")
+                actor: accessContext?.account?.name ?? "uid:\(actorUID)",
+                conversionEntries: InitialAuthorityBootstrap.bootstrapEntries(
+                    root: root, originals: originals))
             try InitialAuthorityBootstrap.validateOriginalInventory(
                 root: root, request: request,
                 progress: progress)

@@ -48,6 +48,7 @@ final class PeerIntakeJournal {
             }
         }
     }
+    private let canonicalOwnerUID: UInt32
     var documents: PeerDocumentTransfer?
     var beforeSealForProfile: ((String) throws -> Void)?
     var afterBoundaryForTesting: ((Boundary) throws -> Void)?
@@ -57,12 +58,18 @@ final class PeerIntakeJournal {
     private var byteCache: [String: UInt64] = [:]
     private var objectCountCache: [String: Int] = [:]
     private var activeStagedBytes: UInt64?
+    /// Valid only while activeStagedBytes is valid; applied journals still occupy inventory slots.
+    private var stagedPackageCount = 0
+    private(set) var stagingInventoryScansForTesting = 0
+    private(set) var stagingStatusScansForTesting = 0
+    private(set) var beginDecodesForTesting = 0
     init(
         root: URL, ownerUID: UInt32, limits: PeerPackage.Limits = .init(),
         stagingQuota: StagingByteQuota? = nil
     ) {
         self.stagingQuota = stagingQuota
         self.root = root
+        self.canonicalOwnerUID = ownerUID
         self.limits = limits
         files = DocumentContentFiles(
             root: root, ownerUID: ownerUID, minimumFreeBytes: limits.reserveBytes, stagingQuota: stagingQuota)
@@ -74,7 +81,9 @@ final class PeerIntakeJournal {
     private func write(_ data: Data, at path: [String], maximum: Int = PeerPackage.maximumPageBytes) throws {
         if let old = try files.readIfPresent(path: path, maximumBytes: maximum) {
             guard old == data else {
-                throw TractandaError("peerObjectCollision", "Retained bytes differ for this identity.")
+                throw TractandaError(
+                    "peerObjectCollision",
+                    "Retained bytes differ for this identity at \(path.joined(separator: "/")).")
             }
         } else {
             try files.writeImmutable(data, path: path, maximumBytes: maximum)
@@ -82,8 +91,11 @@ final class PeerIntakeJournal {
     }
     private func stagedBytes() throws -> UInt64 {
         if let activeStagedBytes { return activeStagedBytes }
+        stagingInventoryScansForTesting += 1
         var total: UInt64 = 0
+        var packages = 0
         try packageIDs { id in
+            packages += 1
             if try files.readIfPresent(
                 path: path(id, ["applied.json"]), maximumBytes: PeerPackage.maximumPageBytes) == nil
             {
@@ -94,8 +106,51 @@ final class PeerIntakeJournal {
                 total += next
             }
         }
+        stagedPackageCount = packages
         activeStagedBytes = total
         return total
+    }
+    func stagedBytesForTesting() throws -> UInt64 { try stagedBytes() }
+    /// Foreign payload/document work can change private charges outside journal transitions.
+    func invalidateStageAccounting(packageID: String) {
+        byteCache.removeValue(forKey: packageID)
+        objectCountCache.removeValue(forKey: packageID)
+        activeStagedBytes = nil
+    }
+    private func activePackageBytes(_ id: String) throws -> UInt64 {
+        if try files.readIfPresent(
+            path: path(id, ["applied.json"]), maximumBytes: PeerPackage.maximumPageBytes) != nil
+        {
+            return 0
+        }
+        return try status(id).receivedBytes
+    }
+    /// The lifetime writer owns these mutations. Retain the reconstructed aggregate and
+    /// recount only this package; authorization and immutable phase proofs are still reread.
+    /// Any uncertain outcome drops the derived counters, so retry reconstructs actual files.
+    private func withStageAccountingMutation<T>(_ id: String, _ body: () throws -> T) throws -> T {
+        var complete = false
+        defer {
+            if !complete {
+                invalidateStageAccounting(packageID: id)
+            }
+        }
+        let before = try stagedBytes()
+        let previous = try activePackageBytes(id)
+        let result = try body()
+        byteCache.removeValue(forKey: id)
+        objectCountCache.removeValue(forKey: id)
+        let current = try activePackageBytes(id)
+        guard previous <= before else {
+            throw TractandaError("peerObjectCollision", "Intake aggregate accounting regressed.")
+        }
+        let next = (before - previous).addingReportingOverflow(current)
+        guard !next.overflow, next.partialValue <= limits.maximumStagedBytes else {
+            throw TractandaError("resourceLimit", "Aggregate intake staging exhausted after mutation.")
+        }
+        activeStagedBytes = next.partialValue
+        complete = true
+        return result
     }
     func begin(context: PeerPackage.Context, manifestBytes: Data) throws -> PeerPackage.Status {
         try begin(context: context, manifestBytes: manifestBytes, retainedLocal: false)
@@ -105,6 +160,10 @@ final class PeerIntakeJournal {
     {
         let manifest = try PeerPackage.decode(PeerPackage.Manifest.self, manifestBytes)
         try manifest.validate(retained: retainedLocal)
+        var complete = false
+        defer {
+            if !complete { invalidateStageAccounting(packageID: manifest.packageID) }
+        }
         if retainedLocal && manifest.profile != PeerPackage.profile {
             guard context.peerID == "local",
                 let old = try files.readIfPresent(
@@ -123,19 +182,26 @@ final class PeerIntakeJournal {
         let beginPath = try path(manifest.packageID, ["begin.json"])
         if try files.readIfPresent(path: beginPath, maximumBytes: PeerPackage.maximumPageBytes) == nil {
             let total = try stagedBytes()
+            guard stagedPackageCount < limits.maximumObjects else {
+                throw TractandaError("resourceLimit", "Package inventory work exceeded.")
+            }
             guard UInt64(begin.count) <= limits.maximumStagedBytes - min(total, limits.maximumStagedBytes)
             else {
                 throw TractandaError("resourceLimit", "Intake metadata staging quota exhausted.")
             }
             try write(begin, at: beginPath)
+            stagedPackageCount += 1
             activeStagedBytes = total + UInt64(begin.count)
         } else {
             try write(begin, at: beginPath)
         }
         try afterBoundaryForTesting?(.began)
-        return try status(manifest.packageID)
+        let result = try status(manifest.packageID)
+        complete = true
+        return result
     }
     func beginRecord(_ id: String, readBudget: ((Int) throws -> Void)? = nil) throws -> Begin {
+        beginDecodesForTesting += 1
         let record = try PeerPackage.decode(
             Begin.self,
             files.read(
@@ -437,6 +503,7 @@ final class PeerIntakeJournal {
     }
     /// Only a caller traversing authenticated package pages may invoke this storage admission.
     func admitDocumentAnchor(packageID: String, object: PeerPackage.Object) throws {
+        defer { invalidateStageAccounting(packageID: packageID) }
         guard try beginRecord(packageID).manifest.profile == PeerPackage.profile, let documents else {
             throw TractandaError("invalidPeerPackage", "Only v3 packages admit document anchors.")
         }
@@ -449,22 +516,24 @@ final class PeerIntakeJournal {
             }
         }
         try documents.anchor(packageID: packageID, manifest: object)
-        byteCache.removeValue(forKey: packageID)
-        objectCountCache.removeValue(forKey: packageID)
-        activeStagedBytes = nil
     }
-    private func writePhase(_ bytes: Data, packageID: String, name: String) throws {
-        let destination = try path(packageID, [name])
-        if try files.readIfPresent(path: destination, maximumBytes: PeerPackage.maximumPageBytes) == nil {
-            let used = try stagedBytes()
-            guard UInt64(bytes.count) <= limits.maximumStagedBytes - min(used, limits.maximumStagedBytes)
-            else {
-                throw TractandaError("resourceLimit", "Peer phase journal exceeds actual staging quota.")
+    private func writePhase(
+        _ bytes: Data, packageID: String, name: String, after: (() throws -> Void)? = nil
+    ) throws {
+        try withStageAccountingMutation(packageID) {
+            let destination = try path(packageID, [name])
+            if try files.readIfPresent(path: destination, maximumBytes: PeerPackage.maximumPageBytes) == nil {
+                let used = try stagedBytes()
+                guard UInt64(bytes.count) <= limits.maximumStagedBytes - min(used, limits.maximumStagedBytes)
+                else {
+                    throw TractandaError("resourceLimit", "Peer phase journal exceeds actual staging quota.")
+                }
             }
+            try write(bytes, at: destination)
+            try after?()
+            byteCache.removeValue(forKey: packageID)
+            activeStagedBytes = nil
         }
-        try write(bytes, at: destination)
-        byteCache.removeValue(forKey: packageID)
-        activeStagedBytes = nil
     }
     func prepare(_ publication: Publication) throws {
         let begin = try beginRecord(publication.packageID)
@@ -486,14 +555,17 @@ final class PeerIntakeJournal {
             publication.manifestDigest == AuthorityRecordCodec.sha256(try JSON.encode(begin.manifest))
         else { throw TractandaError("invalidPeerPackage", "Publication binding differs.") }
         try writePhase(try JSON.encode(publication), packageID: publication.packageID, name: "prepared.json")
-        try afterBoundaryForTesting?(.prepared)
+        {
+            try self.afterBoundaryForTesting?(.prepared)
+        }
     }
     func seal(_ id: String) throws {
         try beforeSealForProfile?(beginRecord(id).manifest.profile)
         let bytes = try files.read(
             path: path(id, ["prepared.json"]), maximumBytes: PeerPackage.maximumPageBytes)
-        try writePhase(bytes, packageID: id, name: "sealed.json")
-        try afterBoundaryForTesting?(.sealed)
+        try writePhase(bytes, packageID: id, name: "sealed.json") {
+            try self.afterBoundaryForTesting?(.sealed)
+        }
     }
     func preparedPublication(_ id: String, readBudget: ((Int) throws -> Void)? = nil) throws -> Publication? {
         try files.readIfPresent(
@@ -546,15 +618,17 @@ final class PeerIntakeJournal {
         return value
     }
     func applied(_ id: String) throws {
-        guard let publication = try publication(id) else {
-            throw TractandaError("invalidPeerPackage", "Unsealed package cannot apply.")
+        try withStageAccountingMutation(id) {
+            guard let publication = try publication(id) else {
+                throw TractandaError("invalidPeerPackage", "Unsealed package cannot apply.")
+            }
+            try writePhase(try JSON.encode(publication), packageID: id, name: "applied.json")
+            stagingQuota?.completePeerJournal(packageID: id)
+            activeStagedBytes = nil
+            try originals?.complete(packageID: id)
+            try documents?.complete(packageID: id)
+            try afterBoundaryForTesting?(.applied)
         }
-        try writePhase(try JSON.encode(publication), packageID: id, name: "applied.json")
-        stagingQuota?.completePeerJournal(packageID: id)
-        activeStagedBytes = nil
-        try originals?.complete(packageID: id)
-        try documents?.complete(packageID: id)
-        try afterBoundaryForTesting?(.applied)
     }
     /// A sealed receiver locator is deterministic from the synchronized arrival minute and IDs.
     /// Revision UUID time and modifiedAt never choose this path.
@@ -574,58 +648,69 @@ final class PeerIntakeJournal {
     func publishOriginal(
         _ object: PeerPackage.Object, bytes: Data, publication: Publication, existingPath: String? = nil
     ) throws -> String {
-        guard bytes.count == object.length, AuthorityRecordCodec.sha256(bytes) == object.sha256 else {
-            throw TractandaError("peerObjectCollision", "Publication original differs.")
-        }
-        let destination: [String]
-        if let existingPath {
-            destination = existingPath.split(separator: "/").map(String.init)
-        } else if let locator = try files.readIfPresent(
-            path: canonicalPath(object, publication: publication), maximumBytes: 512),
-            let text = String(data: locator, encoding: .utf8)
-        {
-            _ = try retainedBytes(object, publication: publication)
-            destination = text.split(separator: "/").map(String.init)
-        } else if object.kind == .item {
-            let revision = try AuthorityRevision(originalBytes: bytes).revision
-            guard revision.revisionID == object.id else {
-                throw TractandaError("invalidPeerPackage", "Item identity differs.")
+        return try withStageAccountingMutation(publication.packageID) {
+            guard bytes.count == object.length, AuthorityRecordCodec.sha256(bytes) == object.sha256 else {
+                throw TractandaError("peerObjectCollision", "Publication original differs.")
             }
-            destination =
-                try ["items"] + Self.currentArrivalMinute().split(separator: "/").map(String.init)
-                + [revision.itemID, revision.revisionID + ".tractanda"]
-        } else {
-            destination =
-                try ["authority", "records"]
-                + Self.currentArrivalMinute().split(separator: "/").map(String.init)
-                + [object.id + ".authority"]
-        }
-        let relative = destination.joined(separator: "/")
-        if object.kind == .item {
-            let revision = try AuthorityRevision(originalBytes: bytes).revision
-            guard CanonicalRecordPath.validate(relative, itemID: revision.itemID, revisionID: object.id)
-            else {
-                throw TractandaError("invalidPeerPackage", "Receiver item locator is invalid.")
+            let destination: [String]
+            if let existingPath {
+                destination = existingPath.split(separator: "/").map(String.init)
+            } else if let locator = try files.readIfPresent(
+                path: canonicalPath(object, publication: publication), maximumBytes: 512),
+                let text = String(data: locator, encoding: .utf8)
+            {
+                _ = try retainedBytes(object, publication: publication)
+                destination = text.split(separator: "/").map(String.init)
+            } else if object.kind == .item {
+                let revision = try AuthorityRevision(originalBytes: bytes).revision
+                guard revision.revisionID == object.id else {
+                    throw TractandaError("invalidPeerPackage", "Item identity differs.")
+                }
+                destination =
+                    try ["items"] + Self.currentArrivalMinute().split(separator: "/").map(String.init)
+                    + [revision.itemID, revision.revisionID + ".tractanda"]
+            } else {
+                destination =
+                    try ["authority", "records"]
+                    + Self.currentArrivalMinute().split(separator: "/").map(String.init)
+                    + [object.id + ".authority"]
             }
-        } else {
-            guard destination.count == 8, destination.prefix(2) == ["authority", "records"],
-                destination.last == object.id + ".authority"
-            else { throw TractandaError("invalidPeerPackage", "Receiver control locator is invalid.") }
+            let relative = destination.joined(separator: "/")
+            if object.kind == .item {
+                let revision = try AuthorityRevision(originalBytes: bytes).revision
+                guard CanonicalRecordPath.validate(relative, itemID: revision.itemID, revisionID: object.id)
+                else {
+                    throw TractandaError("invalidPeerPackage", "Receiver item locator is invalid.")
+                }
+            } else {
+                guard destination.count == 8, destination.prefix(2) == ["authority", "records"],
+                    destination.last == object.id + ".authority"
+                else { throw TractandaError("invalidPeerPackage", "Receiver control locator is invalid.") }
+            }
+            // Plan and synchronize the actual receiver locator BEFORE the file. A crash cannot
+            // publish a second copy in another minute because the first path became undiscoverable.
+            try write(
+                Data(relative.utf8), at: canonicalPath(object, publication: publication)
+            )
+            if object.kind == .item,
+                let old = try InitialAuthorityBootstrap.retainedItemBytes(
+                    root: root, path: relative, object: object, ownerUID: canonicalOwnerUID)
+            {
+                guard old == bytes else {
+                    throw TractandaError("peerObjectCollision", "Retained item bytes differ.")
+                }
+            } else {
+                try write(bytes, at: destination, maximum: object.length)
+            }
+            try afterOriginalPublicationForTesting?()
+            // Item chunks would otherwise duplicate canonical content. Index pages remain journal
+            // metadata. Authority originals are likewise retained exactly once in their record tree.
+            try files.removePeerObjectStage(packageID: publication.packageID, objectID: object.id)
+            byteCache.removeValue(forKey: publication.packageID)
+            objectCountCache.removeValue(forKey: publication.packageID)
+            activeStagedBytes = nil
+            return destination.joined(separator: "/")
         }
-        // Plan and synchronize the actual receiver locator BEFORE the file. A crash cannot
-        // publish a second copy in another minute because the first path became undiscoverable.
-        try write(
-            Data(relative.utf8), at: canonicalPath(object, publication: publication)
-        )
-        try write(bytes, at: destination, maximum: object.length)
-        try afterOriginalPublicationForTesting?()
-        // Item chunks would otherwise duplicate canonical content. Index pages remain journal
-        // metadata. Authority originals are likewise retained exactly once in their record tree.
-        try files.removePeerObjectStage(packageID: publication.packageID, objectID: object.id)
-        byteCache.removeValue(forKey: publication.packageID)
-        objectCountCache.removeValue(forKey: publication.packageID)
-        activeStagedBytes = nil
-        return destination.joined(separator: "/")
     }
     static func currentArrivalMinute() throws -> String {
         let stamp = try RevisionTimestamp(Timestamp.now()).formatted()
@@ -645,9 +730,15 @@ final class PeerIntakeJournal {
         guard !text.hasPrefix("/"), !destination.contains(".."), !destination.contains("."),
             destination.joined(separator: "/") == text
         else { throw TractandaError("invalidPeerPackage", "Unsafe retained locator.") }
-        guard
-            let bytes = try files.readIfPresent(
+        let retained: Data?
+        if object.kind == .item {
+            retained = try InitialAuthorityBootstrap.retainedItemBytes(
+                root: root, path: text, object: object, ownerUID: canonicalOwnerUID, readBudget: readBudget)
+        } else {
+            retained = try files.readIfPresent(
                 path: destination, maximumBytes: object.length, readBudget: readBudget)
+        }
+        guard let bytes = retained
         else {
             return nil
         }
@@ -689,11 +780,12 @@ final class PeerIntakeJournal {
             try documents.complete(packageID: id)
             byteCache.removeValue(forKey: id)
             objectCountCache.removeValue(forKey: id)
-            activeStagedBytes = nil
+            // Applied packages contribute zero to the active aggregate, before and after cleanup.
         }
         if let total = byteCache[id] {
             return .init(packageID: id, sealed: try publication(id) != nil, receivedBytes: total)
         }
+        stagingStatusScansForTesting += 1
         let directory = root.appendingPathComponent(try path(id, ["objects"]).joined(separator: "/"))
         var total = UInt64(try JSON.encode(beginRecord(id)).count)
         var count = 0
