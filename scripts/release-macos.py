@@ -400,6 +400,29 @@ def archive_notarization_evidence(state, new_commit):
     return str(destination)
 
 
+def require_unpublished_version(state):
+    """Require authenticated release visibility and conclusive tag/release absence."""
+    repository = state['configuration']['repository']
+    metadata = json.loads(command(['gh', 'api', 'repos/' + repository]))
+    if not isinstance(metadata, dict) or metadata.get('permissions', {}).get('push') is not True:
+        raise RuntimeError('Remote release visibility is uncertain; refusing revision.')
+    tag = 'v' + state['version']
+    releases = command(['gh', 'api', '--paginate', 'repos/' + repository + '/releases?per_page=100',
+                        '--jq', '.[].tag_name']).splitlines()
+    if any(not name or re.search(r'\s', name) for name in releases):
+        raise RuntimeError('Remote release response is malformed; refusing revision.')
+    if tag in releases:
+        raise RuntimeError('A remote release already exists for this version; refusing revision.')
+    remote = subprocess.run(['git', 'ls-remote', '--exit-code', '--tags',
+        'https://github.com/' + repository + '.git', 'refs/tags/' + tag],
+        capture_output=True, text=True, check=False, timeout=30)
+    if remote.returncode == 0:
+        raise RuntimeError('A public tag already exists for this version; refusing revision.')
+    if remote.returncode != 2 or remote.stdout.strip() or remote.stderr.strip():
+        raise RuntimeError('Remote tag absence is uncertain; refusing revision.')
+    return {'verifiedAt': now(), 'remoteTag': tag, 'remoteReleaseAbsent': True}
+
+
 def require_unpublished_ci_repair(state):
     """Permit a same-version repair only after an installed, unpublished CI failure."""
     required = {'verify', 'release-build', 'bundle', 'package', 'notarization',
@@ -438,25 +461,52 @@ def require_unpublished_ci_repair(state):
             or runs[0].get('headSha') != state['commit'] or runs[0].get('status') != 'completed'
             or runs[0].get('conclusion') != 'failure'):
         raise RuntimeError('A completed verification failure for this exact source is unproven.')
-    metadata = json.loads(command(['gh', 'api', 'repos/' + repository]))
-    if not isinstance(metadata, dict) or metadata.get('permissions', {}).get('push') is not True:
-        raise RuntimeError('Remote release visibility is uncertain; refusing revision.')
-    tag = 'v' + state['version']
-    releases = command(['gh', 'api', '--paginate', 'repos/' + repository + '/releases?per_page=100',
-                        '--jq', '.[].tag_name']).splitlines()
-    if any(not name or re.search(r'\s', name) for name in releases):
-        raise RuntimeError('Remote release response is malformed; refusing revision.')
-    if tag in releases:
-        raise RuntimeError('A remote release already exists for this version; refusing revision.')
-    remote = subprocess.run(['git', 'ls-remote', '--exit-code', '--tags',
-        'https://github.com/' + repository + '.git', 'refs/tags/' + tag],
-        capture_output=True, text=True, check=False, timeout=30)
-    if remote.returncode == 0:
-        raise RuntimeError('A public tag already exists for this version; refusing revision.')
-    if remote.returncode != 2 or remote.stdout.strip() or remote.stderr.strip():
-        raise RuntimeError('Remote tag absence is uncertain; refusing revision.')
-    return {'verifiedAt': now(), 'failedCI': runs[0], 'remoteTag': tag,
-            'remoteReleaseAbsent': True, 'liveManifestSHA256': expected}
+    return {**require_unpublished_version(state), 'failedCI': runs[0],
+            'liveManifestSHA256': expected}
+
+
+def require_unpublished_cluster_repair(state):
+    """Permit explicit repair at the unaccepted cluster gate, without changing live state."""
+    required = {'verify', 'release-build', 'bundle', 'package', 'notarization',
+                'artifacts', 'install-authorization', 'install', 'health'}
+    if (not delivery.active(state) or state.get('status') != 'paused'
+            or state.get('activeStep') != 'cluster-acceptance'
+            or set(state.get('steps', {})) != required
+            or state['delivery'].get('acceptance')):
+        raise RuntimeError('Only an installed candidate paused before cluster acceptance may use cluster repair.')
+    authorization = delivery.verify_install(state)
+    if authorization is None:
+        raise RuntimeError('The installed candidate authorization is unproven; refusing cluster repair.')
+    runner_path = CONTROL / 'runner.json'
+    if runner_path.is_symlink() or not runner_path.is_file():
+        raise RuntimeError('Runner termination is unproven; refusing cluster repair.')
+    runner = read(runner_path)
+    pid = runner.get('pid')
+    if (runner.get('version') != state['version'] or runner.get('status') != 'paused'
+            or not isinstance(runner.get('stoppedAt'), str) or type(pid) is not int or pid <= 0):
+        raise RuntimeError('Runner termination is unproven; refusing cluster repair.')
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        pass
+    except OSError as error:
+        raise RuntimeError('Runner presence is uncertain; refusing cluster repair.') from error
+    else:
+        raise RuntimeError('A recorded runner is still present; refusing cluster repair.')
+    current = Path(state['configuration']['softwareRoot']) / 'current/bundle-manifest.json'
+    expected = state['steps']['bundle'].get('result', {}).get('manifestSHA256')
+    health = state['steps']['health'].get('result', {})
+    executable = health.get('server', {}).get('executableSHA256')
+    if (not isinstance(expected, str) or not re.fullmatch(r'[0-9a-f]{64}', expected)
+            or current.is_symlink() or not current.is_file() or sha(current) != expected
+            or read(current).get('version') != state['version']
+            or health.get('release') != str(current.parent.resolve())
+            or not isinstance(executable, str) or not re.fullmatch(r'[0-9a-f]{64}', executable)
+            or sha(current.parent / 'bin/tractanda') != executable):
+        raise RuntimeError('The live bundle/health identity differs; refusing cluster repair.')
+    return {**require_unpublished_version(state), 'liveManifestSHA256': expected,
+            'liveExecutableSHA256': executable, 'installCandidateID': authorization['candidateID'],
+            'gate': 'cluster-acceptance'}
 
 
 def require_ready_ci_descendant_repair(state):
@@ -510,7 +560,10 @@ def revise(state, notes):
     """Repair an unpublished candidate without replacing any live/published release."""
     if 'publish' in state['steps'] or state.get('status') == 'complete':
         raise RuntimeError('This candidate has been published; prepare a separate release after resolving it.')
-    repair_proof = require_unpublished_ci_repair(state) if any(name in state['steps'] for name in ('install', 'push')) else None
+    cluster_repair = (require_unpublished_cluster_repair(state)
+                      if state.get('status') == 'paused' and state.get('activeStep') == 'cluster-acceptance' else None)
+    repair_proof = cluster_repair or (require_unpublished_ci_repair(state)
+                   if any(name in state['steps'] for name in ('install', 'push')) else None)
     current = Path(state['configuration']['softwareRoot']) / 'current/bundle-manifest.json'
     if not repair_proof and current.exists() and read(current).get('version') == state['version']:
         repair_proof = require_ready_ci_descendant_repair(state)
@@ -529,7 +582,9 @@ def revise(state, notes):
     notarization_history = archive_notarization_evidence(state, commit)
     state.setdefault('previousCandidates', []).append({
         'commit': state['commit'], 'steps': state['steps'], 'error': state.get('error'),
-        'notarizationEvidence': notarization_history, 'unpublishedCIRepair': repair_proof,
+        'notarizationEvidence': notarization_history,
+        'unpublishedCIRepair': repair_proof if cluster_repair is None else None,
+        'unpublishedClusterRepair': cluster_repair,
         'delivery': state.get('delivery')})
     state['previousCandidates'][-1]['deliveryEvidence'] = delivery.archive_for_revision(state)
     state.update(commit=commit, tree=git('rev-parse', 'HEAD^{tree}'), steps={}, status='ready',

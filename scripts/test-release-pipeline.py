@@ -279,6 +279,76 @@ class ReleaseTests(unittest.TestCase):
                         release.revise(state, 'must refuse')
                 git.assert_not_called()
 
+    def cluster_repair_fixture(self, root):
+        control, directory, state, live, command, git = self.ci_repair_fixture(root)
+        state['steps'].pop('push')
+        state['steps']['install-authorization'] = {'result': {}}
+        state.update(status='paused', activeStep='cluster-acceptance', delivery=release.delivery.fresh())
+        state.pop('error')
+        executable = live.parent / 'bin/tractanda'; executable.parent.mkdir()
+        executable.write_bytes(b'exact installed candidate fixture')
+        state['steps']['health']['result'] = {
+            'release': str(live.parent.resolve()), 'server': {'executableSHA256': release.sha(executable)}}
+        release.write(control / 'runner.json', {'pid': 123, 'version': state['version'],
+                                              'status': 'paused', 'stoppedAt': 'verified'})
+        return control, directory, state, live, command, git
+
+    def test_unpublished_cluster_pause_can_revise_without_replacing_live_or_retaining_acceptance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            control, directory, state, live, command, git = self.cluster_repair_fixture(root)
+            before = live.read_bytes(); old_steps = state['steps'].copy()
+            retained = directory / 'install-evidence'; retained.mkdir()
+            (retained / 'receipt.json').write_text('historical canonical conversion/enrollment fact')
+            absent = subprocess.CompletedProcess([], 2, stdout='', stderr='')
+            def remote(args, **kwargs):
+                self.assertNotEqual(args[:3], ['gh', 'run', 'list'], 'Cluster repair must not invent a CI failure')
+                return command(args, **kwargs)
+            with patch.object(release, 'ROOT', root), patch.object(release, 'CONTROL', control), \
+                    patch.object(release, 'command', side_effect=remote), patch.object(release, 'git', side_effect=git), \
+                    patch.object(release.delivery, 'verify_install', return_value={'candidateID': 'old-candidate'}), \
+                    patch.object(release.os, 'kill', side_effect=ProcessLookupError), \
+                    patch.object(release.subprocess, 'run', return_value=absent):
+                revised = release.revise(state, 'owner-aware activated target validation')
+            self.assertEqual(revised['steps'], {})
+            self.assertEqual(revised['delivery'], release.delivery.fresh())
+            self.assertEqual(revised['version'], '0.1.0-poc.13')
+            previous = revised['previousCandidates'][-1]
+            self.assertEqual(previous['steps'], old_steps)
+            self.assertIsNone(previous['unpublishedCIRepair'])
+            self.assertEqual(previous['unpublishedClusterRepair']['gate'], 'cluster-acceptance')
+            self.assertTrue((Path(previous['deliveryEvidence']) / 'install-evidence/receipt.json').is_file())
+            self.assertEqual(live.read_bytes(), before)
+
+    def test_cluster_repair_refuses_live_accepted_published_or_uncertain_candidates(self):
+        causes = ('active', 'unobservable', 'authorization', 'changed-proof', 'accepted', 'push',
+                  'wrong-pause', 'inactive-delivery', 'live-drift', 'binary-drift', 'runner',
+                  'release', 'tag', 'network', 'visibility')
+        for cause in causes:
+            with self.subTest(cause=cause), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                control, _directory, state, live, command, _git = self.cluster_repair_fixture(root)
+                if cause == 'accepted': state['delivery']['acceptance'] = {'candidateID': 'accepted'}
+                if cause == 'push': state['steps']['push'] = {'result': {}}
+                if cause == 'wrong-pause': state['activeStep'] = 'install-authorization'
+                if cause == 'inactive-delivery': state['delivery'] = {}
+                if cause == 'live-drift': live.write_text('{"version":"changed"}')
+                if cause == 'binary-drift': (live.parent / 'bin/tractanda').write_bytes(b'drift')
+                if cause == 'runner': (control / 'runner.json').unlink()
+                def remote(args, **kwargs):
+                    if cause == 'release' and args[:3] == ['gh', 'api', '--paginate']: return 'v' + state['version']
+                    if cause == 'visibility' and args == ['gh', 'api', 'repos/owner/repo']: return '{}'
+                    return command(args, **kwargs)
+                tag = subprocess.CompletedProcess([], 0 if cause == 'tag' else 128 if cause == 'network' else 2,
+                                                  stdout='', stderr='network' if cause == 'network' else '')
+                kill = None if cause == 'active' else PermissionError if cause == 'unobservable' else ProcessLookupError
+                with patch.object(release, 'CONTROL', control), patch.object(release, 'command', side_effect=remote), \
+                        patch.object(release.delivery, 'verify_install', return_value=None if cause == 'authorization' else {'candidateID': 'old'},
+                                     side_effect=RuntimeError('changed proof') if cause == 'changed-proof' else None), \
+                        patch.object(release.os, 'kill', side_effect=kill), \
+                        patch.object(release.subprocess, 'run', return_value=tag):
+                    with self.assertRaises(RuntimeError): release.require_unpublished_cluster_repair(state)
+
     def test_revise_archives_uploaded_notarization_with_provenance_and_fresh_attempt(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

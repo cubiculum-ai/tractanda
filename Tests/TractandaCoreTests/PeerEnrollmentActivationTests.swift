@@ -4,6 +4,12 @@ import XCTest
 
 @testable import TractandaCore
 
+#if canImport(Darwin)
+    import Darwin
+#else
+    import Glibc
+#endif
+
 final class PeerEnrollmentActivationTests: XCTestCase {
     typealias Source = PeerEnrollmentApprovalTests.Fixture
     final class Fixture {
@@ -185,6 +191,67 @@ final class PeerEnrollmentActivationTests: XCTestCase {
         XCTAssertEqual(
             try f.source.source.loadPeerCredential(peerID: f.material.sourceContext.peerID).commitment,
             try f.source.request.sourceCredential.commitment)
+    }
+
+    /// Run explicitly as root: ordinary same-UID fixtures cannot reproduce Setup's custody check.
+    func testPrivilegedPreparedReplicaValidationHonorsDaemonCustody() throws {
+        guard getuid() == 0, geteuid() == 0 else {
+            throw XCTSkip("Requires an isolated root invocation to verify real cross-UID custody.")
+        }
+        let daemon = try XCTUnwrap(getpwnam("daemon"))
+        let owner = daemon.pointee.pw_uid
+        let group = daemon.pointee.pw_gid
+        XCTAssertNotEqual(owner, 0)
+        let f = try Fixture()
+        try f.open()
+        try f.transfer()
+        _ = try f.finish()
+        f.closeSession()
+        let root = f.source.targetRoot
+        let manager = FileManager.default
+        let paths = try XCTUnwrap(
+            manager.enumerator(at: root, includingPropertiesForKeys: [.isSymbolicLinkKey]))
+        for case let path as URL in paths {
+            XCTAssertFalse(try path.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true)
+            XCTAssertEqual(chown(path.path, owner, group), 0)
+        }
+        XCTAssertEqual(chown(root.path, owner, group), 0)
+        let preparation = try PeerEnrollmentApproval.preparation(f.material.preparationBytes)
+        func verify() throws {
+            try ItemStore.verifyPreparedReplicaIdentity(
+                root: root, ownerUID: owner, expectedStoreID: preparation.commonStoreID,
+                expectedReplicaID: preparation.targetReplicaID)
+        }
+        let identity = root.appendingPathComponent(".tractanda-store-identity.json")
+        let original = try Data(contentsOf: identity)
+        XCTAssertEqual(try FileMetadata.read(at: identity).uid, owner)
+        XCTAssertEqual(try FileMetadata.read(at: identity).mode & 0o777, 0o600)
+        XCTAssertNoThrow(try verify())
+        // Correct root custody alone must not admit an identity file owned by the caller instead.
+        XCTAssertEqual(chown(identity.path, 0, 0), 0)
+        XCTAssertThrowsError(try verify())
+        XCTAssertEqual(chown(identity.path, owner, group), 0)
+        for mode: mode_t in [0o400, 0o640, 0o644, 0o660] {
+            XCTAssertEqual(chmod(identity.path, mode), 0)
+            XCTAssertThrowsError(try verify())
+        }
+        XCTAssertEqual(chmod(identity.path, 0o600), 0)
+        let retained = root.appendingPathComponent("identity-retained-for-custody-test")
+        try manager.moveItem(at: identity, to: retained)
+        try manager.createSymbolicLink(at: identity, withDestinationURL: retained)
+        XCTAssertThrowsError(try verify())
+        try manager.removeItem(at: identity)
+        try manager.moveItem(at: retained, to: identity)
+        try manager.linkItem(at: identity, to: retained)
+        XCTAssertThrowsError(try verify())
+        try manager.removeItem(at: retained)
+        var substituted = try XCTUnwrap(JSONSerialization.jsonObject(with: original) as? [String: Any])
+        substituted["storeID"] = try Source.id()
+        try JSONSerialization.data(withJSONObject: substituted).write(to: identity)
+        XCTAssertThrowsError(try verify())
+        try original.write(to: identity)
+        XCTAssertNoThrow(try verify())
+        XCTAssertEqual(try Data(contentsOf: identity), original)
     }
     func testCompletedCanonicalTargetCopiesToNewDirectoryWithExactIdentityKeysAndReceipt() throws {
         let f = try Fixture()

@@ -419,10 +419,10 @@ enum PeerEnrollmentActivation {
         guard commit.sequence == receipt.configurationSequence, commit.after == historical else {
             throw failure("Activation historical configuration/sequence differs.")
         }
-        let identity =
-            try JSONSerialization.jsonObject(with: InitialAuthorityBootstrap.storeIdentityBytes(root: root))
-            as? [String: Any]
-        guard try identity?["storeID"] as? String == record.preparation.commonStoreID else {
+        guard
+            try CanonicalReaderRequirement.storeIdentity(root: root, ownerUID: ownerUID)
+                == record.preparation.commonStoreID
+        else {
             throw failure("Activated target lost its common store identity.")
         }
         if let context = config.peers.first(where: { $0.peerID == record.targetContext.peerID }) {
