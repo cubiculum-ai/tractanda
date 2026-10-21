@@ -648,6 +648,7 @@ extension InitialAuthorityBootstrap {
             if count < 0, errno == EINTR { continue }
             guard count >= 0 else { throw failure("Cannot read canonical original.") }
             if count == 0 { break }
+            DocumentContentFiles.recordReadForTesting(root: root, path: components, bytes: count)
             guard count <= length - bytes.count else {
                 throw failure("Canonical original exceeds its captured byte window.")
             }

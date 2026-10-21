@@ -48,6 +48,10 @@ final class DocumentContentFiles: @unchecked Sendable {
     ) throws -> T {
         try readObservation.withObserver(root: root, callback: observation, body: body)
     }
+    /// Shared by descriptor readers; report only bytes returned by a successful read syscall.
+    static func recordReadForTesting(root: URL, path: [String], bytes: Int) {
+        readObservation.record(root: root, path: path, bytes: bytes)
+    }
     var afterDirectoryRenameForTesting: (() throws -> Void)?
     var beforePublicationSyncForTesting: (() throws -> Void)?
     var afterPeerPartRenameForTesting: (() throws -> Void)?
@@ -768,7 +772,7 @@ final class DocumentContentFiles: @unchecked Sendable {
                     off_t(offset))
                 if amount < 0 && errno == EINTR { continue }
                 guard amount > 0 else { throw failure("Document dependency ended early.") }
-                Self.readObservation.record(root: root, path: path, bytes: amount)
+                Self.recordReadForTesting(root: root, path: path, bytes: amount)
                 offset += amount
             }
         }
