@@ -172,6 +172,18 @@ do {
     let (command, options, dataRoot, indexRoot) = try parse()
     let base = SetupRoots()
     let roots = SetupRoots(platform: base.platform, data: dataRoot, indexes: indexRoot)
+    let waitsForStartup = ["install", "upgrade", "start", "restart"].contains(command)
+    if waitsForStartup {
+        guard tractanda_start_signals() == 0 else {
+            throw SetupError("Cannot install startup cancellation handlers.")
+        }
+        var unblocked = sigset_t()
+        sigemptyset(&unblocked)
+        sigaddset(&unblocked, SIGINT)
+        sigaddset(&unblocked, SIGTERM)
+        pthread_sigmask(SIG_UNBLOCK, &unblocked, nil)
+    }
+    defer { if waitsForStartup { tractanda_restore_signals() } }
     let engine = SetupEngine(roots: roots)
     switch command {
     case "plan", "dry-run": try printJSON(engine.plan(options))

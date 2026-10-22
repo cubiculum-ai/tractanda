@@ -512,10 +512,14 @@ def require_unpublished_cluster_repair(state):
 def require_unpublished_cluster_descendant_repair(state):
     """Revise an uninstalled descendant while its archived cluster ancestor stays live."""
     allowed = {'verify', 'release-build', 'bundle', 'package', 'notarization', 'artifacts'}
+    failed_before_replacement = (state.get('status') == 'failed' and state.get('activeStep') == 'install'
+                                 and set(state.get('steps', {})) == allowed | {'install-authorization'}
+                                 and delivery.verify_install(state) is not None)
     if (not delivery.active(state) or state.get('status') not in ('failed', 'paused')
-            or not set(state.get('steps', {})) <= allowed
-            or state.get('activeStep') not in allowed | {'archive', 'install-authorization'}
-            or state['delivery'].get('installAuthorization') or state['delivery'].get('acceptance')):
+            or not failed_before_replacement and (not set(state.get('steps', {})) <= allowed
+                or state.get('activeStep') not in allowed | {'archive', 'install-authorization'}
+                or state['delivery'].get('installAuthorization'))
+            or state['delivery'].get('acceptance')):
         raise RuntimeError('Only a stopped, uninstalled cluster-repair descendant may be revised.')
     runner_path = CONTROL / 'runner.json'
     if runner_path.is_symlink() or not runner_path.is_file():
@@ -582,7 +586,8 @@ def require_unpublished_cluster_descendant_repair(state):
     return {**require_unpublished_version(state), 'gate': 'cluster-acceptance-descendant',
             'installedAncestorCommit': ancestor['commit'], 'liveManifestSHA256': digest,
             'liveExecutableSHA256': saved['liveExecutableSHA256'],
-            'archivedAuthorizationSHA256': fingerprint['sha256']}
+            'archivedAuthorizationSHA256': fingerprint['sha256'],
+            'failedBeforeReplacement': failed_before_replacement}
 
 
 def require_ready_ci_descendant_repair(state):
@@ -874,7 +879,7 @@ class Pipeline:
             self.run_command('stage-install', ['/usr/bin/ditto', '--noextattr', '--norsrc',
                                               self.bundle, staging / 'bundle'])
             shutil.copyfile(self.package, staging / 'release.pkg')
-            args = [sys.executable, str(staging / 'activate.py'), '--bundle', str(staging / 'bundle'),
+            args = [sys.executable, '-B', str(staging / 'activate.py'), '--bundle', str(staging / 'bundle'),
                     '--software-root', self.settings['softwareRoot'], '--instance', self.settings['instance'],
                     '--manifest-sha256', self.state['steps']['bundle']['result']['manifestSHA256'],
                     '--package', str(staging / 'release.pkg'), '--package-sha256',

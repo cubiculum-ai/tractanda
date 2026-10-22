@@ -140,6 +140,47 @@ struct SetupServiceBackend {
         return state.running
     }
 
+    func startupObservation(_ instance: String, role: SetupServiceRole = .server) throws
+        -> SetupStartupWait.Observation
+    {
+        if roots.platform == .linux {
+            let state = try systemdState(instance, role: role)
+            try state.requireOwned(fragment: definitionURL(instance, role: role))
+            let failure =
+                ["failed", "inactive"].contains(state.activeState) && state.mainPID == 0
+                ? "Owned startup service stopped: " + state.activeState : nil
+            return .init(detail: "PID=\(state.mainPID) state=\(state.activeState)", failure: failure)
+        }
+        let result = try run(["print", label(instance, role: role)])
+        guard result.status == 0 else {
+            throw SetupError("Owned startup service disappeared: " + result.output.prefix(4096))
+        }
+        let lines = result.output.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+        let pidLine = lines.first { $0.hasPrefix("pid = ") }
+        let state = lines.filter {
+            $0.hasPrefix("state = ") || $0.hasPrefix("last exit code = ")
+                || $0.hasPrefix("last terminating signal = ")
+        }
+        if pidLine == nil,
+            state.contains(where: {
+                ($0.hasPrefix("last exit code = ") || $0.hasPrefix("last terminating signal = "))
+                    && !$0.contains("never exited")
+            })
+        {
+            return .init(
+                detail: state.joined(separator: "; "),
+                failure: "Owned startup process exited: " + state.joined(separator: "; "))
+        }
+        var detail = ([pidLine].compactMap { $0 } + state).joined(separator: "; ")
+        if let pidLine, let pid = Int32(pidLine.dropFirst(6)), pid > 1 {
+            let process = try runner.run(
+                "/bin/ps", ["-p", String(pid), "-o", "pid=,uid=,etime=,time=,%cpu=,rss=,comm="],
+                environment: [:])
+            detail += "; " + process.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return .init(detail: detail)
+    }
+
     func status(_ instance: String, role: SetupServiceRole = .server) throws -> String {
         if roots.platform == .macos { return try run(["print", label(instance, role: role)]).output }
         let state = try systemdState(instance, role: role)

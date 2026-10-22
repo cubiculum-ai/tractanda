@@ -1,3 +1,4 @@
+import CTractandaPlatform
 import Foundation
 
 #if canImport(Darwin)
@@ -6,15 +7,34 @@ import Foundation
     import Glibc
 #endif
 
+struct SetupProcessTimeout: Error, LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
+}
+
 /// Spool child output to a private file, avoiding pipe backpressure while waiting for exit.
 /// Helpers are bounded, reaped on timeout, and receive an explicit environment.
 public struct FoundationProcessRunner: SetupProcessRunning {
-    let timeout: TimeInterval
+    let timeout: TimeInterval?
     let maximumOutputBytes: Int
+    let cancelled: @Sendable () -> Bool
 
-    public init(timeout: TimeInterval = 30, maximumOutputBytes: Int = 8 * 1024 * 1024) {
+    public init(
+        timeout: TimeInterval? = 30, maximumOutputBytes: Int = 8 * 1024 * 1024,
+        cancelled: @escaping @Sendable () -> Bool = { false }
+    ) {
         self.timeout = timeout
         self.maximumOutputBytes = maximumOutputBytes
+        self.cancelled = cancelled
+    }
+
+    public func runStartup(_ executable: String, _ arguments: [String], environment: [String: String] = [:])
+        throws -> ProcessResult
+    {
+        try FoundationProcessRunner(
+            timeout: nil, maximumOutputBytes: maximumOutputBytes,
+            cancelled: { tractanda_stopping() != 0 }
+        ).run(executable, arguments, environment: environment)
     }
 
     public func run(
@@ -41,14 +61,18 @@ public struct FoundationProcessRunner: SetupProcessRunning {
         process.standardOutput = output
         process.standardError = output
         try process.run()
-        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        let deadline = timeout.map { ProcessInfo.processInfo.systemUptime + $0 }
         var failure: String?
+        var timedOut = false
         while process.isRunning {
             let size = (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size]) as? NSNumber
-            if (size?.intValue ?? 0) > maximumOutputBytes {
+            if cancelled() {
+                failure = "Startup helper cancelled by the operator."
+            } else if (size?.intValue ?? 0) > maximumOutputBytes {
                 failure = "Helper output exceeded its limit: \(executable)."
-            } else if ProcessInfo.processInfo.systemUptime >= deadline {
+            } else if let deadline, ProcessInfo.processInfo.systemUptime >= deadline {
                 failure = "Timed out running \(executable)."
+                timedOut = true
             }
             if failure != nil { break }
             Thread.sleep(forTimeInterval: 0.01)
@@ -66,7 +90,10 @@ public struct FoundationProcessRunner: SetupProcessRunning {
         defer { try? input.close() }
         let bytes = try input.read(upToCount: maximumOutputBytes + 1) ?? Data()
         if bytes.count > maximumOutputBytes { failure = "Helper output exceeded its limit: \(executable)." }
-        if let failure { throw SetupError(failure) }
+        if let failure {
+            if timedOut { throw SetupProcessTimeout(message: failure) }
+            throw SetupError(failure)
+        }
         return ProcessResult(
             status: process.terminationStatus, output: String(decoding: bytes, as: UTF8.self))
     }

@@ -86,30 +86,32 @@ extension SetupEngine {
     }
     func waitForEmbedding(_ receipt: InstallationReceipt) throws {
         guard let payload = receipt.embedding else { return }
-        let deadline = ProcessInfo.processInfo.systemUptime + 90
-        var observation = "No health response yet."
-        repeat {
-            let result = try runner.run(
-                "/usr/bin/curl",
-                [
-                    "--noproxy", "*", "--fail", "--silent", "--max-time", "2",
-                    "http://127.0.0.1:\(receipt.port + 1)/health",
-                ], environment: [:])
-            if result.status == 0, let bytes = result.output.data(using: .utf8),
-                let object = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any]
-            {
-                let ready = object["ready"] as? Bool == true
-                let matchesModel = object["model"] as? String == payload.model
-                let listener = try embeddingListenerState(receipt)
-                if ready && matchesModel && listener.ownsPort { return }
-                observation = "Health ready=\(ready), matching model=\(matchesModel); \(listener.detail)"
-            } else {
-                observation =
-                    "Health request exit=\(result.status), response bytes=\(result.output.utf8.count)."
-            }
-            Thread.sleep(forTimeInterval: 0.1)
-        } while ProcessInfo.processInfo.systemUptime < deadline
-        throw SetupError("The bundled embedding service did not become ready. " + observation)
+        try SetupStartupWait.run(
+            observe: {
+                try self.serviceBackend.startupObservation(receipt.instance, role: .embeddings)
+            },
+            probe: {
+                var observation = "No health response yet."
+                let result = try runner.run(
+                    "/usr/bin/curl",
+                    [
+                        "--noproxy", "*", "--fail", "--silent", "--max-time", "2",
+                        "http://127.0.0.1:\(receipt.port + 1)/health",
+                    ], environment: [:])
+                if result.status == 0, let bytes = result.output.data(using: .utf8),
+                    let object = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any]
+                {
+                    let ready = object["ready"] as? Bool == true
+                    let matchesModel = object["model"] as? String == payload.model
+                    let listener = try embeddingListenerState(receipt)
+                    if ready && matchesModel && listener.ownsPort { return }
+                    observation = "Health ready=\(ready), matching model=\(matchesModel); \(listener.detail)"
+                } else {
+                    observation =
+                        "Health request exit=\(result.status), response bytes=\(result.output.utf8.count)."
+                }
+                throw SetupError("The bundled embedding service is not ready. " + observation)
+            })
     }
 
     func embeddingListenerState(_ receipt: InstallationReceipt) throws -> (ownsPort: Bool, detail: String) {

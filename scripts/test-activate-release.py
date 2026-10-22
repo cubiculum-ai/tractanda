@@ -492,5 +492,87 @@ class CheckpointTests(unittest.TestCase):
         self.assertLess(before['logicalBytes'], 4096)
 
 
+class RestoreStartupWaitTests(unittest.TestCase):
+    def run_wait(self, root, mode='slow'):
+        definition = root / 'service.plist'; client = root / 'tractanda'
+        definition.write_bytes(plistlib.dumps({'ProgramArguments': [str(client), 'daemon', str(root / 'store'), str(root / 'sock')]}))
+        clock = [0.0]; probes = [0]; observations = [0]
+        def run(argv, **kwargs):
+            if argv[0] == '/bin/launchctl':
+                observations[0] += 1
+                if mode == 'slow' and observations[0] == 1: raise subprocess.TimeoutExpired('observation', 5)
+                text = 'state = running\npid = 123\nlast exit code = (never exited)\n'
+                if mode == 'exit' and probes[0]: text = 'state = waiting\nlast exit code = 3\n'
+                return subprocess.CompletedProcess(argv, 0, stdout=text, stderr='')
+            self.assertEqual(argv[:4], ['/usr/bin/sudo', '-n', '-u', 'fixture-owner'])
+            probes[0] += 1
+            if mode == 'slow' and probes[0] == 1: raise subprocess.TimeoutExpired('bounded readiness', 5)
+            if clock[0] <= 7200 or mode == 'exit': return subprocess.CompletedProcess(argv, 1, stdout='', stderr='socket not published')
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({'server': {'executableSHA256': 'h', 'processID': 123}}), stderr='')
+        with patch.object(activation, 'digest', return_value='h'), patch.object(activation.format_guard, 'require_owned_reader'), \
+                patch.object(activation, 'service_pid', return_value=123), patch.object(activation.subprocess, 'run', side_effect=run), \
+                patch.object(activation.time, 'monotonic', side_effect=lambda: clock[0]), \
+                patch.object(activation.time, 'sleep', side_effect=lambda _: clock.__setitem__(0, clock[0] + 300)), \
+                patch.object(activation, 'CANCELLED', mode == 'cancel'):
+            activation.restore_service('owned', definition, 'h', client, str(root / 'sock'), 'manifest', owner='fixture-owner')
+        return clock[0], probes[0]
+
+    def test_healthy_restore_can_exceed_two_hours(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            clock, probes = self.run_wait(Path(temporary))
+            self.assertGreater(clock, 7200); self.assertEqual(probes, 25)
+
+    def test_actual_exit_and_operator_cancellation_stop_restore(self):
+        for mode, error in [('exit', RuntimeError), ('cancel', KeyboardInterrupt)]:
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
+                with self.assertRaises(error): self.run_wait(Path(temporary), mode)
+
+class ProtectedStageTests(unittest.TestCase):
+    def fixture(self, root):
+        root = root.resolve(); bundle = root / 'operator-private/bundle'; (bundle / 'bin').mkdir(parents=True)
+        program = bundle / 'bin/probe'
+        program.write_text('#!/bin/sh\nexec /usr/bin/id -u\n'); program.chmod(0o755)
+        manifest = {'files': [{'path': 'bin/probe', 'size': program.stat().st_size,
+                               'sha256': activation.digest(program), 'mode': 0o755}]}
+        (bundle / 'bundle-manifest.json').write_text(json.dumps(manifest)); (bundle / 'bundle-manifest.json').chmod(0o644)
+        package = root / 'operator-private/release.pkg'; package.write_bytes(b'tiny public package fixture')
+        return bundle, package, activation.digest(bundle / 'bundle-manifest.json'), activation.digest(package)
+
+    @unittest.skipUnless(os.geteuid() == 0 and platform.system() == 'Darwin', 'Actual root-to-daemon macOS execution required')
+    def test_real_daemon_executes_root_controlled_software_not_private_control(self):
+        with tempfile.TemporaryDirectory(prefix='td-stage-uid-', dir='/private/tmp') as temporary:
+            root = Path(temporary); bundle, package, manifest_hash, package_hash = self.fixture(root)
+            daemon = pwd.getpwnam('daemon')
+            denied = subprocess.run(['/usr/bin/sudo', '-n', '-u', 'daemon', str(bundle / 'bin/probe')], capture_output=True)
+            self.assertNotEqual(denied.returncode, 0, 'Original private parent must reject daemon traversal')
+            with activation.protected_candidate_stage(bundle, package, manifest_hash, package_hash) as (software, protected_package):
+                result = subprocess.run(['/usr/bin/sudo', '-n', '-u', 'daemon', str(software / 'bin/probe')], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr); self.assertEqual(result.stdout.strip(), str(daemon.pw_uid))
+                self.assertEqual(software.stat().st_uid, 0)
+                self.assertEqual((software / 'bin/probe').stat().st_uid, 0)
+                self.assertEqual(subprocess.run(['/usr/bin/sudo', '-n', '-u', 'daemon', '/bin/test', '-w', str(software)], capture_output=True).returncode, 1)
+                self.assertEqual(subprocess.run(['/usr/bin/sudo', '-n', '-u', 'daemon', '/bin/test', '-r', str(protected_package)], capture_output=True).returncode, 1)
+            self.assertFalse(software.parent.exists())
+
+    def test_cleanup_failure_preserves_original_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); bundle, package, manifest_hash, package_hash = self.fixture(root)
+            controlled = root / 'root-stage'; controlled.mkdir()
+            with patch.object(activation.os, 'geteuid', return_value=0), patch.object(activation.os, 'chown'), \
+                    patch.object(activation, 'require_capacity'), patch.object(activation.tempfile, 'mkdtemp', return_value=str(controlled)), \
+                    patch.object(activation.shutil, 'rmtree', side_effect=PermissionError('secondary cleanup')):
+                with self.assertRaisesRegex(RuntimeError, 'original activation error'):
+                    with activation.protected_candidate_stage(bundle, package, manifest_hash, package_hash):
+                        raise RuntimeError('original activation error')
+
+    def test_external_software_symlink_refused(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); bundle, package, manifest_hash, package_hash = self.fixture(root)
+            (bundle / 'outside').symlink_to(package)
+            with patch.object(activation.os, 'geteuid', return_value=0), patch.object(activation.os, 'chown'), patch.object(activation, 'require_capacity'):
+                with self.assertRaises(ValueError):
+                    with activation.protected_candidate_stage(bundle, package, manifest_hash, package_hash):
+                        self.fail('Escaped software tree was admitted')
+
 if __name__ == '__main__':
     unittest.main()

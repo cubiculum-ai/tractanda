@@ -203,8 +203,18 @@ public struct ProcessResult: Equatable, Sendable {
 }
 
 public protocol SetupProcessRunning: Sendable {
+    func runStartup(_ executable: String, _ arguments: [String], environment: [String: String]) throws
+        -> ProcessResult
     func run(_ executable: String, _ arguments: [String], environment: [String: String]) throws
         -> ProcessResult
+}
+
+extension SetupProcessRunning {
+    public func runStartup(_ executable: String, _ arguments: [String], environment: [String: String]) throws
+        -> ProcessResult
+    {
+        try run(executable, arguments, environment: environment)
+    }
 }
 
 public struct SetupOptions: Equatable, Sendable {

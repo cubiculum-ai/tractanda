@@ -1,3 +1,4 @@
+import shlex
 import hashlib
 #!/usr/bin/env python3
 """Portable, side-effect-free checks for the release controller's safety gates."""
@@ -42,6 +43,7 @@ class ReleaseTests(unittest.TestCase):
                 if name == 'stage-install':
                     return  # Bundle copying is unrelated to helper import resolution.
                 self.assertEqual(name, 'install')
+                self.assertEqual(shlex.split(args[-1])[1], '-B', 'Privileged Python must not create a root cache in the operator stage')
                 observed.append(name)
                 stage = Path(cwd)
                 self.assertEqual(release.sha(stage / 'activate.py'), release.sha(scripts / 'activate-release.py'))

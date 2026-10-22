@@ -296,7 +296,7 @@ public final class SetupEngine {
                     executable, "--bootstrap-store", receipt.store, receipt.indexDirectory, receipt.owner,
                     receipt.instance,
                 ]
-                try successful("/usr/bin/sudo", command)
+                try successful("/usr/bin/sudo", command, startup: true)
                 receipt.initialized = true
                 try writeReceipt(receipt)
             }
@@ -745,8 +745,11 @@ public final class SetupEngine {
     func receiptURL(_ name: String) -> URL {
         roots.configuration.appendingPathComponent("receipts/" + name + ".json")
     }
-    func successful(_ executable: String, _ arguments: [String]) throws {
-        let result = try runner.run(executable, arguments, environment: [:])
+    func successful(_ executable: String, _ arguments: [String], startup: Bool = false) throws {
+        let result =
+            try startup
+            ? runner.runStartup(executable, arguments, environment: [:])
+            : runner.run(executable, arguments, environment: [:])
         guard result.status == 0 else {
             throw SetupError("Command failed: \(executable): \(result.output.prefix(4096))")
         }
@@ -873,10 +876,11 @@ public final class SetupEngine {
                 receipt, status: peerStatusCall(receipt.socket, roots.platform.serviceUser))
             return
         }
-        let deadline = ProcessInfo.processInfo.systemUptime + 45
-        var lastError = "Service did not answer."
-        repeat {
-            do {
+        try SetupStartupWait.run(
+            observe: {
+                try self.serviceBackend.startupObservation(receipt.instance)
+            },
+            probe: {
                 let info = try SetupNativeClient(
                     socket: receipt.socket, serverUser: roots.platform.serviceUser
                 ).call("TractandaStore/info")
@@ -901,9 +905,6 @@ public final class SetupEngine {
                     throw SetupError("The HTTP listener is not ready.")
                 }
                 return
-            } catch { lastError = error.localizedDescription }
-            Thread.sleep(forTimeInterval: 0.1)
-        } while ProcessInfo.processInfo.systemUptime < deadline
-        throw SetupError("Service readiness timed out: " + lastError)
+            })
     }
 }

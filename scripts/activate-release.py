@@ -15,6 +15,9 @@ import plistlib
 import os
 from pathlib import Path
 import platform
+import pwd
+import signal
+import sys
 import re
 import shutil
 import stat
@@ -27,6 +30,57 @@ from contextlib import contextmanager
 _FORMAT_SPEC = importlib.util.spec_from_file_location('canonical_format_guard', Path(__file__).with_name('canonical-format-guard.py'))
 format_guard = importlib.util.module_from_spec(_FORMAT_SPEC)
 _FORMAT_SPEC.loader.exec_module(format_guard)
+
+
+CANCELLED = False
+
+def cancel_startup(_signal, _frame):
+    global CANCELLED
+    CANCELLED = True
+    raise KeyboardInterrupt('Operator cancelled activation.')
+
+
+@contextmanager
+def protected_candidate_stage(bundle, package, manifest_sha256, package_sha256):
+    """Root-owned software is daemon-readable; package/control data stays root-private."""
+    if os.geteuid() != 0:
+        raise RuntimeError('Protected candidate staging requires root.')
+    bundle, package = Path(bundle).resolve(strict=True), Path(package).resolve(strict=True)
+    if digest(bundle / 'bundle-manifest.json') != manifest_sha256 or digest(package) != package_sha256:
+        raise RuntimeError('Candidate inputs changed before protected staging.')
+    manifest = json.loads((bundle / 'bundle-manifest.json').read_text())
+    require_capacity(Path('/private/tmp'), sum(int(v['size']) for v in manifest['files']) + package.stat().st_size)
+    group = pwd.getpwnam('daemon').pw_gid
+    root = Path(tempfile.mkdtemp(prefix='tractanda-root-software-', dir='/private/tmp')).resolve(strict=True)
+    try:
+        os.chown(root, 0, group); root.chmod(0o710)
+        control = root / 'control'; control.mkdir(mode=0o700)
+        protected_package = control / 'release.pkg'
+        shutil.copyfile(package, protected_package); protected_package.chmod(0o600)
+        software = root / 'bundle'; shutil.copytree(bundle, software, symlinks=True)
+        for parent, directories, files in os.walk(software, followlinks=False):
+            for path in [Path(parent)] + [Path(parent) / n for n in directories + files]:
+                mode = path.lstat()
+                if stat.S_ISLNK(mode.st_mode):
+                    path.resolve(strict=True).relative_to(software.resolve())
+                    os.chown(path, 0, group, follow_symlinks=False)
+                elif stat.S_ISDIR(mode.st_mode):
+                    os.chown(path, 0, group); path.chmod(0o750)
+                elif stat.S_ISREG(mode.st_mode):
+                    if mode.st_mode & 0o022:
+                        raise RuntimeError('Candidate software has writable group/world mode.')
+                    os.chown(path, 0, group)  # Preserve signed inventory file modes.
+                else:
+                    raise RuntimeError('Candidate software contains a special file.')
+        if digest(software / 'bundle-manifest.json') != manifest_sha256 or digest(protected_package) != package_sha256:
+            raise RuntimeError('Protected candidate copy changed.')
+        # activate_candidate verifies the full copied inventory/signature before stopping anything.
+        yield software, protected_package
+    finally:
+        try:
+            shutil.rmtree(root)
+        except OSError as error:
+            print('Secondary protected-stage cleanup warning: ' + str(error), file=sys.stderr)
 
 
 def secure_open(path, directory=False, writable=False):
@@ -365,7 +419,7 @@ def retain_stopped_recovery(receipt_path, expected, definition, expected_definit
             temporary.unlink()
 
 
-def restore_service(label, definition, expected_definition, old_client, socket, expected_manifest=None):
+def restore_service(label, definition, expected_definition, old_client, socket, expected_manifest=None, owner=None):
     if digest(definition) != expected_definition:
         raise RuntimeError('Old owned service definition changed; restoration requires inspection.')
     specification = plistlib.loads(Path(definition).read_bytes())
@@ -373,19 +427,59 @@ def restore_service(label, definition, expected_definition, old_client, socket, 
     if len(arguments) < 4 or arguments[0] != str(old_client) or arguments[1] not in ('daemon', 'serve'):
         raise RuntimeError('Old writer store binding is unknown; leave it stopped.')
     format_guard.require_owned_reader(old_client, Path(arguments[2]), expected_manifest)
-    status = subprocess.run(['/bin/launchctl', 'print', label], capture_output=True)
+    while True:
+        if CANCELLED:
+            raise KeyboardInterrupt('Operator cancelled old writer startup.')
+        try:
+            status = subprocess.run(['/bin/launchctl', 'print', label], capture_output=True, timeout=5)
+            break
+        except subprocess.TimeoutExpired:
+            print('Old managed startup: process observation timed out; retrying observation.', flush=True)
+            time.sleep(.1)
     if status.returncode:
         subprocess.run(['/bin/launchctl', 'bootstrap', 'system', str(definition)], check=True)
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        result = subprocess.run([str(old_client), 'info', socket], capture_output=True, text=True,
-                                env={**os.environ, 'TRACTANDA_SERVER_USER': 'daemon'}, timeout=5)
+    last_observation = None
+    last_error = None
+    probe = [str(old_client), 'info', socket]
+    if owner is not None:
+        probe = ['/usr/bin/sudo', '-n', '-u', owner, '/usr/bin/env', 'TRACTANDA_SERVER_USER=daemon', *probe]
+    while True:
+        if CANCELLED:
+            raise KeyboardInterrupt('Operator cancelled old writer startup.')
+        try:
+            status = subprocess.run(['/bin/launchctl', 'print', label], capture_output=True, text=True, timeout=5)
+        except subprocess.TimeoutExpired:
+            print('Old managed startup: process observation timed out; not a process exit.', flush=True)
+            time.sleep(.1)
+            continue
+        if status.returncode:
+            raise RuntimeError('Old managed service disappeared during startup: ' + status.stderr[-4096:])
+        pid = re.search(r'^\s*pid = (\d+)\s*$', status.stdout, re.M)
+        terminal = [line.strip() for line in status.stdout.splitlines()
+                    if 'last exit code =' in line or 'last terminating signal =' in line]
+        if not pid and any('never exited' not in line for line in terminal):
+            raise RuntimeError('Old managed startup process exited: ' + '; '.join(terminal))
+        observation = '; '.join(line.strip() for line in status.stdout.splitlines()
+                                if line.strip().startswith(('pid = ', 'state = ', 'last exit code = ')))
+        if observation != last_observation:
+            print('Old managed startup: ' + observation, flush=True); last_observation = observation
+        try:
+            result = subprocess.run(probe, capture_output=True, text=True,
+                                    env={**os.environ, 'TRACTANDA_SERVER_USER': 'daemon'}, timeout=5)
+        except subprocess.TimeoutExpired:
+            print('Old managed startup: bounded readiness probe timed out; retrying.', flush=True)
+            time.sleep(.1)
+            continue
         if result.returncode == 0:
             info = json.loads(result.stdout)
-            if info.get('server', {}).get('executableSHA256') == digest(old_client) and info.get('server', {}).get('processID') == service_pid(label):
-                return
+            if info.get('server', {}).get('executableSHA256') != digest(old_client) or info.get('server', {}).get('processID') != service_pid(label):
+                raise RuntimeError('Old managed startup answered with another executable/process identity.')
+            return
+        error = (result.stderr + result.stdout)[-4096:]
+        if error != last_error:
+            print('Old managed startup probe: ' + error, flush=True); last_error = error
         time.sleep(.1)
-    raise RuntimeError('Old managed writer restoration did not become ready.')
+
 
 
 def backup_before_upgrade(receipt, base, candidate_setup):
@@ -422,7 +516,7 @@ def backup_before_upgrade(receipt, base, candidate_setup):
     def restore_writer():
         try:
             restore_service(label, definition, expected_definition,
-                            Path(receipt['release']) / 'bin/tractanda', receipt['socket'], receipt['manifestSHA256'])
+                            Path(receipt['release']) / 'bin/tractanda', receipt['socket'], receipt['manifestSHA256'], owner=receipt['owner'])
         except BaseException as failure:
             # Backup already stopped the owned writer. A failed compatibility proof must
             # not leave an active receipt that a later outer catch could restart.
@@ -549,9 +643,19 @@ def main():
     args = parser.parse_args()
     if platform.system() != 'Darwin' or os.geteuid() != 0:
         parser.error('Run this upgrade through macOS administrator authentication.')
+    signal.signal(signal.SIGTERM, cancel_startup)
+    signal.signal(signal.SIGINT, cancel_startup)
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM, signal.SIGINT})
+    active_installation(args)
+    with protected_candidate_stage(args.bundle, args.package, args.manifest_sha256, args.package_sha256) as (bundle, package):
+        args.bundle, args.package = bundle, package
+        activate_candidate(args)
+
+
+def active_installation(args):
     base = Path('/Users/Shared/Library/Application Support/Tractanda')
     if args.software_root != base or not re.fullmatch(r'[a-z0-9-]+', args.instance):
-        parser.error('Choose an existing managed Tractanda installation.')
+        raise ValueError('Choose an existing managed Tractanda installation.')
     receipt_path = base / 'receipts' / (args.instance + '.json')
     mode = receipt_path.lstat()
     if not stat.S_ISREG(mode.st_mode) or mode.st_uid != 0 or mode.st_mode & 0o022:
@@ -559,6 +663,11 @@ def main():
     receipt = json.loads(receipt_path.read_text())
     if receipt['state'] != 'active':
         raise ValueError('Only existing active installations can be upgraded by this workflow.')
+    return base, receipt_path, receipt
+
+
+def activate_candidate(args):
+    base, receipt_path, receipt = active_installation(args)
     bundle = args.bundle.resolve(strict=True)
     if digest(bundle / 'bundle-manifest.json') != args.manifest_sha256:
         raise ValueError('The prepared bundle changed before activation.')
@@ -587,7 +696,7 @@ def main():
             definition = Path('/Library/LaunchDaemons/ai.tractanda.server.' + args.instance + '.plist')
             try:
                 restore_service('system/ai.tractanda.server.' + args.instance, definition,
-                                receipt['definitionSHA256'], Path(receipt['release']) / 'bin/tractanda', receipt['socket'], receipt['manifestSHA256'])
+                                receipt['definitionSHA256'], Path(receipt['release']) / 'bin/tractanda', receipt['socket'], receipt['manifestSHA256'], owner=receipt['owner'])
             except BaseException as failure:
                 retain_stopped_recovery(receipt_path, receipt, definition, receipt['definitionSHA256'], failure)
                 raise
