@@ -38,6 +38,73 @@ final class PeerCategoryAssignmentTests: XCTestCase {
     private func send(_ f: Fixture, _ revision: Revision) throws -> AuthorityStore.Result {
         try f.send(f.packet(f.source.peerMetadataObjects(revisionID: revision.revisionID)))
     }
+    func testSealedRetainedIntakeUsesRecoveryBudgetButOrdinaryReplayKeepsWireBudget() throws {
+        for recovery in [false, true] {
+            let f = try Fixture()
+            try f.bootstrap()
+            let original = try f.source.commit(
+                .init(
+                    classID: "Item", changes: ["subject": .text("Tiny read-budget scope fixture")],
+                    operationID: Fixture.id())
+            ).revision
+            let packet = try f.packet(f.source.peerMetadataObjects(revisionID: original.revisionID))
+            _ = try f.send(packet)
+            var charged = false
+            f.receiver.peerIntakeBoundaryForTesting = { boundary in
+                if boundary == .applied {
+                    charged = true
+                    // Charge a counter only: no allocation/read/write of these bytes occurs.
+                    try f.receiver.chargePeerReadBudgetForTesting(
+                        Int(PeerPackage.Limits().maximumReadBytes) + 1)
+                }
+            }
+            defer { f.receiver.peerIntakeBoundaryForTesting = nil }
+            let replay = {
+                try f.receiver.commitPeerIntake(
+                    context: f.context, packageID: packet.manifest.packageID,
+                    expectedContextToken: f.receiver.peerIntakeContextToken(), retainedRecovery: recovery)
+            }
+            if recovery {
+                _ = try replay()
+                XCTAssertTrue(f.receiver.isCanonicalTrusted)
+                XCTAssertFalse(StoreCheckpoint.isDirty(root: f.receiverRoot))
+                XCTAssertEqual(try f.receiver.get(original.itemID), original)
+            } else {
+                XCTAssertThrowsError(try replay()) {
+                    XCTAssertEqual(($0 as? TractandaError)?.code, "resourceLimit")
+                }
+                XCTAssertFalse(f.receiver.isCanonicalTrusted, "Ordinary resource denial remains fail closed")
+            }
+            XCTAssertTrue(charged, "Probe must run inside the real intake completion scope")
+            try f.capacity()
+        }
+    }
+    func testRetainedRecoveryStillRequiresAnExistingSeal() throws {
+        let f = try Fixture()
+        try f.bootstrap()
+        let original = try f.source.commit(
+            .init(
+                classID: "Item", changes: ["subject": .text("Unsealed recovery cannot gain admission")],
+                operationID: Fixture.id())
+        ).revision
+        let packet = try f.packet(f.source.peerMetadataObjects(revisionID: original.revisionID))
+        _ = try f.receiver.beginPeerIntake(context: f.context, manifestBytes: JSON.encode(packet.manifest))
+        for (object, bytes) in packet.objects {
+            _ = try f.receiver.appendPeerObject(
+                context: f.context, packageID: packet.manifest.packageID,
+                object: object, offset: 0, bytes: bytes)
+        }
+        XCTAssertThrowsError(
+            try f.receiver.commitPeerIntake(
+                context: f.context, packageID: packet.manifest.packageID,
+                expectedContextToken: f.receiver.peerIntakeContextToken(), retainedRecovery: true)
+        ) {
+            XCTAssertEqual(($0 as? TractandaError)?.code, "invalidPeerPackage")
+        }
+        XCTAssertTrue(f.receiver.isCanonicalTrusted)
+        XCTAssertFalse(StoreCheckpoint.isDirty(root: f.receiverRoot))
+        try f.capacity()
+    }
     func testCategorizedNewItemAndAssignmentRevisionUseCategoryReadNotWrite() throws {
         let f = try Fixture()
         let target = try category(f)

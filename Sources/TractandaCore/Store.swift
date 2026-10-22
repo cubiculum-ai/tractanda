@@ -6708,6 +6708,10 @@ extension ItemStore {
             return try body()
         }
     }
+    /// Downward-only counter charge: exercise real entry scopes without allocating large fixtures.
+    func chargePeerReadBudgetForTesting(_ bytes: Int) throws {
+        try requirePeerIntake().admissionReadBudget()(bytes)
+    }
     func releasePeerLogicalVerification(_ owner: String) {
         peerIntake?.journal.originals?.releaseLogicalVerification(owner)
         peerIntake?.documentVerification?.releaseLogicalVerification(owner)
@@ -8641,7 +8645,7 @@ extension ItemStore {
         guard let index else {
             throw TractandaError("indexUnavailable", "Intake requires the accepted catalogue.")
         }
-        return try coordinator.withOperation {
+        return try coordinator.withOperation(recovery: retainedRecovery) {
             try index.withCatalogueScanBudget(reusingActiveBudget: true) {
                 try commitPeerIntakeBody(
                     context: context, packageID: packageID, expectedContextToken: expectedContextToken,
