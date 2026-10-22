@@ -267,6 +267,7 @@ func serveEmbeddings(engine: any EmbeddingServing, port: Int) async throws {
     let gate = AdmissionGate()
     do {
         let channel = try await ServerBootstrap(group: group)
+            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .serverChannelOption(ChannelOptions.backlog, value: 16)
             .childChannelInitializer { channel in
                 do {
