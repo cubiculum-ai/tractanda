@@ -648,6 +648,33 @@ int tractanda_receive_frame(int fd, void **bytes, uint32_t *count) {
     *bytes = buffer; *count = length; return 0;
 }
 
+/* Installer mutations only: preserve partial header/body bytes across bounded socket waits.
+ * The request is sent once. EOF, cancellation and other transport failures still terminate. */
+static int read_installer_response(int fd, void *data, size_t count) {
+    char *cursor = data;
+    while (count) {
+        if (tractanda_stopping()) { errno = ECANCELED; return -1; }
+        ssize_t amount = read(fd, cursor, count);
+        if (amount < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT)) continue;
+        if (amount == 0) { errno = ECONNRESET; return -1; }
+        if (amount < 0) return -1;
+        cursor += amount; count -= (size_t)amount;
+    }
+    return 0;
+}
+int tractanda_receive_installer_frame(int fd, void **bytes, uint32_t *count) {
+    uint32_t length;
+    if (read_installer_response(fd, &length, sizeof(length)) != 0) return -1;
+    length = ntohl(length);
+    if (!length || length > 8 * 1024 * 1024) { errno = EMSGSIZE; return -1; }
+    void *buffer = malloc(length);
+    if (!buffer) return -1;
+    if (read_installer_response(fd, buffer, length) != 0) {
+        int saved = errno; free(buffer); errno = saved; return -1;
+    }
+    *bytes = buffer; *count = length; return 0;
+}
+
 void tractanda_private_free(void *bytes, uint32_t count) {
     if (bytes) {
         volatile unsigned char *cursor = bytes;

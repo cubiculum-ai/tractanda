@@ -72,6 +72,8 @@ int tractanda_terminate_if_stopping(void);
 int tractanda_peer_uid(int descriptor, uint32_t *uid);
 int tractanda_send_frame(int descriptor, const void *bytes, uint32_t count);
 int tractanda_receive_frame(int descriptor, void **bytes, uint32_t *count);
+// Explicit installer mutation response only: bounded reads may repeat, request is never resent.
+int tractanda_receive_installer_frame(int descriptor, void **bytes, uint32_t *count);
 // Fixed local enrollment launch: actual current image path; no argv/PATH fallback.
 int tractanda_current_executable(char *buffer, uint32_t capacity);
 // Fixed basename only, no-follow trusted-owner chain; reject mutation-granting ACLs.

@@ -2712,13 +2712,16 @@ public final class ItemService {
 }
 
 public enum LocalTransport {
+    public enum ResponseWait: Sendable { case bounded, installerMutation }
     static func connectionFailure(socket: String, errorCode: Int32) -> TractandaError {
         TractandaError(
             "connectionFailed",
             "Cannot connect to \(socket): \(String(cString: strerror(errorCode))) (errno \(errorCode)).",
             osError: errorCode)
     }
-    public static func call(socket: String, request: Data, serverUser: String? = nil) throws -> Data {
+    public static func call(
+        socket: String, request: Data, serverUser: String? = nil, responseWait: ResponseWait = .bounded
+    ) throws -> Data {
         guard !request.isEmpty, request.count <= 8 * 1024 * 1024 else {
             throw TractandaError("limit", "Request must contain 1 byte to 8 MiB.")
         }
@@ -2743,15 +2746,21 @@ public enum LocalTransport {
         else {
             throw TractandaError("transportError", "Send failed; retry mutations with the same operationID.")
         }
-        return try receive(fd)
+        return try receive(fd, responseWait: responseWait)
     }
-    private static func receive(_ fd: Int32) throws -> Data {
+    private static func receive(_ fd: Int32, responseWait: ResponseWait = .bounded) throws -> Data {
         var pointer: UnsafeMutableRawPointer?
         var count: UInt32 = 0
-        guard tractanda_receive_frame(fd, &pointer, &count) == 0, let pointer else {
+        let status =
+            responseWait == .installerMutation
+            ? tractanda_receive_installer_frame(fd, &pointer, &count)
+            : tractanda_receive_frame(fd, &pointer, &count)
+        guard status == 0, let pointer else {
+            let cause = errno
             throw TractandaError(
                 "transportError",
-                "Receive failed; a mutation may have committed. Retry with the same operationID.")
+                "Receive failed (errno \(cause): \(String(cString: strerror(cause)))); a mutation may have committed. Retry with the same operationID.",
+                osError: cause)
         }
         defer { tractanda_free(pointer) }
         return Data(bytes: pointer, count: Int(count))

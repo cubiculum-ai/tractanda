@@ -5,11 +5,14 @@ struct SetupNativeClient {
     let socket: String
     let serverUser: String
 
-    func call(_ method: String, _ arguments: [String: Any] = [:]) throws -> [String: Any] {
+    func call(_ method: String, _ arguments: [String: Any] = [:], waitForMutation: Bool = false) throws
+        -> [String: Any]
+    {
         let bytes = try JSONSerialization.data(withJSONObject: [
             "using": [ItemService.capability], "methodCalls": [[method, arguments, "setup"]],
         ])
-        let response = try ServerConnection(socketPath: socket, serverUser: serverUser).send(bytes)
+        let response = try ServerConnection(socketPath: socket, serverUser: serverUser).send(
+            bytes, responseWait: waitForMutation ? .installerMutation : .bounded)
         guard let envelope = try JSONSerialization.jsonObject(with: response) as? [String: Any],
             let calls = envelope["methodResponses"] as? [[Any]], calls.count == 1, calls[0].count == 3,
             let result = calls[0][1] as? [String: Any], calls[0][0] as? String == method
@@ -54,7 +57,7 @@ struct SetupNativeClient {
             "TractandaCategory/installTemplate",
             [
                 "template": template, "timeZone": TimeZone.current.identifier,
-            ])
+            ], waitForMutation: true)
         guard let items = installed["items"] as? [String: String], let status = items["status"],
             let ready = items["status.ready"], let doing = items["status.doing"],
             let done = items["status.done"]
@@ -74,7 +77,7 @@ struct SetupNativeClient {
                     "action": "create", "classID": "Item",
                     "operationID": "setup-sample-v1-" + instance + "-" + key,
                     "changes": fields, "unset": [],
-                ])
+                ], waitForMutation: true)
             guard let revision = result["revision"] as? [String: Any],
                 let values = revision["fields"] as? [String: Any],
                 let identity = values["itemID"] as? [String: Any], let value = identity["value"] as? String

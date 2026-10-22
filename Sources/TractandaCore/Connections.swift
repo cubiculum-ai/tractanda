@@ -57,9 +57,10 @@ public struct ServerConnection: Codable, Equatable, Sendable {
     }
 
     /// Start only after connect failed before any request bytes were sent. Never replay an uncertain write.
-    public func send(_ request: Data) throws -> Data {
+    public func send(_ request: Data, responseWait: LocalTransport.ResponseWait = .bounded) throws -> Data {
         do {
-            return try LocalTransport.call(socket: socketPath, request: request, serverUser: serverUser)
+            return try LocalTransport.call(
+                socket: socketPath, request: request, serverUser: serverUser, responseWait: responseWait)
         } catch let error as TractandaError where error.code == "connectionFailed" {
             // Permission failures do not establish that the server is absent.
             guard !Self.isPermissionDenied(error) else { throw connectionDiagnostic(error) }
@@ -78,7 +79,8 @@ public struct ServerConnection: Codable, Equatable, Sendable {
             repeat {
                 do {
                     return try LocalTransport.call(
-                        socket: socketPath, request: request, serverUser: serverUser)
+                        socket: socketPath, request: request, serverUser: serverUser,
+                        responseWait: responseWait)
                 } catch let retryError as TractandaError where retryError.code == "connectionFailed" {
                     if Self.isPermissionDenied(retryError) { throw connectionDiagnostic(retryError) }
                     if Date() >= deadline { throw retryError }

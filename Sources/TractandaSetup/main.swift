@@ -197,6 +197,7 @@ do {
     default: throw SetupError(usage)
     }
 } catch {
-    FileHandle.standardError.write(Data("tractanda-setup: \(error.localizedDescription)\n".utf8))
+    let message = (error as? TractandaError)?.description ?? String(describing: error)
+    FileHandle.standardError.write(Data("tractanda-setup: \(message)\n".utf8))
     exit(1)
 }

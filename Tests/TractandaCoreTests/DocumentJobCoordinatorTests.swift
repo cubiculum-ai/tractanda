@@ -1132,6 +1132,19 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         XCTAssertEqual(waitpid(pid, &childStatus, WNOHANG), -1)
         XCTAssertEqual(errno, ECHILD)
         let record = fixture.store.appendingPathComponent("document-jobs/\(admitted.jobID)/record.json")
+        defer {
+            // Keep the sealed record intact during assertions; Foundation cleanup may reject 0400.
+            let descriptor = open(record.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+            if descriptor >= 0 {
+                defer { _ = close(descriptor) }
+                var metadata = stat()
+                if fstat(descriptor, &metadata) == 0, metadata.st_uid == geteuid(),
+                    metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG), metadata.st_nlink == 1
+                {
+                    _ = fchmod(descriptor, (metadata.st_mode & 0o777) | mode_t(S_IWUSR))
+                }
+            }
+        }
         let bytes = try Data(contentsOf: record)
         let persisted = try JSONDecoder().decode(DocumentJobRecord.self, from: bytes)
         XCTAssertEqual(persisted.checkpoint.acceptedPages, 1)
