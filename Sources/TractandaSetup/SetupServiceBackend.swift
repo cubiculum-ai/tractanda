@@ -1,3 +1,4 @@
+import CTractandaPlatform
 import Foundation
 
 /// The system manager is a platform detail; canonical admission and readiness stay in SetupEngine.
@@ -71,6 +72,9 @@ struct SetupServiceBackend {
     let roots: SetupRoots
     let runner: any SetupProcessRunning
     var allowFixtureRuntimeRoot = false
+    var shutdownSleep: () -> Void = { Thread.sleep(forTimeInterval: 0.1) }
+    var shutdownCancelled: () -> Bool = { tractanda_stopping() != 0 }
+    var shutdownReport: (String) -> Void = { FileHandle.standardError.write(Data(($0 + "\n").utf8)) }
 
     func name(_ instance: String, role: SetupServiceRole = .server) -> String {
         if roots.platform == .macos {
@@ -238,10 +242,61 @@ struct SetupServiceBackend {
         }
     }
 
+    private func macProcess(_ pid: Int32) throws -> (birth: String, state: String)? {
+        let result = try runner.run(
+            "/bin/ps", ["-p", String(pid), "-o", "lstart=,stat="], environment: ["LC_ALL": "C"])
+        guard result.output.utf8.count <= 4096 else {
+            throw SetupError("Shutdown process status exceeds its bound.")
+        }
+        let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if result.status == 1, output.isEmpty { return nil }
+        let fields = output.split(whereSeparator: { $0.isWhitespace })
+        guard result.status == 0, fields.count == 6, fields[5].utf8.count <= 32 else {
+            throw SetupError("Cannot establish managed process incarnation during shutdown.")
+        }
+        return (fields.prefix(5).joined(separator: " "), String(fields[5]))
+    }
+
     func unload(_ instance: String, role: SetupServiceRole = .server) throws {
         if roots.platform == .macos {
-            if try isRunning(instance, role: role) {
-                try successful(["bootout", label(instance, role: role)])
+            let managed = try run(["print", label(instance, role: role)])
+            guard managed.status == 0 else { return }
+            let pid = managed.output.split(separator: "\n")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .first { $0.hasPrefix("pid = ") }.flatMap { Int32($0.dropFirst(6)) }
+            let captured = try pid.flatMap { $0 > 1 ? try macProcess($0) : nil }
+            guard !shutdownCancelled() else {
+                throw SetupError("Service shutdown cancelled by the operator.")
+            }
+            let stopped = try runner.runStartup(
+                "/bin/launchctl", ["bootout", label(instance, role: role)], environment: [:])
+            guard stopped.status == 0 else {
+                throw SetupError("System service command failed: " + stopped.output.prefix(4096))
+            }
+            if let pid, let captured {
+                var lastState = ""
+                while true {
+                    guard !shutdownCancelled() else {
+                        throw SetupError("Service shutdown cancelled by the operator.")
+                    }
+                    do {
+                        guard let current = try macProcess(pid), current.birth == captured.birth,
+                            !current.state.hasPrefix("Z")
+                        else { break }
+                        if current.state != lastState {
+                            shutdownReport(
+                                "Shutdown: PID=\(pid) state=\(current.state); waiting for managed process exit."
+                            )
+                            lastState = current.state
+                        }
+                    } catch let timeout as SetupProcessTimeout {
+                        if timeout.message != lastState {
+                            shutdownReport("Shutdown observation: " + timeout.message)
+                            lastState = timeout.message
+                        }
+                    }
+                    shutdownSleep()
+                }
             }
             return
         }

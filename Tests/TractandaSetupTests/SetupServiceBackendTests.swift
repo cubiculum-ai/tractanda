@@ -244,6 +244,10 @@ final class SetupServiceBackendTests: XCTestCase {
                 -> ProcessResult
             {
                 calls.append((executable, arguments))
+                if executable == "/bin/ps" {
+                    return ProcessResult(
+                        status: loaded ? 0 : 1, output: loaded ? "Thu Oct 22 12:00:00 2026 S\n" : "")
+                }
                 if arguments.first == "print" {
                     return ProcessResult(status: loaded ? 0 : 1, output: "pid = 4242\n")
                 }
@@ -259,6 +263,48 @@ final class SetupServiceBackendTests: XCTestCase {
         XCTAssertEqual(try manager.mainPID("production", role: .server), 4242)
         try manager.unload("production")
         XCTAssertFalse(runner.loaded)
-        XCTAssertTrue(runner.calls.allSatisfy { $0.0 == "/bin/launchctl" })
+        XCTAssertTrue(runner.calls.allSatisfy { ["/bin/launchctl", "/bin/ps"].contains($0.0) })
     }
+    func testMacBootoutWaitsForCapturedIncarnationIncludingSlowExitAndZombie() throws {
+        final class DrainRunner: SetupProcessRunning, @unchecked Sendable {
+            var bootedOut = false
+            var probes = 0
+            var endWithZombie = false
+            func run(_ executable: String, _ arguments: [String], environment: [String: String]) throws
+                -> ProcessResult
+            {
+                if executable == "/bin/launchctl" {
+                    if arguments.first == "bootout" {
+                        bootedOut = true
+                        return .init(status: 0)
+                    }
+                    return .init(status: 0, output: "pid = 4242\n")
+                }
+                XCTAssertEqual(executable, "/bin/ps")
+                if bootedOut {
+                    probes += 1
+                    if probes == 1 { throw SetupProcessTimeout(message: "fixture bounded status timeout") }
+                    if probes > 3 {
+                        return .init(
+                            status: endWithZombie ? 0 : 1,
+                            output: endWithZombie ? "Thu Oct 22 12:00:00 2026 Z\n" : "")
+                    }
+                }
+                return .init(status: 0, output: "Thu Oct 22 12:00:00 2026 S\n")
+            }
+        }
+        for role in [SetupServiceRole.server, .embeddings] {
+            let runner = DrainRunner()
+            runner.endWithZombie = role == .embeddings
+            var backend = SetupServiceBackend(roots: SetupRoots(platform: .macos), runner: runner)
+            var virtualElapsed = 0.0
+            backend.shutdownSleep = { virtualElapsed += 3600 }  // Slow healthy shutdown exceeds two hours.
+            backend.shutdownReport = { _ in }
+            try backend.unload("production", role: role)
+            XCTAssertTrue(runner.bootedOut)
+            XCTAssertEqual(runner.probes, 4)
+            XCTAssertGreaterThan(virtualElapsed, 7200)
+        }
+    }
+
 }

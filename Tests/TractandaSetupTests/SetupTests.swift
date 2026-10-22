@@ -12,15 +12,22 @@ final class SetupTests: XCTestCase {
         var jobs = Set<String>()
         var loaded: Bool { !jobs.isEmpty }
         var failNextBootstrap = false
+        var observedProcessAlive = false
         var beforeRun: ((String, [String]) throws -> Void)?
         func run(_ executable: String, _ arguments: [String], environment: [String: String]) throws
             -> ProcessResult
         {
             calls.append((executable, arguments))
             try beforeRun?(executable, arguments)
+            if executable == "/bin/ps" {
+                return ProcessResult(
+                    status: observedProcessAlive ? 0 : 1,
+                    output: observedProcessAlive ? "Thu Oct 22 12:00:00 2026 S\n" : "")
+            }
             if executable == "/bin/launchctl" {
                 switch arguments.first {
                 case "print":
+                    observedProcessAlive = jobs.contains(arguments[1])
                     return ProcessResult(
                         status: jobs.contains(arguments[1]) ? 0 : 1, output: "state = running\npid = 4242\n")
                 case "bootstrap":
@@ -31,7 +38,9 @@ final class SetupTests: XCTestCase {
                     jobs.insert(
                         "system/"
                             + URL(fileURLWithPath: arguments[2]).deletingPathExtension().lastPathComponent)
-                case "bootout": jobs.remove(arguments[1])
+                case "bootout":
+                    jobs.remove(arguments[1])
+                    observedProcessAlive = false
                 default: break
                 }
             }
