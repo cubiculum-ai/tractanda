@@ -37,12 +37,46 @@ package struct PeerExchangeBinding: Equatable, Sendable {
 package final class PeerExchangeControl: @unchecked Sendable {
     private let lock = NSLock()
     private var cancelled = false
-    private let deadline: UInt64
+    private let deadline: UInt64?
+    private var atomicCommit = false
     package init(maximumSeconds: Double = 30) throws {
         guard maximumSeconds.isFinite, maximumSeconds > 0, maximumSeconds <= 60 else {
             throw TractandaError("resourceLimit", "Invalid peer operation deadline.")
         }
         deadline = DispatchTime.now().uptimeNanoseconds + UInt64(maximumSeconds * 1_000_000_000)
+    }
+    private init(commitCompletion: Void) { deadline = nil }
+    /// A complete, bounded commit request waits for completion, cancellation or connection loss.
+    package static func commitCompletion() -> PeerExchangeControl {
+        PeerExchangeControl(commitCompletion: ())
+    }
+    package var isCommittingAtomically: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return atomicCommit
+    }
+    package func withAtomicCommit<T>(_ body: () throws -> T) throws -> T {
+        lock.lock()
+        guard !atomicCommit else {
+            lock.unlock()
+            throw TractandaError("serviceBusy", "A peer atomic commit is already active.")
+        }
+        guard !cancelled else {
+            lock.unlock()
+            throw TractandaError("cancelled", "Peer operation cancelled.")
+        }
+        guard deadline.map({ DispatchTime.now().uptimeNanoseconds < $0 }) ?? true else {
+            lock.unlock()
+            throw TractandaError("deadlineExceeded", "Peer operation deadline exceeded.")
+        }
+        atomicCommit = true
+        lock.unlock()
+        defer {
+            lock.lock()
+            atomicCommit = false
+            lock.unlock()
+        }
+        return try body()
     }
     package func cancel() {
         lock.lock()
@@ -52,9 +86,11 @@ package final class PeerExchangeControl: @unchecked Sendable {
     package func check() throws {
         lock.lock()
         let stopped = cancelled
+        let committing = atomicCommit
         lock.unlock()
+        if committing { return }
         guard !stopped else { throw TractandaError("cancelled", "Peer operation cancelled.") }
-        guard DispatchTime.now().uptimeNanoseconds < deadline else {
+        guard deadline.map({ DispatchTime.now().uptimeNanoseconds < $0 }) ?? true else {
             throw TractandaError("deadlineExceeded", "Peer operation deadline exceeded.")
         }
     }
@@ -67,6 +103,13 @@ package struct PeerExchangeRequest: Codable, Sendable {
     package init(_ operation: String, _ fields: [String: ItemValue] = [:]) {
         self.operation = operation
         self.fields = fields
+    }
+    package static func decode(_ data: Data) throws -> Self {
+        try PeerPackage.decode(Self.self, data, maximum: 2 * 1024 * 1024)
+    }
+    package var waitsForCommitCompletion: Bool {
+        operation == "commit" && fields.count == 1
+            && (try? AuthorityRecord.persistentID(fields["packageID"])) != nil
     }
 }
 
@@ -234,7 +277,7 @@ struct PeerExchangeState: Sendable {
     ) throws -> Data {
         try control.check()
         try compatibility.requireAdmission(store: store, storeID: binding.storeID)
-        let request = try PeerPackage.decode(PeerExchangeRequest.self, data, maximum: 2 * 1024 * 1024)
+        let request = try PeerExchangeRequest.decode(data)
         let fields = request.fields
         let output: [String: ItemValue]
         switch request.operation {
@@ -415,9 +458,11 @@ struct PeerExchangeState: Sendable {
             try exact(fields, ["packageID"])
             // Current policy/Context was checked above on this same serial owner. Ordinary
             // writes may advance general Store generation while an immutable transfer runs.
-            let result = try store.commitPeerIntake(
-                context: context, packageID: id(fields["packageID"]),
-                expectedContextToken: store.peerIntakeContextToken())
+            let result = try control.withAtomicCommit {
+                try store.commitPeerIntake(
+                    context: context, packageID: id(fields["packageID"]),
+                    expectedContextToken: store.peerIntakeContextToken())
+            }
             output = [
                 "packageID": .text(result.packageID), "stored": .integer(Int64(result.stored)),
                 "accepted": .integer(Int64(result.accepted)), "held": .integer(Int64(result.held)),

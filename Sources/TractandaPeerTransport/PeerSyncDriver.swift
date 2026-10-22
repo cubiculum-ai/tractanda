@@ -175,13 +175,8 @@ package actor PeerSyncDriver {
         let reconnected = connection !== supplied
         var budget = Budget(
             limits: limits, deadline: ProcessInfo.processInfo.systemUptime + limits.maximumSeconds)
-        let timer = Task {
-            do {
-                try await Task.sleep(for: .seconds(limits.maximumSeconds))
-                _ = supplied.close()
-            } catch {}
-        }
-        defer { timer.cancel() }
+        // This is a fairness quantum, checked between operations. Closing an active
+        // connection here can interrupt healthy canonical publication on its peer.
         return try await withTaskCancellationHandler {
             do {
                 if localContext == nil {
@@ -315,9 +310,9 @@ package actor PeerSyncDriver {
         flows = [Flow(), Flow()]
     }
     private func control(_ budget: Budget) throws -> PeerExchangeControl {
-        try budget.check()
-        return try PeerExchangeControl(
-            maximumSeconds: min(30, budget.deadline - ProcessInfo.processInfo.systemUptime))
+        // Also used to persist completed progress after an admitted operation outlives
+        // its quantum. Wire admission remains bounded by Budget.request.
+        try PeerExchangeControl()
     }
     private func call(remote: Bool, _ request: PeerExchangeRequest, budget: inout Budget) async throws
         -> [String: ItemValue]
@@ -331,10 +326,12 @@ package actor PeerSyncDriver {
             bytes = try await connection.request(request).get()
         } else {
             guard let local else { throw TractandaError("serviceClosed", "No local gateway.") }
-            bytes = try await local.execute(encoded, control: control(budget))
+            bytes = try await local.execute(
+                encoded,
+                control: request.waitsForCommitCompletion
+                    ? PeerExchangeControl.commitCompletion() : control(budget))
         }
         budget.report.encodedBytes += bytes.count
-        try budget.check()
         guard bytes.count <= (request.operation == "exportRead" ? 2 * 1024 * 1024 : 128 * 1024) else {
             throw TractandaError("resourceLimit", "Synchronization response window exceeded.")
         }

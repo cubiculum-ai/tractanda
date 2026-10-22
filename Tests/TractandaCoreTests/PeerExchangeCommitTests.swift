@@ -28,6 +28,55 @@ final class PeerExchangeCommitTests: XCTestCase {
                 return state
             })
     }
+    func testCancellationAfterPublicationFinishesCommitBeforeDiscardingResponse() throws {
+        let f = try fixture()
+        try f.bootstrap()
+        let child = try f.edit()
+        let packet = try f.packet(f.source.peerMetadataObjects(revisionID: child.revisionID))
+        var state = try self.state(f)
+        _ = try f.receiver.beginPeerIntake(context: f.context, manifestBytes: JSON.encode(packet.manifest))
+        for (descriptor, bytes) in packet.objects {
+            _ = try f.receiver.appendPeerObject(
+                context: f.context, packageID: packet.manifest.packageID,
+                object: descriptor, offset: 0, bytes: bytes)
+        }
+        let control = try PeerExchangeControl()
+        f.receiver.peerIntakeOriginalPublicationForTesting = { control.cancel() }
+        defer { f.receiver.peerIntakeOriginalPublicationForTesting = nil }
+        XCTAssertThrowsError(
+            try f.receiver.withPeerExchange(
+                binding: state.binding, expectedSecurity: state.securityBinding, progress: control.check,
+                { context, _ in
+                    try state.perform(
+                        JSON.encode(
+                            PeerExchangeRequest("commit", ["packageID": .text(packet.manifest.packageID)])),
+                        store: f.receiver, context: context, control: control)
+                })
+        ) { XCTAssertEqual(($0 as? TractandaError)?.code, "cancelled") }
+        XCTAssertTrue(f.receiver.isCanonicalTrusted)
+        XCTAssertEqual(try f.receiver.get(child.itemID), child)
+        XCTAssertFalse(StoreCheckpoint.isDirty(root: f.receiver.root))
+        XCTAssertTrue(
+            FileManager.default.fileExists(
+                atPath: f.receiver.root.appendingPathComponent(
+                    "authority/intake/\(packet.manifest.packageID)/applied.json"
+                ).path))
+        try f.capacity()
+    }
+    func testAtomicScopeDoesNotSwallowValidationErrorsOrLeakToNextOperation() throws {
+        let control = try PeerExchangeControl()
+        XCTAssertThrowsError(
+            try control.withAtomicCommit {
+                throw TractandaError("invalidAuthority", "Actual validation still fails closed.")
+            }
+        ) { XCTAssertEqual(($0 as? TractandaError)?.code, "invalidAuthority") }
+        XCTAssertFalse(control.isCommittingAtomically)
+        control.cancel()
+        XCTAssertThrowsError(try control.withAtomicCommit { XCTFail("Cancelled work entered publication") }) {
+            XCTAssertEqual(($0 as? TractandaError)?.code, "cancelled")
+        }
+        XCTAssertFalse(control.isCommittingAtomically)
+    }
     func testGlobalPolicyChangeBetweenBeginAndCommitInvalidatesSession() throws {
         let f = try fixture()
         try f.bootstrap()

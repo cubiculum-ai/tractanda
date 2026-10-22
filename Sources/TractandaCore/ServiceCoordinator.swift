@@ -1720,7 +1720,7 @@ public actor ServiceCoordinator {
                     binding: state.binding, expectedSecurity: state.securityBinding,
                     progress: {
                         try control.check()
-                        try state.compatibility.requireLifetime()
+                        if !control.isCommittingAtomically { try state.compatibility.requireLifetime() }
                     }
                 ) { context, _ in
                     var next = state

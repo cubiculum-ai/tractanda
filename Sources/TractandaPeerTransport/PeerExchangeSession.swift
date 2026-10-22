@@ -127,6 +127,7 @@ final class PeerExchangeHandler: ChannelDuplexHandler {
     private var task: Task<Void, Never>?
     private var control: PeerExchangeControl?
     private var operationDeadline: Scheduled<Void>?
+    private var partialFrameDeadline: Scheduled<Void>?
     private var preflightDeadline: Scheduled<Void>?
     private var preflightControl: PeerExchangeControl?
     private var sessionDeadline: Scheduled<Void>?
@@ -281,6 +282,7 @@ final class PeerExchangeHandler: ChannelDuplexHandler {
                 if localCommitted, active {
                     throw TractandaError("serviceBusy", "Peer operation already active.")
                 }
+                if input == nil { startPartialFrameDeadline(context) }
                 var buffer = input ?? context.channel.allocator.buffer(capacity: 4)
                 if buffer.readableBytes < 4 {
                     let count = min(4 - buffer.readableBytes, part.readableBytes)
@@ -306,6 +308,8 @@ final class PeerExchangeHandler: ChannelDuplexHandler {
                     throw TractandaError("invalidPeerFrame", "Truncated peer frame.")
                 }
                 input = nil
+                partialFrameDeadline?.cancel()
+                partialFrameDeadline = nil
                 let frame = try PeerExchangeCodec.decode(Data(bytes))
                 if localCommitted && remoteReadyReceived && frame.kind == .request {
                     try receive(frame, context: context)
@@ -479,9 +483,13 @@ final class PeerExchangeHandler: ChannelDuplexHandler {
             inboundID = frame.requestID
             active = true
             _ = context.channel.setOption(ChannelOptions.autoRead, value: false)
-            let control = try PeerExchangeControl(maximumSeconds: limits.operationSeconds)
+            let request = try PeerExchangeRequest.decode(frame.body)
+            let control =
+                request.waitsForCommitCompletion
+                ? PeerExchangeControl.commitCompletion()
+                : try PeerExchangeControl(maximumSeconds: limits.operationSeconds)
             self.control = control
-            startDeadline(context)
+            if !request.waitsForCommitCompletion { startDeadline(context) }
             let loop = context.eventLoop
             let bound = NIOLoopBound(self, eventLoop: loop)
             task = Task {
@@ -557,10 +565,13 @@ final class PeerExchangeHandler: ChannelDuplexHandler {
         let requestID = outboundID
         pending = (requestID, promise)
         do {
-            let control = try PeerExchangeControl(maximumSeconds: limits.operationSeconds)
+            let control =
+                request.waitsForCommitCompletion
+                ? PeerExchangeControl.commitCompletion()
+                : try PeerExchangeControl(maximumSeconds: limits.operationSeconds)
             self.control = control
             let body = try JSON.encode(request)
-            startDeadline(context)
+            if !request.waitsForCommitCompletion { startDeadline(context) }
             let loop = context.eventLoop
             let bound = NIOLoopBound(self, eventLoop: loop)
             task = Task {
@@ -609,6 +620,15 @@ final class PeerExchangeHandler: ChannelDuplexHandler {
             in: .nanoseconds(Int64(limits.operationSeconds * 1_000_000_000))
         ) {
             bound.value.fail(TractandaError("deadlineExceeded", "Peer operation deadline exceeded."))
+        }
+    }
+    private func startPartialFrameDeadline(_ context: ChannelHandlerContext) {
+        partialFrameDeadline?.cancel()
+        let bound = NIOLoopBound(self, eventLoop: context.eventLoop)
+        partialFrameDeadline = context.eventLoop.scheduleTask(
+            in: .nanoseconds(Int64(limits.operationSeconds * 1_000_000_000))
+        ) {
+            bound.value.fail(TractandaError("deadlineExceeded", "Partial peer frame deadline exceeded."))
         }
     }
     private func finish(_ requestID: UInt64, result: Result<Data, Error>) {
@@ -717,6 +737,7 @@ final class PeerExchangeHandler: ChannelDuplexHandler {
         if let gateway { Task { await gateway.detachLogicalLease() } }
         gateway = nil
         operationDeadline?.cancel()
+        partialFrameDeadline?.cancel()
         preflightDeadline?.cancel()
         sessionDeadline?.cancel()
         if !readyFinished {

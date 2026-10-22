@@ -882,6 +882,28 @@ final class PeerExchangeTests: XCTestCase {
             }
         }
     }
+    func testCommitCompletionWaitOutlivesOrdinaryOperationDeadline() async throws {
+        try await withMembershipPair { pair, _, receiver, _, _ in
+            let gate = MembershipPause()
+            await receiver.setPeerExchangeAuthorizationHookForTesting { await gate.visit() }
+            let packageID = try Fixture.id()
+            let future = pair.a.request(.init("commit", ["packageID": .text(packageID)]))
+            try await pause(gate, pair: pair)
+            await pair.client.testingEventLoop.advanceTime(by: .seconds(31))
+            await pair.server.testingEventLoop.advanceTime(by: .seconds(31))
+            try await pair.pump()
+            XCTAssertTrue(pair.client.isActive)
+            XCTAssertTrue(pair.server.isActive)
+            await gate.release()
+            do {
+                _ = try await pair.value(future)
+                XCTFail("An absent package was accepted")
+            } catch {
+                XCTAssertNotEqual((error as? TractandaError)?.code, "deadlineExceeded")
+                XCTAssertNotEqual((error as? TractandaError)?.code, "serviceClosed")
+            }
+        }
+    }
     func testDelayedReceivedResponseReauthorizesBeforeCallerSuccess() async throws {
         try await withMembershipPair { pair, source, _, _, remote in
             let gate = MembershipPause(stopAt: 2)
