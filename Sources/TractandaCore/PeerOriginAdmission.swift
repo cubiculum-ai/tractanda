@@ -141,9 +141,7 @@ extension PeerIntakeCoordinator {
                 let root = try index.retainedAuthorityObject(id: pin.recordID),
                 root.descriptor.sha256 == pin.sha256
             else { return nil }
-            let rootBytes = try journal.files.read(
-                path: root.path.split(separator: "/").map(String.init),
-                maximumBytes: root.descriptor.length, readBudget: charge)
+            let rootBytes = try verifiedOriginalBytes(root, readBudget: charge)
             guard AuthorityRecordCodec.sha256(rootBytes) == pin.sha256 else {
                 throw PeerOriginAdmission.failure("Permanent root original differs.")
             }

@@ -72,26 +72,43 @@ final class PeerIntakeCoordinator {
     private var operationDepth = 0
     private var remainingReadBytes: UInt64 = 0
     private var operationReadCapacity: UInt64 = 0
+    private var verifiedOriginals: PeerVerifiedOriginalCache?
+    var verifiedOriginalCacheForTesting: (entries: Int, bytes: Int) {
+        (verifiedOriginals?.entryCount ?? 0, verifiedOriginals?.residentBytes ?? 0)
+    }
     /// Read-only owning-operation budget evidence, inspected on this coordinator's serial owner.
     var operationReadBytesForTesting: UInt64 { operationReadCapacity - remainingReadBytes }
     func withOperation<T>(recovery: Bool = false, maximumReadBytes: UInt64? = nil, _ body: () throws -> T)
         throws -> T
     {
         var enclosing: (remaining: UInt64, capacity: UInt64, window: UInt64)?
+        let outermost = operationDepth == 0
+        let previousCache = verifiedOriginals
         if operationDepth == 0 {
             remainingReadBytes =
                 recovery ? journal.limits.maximumRecoveryReadBytes : journal.limits.maximumReadBytes
             if let maximumReadBytes { remainingReadBytes = min(remainingReadBytes, maximumReadBytes) }
             operationReadCapacity = remainingReadBytes
+            verifiedOriginals = PeerVerifiedOriginalCache(
+                root: root, ownerUID: ownerUID,
+                maximumBytes: Int(min(32 * 1024 * 1024, operationReadCapacity)))
         } else if let maximumReadBytes {
             let window = min(remainingReadBytes, maximumReadBytes)
             enclosing = (remainingReadBytes, operationReadCapacity, window)
             remainingReadBytes = window
             operationReadCapacity = min(operationReadCapacity, maximumReadBytes)
+            // A stricter nested window retains its full original accounting, including
+            // repeated lookups. It cannot borrow previously hydrated outer-window bytes.
+            verifiedOriginals = nil
         }
         operationDepth += 1
         defer {
             operationDepth -= 1
+            if outermost {
+                verifiedOriginals = nil
+            } else if enclosing != nil {
+                verifiedOriginals = previousCache
+            }
             if let enclosing {
                 // Nested comparison cannot escape its cap or restore consumed parent bytes.
                 let used = enclosing.window - remainingReadBytes
@@ -182,28 +199,45 @@ final class PeerIntakeCoordinator {
             readBudget: admissionReadBudget())
     }
     func bytes(_ row: AuthorityStore.RetainedObject) throws -> Data {
-        try progress?()
-        if operationDepth > 0 {
-            guard UInt64(row.descriptor.length) <= remainingReadBytes else {
-                throw TractandaError("resourceLimit", "Authority operation hydration allowance exhausted.")
+        try verifiedOriginalBytes(row) { count in
+            if self.operationDepth > 0 {
+                guard count >= 0, UInt64(count) <= self.remainingReadBytes else {
+                    throw TractandaError(
+                        "resourceLimit", "Authority operation hydration allowance exhausted.")
+                }
+                self.remainingReadBytes -= UInt64(count)
             }
-            remainingReadBytes -= UInt64(row.descriptor.length)
         }
-        let data: Data
-        if row.descriptor.kind == .item {
-            guard
-                let original = try InitialAuthorityBootstrap.retainedItemBytes(
-                    root: root, path: row.path, object: row.descriptor, ownerUID: ownerUID)
-            else { throw TractandaError("peerObjectCollision", "Retained original is missing.") }
-            data = original
-        } else {
-            data = try journal.files.read(
-                path: row.path.split(separator: "/").map(String.init), maximumBytes: row.descriptor.length)
+    }
+    /// Raw immutable originals only. Callers still independently check current receipts,
+    /// source cuts and authorization. No configuration or decision result is cached here.
+    func verifiedOriginalBytes(
+        _ row: AuthorityStore.RetainedObject, readBudget: @escaping (Int) throws -> Void
+    ) throws -> Data {
+        try progress?()
+        var hydrated = false
+        let load = {
+            hydrated = true
+            try readBudget(row.descriptor.length)
+            let data: Data
+            if row.descriptor.kind == .item {
+                guard
+                    let original = try InitialAuthorityBootstrap.retainedItemBytes(
+                        root: self.root, path: row.path, object: row.descriptor, ownerUID: self.ownerUID)
+                else { throw TractandaError("peerObjectCollision", "Retained original is missing.") }
+                data = original
+            } else {
+                data = try self.journal.files.read(
+                    path: row.path.split(separator: "/").map(String.init), maximumBytes: row.descriptor.length
+                )
+            }
+            guard data.count == row.descriptor.length,
+                AuthorityRecordCodec.sha256(data) == row.descriptor.sha256
+            else { throw TractandaError("peerObjectCollision", "Retained original digest changed.") }
+            return data
         }
-        guard data.count == row.descriptor.length, AuthorityRecordCodec.sha256(data) == row.descriptor.sha256
-        else {
-            throw TractandaError("peerObjectCollision", "Retained original digest changed.")
-        }
+        let data = try verifiedOriginals.map { try $0.read(row, load: load) } ?? load()
+        if !hydrated { try readBudget(0) }  // Retain the caller's progress/cancellation checks.
         return data
     }
     /// Known bytes cannot bypass loss of the receipt that admitted them. This is read-only;
