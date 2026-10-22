@@ -35,8 +35,10 @@ package actor PeerSyncDriver {
         package var chunks = 0
         package var encodedBytes = 0
         mutating func note(_ value: Status) {
+            // A partial data outcome does not finish a job's bounded continuation. Resume
+            // yielded work promptly while genuine repair/unsupported barriers still block it.
             let order: [Status] = [
-                .complete, .yielded, .held, .rejected, .missing, .unsupported, .repairRequired,
+                .complete, .held, .rejected, .missing, .yielded, .unsupported, .repairRequired,
             ]
             if order.firstIndex(of: value)! > order.firstIndex(of: status)! { status = value }
         }

@@ -90,6 +90,95 @@ final class PeerSyncSchedulerTests: XCTestCase {
             "Expected scheduler call at bounded index \(index).", file: file, line: line)
     }
 
+    func testMissingOutcomeThenYieldResumesPromptlyWithoutBypassingRepair() async throws {
+        try PeerFixtureCapacity.requireFree()
+        let root = try GuardedFixtureDirectory.create(
+            prefix: "q", source: "PeerSyncSchedulerTests", test: name)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try PeerServiceFixture(root: root)
+        fixture.releaseWriter()
+        let accounts = fixture.accounts
+        let coordinator = try await ServiceCoordinator(
+            opening: fixture.sourceRoot, embeddingProviderForTesting: nil,
+            requireInitializedStore: true, makeAccountDirectory: { accounts })
+        defer { await coordinator.close() }
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { try? await group.shutdownGracefully() }
+        let peer = fixture.request.sourceCredential.binding.peerID
+        let configuration = try PeerRuntimeConfiguration(
+            peers: [.init(alias: peer, host: "127.0.0.1", port: 1)],
+            synchronization: .init(enabled: true, intervalSeconds: 300))
+        let network = try PeerServiceRuntime(
+            configuration: configuration, coordinator: coordinator, group: group)
+        defer { await network.close() }
+        let gate = PeerSyncSchedulerGate()
+        let runtime = try PeerSyncRuntime(
+            configuration: configuration, coordinator: coordinator, network: network,
+            synchronizeForTesting: { peerID, snapshot in
+                try await gate.hold(peerID: peerID, snapshot: snapshot)
+            })
+        defer {
+            await gate.shutdown()
+            await runtime.close()
+        }
+        let base = ProcessInfo.processInfo.systemUptime + 1
+        await runtime.activate()
+        await runtime.tick(now: base)
+        let firstStarted = await waitUntil { await gate.callLog().count == 1 }
+        XCTAssertTrue(firstStarted)
+        let first = try call(at: 0, in: await gate.callLog())
+        var partial = PeerSyncDriver.Report()
+        partial.packagesCommitted = 1
+        partial.note(.held)
+        partial.note(.rejected)
+        partial.note(.missing)
+        XCTAssertEqual(partial.status, .missing)
+        partial.note(.yielded)  // The same job then exhausts its chunk/time window.
+        await gate.release(first.id, with: partial)
+        let firstFinished = await waitUntil { await runtime.activeJobsForTesting() == 0 }
+        XCTAssertTrue(firstFinished)
+        let fastState = await runtime.schedulingForTesting(peerID: peer)
+        let fast = try XCTUnwrap(fastState)
+        XCTAssertEqual(fast.next, base + 0.25, accuracy: 0.000_001)
+        await runtime.tick(now: base + 0.24)
+        let beforeFast = await gate.callLog().count
+        XCTAssertEqual(beforeFast, 1)
+        await runtime.tick(now: base + 0.25)
+        let secondStarted = await waitUntil { await gate.callLog().count == 2 }
+        XCTAssertTrue(secondStarted)
+        let second = try call(at: 1, in: await gate.callLog())
+        var completedMissing = PeerSyncDriver.Report()
+        completedMissing.note(.missing)
+        await gate.release(second.id, with: completedMissing)
+        let secondFinished = await waitUntil { await runtime.activeJobsForTesting() == 0 }
+        XCTAssertTrue(secondFinished)
+        let regularState = await runtime.schedulingForTesting(peerID: peer)
+        let regular = try XCTUnwrap(regularState)
+        XCTAssertGreaterThanOrEqual(regular.next, base + 0.25 + 300)
+        XCTAssertLessThanOrEqual(regular.next, base + 0.25 + 360)
+        await runtime.tick(now: base + 100)
+        let beforeRegular = await gate.callLog().count
+        XCTAssertEqual(beforeRegular, 2)
+        await runtime.tick(now: regular.next)
+        let thirdStarted = await waitUntil { await gate.callLog().count == 3 }
+        XCTAssertTrue(thirdStarted)
+        let third = try call(at: 2, in: await gate.callLog())
+        var repair = partial
+        repair.note(.repairRequired)
+        repair.note(.yielded)
+        await gate.release(third.id, with: repair)
+        let thirdFinished = await waitUntil { await runtime.activeJobsForTesting() == 0 }
+        XCTAssertTrue(thirdFinished)
+        await runtime.tick(now: base + 10_000)
+        let afterRepair = await gate.callLog().count
+        XCTAssertEqual(afterRepair, 3, "Yield must not bypass a genuine repair barrier.")
+        var unsupported = partial
+        unsupported.note(.unsupported)
+        unsupported.note(.yielded)
+        XCTAssertEqual(unsupported.status, .unsupported)
+        try fixture.capacity()
+    }
+
     func testBoundedFairSchedulingReplacementAndDrainedClose() async throws {
         try PeerFixtureCapacity.requireFree()
         let root = try GuardedFixtureDirectory.create(
