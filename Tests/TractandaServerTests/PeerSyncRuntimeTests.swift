@@ -221,6 +221,53 @@ final class PeerSyncRuntimeTests: XCTestCase {
         return facts
     }
 
+    func testRealFailureAfterJobQuantumIsNotReportedAsYield() async throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        f.releaseWriter()
+        let source = try await coordinator(f.sourceRoot, f.accounts)
+        let target = try await coordinator(f.targetRoot, f.accounts)
+        defer {
+            await source.close()
+            await target.close()
+        }
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { try? await group.shutdownGracefully() }
+        let responder = try PeerServiceRuntime(configuration: .init(), coordinator: target, group: group)
+        await responder.refreshNow()
+        await responder.activate()
+        let listener = try await DaemonListeners.peer(
+            group: group, host: "127.0.0.1", port: 0, initialize: { responder.install(on: $0) })
+        defer {
+            try? await listener.close()
+            await responder.close()
+        }
+        let port = try XCTUnwrap(listener.port)
+        let initiator = try PeerServiceRuntime(
+            configuration: .init(peers: [.init(alias: "target", host: "127.0.0.1", port: port)]),
+            coordinator: source, group: group)
+        await initiator.activate()
+        defer { await initiator.close() }
+        let socket = try await initiator.connect(peerID: "target")
+        var limits = PeerSyncLimits()
+        limits.maximumSeconds = 0.001  // Intentional tiny negative-test quantum.
+        let driver = try PeerSyncDriver(
+            coordinator: source, binding: f.request.sourceCredential.binding, limits: limits)
+        defer { await driver.close() }
+        await source.setPeerExchangeAuthorizationHookForTesting {
+            try? await Task.sleep(for: .milliseconds(25))
+            await source.close()  // A real failure after the quantum, not the typed fairness yield.
+        }
+        do {
+            _ = try await driver.run(connection: socket)
+            XCTFail("A closed service was reported as successful yielded work")
+        } catch {
+            XCTAssertEqual((error as? TractandaError)?.code, "serviceClosed")
+        }
+        await source.setPeerExchangeAuthorizationHookForTesting(nil)
+        try f.capacity()
+    }
+
     func testFiniteJobsReconnectAcrossMorePagesThanOneSocketAndQuiesceWithoutNewPackages() async throws {
         var phase = "fixture"
         do {

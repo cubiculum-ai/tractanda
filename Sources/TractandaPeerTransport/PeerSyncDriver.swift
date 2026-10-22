@@ -289,13 +289,6 @@ package actor PeerSyncDriver {
                 budget.report.sessionRollovers += 1
                 budget.report.note(.yielded)
                 return budget.report
-            } catch {
-                if ProcessInfo.processInfo.systemUptime >= budget.deadline, !Task.isCancelled {
-                    _ = try? await supplied.close().get()
-                    budget.report.note(.yielded)
-                    return budget.report
-                }
-                throw error
             }
         } onCancel: {
             _ = supplied.close()

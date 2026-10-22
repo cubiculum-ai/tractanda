@@ -8834,6 +8834,23 @@ extension ItemStore {
         } catch {
             try? index.execute("ROLLBACK TO peer_intake")
             try? index.execute("RELEASE peer_intake")
+            // Retain the original failure before the recovery gate replaces public status.
+            // Codes and identifiers only: never log record bodies, credentials or error payloads.
+            let failure = error as? TractandaError
+            var diagnostic: [String: Any] = [
+                "profile": "tractanda.peer-intake-failure.v1",
+                "packageID": String(packageID.prefix(64)),
+                "phase": String(intakePhase.prefix(64)),
+                "code": String((failure?.code ?? "untypedError").prefix(96)),
+                "errorType": String(String(reflecting: type(of: error)).prefix(128)),
+            ]
+            if let osError = failure?.osError { diagnostic["osError"] = osError }
+            if let data = try? JSONSerialization.data(withJSONObject: diagnostic, options: [.sortedKeys]),
+                data.count <= 1024
+            {
+                FileHandle.standardError.write(
+                    Data("TRACTANDA_PEER_INTAKE_FAILURE ".utf8) + data + Data("\n".utf8))
+            }
             quarantineCheckpoint()
             if let failure = error as? TractandaError,
                 ["resourceLimit", "projectionRequired"].contains(failure.code)
