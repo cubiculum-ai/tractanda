@@ -20,6 +20,42 @@ struct PooledReadAuthority: Sendable, Equatable {
     let state: String
 }
 
+/// Whitelisted, non-content diagnostics for a failed peer-intake attempt.
+/// Unknown error messages are deliberately not copied into the operator log.
+enum PeerIntakeFailureDiagnostic {
+    static func record(packageID: String, phase: String, error: Error) -> [String: Any] {
+        let failure = error as? TractandaError
+        var value: [String: Any] = [
+            "profile": "tractanda.peer-intake-failure.v1",
+            "packageID": String(packageID.prefix(64)),
+            "phase": String(phase.prefix(64)),
+            "code": String((failure?.code ?? "untypedError").prefix(96)),
+            "errorType": String(String(reflecting: type(of: error)).prefix(128)),
+        ]
+        if let failure, let cause = resourceCause(code: failure.code, message: failure.message) {
+            value["resourceCause"] = cause
+        }
+        if let osError = failure?.osError { value["osError"] = osError }
+        return value
+    }
+
+    static func resourceCause(code: String, message: String) -> String? {
+        guard code == "resourceLimit" else { return nil }
+        switch message {
+        case "Admission exhausted the owning operation read budget.":
+            return "admissionReadBudget"
+        case "Authority operation hydration allowance exhausted.":
+            return "authorityHydrationAllowance"
+        case "Affected-item metadata exceeds operation allowance.":
+            return "affectedItemMetadata"
+        case "Catalogue statement work budget exceeded.", "Revision catalogue work budget exceeded.":
+            return "catalogueVM"
+        default:
+            return nil
+        }
+    }
+}
+
 #if canImport(Darwin)
     import Darwin
 #else
@@ -8878,14 +8914,8 @@ extension ItemStore {
             // Retain the original failure before the recovery gate replaces public status.
             // Codes and identifiers only: never log record bodies, credentials or error payloads.
             let failure = error as? TractandaError
-            var diagnostic: [String: Any] = [
-                "profile": "tractanda.peer-intake-failure.v1",
-                "packageID": String(packageID.prefix(64)),
-                "phase": String(intakePhase.prefix(64)),
-                "code": String((failure?.code ?? "untypedError").prefix(96)),
-                "errorType": String(String(reflecting: type(of: error)).prefix(128)),
-            ]
-            if let osError = failure?.osError { diagnostic["osError"] = osError }
+            let diagnostic = PeerIntakeFailureDiagnostic.record(
+                packageID: packageID, phase: intakePhase, error: error)
             if let data = try? JSONSerialization.data(withJSONObject: diagnostic, options: [.sortedKeys]),
                 data.count <= 1024
             {
