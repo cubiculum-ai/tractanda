@@ -12,7 +12,8 @@ extension ItemIndex {
     /// original wrappers bind actual bytes; no canonical record is re-encoded here.
     func appendValidatedPeer(
         row: CatalogueRow, revision original: AuthorityRevision, parent: AuthorityRevision?,
-        control: AuthorityBinding? = nil, originalsVerified: Bool = false
+        control: AuthorityBinding? = nil, originalsVerified: Bool = false,
+        categoryControl: AuthorityBinding? = nil
     ) throws {
         guard !projectionAppendActive else {
             throw TractandaError("indexTransient", "An append already owns this index.")
@@ -88,11 +89,28 @@ extension ItemIndex {
                     throw authorityInvalid("Peer append omitted original feedback references.")
                 }
                 let addressed = Set(provenance.writtenFields + provenance.unsetFields)
+                let categoryAssignment = value.classID == "Item" && addressed.contains("categoryOverrides")
+                let categoryFields: Set<String> = categoryAssignment ? ["categoryOverrides"] : []
+                if categoryAssignment {
+                    guard let categoryControl, try hasValidatedAuthorityControl(categoryControl),
+                        try authorityNumber(
+                            "SELECT EXISTS(SELECT 1 FROM authority_control_delta d JOIN authority_control c ON c.id=d.control JOIN authority_local_acceptance a ON a.control=c.id AND a.sha256=c.sha256 WHERE c.id=? AND c.sha256=? AND d.target=? AND d.item=? AND d.sha256=? AND d.eligible=1 AND d.evidence!=?)",
+                            [
+                                categoryControl.recordID, categoryControl.sha256, value.revisionID,
+                                value.itemID, original.sha256,
+                                String(decoding: try JSON.encode(ItemValue.list([])), as: UTF8.self),
+                            ]) == 1
+                    else {
+                        throw authorityInvalid(
+                            "Category assignment lacks its exact sealed local acceptance control.")
+                    }
+                }
                 let time = try RevisionTimestamp(row.modifiedAt)
                 if provenance.parents.isEmpty {
                     var initialFields: Set<String> = ["classID", "schemaVersion", "permissions"]
                     if value.fields["isDeleted"] == .boolean(false) { initialFields.insert("isDeleted") }
                     if configurationChange { initialFields.insert("accessConfiguration") }
+                    initialFields.formUnion(categoryFields)
                     guard parent == nil,
                         addressed.intersection(RevisionMerge.protectedFields).isSubset(of: initialFields),
                         try authorityNumber(
@@ -105,7 +123,7 @@ extension ItemIndex {
                 } else {
                     guard let parent, provenance.parents == [parent.revision.revisionID],
                         addressed.intersection(RevisionMerge.protectedFields).isSubset(
-                            of: verifiedStorageFields.union(
+                            of: verifiedStorageFields.union(categoryFields).union(
                                 configurationChange ? ["accessConfiguration"] : [])),
                         parent.revision.itemID == row.itemID,
                         let input = try self.revision(parent.revision.revisionID),
@@ -471,6 +489,19 @@ extension ItemIndex {
                 "SELECT \(Self.authorityColumns) FROM authority_objects o JOIN authority_packages p ON p.object=o.id WHERE o.id=? ORDER BY p.permitted DESC,p.package LIMIT 1",
                 [id], maximum: Self.authorityMetadataRowBytes
             ).first
+        }
+    }
+    /// A receiver's own sealed acceptance, not merely the sender's source-only testimony.
+    func localAuthorityAcceptanceControl(revisionID: String) throws -> AuthorityBinding? {
+        try withCatalogueScanBudget(reusingActiveBudget: true) {
+            let statement = try corpusPrepare(
+                "SELECT c.id,c.sha256 FROM authority_control_delta d JOIN authority_control c ON c.id=d.control JOIN authority_local_acceptance a ON a.control=c.id AND a.sha256=c.sha256 WHERE d.target=? AND d.eligible=1 ORDER BY c.ordinal DESC LIMIT 1",
+                [revisionID])
+            defer { sqlite3_finalize(statement) }
+            let status = catalogueStep(statement)
+            if status == SQLITE_DONE { return nil }
+            guard status == SQLITE_ROW else { throw graphSQLiteError() }
+            return try .init(recordID: authorityText(statement, 0), sha256: authorityText(statement, 1))
         }
     }
     func retainedAuthorityPage(after: String? = nil, limit: Int = 128) throws -> [AuthorityStore

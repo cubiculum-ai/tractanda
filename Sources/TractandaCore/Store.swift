@@ -6945,6 +6945,34 @@ extension ItemStore {
             return revision
         }
     }
+    private func categoryPolicies(
+        _ itemID: String, at cut: AuthorityBinding, coordinator: PeerIntakeCoordinator, index: ItemIndex
+    ) throws -> [Revision] {
+        let ids = try index.authorityItemFrontierAtCut(itemID: itemID, cut: cut)
+        guard !ids.isEmpty else {
+            throw TractandaError(
+                "missingDependencies", "Source category policy is unavailable at the exact cut.")
+        }
+        return try ids.map { id in
+            guard let row = try index.retainedAuthorityObject(id: id), row.descriptor.kind == .item else {
+                throw TractandaError("missingDependencies", "Source category policy original is missing.")
+            }
+            let original = try AuthorityRevision(originalBytes: coordinator.bytes(row))
+            let revision = original.revision
+            guard revision.itemID == itemID, revision.revisionID == id,
+                original.sha256 == row.descriptor.sha256
+            else {
+                throw TractandaError("invalidAuthority", "Source category policy identity differs.")
+            }
+            return revision
+        }
+    }
+    private func requireCategoryRead(_ itemID: String, forUID uid: UInt32, index: ItemIndex) throws {
+        // Prepare policy projection without publishing any new canonical decision. A missing
+        // category remains a dependency; an accepted but unreadable category remains denied.
+        _ = try authorityCurrentPolicies(itemID, index: index)
+        try withAccess(forUID: uid) { _ = try get(itemID) }
+    }
     private func authorityOriginalsVerified(
         _ revision: Revision, coordinator: PeerIntakeCoordinator, index: ItemIndex
     ) throws -> Bool {
@@ -7115,7 +7143,11 @@ extension ItemStore {
                 ? accessConfiguration.map { [$0] } ?? [] : currentAccessConfigurations,
             currentItemPolicies: currentPolicies,
             ownerUID: ownerUID,
-            loadBinding: { try coordinator.bindingAtCut($0, cut: cut, index: index) })
+            loadBinding: { try coordinator.bindingAtCut($0, cut: cut, index: index) },
+            categoryPoliciesAtSourceCut: {
+                try self.categoryPolicies($0, at: cut, coordinator: coordinator, index: index)
+            },
+            requireCurrentCategoryRead: { try self.requireCategoryRead($0, forUID: $1, index: index) })
         return try evaluator.evaluate(
             node, evidence: evidence,
             allowPolicy: node.revision.classID == AccessConfiguration.classID,
@@ -7170,7 +7202,10 @@ extension ItemStore {
         let cut = try coordinator.sourceControl(evidence)!
         return try RuntimeAuthorityEvaluator(
             accounts: accounts, currentConfigurations: [], currentItemPolicies: [],
-            ownerUID: ownerUID, loadBinding: { try coordinator.bindingAtCut($0, cut: cut, index: index) }
+            ownerUID: ownerUID, loadBinding: { try coordinator.bindingAtCut($0, cut: cut, index: index) },
+            categoryPoliciesAtSourceCut: {
+                try self.categoryPolicies($0, at: cut, coordinator: coordinator, index: index)
+            }
         )
         .evaluate(
             node, evidence: evidence, sourceOnly: true,
@@ -7815,7 +7850,9 @@ extension ItemStore {
                                 ? index.authorityAcceptanceControl(revisionID: node.revision.revisionID)
                                 : nil,
                             originalsVerified: authorityOriginalsVerified(
-                                node.revision, coordinator: coordinator, index: index)
+                                node.revision, coordinator: coordinator, index: index),
+                            categoryControl: index.localAuthorityAcceptanceControl(
+                                revisionID: node.revision.revisionID)
                         )
                         peerSnapshot = nil
                     }

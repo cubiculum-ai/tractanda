@@ -8,6 +8,10 @@ struct RuntimeAuthorityEvaluator {
     let currentItemPolicies: [Revision]
     let ownerUID: UInt32
     let loadBinding: (ItemValue) throws -> AuthorityRevision?
+    // Category assignment is ordinary item metadata; automatic merges still protect it.
+    // Source policies come from the exact validated PRE cut, never receiver ACL testimony.
+    var categoryPoliciesAtSourceCut: ((String) throws -> [Revision])? = nil
+    var requireCurrentCategoryRead: ((String, UInt32) throws -> Void)? = nil
 
     func evaluate(
         _ node: AuthorityRevision, evidence: AuthorityRecord, sourceOnly: Bool = false,
@@ -55,18 +59,21 @@ struct RuntimeAuthorityEvaluator {
                 "attachments", "attachmentText", "attachmentDocument",
             ])
             : RevisionMerge.protectedFields
+        let admissionProtectedFields = protectedFields.subtracting(["categoryOverrides"])
         let policyTransition =
             allowPolicy && revision.classID == AccessConfiguration.classID && !node.parents.isEmpty
         if !policyTransition
             && (revision.classID != "Item" || RevisionMerge.protectedClasses.contains(revision.classID)
                 || (!node.parents.isEmpty
                     && !Set(provenance.writtenFields + provenance.unsetFields).isDisjoint(
-                        with: protectedFields)))
+                        with: admissionProtectedFields)))
         {
             return held("Protected metadata requires the reviewed admission stage.")
         }
         if node.parents.isEmpty {
-            let allowedRootMetadata: Set<String> = ["classID", "schemaVersion", "permissions", "isDeleted"]
+            let allowedRootMetadata: Set<String> = [
+                "classID", "schemaVersion", "permissions", "isDeleted", "categoryOverrides",
+            ]
             if !Set(provenance.writtenFields).intersection(RevisionMerge.protectedFields).subtracting(
                 allowedRootMetadata
             ).isEmpty
@@ -120,6 +127,7 @@ struct RuntimeAuthorityEvaluator {
             return held("Source policy transition requires its current administrator.")
         }
         let itemPolicies = try AuthorityRecord.list(payload["itemPolicies"])
+        var sourceParent: Revision?
         if node.parents.isEmpty {
             guard itemPolicies.isEmpty, let value = revision.fields["permissions"],
                 try ItemPermissions(value).owner == principal
@@ -129,6 +137,9 @@ struct RuntimeAuthorityEvaluator {
             for binding in itemPolicies {
                 guard let policy = try loadBinding(binding), policy.revision.itemID == revision.itemID
                 else { return missing() }
+                if node.parents.count == 1, policy.revision.revisionID == node.parents[0] {
+                    sourceParent = policy.revision
+                }
                 if policyTransition {
                     guard sourceAdministrator,
                         policy.revision.classID == AccessConfiguration.classID,
@@ -147,6 +158,39 @@ struct RuntimeAuthorityEvaluator {
                             aliases: payload["aliases"]!.map!))
                 else {
                     return held("Canonical source item policy does not allow the intent.")
+                }
+            }
+        }
+        let changedCategories: [String]
+        if let value = revision.fields["categoryOverrides"], value.map == nil {
+            throw TractandaError("invalidCategory", "categoryOverrides must be an object.")
+        }
+        let currentOverrides = revision.fields["categoryOverrides"]?.map ?? [:]
+        if !provenance.writtenFields.contains("categoryOverrides") || currentOverrides.isEmpty {
+            changedCategories = []
+        } else if node.parents.isEmpty {
+            changedCategories = currentOverrides.keys.sorted()
+        } else {
+            guard node.parents.count == 1, let sourceParent else { return missing() }
+            let previous = sourceParent.fields["categoryOverrides"]?.map ?? [:]
+            changedCategories = currentOverrides.keys.filter { currentOverrides[$0] != previous[$0] }.sorted()
+        }
+        for categoryID in changedCategories {
+            guard let categoryPoliciesAtSourceCut else { return missing() }
+            let policies = try categoryPoliciesAtSourceCut(categoryID)
+            guard !policies.isEmpty else { return missing() }
+            for policy in policies {
+                guard policy.itemID == categoryID, !policy.isDeleted,
+                    let value = policy.fields["permissions"]
+                else { return missing() }
+                guard
+                    try sourceAdministrator
+                        || Self.sourceAllows(
+                            ItemPermissions(value), principal: principal, groups: sourceGroups,
+                            aliases: payload["aliases"]!.map!, requiredRights: 4)
+                else {
+                    return held(
+                        "Canonical source category policy does not allow reading the assignment target.")
                 }
             }
         }
@@ -204,6 +248,16 @@ struct RuntimeAuthorityEvaluator {
                     return held("Current item policy requires administrator review.")
                 }
             }
+            for categoryID in changedCategories {
+                guard let requireCurrentCategoryRead else { return missing() }
+                do {
+                    try requireCurrentCategoryRead(categoryID, account.uid)
+                } catch let error as TractandaError
+                    where ["forbidden", "notFound", "itemUnresolved"].contains(error.code)
+                {
+                    return held("Current category read permission requires review.")
+                }
+            }
         } catch let error as TractandaError
             where ["unresolvedPrincipal", "ambiguousPrincipal"].contains(error.code)
         {
@@ -215,28 +269,28 @@ struct RuntimeAuthorityEvaluator {
     }
     static func sourceAllows(
         _ policy: ItemPermissions, principal: String, groups: Set<String>, aliases: [String: ItemValue],
-        identityAliases: [String: ItemValue]? = nil
+        identityAliases: [String: ItemValue]? = nil, requiredRights: Int = 6
     ) throws -> Bool {
         func name(_ value: String) -> String { aliases[value]?.string ?? value }
-        if name(policy.owner) == principal { return (policy.mode >> 6) & 6 == 6 }
+        if name(policy.owner) == principal { return (policy.mode >> 6) & requiredRights == requiredRights }
         let mask = policy.mask ?? ((policy.mode >> 3) & 7)
         let named = policy.users.filter { name($0.key) == principal }
         guard named.count <= 1 else {
             throw TractandaError("invalidAuthority", "Ambiguous source ACL testimony.")
         }
-        if let rights = named.first?.value { return rights & mask & 6 == 6 }
+        if let rights = named.first?.value { return rights & mask & requiredRights == requiredRights }
         let identity = identityAliases ?? aliases
         let names = Set(groups.map { identity[$0]?.string ?? $0 })
         var matched = false
         if names.contains(name(policy.group)) {
             matched = true
-            if policy.owningGroupPermissions & mask & 6 == 6 { return true }
+            if policy.owningGroupPermissions & mask & requiredRights == requiredRights { return true }
         }
         for (group, rights) in policy.groups where names.contains(name(group)) {
             matched = true
-            if rights & mask & 6 == 6 { return true }
+            if rights & mask & requiredRights == requiredRights { return true }
         }
-        return !matched && policy.mode & 6 == 6
+        return !matched && policy.mode & requiredRights == requiredRights
     }
     private func held(_ reason: String) -> AuthorityStore.Evaluation {
         .init(disposition: .held, reason: reason)
