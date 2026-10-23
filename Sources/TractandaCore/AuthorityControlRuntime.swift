@@ -83,17 +83,94 @@ extension PeerIntakeCoordinator {
         deltas: [AuthorityStore.DispositionDelta], bootstrap: AuthorityBinding?
     ) throws -> AuthorityRecord {
         try AuthorityRecord(
-            recordID: UUID.makeVersion1().uuidString.lowercased(), storeID: storeID,
-            originReplicaID: origin, kind: .controlCommit,
-            parentAuthorityIDs: parents.map(\.recordID).sorted(),
-            actorPrincipal: actor, createdAt: Timestamp.now(),
-            payload: [
+            value: controlValue(
+                recordID: UUID.makeVersion1().uuidString.lowercased(), createdAt: Timestamp.now(),
+                origin: origin, actor: actor, localParent: localParent, parents: parents,
+                deltas: deltas, bootstrap: bootstrap))
+    }
+    private func controlValue(
+        recordID: String, createdAt: String, origin: String, actor: String,
+        localParent: AuthorityBinding?, parents: [AuthorityBinding],
+        deltas: [AuthorityStore.DispositionDelta], bootstrap: AuthorityBinding?
+    ) -> ItemValue {
+        .object([
+            "profile": .text(AuthorityRecord.profile), "recordID": .text(recordID),
+            "storeID": .text(storeID), "originReplicaID": .text(origin),
+            "kind": .text(AuthorityRecord.Kind.controlCommit.rawValue),
+            "parentAuthorityIDs": .list(parents.map(\.recordID).sorted().map(ItemValue.text)),
+            "actorPrincipal": .text(actor), "createdAt": .date(createdAt),
+            "payload": .object([
                 "controls": .list(parents.sorted { $0.recordID < $1.recordID }.map(\.itemValue)),
                 "localParent": .list(localParent.map { [$0.itemValue] } ?? []),
                 "deltas": .list(
                     deltas.sorted { $0.target.revisionID < $1.target.revisionID }.map(\.itemValue)),
                 "bootstrap": .list(bootstrap.map { [$0.itemValue] } ?? []),
-            ])
+            ]),
+        ])
+    }
+    /// Freeze complete, ordinary control envelopes. Size includes JSON escaping and MIME
+    /// headers; neither an entry count nor the JSON body alone bounds the published bytes.
+    /// Each page retains the original deltas and extends the preceding local cut. Planning
+    /// does not publish controls or consume the private pending-effect queue.
+    func makeControlPages(
+        origin: String, actor: String, localParent: AuthorityBinding?,
+        fixedParents: [AuthorityBinding], deltas: [AuthorityStore.DispositionDelta],
+        bootstrap: AuthorityBinding?, includingDeltaCauses: Bool
+    ) throws -> [AuthorityRecord] {
+        var current = localParent
+        var page: [AuthorityStore.DispositionDelta] = []
+        var fitted: AuthorityRecord?
+        var records: [AuthorityRecord] = []
+        var recordID = try UUID.makeVersion1().uuidString.lowercased()
+        var createdAt = Timestamp.now()
+        func candidate(_ values: [AuthorityStore.DispositionDelta]) throws -> AuthorityRecord? {
+            let parents = Array(
+                Set(
+                    fixedParents + (current.map { [$0] } ?? [])
+                        + (includingDeltaCauses ? values.flatMap(\.causes) : []))
+            )
+            .sorted { $0.recordID < $1.recordID }
+            guard values.count <= 128, parents.count <= AuthorityRecord.maximumEntries else { return nil }
+            let value = controlValue(
+                recordID: recordID, createdAt: createdAt, origin: origin, actor: actor,
+                localParent: current, parents: parents, deltas: values, bootstrap: bootstrap)
+            guard
+                try AuthorityRecordCodec.encodedSize(
+                    value, recordID: recordID, storeID: storeID) <= AuthorityRecord.maximumBytes
+            else { return nil }
+            return try AuthorityRecord(value: value)
+        }
+        for delta in deltas {
+            _ = try AuthorityStore.DispositionDelta(value: delta.itemValue)
+            if let next = try candidate(page + [delta]) {
+                page.append(delta)
+                fitted = next
+                continue
+            }
+            guard let previous = fitted else {
+                throw TractandaError(
+                    "resourceLimit", "One control delta exceeds its complete envelope or parent window.")
+            }
+            records.append(previous)
+            current = try recordBinding(previous)
+            recordID = try UUID.makeVersion1().uuidString.lowercased()
+            createdAt = Timestamp.now()
+            page = [delta]
+            guard let next = try candidate(page) else {
+                throw TractandaError(
+                    "resourceLimit", "One control delta exceeds its complete envelope or parent window.")
+            }
+            fitted = next
+        }
+        if let fitted {
+            records.append(fitted)
+        } else if deltas.isEmpty {
+            guard let empty = try candidate([]) else {
+                throw TractandaError("resourceLimit", "Control parents exceed the complete envelope window.")
+            }
+            records.append(empty)
+        }
+        return records
     }
     func recordBinding(_ record: AuthorityRecord) throws -> AuthorityBinding {
         try .init(
@@ -161,18 +238,17 @@ extension PeerIntakeCoordinator {
         defer { try? index.authorityEndWalk(token: walk) }
         var work = 0
         func appendJoin(head: AuthorityBinding, deltas: [AuthorityStore.DispositionDelta]) throws {
-            let parents = Array(Set([head] + (current.map { [$0] } ?? []))).sorted {
-                $0.recordID < $1.recordID
+            for record in try makeControlPages(
+                origin: origin, actor: actor, localParent: current, fixedParents: [head],
+                deltas: deltas, bootstrap: bootstrap, includingDeltaCauses: false)
+            {
+                encoded += try AuthorityRecordCodec.encode(record).count
+                guard UInt64(encoded) <= journal.limits.maximumStagedBytes else {
+                    throw TractandaError("resourceLimit", "Pre-cut join byte allowance exhausted.")
+                }
+                records.append(record)
+                current = try recordBinding(record)
             }
-            let record = try makeControl(
-                origin: origin, actor: actor, localParent: current,
-                parents: parents, deltas: deltas, bootstrap: bootstrap)
-            encoded += try AuthorityRecordCodec.encode(record).count
-            guard UInt64(encoded) <= journal.limits.maximumStagedBytes else {
-                throw TractandaError("resourceLimit", "Pre-cut join byte allowance exhausted.")
-            }
-            records.append(record)
-            current = try recordBinding(record)
         }
         while true {
             let heads = try index.authorityControlHeadPage(afterOriginID: afterOrigin, limit: 128)
@@ -256,21 +332,17 @@ extension PeerIntakeCoordinator {
             let page = try index.authorityDispositionEffectPage(afterRevisionID: pendingAfter, limit: 128)
             if page.isEmpty { break }
             pendingAfter = page.last!.target.revisionID
-            let parents = Array(Set((current.map { [$0] } ?? []) + page.flatMap(\.causes))).sorted {
-                $0.recordID < $1.recordID
+            for record in try makeControlPages(
+                origin: origin, actor: actor, localParent: current, fixedParents: [],
+                deltas: page, bootstrap: bootstrap, includingDeltaCauses: true)
+            {
+                encoded += try AuthorityRecordCodec.encode(record).count
+                guard UInt64(encoded) <= journal.limits.maximumStagedBytes else {
+                    throw TractandaError("resourceLimit", "Disposition join byte allowance exhausted.")
+                }
+                records.append(record)
+                current = try recordBinding(record)
             }
-            guard parents.count <= 256 else {
-                throw TractandaError("resourceLimit", "Disposition join needs smaller cause pages.")
-            }
-            let record = try makeControl(
-                origin: origin, actor: actor, localParent: current,
-                parents: parents, deltas: page, bootstrap: bootstrap)
-            encoded += try AuthorityRecordCodec.encode(record).count
-            guard UInt64(encoded) <= journal.limits.maximumStagedBytes else {
-                throw TractandaError("resourceLimit", "Disposition join byte allowance exhausted.")
-            }
-            records.append(record)
-            current = try recordBinding(record)
         }
         if current == nil, let bootstrap {
             let genesis = try makeControl(

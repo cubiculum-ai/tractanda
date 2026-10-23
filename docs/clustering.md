@@ -18,6 +18,17 @@ Authority events strictly after an issuer's valid removal lose that issuer's aut
 
 Credential-only rotation preserves StoreID, ReplicaID, revision identities and exact historical receipt testimony. Private endpoint credential removal remains local even when canonical retirement propagates. Re-adding a credential cannot override a still-valid origin cutoff. A cooperative replica learning its own valid removal refuses new ordinary local publication while retaining permitted reads, exact committed retries and control-plane intake/recovery; it cannot mint fresh review authority to restore itself.
 
+### Bounded source-cut publication
+
+A local write first joins accepted remote control history and pending disposition effects into its
+source cut. Both joins pack ordinary control records by their complete encoded MIME-envelope size,
+including JSON escaping and headers, as well as the existing entry and parent limits. Every page
+retains the exact target, eligibility, policy, cause and selected-evidence bindings and chains to the
+preceding local control. The authority envelope limit remains 128 KiB; one delta that cannot fit is
+rejected rather than truncated. Planning alone does not consume pending effects: the existing sealed
+publication and validated-current-head checks still govern their removal. This uses the existing
+control format and leaves source/current permissions and exact operation retries unchanged.
+
 Configured full-server origin attestation remains the trust model; no end-to-end signature or new trust-pin scheme is implied. Source administrator testimony explicitly records source service-owner principal and default administrator group, checked against the exact source PRE policies. Receiver `admin`/`sudo` defaults and copied UID/GID never establish a remote or local privilege. Canonical aliases for item/admission mapping remain separate from exact source OS administrator-group membership.
 
 The source runtime samples configurable `time.nist.gov` on randomized30–60minute idle intervals, with a5second attempt timeout and5second tolerance. The existing pure `PeerClockHealth` owns scheduling and the health latch. The daemon admits one UDP sample only when actual authority intake is enabled, canonical state is ready, private peers are configured and the coordinator is idle. Public daemon startup still leaves intake disabled, so installed/default operation schedules no clock probes. An ordinary request arriving after probe launch proceeds normally. Shutdown cancels and drains the sample before closing the NIO group. Unknown/unavailable reference time does not stop offline work. Confirmed bad health prevents only a NEW retirement; unavailable or inconclusive results preserve that restriction until a confirmed healthy sample. The sampler never changes the OS clock or requires a sample for every write.
