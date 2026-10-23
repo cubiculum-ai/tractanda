@@ -454,7 +454,7 @@ final class AuthorityReviewIndexTests: XCTestCase {
             let (a, initial) = try f.initial()
             let (p, b, c) = try f.plan(base: a, initial: initial)
             _ = try f.index.applyValidatedReview(plan: p, resolutionRow: c.row, loadVerified: f.load)
-            try f.index.retainValidatedControl(p.control)
+            try f.index.retainValidatedControl(p.control.requireLegacyPlan())
             let h2 = try f.control(
                 parents: [p.control.binding],
                 effects: [
@@ -494,7 +494,7 @@ final class AuthorityReviewIndexTests: XCTestCase {
             let (a, initial) = try f.initial()
             let (p, _, c) = try f.plan(base: a, initial: initial)
             _ = try f.index.applyValidatedReview(plan: p, resolutionRow: c.row, loadVerified: f.load)
-            try f.index.retainValidatedControl(p.control)
+            try f.index.retainValidatedControl(p.control.requireLegacyPlan())
             let e = try f.item(parent: c, subject: "later authored child", addressed: ["subject"])
             try f.index.setAuthorityDisposition(
                 id: e.id, evaluation: .init(disposition: .eligible, reason: "fresh child fixture"))
@@ -564,7 +564,7 @@ final class AuthorityReviewIndexTests: XCTestCase {
             code("invalidAuthorityReview") {
                 try f.index.retainValidatedReviewInvalidation(p, previous: left.original)
             }
-            try f.index.retainValidatedControl(p.control)
+            try f.index.retainValidatedControl(p.control.requireLegacyPlan())
             for previous in [left, right, left] {
                 try f.index.retainValidatedReviewInvalidation(p, previous: previous.original)
             }
@@ -632,7 +632,7 @@ final class AuthorityReviewIndexTests: XCTestCase {
             try f.index.retainRecoveryAuthorityReview(plan: p)
             // Even a normalized positive post-control cannot turn a provisional
             // review marker into a fully validated policy transition.
-            try f.index.retainValidatedControl(p.control)
+            try f.index.retainValidatedControl(p.control.requireLegacyPlan())
             code("invalidAuthorityReview") {
                 try f.index.retainValidatedReviewInvalidation(p, previous: a.original)
             }
@@ -644,7 +644,7 @@ final class AuthorityReviewIndexTests: XCTestCase {
                 let (review, _, result) = try other.plan(base: root, initial: cut)
                 _ = try other.index.applyValidatedReview(
                     plan: review, resolutionRow: result.row, loadVerified: other.load)
-                try other.index.retainValidatedControl(review.control)
+                try other.index.retainValidatedControl(review.control.requireLegacyPlan())
                 code("invalidAuthority") {
                     try AuthorityStore.validateReviewPolicyTransition(review, previous: root.original)
                 }
@@ -675,7 +675,7 @@ final class AuthorityReviewIndexTests: XCTestCase {
                 // Store uses this identical pure shape check BEFORE any seal/publication.
                 XCTAssertNoThrow(try AuthorityStore.validateReviewPolicyTransition(p, previous: a.original))
                 _ = try f.index.applyValidatedReview(plan: p, resolutionRow: c.row, loadVerified: f.load)
-                try f.index.retainValidatedControl(p.control)
+                try f.index.retainValidatedControl(p.control.requireLegacyPlan())
                 try f.index.retainValidatedReviewInvalidation(p, previous: a.original)
                 let transitions = try f.index.authorityInvalidationPage(policyItemID: a.row.itemID)
                 XCTAssertEqual(transitions.count, 1)
@@ -712,14 +712,50 @@ final class AuthorityReviewIndexTests: XCTestCase {
             XCTAssertTrue(try f.index.acceptedGraphProofIsCurrent())
         }
     }
+    func testGenericPendingCASIgnoresUnmatchedDecisionAndPreservesChangedNegative() throws {
+        let f = try Fixture()
+        try f.transaction {
+            let (a, initial) = try f.initial()
+            let (plan, b, c) = try f.plan(base: a, initial: initial)
+            _ = try f.index.applyValidatedReview(plan: plan, resolutionRow: c.row, loadVerified: f.load)
+            try f.index.retainValidatedControl(plan.control.requireLegacyPlan())
+            try f.index.retainLocalAuthorityAcceptance(plan.control.requireLegacyPlan())
+            // D is a validated review decision, not an ordinary control in PRE. New positive
+            // decisions are not pending effects and generic exact-CAS cleanup must be a no-op.
+            try f.index.clearAuthorityDispositionEffects(coveredBy: plan.control.binding, originID: f.origin)
+            let remote = try f.record(
+                .controlCommit,
+                payload: [
+                    "controls": .list([plan.control.binding.itemValue]), "localParent": .list([]),
+                    "bootstrap": .list([]),
+                    "deltas": .list([
+                        AuthorityStore.DispositionDelta(
+                            target: b.target, eligible: false,
+                            actor: "fixture", policyIDs: []
+                        ).itemValue
+                    ]),
+                ], parents: [plan.control.binding], issuer: f.id())
+            let newer = try AuthorityStore.VerifiedControlPlan(control: remote)
+            try f.index.retainValidatedControl(newer)
+            let changed = AuthorityStore.DispositionDelta(
+                target: b.target, eligible: false,
+                actor: "fixture", policyIDs: [], causes: [newer.binding])
+            try f.index.noteAuthorityDispositionEffect(changed)
+            let before = try f.index.catalogueWatermark()
+            try f.index.clearAuthorityDispositionEffects(coveredBy: plan.control.binding, originID: f.origin)
+            XCTAssertEqual(try f.index.authorityDispositionEffectPage(), [changed])
+            XCTAssertEqual(try f.index.catalogueWatermark(), before)
+            XCTAssertEqual(try f.index.authorityControlHead(originID: f.origin), plan.control.binding)
+        }
+    }
     func testAppliedReviewConsumesOnlyCoveredPendingBAndCWithoutChangingEligibility() throws {
         let f = try Fixture()
         try f.transaction {
             let (a, initial) = try f.initial()
             let (p, b, c) = try f.plan(base: a, initial: initial)
             _ = try f.index.applyValidatedReview(plan: p, resolutionRow: c.row, loadVerified: f.load)
-            try f.index.retainValidatedControl(p.control)
-            try f.index.retainLocalAuthorityAcceptance(p.control)
+            try f.index.retainValidatedControl(p.control.requireLegacyPlan())
+            try f.index.retainLocalAuthorityAcceptance(p.control.requireLegacyPlan())
             let before = try f.index.catalogueWatermark()
             for target in [b.target, c.target] {
                 try f.index.noteAuthorityDispositionEffect(
@@ -770,7 +806,7 @@ final class AuthorityReviewIndexTests: XCTestCase {
             let (a, initial) = try f.initial()
             let (p, _, c) = try f.plan(base: a, initial: initial)
             _ = try f.index.applyValidatedReview(plan: p, resolutionRow: c.row, loadVerified: f.load)
-            try f.index.retainValidatedControl(p.control)
+            try f.index.retainValidatedControl(p.control.requireLegacyPlan())
             let g = try f.item(parent: c, subject: "independently authorized G", addressed: ["subject"])
             let evidence = try f.evidence(g, cut: p.control.binding)
             let binding = try AuthorityBinding(recordID: evidence.record.recordID, sha256: evidence.sha256)
@@ -870,8 +906,8 @@ final class AuthorityReviewIndexTests: XCTestCase {
             let (a, initial) = try f.initial()
             let (p, b, c) = try f.plan(base: a, initial: initial)
             try f.index.retainRecoveryAuthorityReview(plan: p)
-            try f.index.retainValidatedControl(p.control)
-            try f.index.retainLocalAuthorityAcceptance(p.control)
+            try f.index.retainValidatedControl(p.control.requireLegacyPlan())
+            try f.index.retainLocalAuthorityAcceptance(p.control.requireLegacyPlan())
             let pending = AuthorityStore.DispositionDelta(
                 target: b.target, eligible: false, actor: "fixture", policyIDs: [],
                 causes: p.event.controlHolds)
@@ -914,7 +950,7 @@ final class AuthorityReviewIndexTests: XCTestCase {
             let (a, initial) = try f.initial()
             let (p, _, c) = try f.plan(base: a, initial: initial)
             _ = try f.index.applyValidatedReview(plan: p, resolutionRow: c.row, loadVerified: f.load)
-            try f.index.retainValidatedControl(p.control)
+            try f.index.retainValidatedControl(p.control.requireLegacyPlan())
             let (g, evidence, positive) = try f.locallyAcceptedAuthored(parent: c, source: p.control.binding)
             XCTAssertNil(try f.index.revision(g.id))
             let queue = try f.index.authorityLocalVisibilityWorkCount()
@@ -969,7 +1005,7 @@ final class AuthorityReviewIndexTests: XCTestCase {
             let (a, initial) = try f.initial()
             let (p, _, c) = try f.plan(base: a, initial: initial)
             _ = try f.index.applyValidatedReview(plan: p, resolutionRow: c.row, loadVerified: f.load)
-            try f.index.retainValidatedControl(p.control)
+            try f.index.retainValidatedControl(p.control.requireLegacyPlan())
             let (g, evidence, positive) = try f.locallyAcceptedAuthored(
                 parent: c, source: p.control.binding, selected: false)
             code("invalidAuthorityReview") {
@@ -1013,7 +1049,7 @@ final class AuthorityReviewIndexTests: XCTestCase {
             let (a, initial) = try f.initial()
             let (p, _, c) = try f.plan(base: a, initial: initial)
             _ = try f.index.applyValidatedReview(plan: p, resolutionRow: c.row, loadVerified: f.load)
-            try f.index.retainValidatedControl(p.control)
+            try f.index.retainValidatedControl(p.control.requireLegacyPlan())
             let (missing, _, intermediate) = try f.locallyAcceptedAuthored(
                 parent: c, source: p.control.binding)
             let (g, evidence, positive) = try f.locallyAcceptedAuthored(
@@ -1032,7 +1068,7 @@ final class AuthorityReviewIndexTests: XCTestCase {
             let (a, initial) = try provisional.initial()
             let (p, b, c) = try provisional.plan(base: a, initial: initial)
             try provisional.index.retainRecoveryAuthorityReview(plan: p)
-            try provisional.index.retainValidatedControl(p.control)
+            try provisional.index.retainValidatedControl(p.control.requireLegacyPlan())
             try provisional.index.insertRecoveryRow(c.row, graphFields: c.original.revision.fields)
             try provisional.index.insertRecoveryRow(b.row, graphFields: b.original.revision.fields)
             try provisional.index.validateRecoveryGraph(requireLinearProjection: false)
@@ -1055,7 +1091,7 @@ final class AuthorityReviewIndexTests: XCTestCase {
                 let (a, initial) = try f.initial()
                 let (p, _, c) = try f.plan(base: a, initial: initial)
                 _ = try f.index.applyValidatedReview(plan: p, resolutionRow: c.row, loadVerified: f.load)
-                try f.index.retainValidatedControl(p.control)
+                try f.index.retainValidatedControl(p.control.requireLegacyPlan())
                 let (g, evidence, positive) = try f.locallyAcceptedAuthored(
                     parent: c, source: p.control.binding,
                     addressed: malformed == "delta" ? ["isDeleted"] : ["subject"],

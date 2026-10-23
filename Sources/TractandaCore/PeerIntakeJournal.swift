@@ -49,6 +49,7 @@ final class PeerIntakeJournal {
         }
     }
     private let canonicalOwnerUID: UInt32
+    private var atomicPendingByteCache: [String: UInt64] = [:]
     var documents: PeerDocumentTransfer?
     var beforeSealForProfile: ((String) throws -> Void)?
     var afterBoundaryForTesting: ((Boundary) throws -> Void)?
@@ -104,6 +105,12 @@ final class PeerIntakeJournal {
                     throw TractandaError("resourceLimit", "Aggregate intake staging exhausted.")
                 }
                 total += next
+            } else {
+                let pending = try pendingAtomicContextBytes(id)
+                guard pending <= limits.maximumStagedBytes - min(total, limits.maximumStagedBytes) else {
+                    throw TractandaError("resourceLimit", "Pending atomic proof staging exhausted.")
+                }
+                total += pending
             }
         }
         stagedPackageCount = packages
@@ -116,12 +123,13 @@ final class PeerIntakeJournal {
         byteCache.removeValue(forKey: packageID)
         objectCountCache.removeValue(forKey: packageID)
         activeStagedBytes = nil
+        atomicPendingByteCache.removeValue(forKey: packageID)
     }
     private func activePackageBytes(_ id: String) throws -> UInt64 {
         if try files.readIfPresent(
             path: path(id, ["applied.json"]), maximumBytes: PeerPackage.maximumPageBytes) != nil
         {
-            return 0
+            return try pendingAtomicContextBytes(id)
         }
         return try status(id).receivedBytes
     }
@@ -471,7 +479,9 @@ final class PeerIntakeJournal {
     /// Stream pages to a disk-backed consumer; keep only the bounded recursion path in memory.
     func walk(
         _ packageID: String, visitIndex: ((PeerPackage.Object) throws -> Void)? = nil,
-        readBudget: ((Int) throws -> Void)? = nil, visit: (PeerPackage.Object, Data?) throws -> Void
+        readBudget: ((Int) throws -> Void)? = nil,
+        hydrate: (PeerPackage.Object) -> Bool = { _ in true },
+        visit: (PeerPackage.Object, Data?) throws -> Void
     ) throws {
         let begin = try beginRecord(packageID, readBudget: readBudget)
         var active = Set<String>()
@@ -496,7 +506,9 @@ final class PeerIntakeJournal {
                 guard work <= min(limits.maximumWork, limits.maximumObjects) else {
                     throw TractandaError("resourceLimit", "Package index work exceeded.")
                 }
-                try visit(entry, object(entry, packageID: packageID, readBudget: readBudget))
+                let bytes = try hydrate(entry)
+                    ? object(entry, packageID: packageID, readBudget: readBudget) : nil
+                try visit(entry, bytes)
             }
         }
         try page(begin.manifest.root, depth: 0)
@@ -574,6 +586,182 @@ final class PeerIntakeJournal {
         )
         .map { try PeerPackage.decode(Publication.self, $0) }
     }
+    /// Unaccepted context pages are staging even when their physical packet was already APPLIED.
+    /// Accepted receipt closures are canonical history, never charged as disposable active work.
+    /// One writer owns this bounded cache; exact incremental writes avoid rescanning all pages
+    /// for every append. Any uncertain mutation invalidates it and reconstructs from real files.
+    private func atomicContextRootBytes(packageID: String, rootID: String) throws -> UInt64 {
+        var total: UInt64 = 0
+        var work = 0
+        try files.withDirectoryEntries(path: path(packageID, ["atomic-context", rootID])) { name in
+            guard name == "pages" else {
+                throw AtomicAuthorityFormat.invalid("Unknown atomic context staging entry.")
+            }
+            try self.files.withDirectoryEntries(
+                path: self.path(packageID, ["atomic-context", rootID, "pages"])) { id in
+                    try Task.checkCancellation()
+                    _ = try AuthorityRecord.persistentID(.text(id))
+                    work += 1
+                    guard work <= self.limits.maximumObjects else {
+                        throw TractandaError("resourceLimit", "Atomic context page count exhausted.")
+                    }
+                    let bytes = try self.files.read(
+                        path: self.path(packageID, ["atomic-context", rootID, "pages", id]),
+                        maximumBytes: PeerPackage.maximumPageBytes)
+                    let page = try PeerPackage.decode(PeerPackage.Page.self, bytes)
+                    try page.validate()
+                    guard UInt64(bytes.count) <= self.limits.maximumStagedBytes
+                        - min(total, self.limits.maximumStagedBytes)
+                    else { throw TractandaError("resourceLimit", "Atomic context staging exhausted.") }
+                    total += UInt64(bytes.count)
+                    return true
+                }
+            return true
+        }
+        return total
+    }
+    private func pendingAtomicContextBytes(_ packageID: String) throws -> UInt64 {
+        if let cached = atomicPendingByteCache[packageID] { return cached }
+        var total: UInt64 = 0
+        var count = 0
+        var entered = false
+        do {
+            try files.withDirectoryEntries(path: path(packageID, ["atomic-context"])) { rootID in
+                entered = true
+                try Task.checkCancellation()
+                _ = try AuthorityRecord.persistentID(.text(rootID))
+                count += 1
+                guard count <= self.limits.maximumObjects else {
+                    throw TractandaError("resourceLimit", "Atomic staged context count exhausted.")
+                }
+                if let bytes = try self.files.readIfPresent(
+                    path: self.path(packageID, ["atomic-accepted", rootID + ".json"]),
+                    maximumBytes: PeerPackage.maximumPageBytes)
+                {
+                    let receipt = try PeerPackage.decode(AtomicAuthorityAcceptance.Receipt.self, bytes)
+                    guard receipt.root.recordID == rootID, receipt.packageID == packageID,
+                        try self.atomicAcceptance(packageID: packageID, root: receipt.root) != nil
+                    else { throw AtomicAuthorityFormat.invalid("Atomic canonical context lost its seal.") }
+                } else {
+                    let pending = try self.atomicContextRootBytes(packageID: packageID, rootID: rootID)
+                    guard pending <= self.limits.maximumStagedBytes
+                        - min(total, self.limits.maximumStagedBytes)
+                    else { throw TractandaError("resourceLimit", "Aggregate atomic proof staging exhausted.") }
+                    total += pending
+                }
+                return true
+            }
+        } catch let error as TractandaError where error.osError == ENOENT {
+            // Absence of the whole optional context directory is ordinary legacy history.
+            // Missing children of a present context are not silently ignored.
+            guard !entered else { throw error }
+        }
+        if atomicPendingByteCache.count >= 256 { atomicPendingByteCache.removeAll(keepingCapacity: false) }
+        atomicPendingByteCache[packageID] = total
+        return total
+    }
+
+    /// Called only in Store's final serialized writer phase after full semantic/current-rights
+    /// validation. The physical package seal is PREPARED input, not this per-root acceptance.
+    func sealAtomicAcceptance(_ receipt: AtomicAuthorityAcceptance.Receipt) throws
+        -> AtomicAuthorityAcceptance.Sealed
+    {
+        try receipt.validate()
+        guard let requirement = try CanonicalReaderRequirement.load(root: root, ownerUID: canonicalOwnerUID),
+            requirement.minimumReaderLevel >= 15,
+            requirement.capabilities.contains("tractanda.authority-atomic.v1")
+        else {
+            throw TractandaError(
+                "incompatibleCanonicalWriter", "Atomic acceptance requires coordinated canonical activation.")
+        }
+        guard let publication = try publication(receipt.packageID),
+            publication.context.storeID == receipt.storeID,
+            publication.manifestDigest == receipt.manifestSHA256
+        else {
+            throw AtomicAuthorityFormat.invalid(
+                "Atomic acceptance requires its complete physical publication seal.")
+        }
+        let bytes = try JSON.encode(receipt)
+        guard bytes.count <= PeerPackage.maximumPageBytes else {
+            throw TractandaError(
+                "resourceLimit", "Atomic acceptance envelope exceeds its physical byte window.")
+        }
+        // Complete structural context, plus its referenced immutable configuration, must already
+        // be durable before this last acceptance file can exist. Store binds the actual semantic
+        // inputs to these descriptors and performs the final current-rights check, not this I/O layer.
+        _ = try walkUntrustedAtomicContext(receipt) { _ in }
+        let configuration = try files.read(
+            path: [".peer-configuration", receipt.context.configuration.fileName],
+            maximumBytes: PeerPackage.maximumPageBytes)
+        guard AuthorityRecordCodec.sha256(configuration) == receipt.context.configuration.sha256 else {
+            throw AtomicAuthorityFormat.invalid("Atomic acceptance configuration input changed.")
+        }
+        try withStageAccountingMutation(receipt.packageID) {
+            let destination = try path(
+                receipt.packageID, ["atomic-accepted", receipt.root.recordID + ".json"])
+            if try files.readIfPresent(path: destination, maximumBytes: PeerPackage.maximumPageBytes) == nil {
+                let used = try stagedBytes()
+                guard UInt64(bytes.count) <= limits.maximumStagedBytes - min(used, limits.maximumStagedBytes)
+                else {
+                    throw TractandaError(
+                        "resourceLimit", "Atomic acceptance exceeds actual staging storage quota.")
+                }
+            }
+            let prior = try files.readIfPresent(path: destination, maximumBytes: PeerPackage.maximumPageBytes)
+            let pending = try pendingAtomicContextBytes(receipt.packageID)
+            let rootBytes = prior == nil
+                ? try atomicContextRootBytes(packageID: receipt.packageID, rootID: receipt.root.recordID) : 0
+            guard rootBytes <= pending else {
+                throw AtomicAuthorityFormat.invalid("Atomic pending proof accounting regressed.")
+            }
+            try write(bytes, at: destination)
+            atomicPendingByteCache[receipt.packageID] = pending - rootBytes
+            byteCache.removeValue(forKey: receipt.packageID)
+            activeStagedBytes = nil
+        }
+        guard let sealed = try atomicAcceptance(packageID: receipt.packageID, root: receipt.root) else {
+            throw AtomicAuthorityFormat.invalid("Durable atomic acceptance could not be reopened.")
+        }
+        return sealed
+    }
+
+    /// Writes only private immutable context index pages. No acceptance exists until the final
+    /// per-root seal; exact retries compare every byte and preserve previous receipt history.
+    func stageAtomicContextPage(
+        packageID: String, rootID: String, object: PeerPackage.Object, bytes: Data
+    ) throws {
+        _ = try AuthorityRecord.persistentID(.text(rootID))
+        try object.validate()
+        guard object.kind == .index, bytes.count == object.length,
+            AuthorityRecordCodec.sha256(bytes) == object.sha256
+        else {
+            throw AtomicAuthorityFormat.invalid("Atomic context page differs from its frozen descriptor.")
+        }
+        let value = try PeerPackage.decode(PeerPackage.Page.self, bytes)
+        try value.validate()
+        try withStageAccountingMutation(packageID) {
+            let destination = try path(packageID, ["atomic-context", rootID, "pages", object.id])
+            if try files.readIfPresent(path: destination, maximumBytes: PeerPackage.maximumPageBytes) == nil {
+                guard try files.readIfPresent(
+                    path: path(packageID, ["atomic-accepted", rootID + ".json"]),
+                    maximumBytes: PeerPackage.maximumPageBytes) == nil
+                else { throw AtomicAuthorityFormat.invalid("Accepted context cannot acquire new pages.") }
+                let used = try stagedBytes()
+                guard UInt64(bytes.count) <= limits.maximumStagedBytes - min(used, limits.maximumStagedBytes)
+                else {
+                    throw TractandaError(
+                        "resourceLimit", "Atomic context exceeds actual staging storage quota.")
+                }
+            }
+            let prior = try files.readIfPresent(path: destination, maximumBytes: PeerPackage.maximumPageBytes)
+            let pending = try pendingAtomicContextBytes(packageID)
+            try write(bytes, at: destination)
+            if prior == nil { atomicPendingByteCache[packageID] = pending + UInt64(bytes.count) }
+            byteCache.removeValue(forKey: packageID)
+            activeStagedBytes = nil
+        }
+    }
+
     /// Existing canonical locators are written only after sealing. They survive index loss and
     /// therefore distinguish missing admitted proof from a legitimate never-sealed partial stage.
     func hasPublishedEvidence(_ id: String) throws -> Bool {
@@ -841,6 +1029,11 @@ final class PeerIntakeJournal {
             }
             total = next.partialValue
         }
+        let pendingAtomic = try pendingAtomicContextBytes(id)
+        guard pendingAtomic <= limits.maximumStagedBytes - min(total, limits.maximumStagedBytes) else {
+            throw TractandaError("resourceLimit", "Atomic context proof staging exhausted quota.")
+        }
+        total += pendingAtomic
         if byteCache.count >= 256 { byteCache.removeAll(keepingCapacity: false) }
         byteCache[id] = total
         objectCountCache[id] = count

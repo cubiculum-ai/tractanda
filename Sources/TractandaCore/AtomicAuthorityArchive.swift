@@ -17,6 +17,11 @@ final class AtomicAuthorityArchive {
         let maximumParts: Int64
         var minimumFreeBytes: Int64 = 10 * 1024 * 1024 * 1024
     }
+    /// Only a retained-original loader may report an unreceived declared part. Missing files for
+    /// an already retained descriptor remain custody errors, not healthy network incompleteness.
+    struct PartUnavailable: Error {
+        let binding: AuthorityBinding
+    }
     struct Window {
         var maximumParts = 16
         var maximumBytes = 1024 * 1024
@@ -80,19 +85,32 @@ final class AtomicAuthorityArchive {
         let supportFacts: Int64
         let targets: Int64
     }
+    /// A parsed prefix fact, not a proof: only isolated private staging may consume it.
+    struct UntrustedStagingFact {
+        let section: Section
+        let value: ItemValue
+    }
 
     private let io: Files
     private let chunkBytes: Int
     private let progress: (() throws -> Void)?
+    private let canonicalPartLoader: ((AuthorityBinding, Int64) throws -> Data)?
+    private let canonicalRootLoader: (() throws -> Data)?
     init(
         root: URL, limits: Limits, chunkBytes: Int = Format.maximumChunkBytes,
-        availableBytes: (@Sendable () throws -> UInt64)? = nil, progress: (() throws -> Void)? = nil
+        availableBytes: (@Sendable () throws -> UInt64)? = nil, progress: (() throws -> Void)? = nil,
+        canonicalPartLoader: ((AuthorityBinding, Int64) throws -> Data)? = nil,
+        canonicalRootLoader: (() throws -> Data)? = nil
     ) throws {
-        guard (1...Format.maximumChunkBytes).contains(chunkBytes), limits.maximumParts > 0 else {
+        guard (1...Format.maximumChunkBytes).contains(chunkBytes), limits.maximumParts > 0,
+            (canonicalPartLoader == nil) == (canonicalRootLoader == nil)
+        else {
             throw Format.invalid("Invalid private archive limits.")
         }
         self.chunkBytes = chunkBytes
         self.progress = progress
+        self.canonicalPartLoader = canonicalPartLoader
+        self.canonicalRootLoader = canonicalRootLoader
         io = try Files(root: root, limits: limits, availableBytes: availableBytes)
     }
     private func check() throws {
@@ -130,6 +148,9 @@ final class AtomicAuthorityArchive {
     func build(
         context: Context, parents: () throws -> ItemValue?, effects: () throws -> ItemValue?
     ) throws -> Handle {
+        guard canonicalPartLoader == nil else {
+            throw Format.invalid("A canonical closure reader cannot construct or replace parts.")
+        }
         let lock = try io.lock()
         defer { io.unlock(lock) }
         try check()
@@ -288,6 +309,231 @@ final class AtomicAuthorityArchive {
     }
 
     func beginValidation(_ handle: Handle) throws -> Reader { try Reader(archive: self, handle: handle) }
+    /// Captures one bounded exact root in owned private work; canonical parts remain in their
+    /// original custody and are freshly loaded/rechecked on every reopen by the supplied boundary.
+    func bindCanonicalRoot(_ bytes: Data) throws -> Handle {
+        guard canonicalPartLoader != nil else {
+            throw Format.invalid("Canonical root binding requires a retained-original loader.")
+        }
+        let record = try Format.Codec.decode(bytes)
+        guard record.kind == .atomicControl else { throw Format.invalid("Expected a logical root.") }
+        let lock = try io.lock()
+        defer { io.unlock(lock) }
+        try check()
+        guard try canonicalRootLoader?() == bytes else {
+            throw Format.invalid("Canonical root changed before private reader binding.")
+        }
+        try io.put(bytes, at: ["root"])
+        return .init(
+            binding: try .init(recordID: record.recordID, sha256: AuthorityRecordCodec.sha256(bytes)),
+            encodedBytes: bytes.count)
+    }
+    private func partBytes(_ reference: Format.Reference) throws -> Data {
+        if let canonicalPartLoader {
+            return try canonicalPartLoader(reference.binding, reference.encodedBytes)
+        }
+        return try io.read(["parts", reference.binding.recordID])
+    }
+    private func currentRootBytes() throws -> Data {
+        let bytes = try io.read(["root"])
+        if let canonicalRootLoader {
+            guard try canonicalRootLoader() == bytes else {
+                throw Format.invalid("Canonical root changed after private reader binding.")
+            }
+        }
+        return bytes
+    }
+    /// Exact physical root bytes only; this does not assert closure or semantic acceptance.
+    func rootBytes(_ handle: Handle) throws -> Data {
+        let lock = try io.lock()
+        defer { io.unlock(lock) }
+        try check()
+        let bytes = try currentRootBytes()
+        let record = try Format.Codec.decode(bytes)
+        guard bytes.count == handle.encodedBytes, record.kind == .atomicControl,
+            record.recordID == handle.binding.recordID,
+            AuthorityRecordCodec.sha256(bytes) == handle.binding.sha256
+        else { throw Format.invalid("Private root differs from its exact handle.") }
+        return bytes
+    }
+    /// Source-publication spool input only. A complete structural walk precedes enumeration,
+    /// then every object is freshly reopened under the private lease. The consumer may stage
+    /// descriptors/bytes but may not accept authority from this callback. Final Store validation
+    /// still binds the canonical root/parts after physical publication, before ACCEPTED sealing.
+    func forEachUntrustedLocalObject(
+        _ handle: Handle, body: (PeerPackage.Object, Data) throws -> Void
+    ) throws {
+        guard canonicalPartLoader == nil else {
+            throw Format.invalid("Only an owned local construction archive supplies publication bytes.")
+        }
+        let structure = try validate(handle)
+        let held = try io.lock()
+        defer { io.unlock(held) }
+        let rootBytes = try currentRootBytes()
+        guard rootBytes.count == handle.encodedBytes,
+            AuthorityRecordCodec.sha256(rootBytes) == handle.binding.sha256
+        else {
+            throw Format.invalid("Local publication root changed after its closure check.")
+        }
+        let root = try Format.Codec.decode(rootBytes)
+        var parts: Int64 = 0
+        do {
+            try io.forEachPartName { id in
+                try self.check()
+                let bytes = try self.io.read(["parts", id])
+                _ = try self.requireLocalPart(bytes, id: id, root: root)
+                parts = try Format.sum(parts, 1)
+                guard parts <= structure.parts else {
+                    throw Format.invalid("Local archive contains unreferenced part files.")
+                }
+                try body(
+                    .init(
+                        kind: .authority, id: id, length: bytes.count,
+                        sha256: AuthorityRecordCodec.sha256(bytes)), bytes)
+            }
+        } catch FileMetadataError.posix(let code) where code == ENOENT && structure.parts == 0 {
+            // An empty physical closure need not create a parts directory.
+        }
+        guard parts == structure.parts, try currentRootBytes() == rootBytes else {
+            throw Format.invalid("Local publication closure changed during enumeration.")
+        }
+        try body(
+            .init(
+                kind: .authority, id: handle.binding.recordID, length: rootBytes.count,
+                sha256: handle.binding.sha256), rootBytes)
+        try check()
+        guard try currentRootBytes() == rootBytes else {
+            throw Format.invalid("Local publication root changed during callback.")
+        }
+    }
+
+    /// Read-only publication input under one exclusive archive lease. The initial and final
+    /// inventories are constant per successful scope; individual objects never recount the tree.
+    /// Expected descriptors remain untrusted input, not proof of root membership or authority.
+    func withUntrustedLocalObjectReader<T>(
+        _ handle: Handle, body: (UntrustedLocalObjectReader) throws -> T
+    ) throws -> T {
+        guard canonicalPartLoader == nil else {
+            throw Format.invalid("Canonical reader cannot author local publication input.")
+        }
+        let held = try io.lock()
+        var reader: UntrustedLocalObjectReader?
+        defer {
+            reader?.invalidate()
+            io.unlock(held)
+        }
+        try io.requireReadCapacity()
+        let current = try UntrustedLocalObjectReader(archive: self, handle: handle)
+        reader = current
+        // A throwing body already fails the scope. Preserve that primary error unchanged;
+        // cleanup only releases the lease and cannot replace it with a secondary census error.
+        let result = try body(current)
+        try current.finish()
+        return result
+    }
+
+    /// No accepting or membership API: every returned object is a freshly verified byte value.
+    /// The enclosing scope invalidates escaped references, including when its callback throws.
+    final class UntrustedLocalObjectReader {
+        private let archive: AtomicAuthorityArchive
+        private let handle: Handle
+        private let rootBytes: Data
+        private let root: Format.Record
+        private var active = true
+        private var failed = false
+        private var busy = false
+        fileprivate init(archive: AtomicAuthorityArchive, handle: Handle) throws {
+            self.archive = archive
+            self.handle = handle
+            try archive.check()
+            let bytes = try archive.currentRootBytes()
+            let root = try Format.Codec.decode(bytes)
+            guard bytes.count == handle.encodedBytes, root.kind == .atomicControl,
+                root.recordID == handle.binding.recordID,
+                AuthorityRecordCodec.sha256(bytes) == handle.binding.sha256
+            else { throw Format.invalid("Scoped local publication changed its exact root.") }
+            rootBytes = bytes
+            self.root = root
+            try requireCurrentRoot()
+        }
+        fileprivate func invalidate() { active = false }
+        private func requireOpen() throws {
+            guard active, !failed else {
+                throw Format.invalid("Untrusted local object reader is closed or failed.")
+            }
+        }
+        private func requireRootWithoutCallback() throws {
+            try archive.io.checkLease()
+            guard try archive.currentRootBytes() == rootBytes else {
+                throw Format.invalid("Scoped local publication root changed during callback.")
+            }
+            try archive.io.checkLease()
+        }
+        private func requireCurrentRoot() throws {
+            try requireOpen()
+            try requireRootWithoutCallback()
+            try archive.check()
+            try requireOpen()
+            try requireRootWithoutCallback()
+        }
+        func object(expected: PeerPackage.Object) throws -> Data {
+            try requireOpen()
+            guard !busy else {
+                failed = true
+                throw Format.invalid("Untrusted local object reader cannot reenter.")
+            }
+            busy = true
+            var succeeded = false
+            defer {
+                busy = false
+                if !succeeded { failed = true }
+            }
+            try expected.validate()
+            guard expected.kind == .authority, expected.part == nil else {
+                throw Format.invalid("Local publication reader requires an exact authority descriptor.")
+            }
+            try requireCurrentRoot()
+            let bytes: Data
+            if expected.id == handle.binding.recordID {
+                bytes = try archive.currentRootBytes()
+            } else {
+                bytes = try archive.io.read(["parts", expected.id])
+                _ = try archive.requireLocalPart(bytes, id: expected.id, root: root)
+            }
+            guard bytes.count == expected.length, AuthorityRecordCodec.sha256(bytes) == expected.sha256 else {
+                throw Format.invalid("Local publication original differs from its expected descriptor.")
+            }
+            try requireCurrentRoot()
+            succeeded = true
+            return bytes
+        }
+        fileprivate func finish() throws {
+            try requireOpen()
+            guard !busy else { throw Format.invalid("Untrusted local reader is still in use.") }
+            busy = true
+            defer { busy = false }
+            try requireCurrentRoot()
+            try archive.io.recountForReadCompletion()
+            // No progress callback runs after the final inventory. A callback cannot append
+            // unaccounted unknown files after the successful scope's last census.
+            try requireRootWithoutCallback()
+        }
+    }
+    /// Read-only per-instance work evidence; no validation/capacity bypass or global hook.
+    var inventoryRecountsForTesting: Int { io.inventoryRecounts }
+
+    private func requireLocalPart(_ bytes: Data, id: String, root: Format.Record) throws -> Format.Record {
+        let record = try Format.Codec.decode(bytes)
+        guard record.kind != .atomicControl, record.recordID == id, record.controlID == root.recordID,
+            record.storeID == root.storeID, record.originReplicaID == root.originReplicaID,
+            record.itemValue.map?["actorPrincipal"] == root.itemValue.map?["actorPrincipal"],
+            record.itemValue.map?["createdAt"] == root.itemValue.map?["createdAt"]
+        else {
+            throw Format.invalid("Local publication part differs from its reserved root context.")
+        }
+        return record
+    }
+
     func validate(_ handle: Handle, window: Window = .init()) throws -> Structure {
         let reader = try beginValidation(handle)
         do {
@@ -317,6 +563,25 @@ final class AtomicAuthorityArchive {
         }
     }
 
+    /// One structural pass. Prefix callbacks must not affect accepted/current/head/queue state.
+    /// The result exists only after every part, entry, range and aggregate count is checked.
+    func forEachUntrustedStagingFact(
+        _ handle: Handle, _ body: (UntrustedStagingFact) throws -> Void
+    ) throws -> Structure {
+        let reader = try beginValidation(handle)
+        do {
+            while true {
+                if let result = try reader.stageWindow(window: .init(), onUntrustedFact: body) {
+                    try reader.close()
+                    return result
+                }
+            }
+        } catch {
+            try? reader.close()
+            throw error
+        }
+    }
+
     private func resource(_ text: String) -> TractandaError { .init("resourceLimit", text) }
 
     final class Reader {
@@ -336,12 +601,13 @@ final class AtomicAuthorityArchive {
         private var complete: Structure?
         private var failed = false
         private(set) var steps = 0
+        private(set) var waitingForPart: AuthorityBinding?
         fileprivate init(archive: AtomicAuthorityArchive, handle: Handle) throws {
             self.archive = archive
             self.handle = handle
             lock = try archive.io.lock()
             do {
-                let data = try archive.io.read(["root"])
+                let data = try archive.currentRootBytes()
                 guard data.count == handle.encodedBytes,
                     AuthorityRecordCodec.sha256(data) == handle.binding.sha256
                 else {
@@ -370,17 +636,48 @@ final class AtomicAuthorityArchive {
                 throw error
             }
         }
+        /// Fresh root/custody check under this reader's already-held exclusive archive lease.
+        /// Opening another archive lease while a Reader lives would correctly report busy.
+        func recheckRoot() throws -> Data {
+            guard lock != nil, !failed else { throw Format.invalid("Closed/failed atomic reader.") }
+            try archive.check()
+            let bytes = try archive.currentRootBytes()
+            guard bytes.count == handle.encodedBytes,
+                AuthorityRecordCodec.sha256(bytes) == handle.binding.sha256
+            else { throw Format.invalid("Atomic root changed between work windows.") }
+            return bytes
+        }
         deinit { try? close() }
         /// Explicit windows limit work, not logical size or wall-clock lifetime. Partial results grant nothing.
         func step(window: Window) throws -> Structure? {
             try scan(window: window, section: nil, onEntry: { _ in })
+        }
+        /// May emit a valid prefix before a later invalid part/cancel. No completion or authority
+        /// may be exposed until a nonnil Structure is returned and caller final checks succeed.
+        func stageWindow(window: Window, onUntrustedFact: (UntrustedStagingFact) throws -> Void) throws
+            -> Structure?
+        {
+            try scan(window: window, section: nil, onEntry: { _ in }, onUntrustedFact: onUntrustedFact)
+        }
+        /// Private intake only: retain the exact parser/stack prefix when the loader reports a
+        /// declared object that has not arrived. No callback completion/authority is produced.
+        func stageAvailableWindow(
+            window: Window, onUntrustedFact: (UntrustedStagingFact) throws -> Void
+        ) throws -> Structure? {
+            try scan(
+                window: window, section: nil, onEntry: { _ in },
+                onUntrustedFact: onUntrustedFact, permitUnavailable: true)
         }
         fileprivate func replay(window: Window, section: Section, onEntry: (ItemValue) throws -> Void) throws
             -> Structure?
         {
             try scan(window: window, section: section, onEntry: onEntry)
         }
-        private func scan(window: Window, section selected: Section?, onEntry: (ItemValue) throws -> Void)
+        private func scan(
+            window: Window, section selected: Section?, onEntry: (ItemValue) throws -> Void,
+            onUntrustedFact: (UntrustedStagingFact) throws -> Void = { _ in },
+            permitUnavailable: Bool = false
+        )
             throws -> Structure?
         {
             guard lock != nil, !failed, window.maximumParts > 0,
@@ -392,19 +689,31 @@ final class AtomicAuthorityArchive {
             defer { if !succeeded { failed = true } }
             var count = 0
             var bytes = 0
+            waitingForPart = nil
             while let (section, expected) = stack.last {
                 try archive.check()
                 if count == window.maximumParts || expected.encodedBytes > Int64(window.maximumBytes - bytes)
                 {
                     break
                 }
-                stack.removeLast()
                 let seen = ["read-work", workID, expected.binding.recordID]
                 guard try archive.io.optional(seen) == nil else {
                     throw Format.invalid("Duplicated/cyclic atomic part.")
                 }
+                let data: Data
+                do {
+                    data = try archive.partBytes(expected)
+                } catch let missing as PartUnavailable where permitUnavailable {
+                    guard archive.canonicalPartLoader != nil, missing.binding == expected.binding else {
+                        throw Format.invalid("Unavailable part does not match its exact declared reference.")
+                    }
+                    // No popped stack, seen marker, decoder input or totals change on this path.
+                    waitingForPart = missing.binding
+                    succeeded = true
+                    return nil
+                }
+                stack.removeLast()
                 try archive.io.put(Data([1]), at: seen)
-                let data = try archive.io.read(["parts", expected.binding.recordID])
                 guard data.count == expected.encodedBytes,
                     AuthorityRecordCodec.sha256(data) == expected.binding.sha256
                 else { throw Format.invalid("Atomic part bytes/digest differ.") }
@@ -449,6 +758,7 @@ final class AtomicAuthorityArchive {
                                 found = true
                             }
                             if selected == section { try onEntry(value) }
+                            try onUntrustedFact(.init(section: section, value: value))
                         }
                         previousFound = found
                     } else {
@@ -457,6 +767,7 @@ final class AtomicAuthorityArchive {
                         }
                         try effectDecoder.append(chunk) { value in
                             if selected == section { try onEntry(value) }
+                            try onUntrustedFact(.init(section: section, value: value))
                         }
                     }
                 }
@@ -467,7 +778,7 @@ final class AtomicAuthorityArchive {
             if stack.isEmpty {
                 try parentDecoder.finish()
                 try effectDecoder.finish()
-                let current = try archive.io.read(["root"])
+                let current = try archive.currentRootBytes()
                 guard current.count == handle.encodedBytes,
                     AuthorityRecordCodec.sha256(current) == handle.binding.sha256,
                     previousFound, root.payload["partCount"]?.integerValue == partCount,
@@ -498,13 +809,16 @@ final class AtomicAuthorityArchive {
         let limits: Limits
         let helpers: DocumentContentFiles
         private var footprint: UInt64 = 0
+        private(set) var inventoryRecounts = 0
         private var heldLocks = Set<Int32>()
         private let identity: (UInt64, UInt64)
         init(root: URL, limits: Limits, availableBytes: (@Sendable () throws -> UInt64)?) throws {
             self.root = root
             self.limits = limits
             let fd = root.path.withCString { tractanda_open_private_directory($0) }
-            guard fd >= 0 else { throw Format.invalid("Archive root is not caller-private/no-follow.") }
+            guard fd >= 0 else {
+                throw Format.invalid("Archive root is not caller-private/no-follow (POSIX \(errno)).")
+            }
             defer { close(fd) }
             var s = stat()
             guard fstat(fd, &s) == 0 else { throw Format.invalid("Cannot inspect archive root.") }
@@ -576,6 +890,15 @@ final class AtomicAuthorityArchive {
             let check = try rootDescriptor()
             close(check)
             return result
+        }
+        func forEachPartName(_ body: (String) throws -> Void) throws {
+            try parent(["parts", ".enumerate"]) { fd, _ in
+                try POSIXDirectory.withEntries(descriptor: fd) { name in
+                    _ = try AuthorityRecord.persistentID(.text(name))
+                    try body(name)
+                    return true
+                }
+            }
         }
         func optional(_ path: [String]) throws -> Data? {
             try Task.checkCancellation()
@@ -678,13 +1001,24 @@ final class AtomicAuthorityArchive {
             _ = flock(fd, LOCK_UN)
             close(fd)
         }
+        func requireReadCapacity() throws {
+            try checkLease()
+            try helpers.requireCapacity(0, at: root)
+            try checkLease()
+        }
+        func recountForReadCompletion() throws {
+            try recount()
+            try requireReadCapacity()
+        }
         private func recount() throws {
+            inventoryRecounts += 1
             let fd = try rootDescriptor()
             defer { close(fd) }
             var total: UInt64 = 4096
             func visit(_ fd: Int32, depth: Int) throws {
                 guard depth <= 12 else { throw Format.invalid("Private archive depth exceeded.") }
                 try POSIXDirectory.withEntries(descriptor: fd) { name in
+                    try Task.checkCancellation()
                     var s = stat()
                     guard fstatat(fd, name, &s, AT_SYMLINK_NOFOLLOW) == 0, s.st_uid == tractanda_uid(),
                         s.st_mode & 0o077 == 0

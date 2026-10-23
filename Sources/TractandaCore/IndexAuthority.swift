@@ -37,7 +37,7 @@ extension ItemIndex {
                 if configurationChange {
                     guard let control, try hasValidatedAuthorityControl(control),
                         try authorityNumber(
-                            "SELECT EXISTS(SELECT 1 FROM authority_control_delta d JOIN authority_control c ON c.id=d.control WHERE c.id=? AND c.sha256=? AND d.target=? AND d.item=? AND d.sha256=? AND d.eligible=1 AND d.evidence!=?)",
+                            "SELECT EXISTS(SELECT 1 FROM authority_control_facts d JOIN authority_control c ON c.id=d.control WHERE c.id=? AND c.sha256=? AND d.target=? AND d.item=? AND d.sha256=? AND d.eligible=1 AND d.evidence!=?)",
                             [
                                 control.recordID, control.sha256, value.revisionID, value.itemID,
                                 original.sha256,
@@ -94,7 +94,7 @@ extension ItemIndex {
                 if categoryAssignment {
                     guard let categoryControl, try hasValidatedAuthorityControl(categoryControl),
                         try authorityNumber(
-                            "SELECT EXISTS(SELECT 1 FROM authority_control_delta d JOIN authority_control c ON c.id=d.control JOIN authority_local_acceptance a ON a.control=c.id AND a.sha256=c.sha256 WHERE c.id=? AND c.sha256=? AND d.target=? AND d.item=? AND d.sha256=? AND d.eligible=1 AND d.evidence!=?)",
+                            "SELECT EXISTS(SELECT 1 FROM authority_control_facts d JOIN authority_control c ON c.id=d.control JOIN authority_local_acceptance a ON a.control=c.id AND a.sha256=c.sha256 WHERE c.id=? AND c.sha256=? AND d.target=? AND d.item=? AND d.sha256=? AND d.eligible=1 AND d.evidence!=?)",
                             [
                                 categoryControl.recordID, categoryControl.sha256, value.revisionID,
                                 value.itemID, original.sha256,
@@ -224,7 +224,7 @@ extension ItemIndex {
 
     func retainAuthorityObject(
         _ row: AuthorityStore.RetainedObject, revision: AuthorityRevision?,
-        authority: AuthorityRecordCodec.Verified?
+        authority: AuthorityRecordCodec.Verified?, atomic: CanonicalAuthorityOriginal? = nil
     ) throws {
         let saved = captureAuthorityPeerGraphState()
         try execute("SAVEPOINT peer_inventory_retain")
@@ -260,7 +260,7 @@ extension ItemIndex {
                 }
                 switch row.descriptor.kind {
                 case .item:
-                    guard let revision, authority == nil, revision.revision.revisionID == id,
+                    guard let revision, authority == nil, atomic == nil, revision.revision.revisionID == id,
                         revision.sha256 == row.descriptor.sha256,
                         revision.originalBytes.count == row.descriptor.length
                     else { throw authorityInvalid("Retained item differs from its verified original.") }
@@ -272,80 +272,105 @@ extension ItemIndex {
                         dependency("frontier", author)
                     }
                 case .authority:
-                    guard let authority, revision == nil, authority.record.recordID == id,
-                        authority.sha256 == row.descriptor.sha256,
-                        authority.originalBytes.count == row.descriptor.length
-                    else { throw authorityInvalid("Retained control differs from its verified original.") }
-                    let record = authority.record
-                    controlKind = record.kind.rawValue
-                    origin = record.originReplicaID
-                    for parent in record.parentAuthorityIDs { dependency("authorityParent", parent) }
-                    for ref in try optionalAuthorityList(record.payload["controls"]) {
-                        let binding = try AuthorityBinding(value: ref)
-                        dependency("controlParent", binding.recordID, binding.sha256)
-                    }
-                    if record.kind == .enrollmentApproval {
-                        let cut = try AuthorityBinding(value: record.payload["cut"]!)
-                        dependency("enrollmentCut", cut.recordID, cut.sha256)
-                        for value in try optionalAuthorityList(record.payload["issuerAdmission"]) {
-                            let issuer = try AuthorityBinding(value: value)
-                            dependency("enrollmentIssuer", issuer.recordID, issuer.sha256)
+                    if let atomic {
+                        guard authority == nil, revision == nil, case .atomic(let record) = atomic.payload,
+                            atomic.recordID == id, atomic.sha256 == row.descriptor.sha256,
+                            atomic.bytes.count == row.descriptor.length
+                        else { throw authorityInvalid("Retained atomic record differs from exact original.") }
+                        origin = record.originReplicaID
+                        controlKind = record.kind.rawValue
+                        for child in try atomic.physicalChildren() {
+                            dependency("atomicPart", child.binding.recordID, child.binding.sha256)
                         }
-                        for value in try AuthorityRecord.list(record.payload["bootstrap"]) {
-                            let binding = try AuthorityBinding(value: value)
-                            dependency("enrollmentBootstrap", binding.recordID, binding.sha256)
-                        }
-                    }
-                    if record.kind == .authoredEvidence {
-                        for field in ["parents", "frontier"] {
-                            for target in try AuthorityRecord.ids(record.payload[field], maximum: 1024) {
-                                dependency("semantic" + field, target)
+                        if record.kind == .atomicControl {
+                            for previous in try AtomicAuthorityFormat.bindings(record.payload["previous"]) {
+                                dependency("controlParent", previous.recordID, previous.sha256)
+                            }
+                            for bootstrap in try AtomicAuthorityFormat.bindings(record.payload["bootstrap"]) {
+                                dependency("atomicBootstrap", bootstrap.recordID, bootstrap.sha256)
                             }
                         }
-                    }
-                    for field in [
-                        "itemPolicies", "admissionPolicies", "administrationPolicies", "revocations",
-                    ] {
-                        for ref in try optionalAuthorityList(record.payload[field]) {
-                            let binding = try AuthorityRecord.binding(ref)
-                            dependency(field, binding.revisionID, binding.sha256)
+                        // controlID on a physical part is a scope binding, NEVER a parent edge.
+                        // Complete logical parents/support dependencies enter separate staging
+                        // only after the exact framed closure has been traversed.
+                    } else {
+                        guard let authority, revision == nil, authority.record.recordID == id,
+                            authority.sha256 == row.descriptor.sha256,
+                            authority.originalBytes.count == row.descriptor.length
+                        else {
+                            throw authorityInvalid("Retained control differs from its verified original.")
                         }
-                    }
-                    if let target = record.payload["target"] {
-                        let binding = try AuthorityRecord.binding(target)
-                        item = binding.itemID
-                        dependency("target", binding.revisionID, binding.sha256)
-                        if record.kind == .authoredEvidence { evidenceTarget = binding.revisionID }
-                    }
-                    for field in ["pages", "children", "acceptedAuthority", "previous", "retirements"] {
-                        for ref in try optionalAuthorityList(record.payload[field]) {
-                            guard let value = ref.map else {
-                                throw authorityInvalid("Invalid control reference.")
+                        let record = authority.record
+                        controlKind = record.kind.rawValue
+                        origin = record.originReplicaID
+                        for parent in record.parentAuthorityIDs { dependency("authorityParent", parent) }
+                        for ref in try optionalAuthorityList(record.payload["controls"]) {
+                            let binding = try AuthorityBinding(value: ref)
+                            dependency("controlParent", binding.recordID, binding.sha256)
+                        }
+                        if record.kind == .enrollmentApproval {
+                            let cut = try AuthorityBinding(value: record.payload["cut"]!)
+                            dependency("enrollmentCut", cut.recordID, cut.sha256)
+                            for value in try optionalAuthorityList(record.payload["issuerAdmission"]) {
+                                let issuer = try AuthorityBinding(value: value)
+                                dependency("enrollmentIssuer", issuer.recordID, issuer.sha256)
                             }
+                            for value in try AuthorityRecord.list(record.payload["bootstrap"]) {
+                                let binding = try AuthorityBinding(value: value)
+                                dependency("enrollmentBootstrap", binding.recordID, binding.sha256)
+                            }
+                        }
+                        if record.kind == .authoredEvidence {
+                            for field in ["parents", "frontier"] {
+                                for target in try AuthorityRecord.ids(record.payload[field], maximum: 1024) {
+                                    dependency("semantic" + field, target)
+                                }
+                            }
+                        }
+                        for field in [
+                            "itemPolicies", "admissionPolicies", "administrationPolicies", "revocations",
+                        ] {
+                            for ref in try optionalAuthorityList(record.payload[field]) {
+                                let binding = try AuthorityRecord.binding(ref)
+                                dependency(field, binding.revisionID, binding.sha256)
+                            }
+                        }
+                        if let target = record.payload["target"] {
+                            let binding = try AuthorityRecord.binding(target)
+                            item = binding.itemID
+                            dependency("target", binding.revisionID, binding.sha256)
+                            if record.kind == .authoredEvidence { evidenceTarget = binding.revisionID }
+                        }
+                        for field in ["pages", "children", "acceptedAuthority", "previous", "retirements"] {
+                            for ref in try optionalAuthorityList(record.payload[field]) {
+                                guard let value = ref.map else {
+                                    throw authorityInvalid("Invalid control reference.")
+                                }
+                                dependency(
+                                    field, try AuthorityRecord.persistentID(value["recordID"]),
+                                    try AuthorityRecord.digest(value["sha256"]))
+                            }
+                        }
+                        if let ref = record.payload["evidence"]?.map {
                             dependency(
-                                field, try AuthorityRecord.persistentID(value["recordID"]),
-                                try AuthorityRecord.digest(value["sha256"]))
+                                "evidence", try AuthorityRecord.persistentID(ref["recordID"]),
+                                try AuthorityRecord.digest(ref["sha256"]))
                         }
-                    }
-                    if let ref = record.payload["evidence"]?.map {
-                        dependency(
-                            "evidence", try AuthorityRecord.persistentID(ref["recordID"]),
-                            try AuthorityRecord.digest(ref["sha256"]))
-                    }
-                    for field in ["holds", "decisionFrontier"] {
-                        if let value = record.payload[field] {
-                            for target in try AuthorityRecord.ids(value) { dependency(field, target) }
+                        for field in ["holds", "decisionFrontier"] {
+                            if let value = record.payload[field] {
+                                for target in try AuthorityRecord.ids(value) { dependency(field, target) }
+                            }
                         }
-                    }
-                    for entry in try optionalAuthorityList(record.payload["entries"]) {
-                        let binding = try AuthorityRecord.binding(entry.map?["target"])
-                        dependency("bootstrapMember", binding.revisionID, binding.sha256)
-                        for author in try AuthorityRecord.ids(entry.map?["frontier"], maximum: 1024) {
-                            dependency("bootstrapFrontier", author)
+                        for entry in try optionalAuthorityList(record.payload["entries"]) {
+                            let binding = try AuthorityRecord.binding(entry.map?["target"])
+                            dependency("bootstrapMember", binding.revisionID, binding.sha256)
+                            for author in try AuthorityRecord.ids(entry.map?["frontier"], maximum: 1024) {
+                                dependency("bootstrapFrontier", author)
+                            }
                         }
                     }
                 case .index:
-                    guard revision == nil, authority == nil else {
+                    guard revision == nil, authority == nil, atomic == nil else {
                         throw authorityInvalid("Package index has an item/control body.")
                     }
                 case .attachment, .document:
@@ -462,7 +487,7 @@ extension ItemIndex {
                         "UPDATE authority_packages SET pending=permitted AND (SELECT state IN('pending','missingDependencies') FROM authority_dispositions WHERE object=?) WHERE object=?",
                         [id, id])
                 }
-                if authorityControlSchemaReady && controlKind == "controlCommit" {
+                if authorityControlSchemaReady && ["controlCommit", "atomicControl"].contains(controlKind) {
                     try execute(
                         "INSERT OR IGNORE INTO authority_control_pending SELECT ?,?,COUNT(*) FROM authority_dependencies d LEFT JOIN authority_control c ON c.id=d.target AND c.sha256=d.sha256 WHERE d.source=? AND d.kind='controlParent' AND c.id IS NULL HAVING NOT EXISTS(SELECT 1 FROM authority_control WHERE id=?)",
                         [row.packageID, id, id, id])
@@ -495,7 +520,7 @@ extension ItemIndex {
     func localAuthorityAcceptanceControl(revisionID: String) throws -> AuthorityBinding? {
         try withCatalogueScanBudget(reusingActiveBudget: true) {
             let statement = try corpusPrepare(
-                "SELECT c.id,c.sha256 FROM authority_control_delta d JOIN authority_control c ON c.id=d.control JOIN authority_local_acceptance a ON a.control=c.id AND a.sha256=c.sha256 WHERE d.target=? AND d.eligible=1 ORDER BY c.ordinal DESC LIMIT 1",
+                "SELECT c.id,c.sha256 FROM authority_control_outcomes d JOIN authority_control c ON c.id=d.control JOIN authority_local_acceptance a ON a.control=c.id AND a.sha256=c.sha256 WHERE d.target=? AND d.eligible=1 ORDER BY c.ordinal DESC LIMIT 1",
                 [revisionID])
             defer { sqlite3_finalize(statement) }
             let status = catalogueStep(statement)
@@ -1051,15 +1076,17 @@ extension ItemIndex {
     private func authorityInvalid(_ message: String) -> TractandaError {
         .init("invalidAuthorityInventory", message)
     }
-    func authorityKindPage(kind: String, after: String? = nil, limit: Int = 128) throws -> [AuthorityStore
-        .RetainedObject]
-    {
+    func authorityKindPage(
+        kind: String, after: String? = nil, limit: Int = 128, packageID: String? = nil
+    ) throws -> [AuthorityStore.RetainedObject] {
         try authorityPageArguments(after: after, limit: limit)
         return try authorityRows(
             "SELECT \(Self.authorityColumns) FROM authority_objects o INDEXED BY authority_kind JOIN authority_packages p ON p.object=o.id WHERE o.control_kind=?"
                 + (after == nil ? "" : " AND o.id>?")
-                + " AND p.package=(SELECT MIN(r.package) FROM authority_packages r WHERE r.object=o.id) ORDER BY o.id LIMIT ?",
-            [kind] + (after.map { [$0] } ?? []) + [String(limit)])
+                + (packageID == nil
+                    ? " AND p.package=(SELECT MIN(r.package) FROM authority_packages r WHERE r.object=o.id)"
+                    : " AND p.package=?") + " ORDER BY o.id LIMIT ?",
+            [kind] + (after.map { [$0] } ?? []) + (packageID.map { [$0] } ?? []) + [String(limit)])
     }
 
     /// Exact retained ancestry remains available after current eligibility demotion.

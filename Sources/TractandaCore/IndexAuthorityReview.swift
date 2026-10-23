@@ -346,7 +346,7 @@ extension ItemIndex {
         var hydration = UInt64(
             plan.held.originalBytes.count + plan.resolution.originalBytes.count
                 + plan.event.record.originalBytes.count + plan.evidence.originalBytes.count
-                + plan.control.control.originalBytes.count)
+                + plan.control.originalBytes.count)
         guard hydration <= limits.maximumHydratedBytes else {
             throw reviewResource("Review closure exceeds its hydration allowance.")
         }
@@ -525,8 +525,8 @@ extension ItemIndex {
                 AuthorityBinding.init(value:)) == [
                     .init(recordID: plan.event.record.record.recordID, sha256: plan.event.record.sha256)
                 ],
-            try AuthorityStore.VerifiedControlPlan(control: plan.control.control) == plan.control,
-            plan.control.control.record.originReplicaID == p.originReplicaID,
+            try reviewControlSummaryIsExact(plan.control),
+            plan.control.origin == p.originReplicaID,
             plan.control.parents.contains(plan.event.preCut)
         else { throw reviewInvalid("Atomic review omitted or rebound its B/C/evidence/control closure.") }
         for (target, evidence) in [
@@ -548,7 +548,7 @@ extension ItemIndex {
         if retained {
             try reviewRetained(plan.event.record)
             try reviewRetained(plan.evidence)
-            try reviewRetained(plan.control.control)
+            try reviewRetainedControlSummary(plan.control)
         }
         let sum = UInt64(plan.held.originalBytes.count).addingReportingOverflow(
             UInt64(plan.resolution.originalBytes.count))
@@ -556,7 +556,36 @@ extension ItemIndex {
         try reviewCapacity(
             sum.partialValue + UInt64(
                 plan.event.record.originalBytes.count + plan.evidence.originalBytes.count
-                    + plan.control.control.originalBytes.count) * 8)
+                    + plan.control.originalBytes.count) * 8)
+    }
+    private func reviewControlSummaryIsExact(_ control: AuthorityStore.ReviewControlSummary) throws -> Bool {
+        switch control.kind {
+        case .legacy:
+            _ = try control.requireLegacyPlan()
+            return true
+        case .atomic:
+            let stage = try AtomicControlStage(rootBytes: control.originalBytes)
+            let source = LogicalControlSource.atomic(stage)
+            let parents = try source.parents(index: self, limit: 2)
+            let supports = try source.supports(index: self, limit: 3)
+            return try AuthorityStore.ReviewControlSummary(
+                atomic: stage, parents: parents.map(\.binding), supports: supports) == control
+        }
+    }
+    private func reviewRetainedControlSummary(_ control: AuthorityStore.ReviewControlSummary) throws {
+        switch control.kind {
+        case .legacy:
+            try reviewRetained(control.requireLegacyPlan().control)
+        case .atomic:
+            guard activeAtomicControlFinalization == control.binding,
+                let row = try retainedAuthorityObject(id: control.binding.recordID),
+                row.descriptor.kind == .authority, row.descriptor.sha256 == control.binding.sha256,
+                row.descriptor.length == control.originalBytes.count,
+                try reviewControlSummaryIsExact(control)
+            else {
+                throw reviewInvalid("Retained atomic review requires its exact fresh canonical finalization.")
+            }
+        }
     }
     private func reviewBindOriginal(_ original: AuthorityRevision, row: CatalogueRow, retained: Bool) throws {
         let value = original.revision
@@ -743,7 +772,7 @@ extension ItemIndex {
                 try authorityControlHead(originID: originID) == control,
                 try hasValidatedAuthorityControl(cut), try authorityControlContains(cut, in: control),
                 try reviewNumber(
-                    "SELECT EXISTS(SELECT 1 FROM authority_control c JOIN authority_local_acceptance l ON l.control=c.id AND l.sha256=c.sha256 JOIN authority_control_delta d ON d.control=c.id WHERE c.id=? AND c.sha256=? AND c.origin=? AND d.target=? AND d.item=? AND d.sha256=? AND d.eligible=1)",
+                    "SELECT EXISTS(SELECT 1 FROM authority_control c JOIN authority_local_acceptance l ON l.control=c.id AND l.sha256=c.sha256 JOIN authority_control_facts d ON d.control=c.id WHERE c.id=? AND c.sha256=? AND c.origin=? AND d.target=? AND d.item=? AND d.sha256=? AND d.eligible=1)",
                     [
                         control.recordID, control.sha256, originID, target.revisionID, target.itemID,
                         target.sha256,
@@ -827,7 +856,7 @@ extension ItemIndex {
                 "SELECT EXISTS(SELECT 1 FROM authority_control WHERE id=? AND sha256=? AND origin=?)",
                 [cut.recordID, cut.sha256, p.originReplicaID]) == 1,
             try reviewNumber(
-                "SELECT EXISTS(SELECT 1 FROM authority_control_delta WHERE control=? AND target=? AND evidence=?)",
+                "SELECT EXISTS(SELECT 1 FROM authority_control_facts WHERE control=? AND target=? AND evidence=?)",
                 [
                     control.recordID, target.revisionID,
                     String(
@@ -891,7 +920,7 @@ extension ItemIndex {
                         try authorityDisposition(id: row.revisionID)?.disposition == .eligible,
                         try !authorityReviewIsProvisional(revisionID: row.revisionID),
                         try reviewNumber(
-                            "SELECT EXISTS(SELECT 1 FROM authority_control c JOIN authority_control_heads h ON h.id=c.id AND h.sha256=c.sha256 AND h.origin=c.origin JOIN authority_local_acceptance l ON l.control=c.id AND l.sha256=c.sha256 JOIN authority_control_delta d ON d.control=c.id WHERE c.id=? AND c.sha256=? AND d.target=? AND d.item=? AND d.sha256=? AND d.eligible=1)",
+                            "SELECT EXISTS(SELECT 1 FROM authority_control c JOIN authority_control_heads h ON h.id=c.id AND h.sha256=c.sha256 AND h.origin=c.origin JOIN authority_local_acceptance l ON l.control=c.id AND l.sha256=c.sha256 JOIN authority_control_facts d ON d.control=c.id WHERE c.id=? AND c.sha256=? AND d.target=? AND d.item=? AND d.sha256=? AND d.eligible=1)",
                             [control.recordID, control.sha256, row.revisionID, row.itemID, original.sha256])
                             == 1,
                         try eligibilityAtCut(revisionID: row.revisionID, cut: control) == .eligible
@@ -1014,6 +1043,12 @@ extension ItemIndex {
             try reviewStageDispositions(plan)
             try reviewRecordApplication(plan, recovery: true)
         }
+    }
+    func authorityReviewRecoveryControlPending(_ control: AuthorityBinding) throws -> Bool {
+        guard try reviewSchemaExists() else { return false }
+        return try reviewNumber(
+            "SELECT EXISTS(SELECT 1 FROM authority_review_applied a JOIN authority_review_event e ON e.id=a.decision AND e.sha256=a.sha256 JOIN authority_objects d ON d.id=e.id AND d.sha256=e.sha256 AND d.control_kind='reviewDecision' WHERE a.control=? AND a.control_digest=? AND a.recovery=1)",
+            [control.recordID, control.sha256]) == 1
     }
     func completeRecoveryAuthorityReview(resolutionID: String) throws {
         guard try reviewSchemaExists() else { return }

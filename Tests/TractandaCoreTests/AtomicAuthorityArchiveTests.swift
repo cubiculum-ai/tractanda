@@ -105,6 +105,81 @@ final class AtomicAuthorityArchiveTests: XCTestCase {
         return replace(original.itemValue, "payload", replace(.object(original.payload), "effects", changed))
     }
 
+    func testUnreceivedDeclaredPartResumesExactParserPrefixWithoutRehydration() throws {
+        let f = try Fixture()
+        defer { f.remove() }
+        let source = try f.archive(chunk: 97)
+        let handle = try build(source, context(), effect())
+        let bytes = try Data(contentsOf: f.root.appendingPathComponent("root"))
+        let destination = f.directory.appendingPathComponent("incoming")
+        try FileManager.default.createDirectory(
+            at: destination, withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700])
+        var reads: [String: Int] = [:]
+        var available = false
+        var blocked: AuthorityBinding?
+        let incoming = try Archive(
+            root: destination,
+            limits: .init(maximumStoredBytes: 4 * 1024 * 1024, maximumParts: 4096),
+            canonicalPartLoader: { binding, _ in
+                if blocked == nil && reads.count == 1 { blocked = binding }
+                if !available && blocked == binding {
+                    throw Archive.PartUnavailable(binding: binding)
+                }
+                reads[binding.recordID, default: 0] += 1
+                return try Data(contentsOf: f.root.appendingPathComponent("parts/" + binding.recordID))
+            }, canonicalRootLoader: { bytes })
+        let bound = try incoming.bindCanonicalRoot(bytes)
+        XCTAssertEqual(bound, handle)
+        let reader = try incoming.beginValidation(bound)
+        defer { try? reader.close() }
+        let window = Archive.Window(maximumParts: 1, maximumBytes: Format.maximumEnvelopeBytes)
+        var facts = 0
+        XCTAssertNil(try reader.stageAvailableWindow(window: window) { _ in facts += 1 })
+        let prefixReads = reads
+        XCTAssertNil(try reader.stageAvailableWindow(window: window) { _ in facts += 1 })
+        XCTAssertNotNil(reader.waitingForPart)
+        XCTAssertEqual(reads, prefixReads)
+        XCTAssertNil(try reader.stageAvailableWindow(window: window) { _ in facts += 1 })
+        XCTAssertEqual(reads, prefixReads, "A missing suffix cannot restart a verified prefix")
+        available = true
+        var result: Archive.Structure?
+        while result == nil {
+            result = try reader.stageAvailableWindow(window: window) { _ in facts += 1 }
+        }
+        XCTAssertNil(reader.waitingForPart)
+        XCTAssertEqual(facts, 1)
+        XCTAssertEqual(Int64(reads.count), result?.parts)
+        XCTAssertTrue(reads.values.allSatisfy { $0 == 1 })
+    }
+
+    func testUnavailableSignalDoesNotHideWrongReferenceOrStrictClosureFailure() throws {
+        let f = try Fixture()
+        defer { f.remove() }
+        let source = try f.archive(chunk: 97)
+        _ = try build(source, context(), effect())
+        let bytes = try Data(contentsOf: f.root.appendingPathComponent("root"))
+        let destination = f.directory.appendingPathComponent("incoming")
+        try FileManager.default.createDirectory(
+            at: destination, withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700])
+        var wrong = true
+        let incoming = try Archive(
+            root: destination,
+            limits: .init(maximumStoredBytes: 4 * 1024 * 1024, maximumParts: 4096),
+            canonicalPartLoader: { binding, _ in
+                throw Archive.PartUnavailable(binding: wrong ? self.binding(9999) : binding)
+            }, canonicalRootLoader: { bytes })
+        let handle = try incoming.bindCanonicalRoot(bytes)
+        var reader = try incoming.beginValidation(handle)
+        XCTAssertThrowsError(try reader.stageAvailableWindow(window: .init()) { _ in })
+        try reader.close()
+        wrong = false
+        reader = try incoming.beginValidation(handle)
+        XCTAssertThrowsError(try reader.step(window: .init()))
+        try reader.close()
+    }
+
     func testDiskStreaming129LeavesAndBoundedValidationWindows() throws {
         let f = try Fixture()
         defer { f.remove() }
@@ -393,6 +468,222 @@ final class AtomicAuthorityArchiveTests: XCTestCase {
             try Data(contentsOf: retained), Data("KEEP".utf8), "Cleanup must not delete unknown data")
         XCTAssertEqual(try Data(contentsOf: f.root.appendingPathComponent("root")), original)
     }
+    private func publicationDescriptors(_ archive: Archive, _ handle: Archive.Handle) throws -> [PeerPackage
+        .Object]
+    {
+        var objects: [PeerPackage.Object] = []
+        var bytes = 0
+        try archive.forEachUntrustedLocalObject(handle) { object, data in
+            bytes += data.count
+            guard objects.count < 64, bytes < 1024 * 1024 else {
+                throw TractandaError("resourceLimit", "Tiny publication reader fixture bound")
+            }
+            objects.append(object)
+        }
+        return objects
+    }
+    func testScopedPublicationReaderUsesTwoCensusesForOneOrManyObjects() throws {
+        let f = try Fixture()
+        defer { f.remove() }
+        let a = try f.archive(chunk: 97)
+        let handle = try build(a, context(), effect())
+        let objects = try publicationDescriptors(a, handle)
+        XCTAssertGreaterThan(objects.count, 3)
+        for count in [1, objects.count] {
+            let before = a.inventoryRecountsForTesting
+            try a.withUntrustedLocalObjectReader(handle) { reader in
+                for expected in objects.prefix(count) {
+                    let bytes = try reader.object(expected: expected)
+                    XCTAssertEqual(bytes.count, expected.length)
+                    XCTAssertEqual(AuthorityRecordCodec.sha256(bytes), expected.sha256)
+                }
+            }
+            XCTAssertEqual(
+                a.inventoryRecountsForTesting - before, 2,
+                "Full inventories must be constant per scope, never per object")
+        }
+    }
+    func testScopedReaderRejectsAlteredLaterPartOrDescriptorAndCannotIgnoreFailure() throws {
+        for alterBody in [false, true] {
+            let f = try Fixture()
+            defer { f.remove() }
+            let a = try f.archive(chunk: 97)
+            let handle = try build(a, context(), effect())
+            let objects = try publicationDescriptors(a, handle)
+            let leaves = try objects.filter { object in
+                guard object.id != handle.binding.recordID else { return false }
+                return try Format.Codec.decode(
+                    Data(contentsOf: f.root.appendingPathComponent("parts/" + object.id))
+                ).kind == .atomicControlPart
+            }
+            let first = try XCTUnwrap(leaves.first)
+            let later = try XCTUnwrap(leaves.dropFirst().first)
+            XCTAssertThrowsError(
+                try a.withUntrustedLocalObjectReader(handle) { reader in
+                    _ = try reader.object(expected: first)
+                    let expected: PeerPackage.Object
+                    if alterBody {
+                        let path = f.root.appendingPathComponent("parts/" + later.id)
+                        let record = try Format.Codec.decode(Data(contentsOf: path))
+                        guard case .bytes(let originalChunk)? = record.payload["bytes"] else {
+                            throw TractandaError("fixture", "Expected a real local leaf chunk")
+                        }
+                        var chunk = originalChunk
+                        chunk[0] ^= 1
+                        let changed = try Format.Record(
+                            value: replace(
+                                record.itemValue, "payload",
+                                replace(.object(record.payload), "bytes", .bytes(chunk))))
+                        try write(Format.Codec.encode(changed), path)
+                        expected = later
+                    } else {
+                        expected = .init(
+                            kind: later.kind, id: later.id, length: later.length + 1, sha256: later.sha256)
+                    }
+                    XCTAssertThrowsError(try reader.object(expected: expected))
+                    XCTAssertThrowsError(
+                        try reader.object(expected: first), "A failed read poisons the scope")
+                })
+        }
+    }
+    func testScopedReaderDetectsRootLeaseAndDirectoryReplacementAfterCallback() throws {
+        for replacement in ["root", "lease", "directory"] {
+            let f = try Fixture()
+            defer { f.remove() }
+            let a = try f.archive(chunk: 512)
+            let handle = try build(a, context(), effect())
+            let objects = try publicationDescriptors(a, handle)
+            XCTAssertThrowsError(
+                try a.withUntrustedLocalObjectReader(handle) { reader in
+                    _ = try reader.object(expected: XCTUnwrap(objects.first))
+                    switch replacement {
+                    case "root":
+                        let old = try root(f)
+                        let changed = try Format.Record(
+                            value: replace(old.itemValue, "actorPrincipal", .text("changed")))
+                        try write(Format.Codec.encode(changed), f.root.appendingPathComponent("root"))
+                    case "lease":
+                        let path = f.root.appendingPathComponent(".archive.lock")
+                        try FileManager.default.moveItem(
+                            at: path, to: f.directory.appendingPathComponent("held-old-lock"))
+                        try Data().write(to: path)
+                        XCTAssertEqual(chmod(path.path, 0o600), 0)
+                    default:
+                        try FileManager.default.moveItem(
+                            at: f.root, to: f.directory.appendingPathComponent("held-old-root"))
+                        try FileManager.default.createDirectory(
+                            at: f.root, withIntermediateDirectories: false,
+                            attributes: [.posixPermissions: 0o700])
+                    }
+                    // No further read: scope completion itself must recheck the callback boundary.
+                })
+        }
+    }
+    func testThrowingScopePreservesPrimaryErrorClosesEscapedReaderAndReleasesLease() throws {
+        let f = try Fixture()
+        defer { f.remove() }
+        let a = try f.archive(chunk: 512)
+        let handle = try build(a, context(), effect())
+        let expected = try XCTUnwrap(publicationDescriptors(a, handle).first)
+        let interrupted = TractandaError("fixtureInterrupted", "Keep the original callback error")
+        var escaped: Archive.UntrustedLocalObjectReader?
+        XCTAssertThrowsError(
+            try a.withUntrustedLocalObjectReader(handle) { reader -> Void in
+                escaped = reader
+                _ = try reader.object(expected: expected)
+                throw interrupted
+            }
+        ) { XCTAssertEqual($0 as? TractandaError, interrupted) }
+        XCTAssertThrowsError(try XCTUnwrap(escaped).object(expected: expected))
+        XCTAssertNoThrow(
+            try a.withUntrustedLocalObjectReader(handle) { reader in
+                _ = try reader.object(expected: expected)
+            })
+        let work = f.root.appendingPathComponent("read-work")
+        if FileManager.default.fileExists(atPath: work.path) {
+            XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: work.path).isEmpty)
+        }
+    }
+    func testFinalCensusRejectsUnknownFileGrowthWithoutDeletingUnknownData() throws {
+        let f = try Fixture()
+        defer { f.remove() }
+        let maximum: UInt64 = 1024 * 1024
+        let a = try f.archive(chunk: 512, maximum: maximum)
+        let handle = try build(a, context(), effect())
+        let expected = try XCTUnwrap(publicationDescriptors(a, handle).first)
+        let original = try Data(contentsOf: f.root.appendingPathComponent("root"))
+        let unknown = f.root.appendingPathComponent("caller-unknown")
+        XCTAssertThrowsError(
+            try a.withUntrustedLocalObjectReader(handle) { reader in
+                _ = try reader.object(expected: expected)
+                // Sparse tiny fixture growth tests actual inventory accounting without filling disk.
+                XCTAssertTrue(
+                    FileManager.default.createFile(
+                        atPath: unknown.path, contents: Data(), attributes: [.posixPermissions: 0o600]))
+                let file = try FileHandle(forWritingTo: unknown)
+                try file.truncate(atOffset: maximum)
+                try file.close()
+                XCTAssertEqual(chmod(unknown.path, 0o400), 0)
+            }
+        ) { XCTAssertEqual(($0 as? TractandaError)?.code, "resourceLimit") }
+        XCTAssertEqual(try FileMetadata.read(at: unknown).size, maximum)
+        XCTAssertEqual(try Data(contentsOf: f.root.appendingPathComponent("root")), original)
+    }
+    func testScopedReaderRejectsReentrantProgressReadEvenIfCallbackCatchesIt() throws {
+        let f = try Fixture()
+        defer { f.remove() }
+        var captured: Archive.UntrustedLocalObjectReader?
+        var expected: PeerPackage.Object?
+        var attempted = false
+        let a = try f.archive(progress: {
+            if let captured, let expected, !attempted {
+                attempted = true
+                XCTAssertThrowsError(try captured.object(expected: expected))
+            }
+        })
+        let handle = try build(a, context(), effect())
+        expected = try XCTUnwrap(publicationDescriptors(a, handle).first)
+        XCTAssertThrowsError(
+            try a.withUntrustedLocalObjectReader(handle) { reader in
+                captured = reader
+                _ = try reader.object(expected: XCTUnwrap(expected))
+            })
+        XCTAssertTrue(attempted)
+    }
+    func testActualTaskCancellationReleasesScopedReaderLeaseBeforeCallback() async throws {
+        let f = try Fixture()
+        defer { f.remove() }
+        let a = try f.archive(chunk: 512)
+        let handle = try build(a, context(), effect())
+        let descriptor = PeerPackage.Object(
+            kind: .authority, id: handle.binding.recordID,
+            length: handle.encodedBytes, sha256: handle.binding.sha256)
+        let root = f.root
+        let task = Task {
+            let archive = try Archive(
+                root: root, limits: .init(maximumStoredBytes: 24 * 1024 * 1024, maximumParts: 4096))
+            let handle = Archive.Handle(
+                binding: try .init(recordID: descriptor.id, sha256: descriptor.sha256),
+                encodedBytes: descriptor.length)
+            withUnsafeCurrentTask { $0?.cancel() }
+            var entered = false
+            do {
+                try archive.withUntrustedLocalObjectReader(handle) { reader in
+                    entered = true
+                    _ = try reader.object(expected: descriptor)
+                }
+                return false
+            } catch is CancellationError {
+                return !entered
+            }
+        }
+        let cancelled = try await task.value
+        XCTAssertTrue(cancelled)
+        XCTAssertNoThrow(
+            try a.withUntrustedLocalObjectReader(handle) { reader in
+                _ = try reader.object(expected: descriptor)
+            })
+    }
     func testCapacityAndCancellationLeaveNoRootAndNoRuntimeChanges() throws {
         let f = try Fixture()
         defer { f.remove() }
@@ -407,7 +698,9 @@ final class AtomicAuthorityArchiveTests: XCTestCase {
             XCTAssertTrue($0 is CancellationError)
         }
         XCTAssertFalse(FileManager.default.fileExists(atPath: f.root.appendingPathComponent("root").path))
-        XCTAssertEqual(CanonicalFormatSupport.current.readerLevel, 14)
-        XCTAssertFalse(CanonicalFormatSupport.current.capabilities.contains(Format.profile))
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: f.root.appendingPathComponent(CanonicalReaderRequirement.fileName).path),
+            "Failed private staging must not publish a canonical reader marker.")
     }
 }

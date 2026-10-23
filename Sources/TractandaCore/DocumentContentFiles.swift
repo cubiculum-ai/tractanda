@@ -655,6 +655,41 @@ final class DocumentContentFiles: @unchecked Sendable {
         }
         try removeTree(path)
     }
+    /// Disposable derived-index workspace only. Atomic canonical originals and acceptance
+    /// receipts remain under authority/intake and are never children of this private path.
+    func removeAtomicAuthorityWork(_ id: String) throws {
+        _ = try AuthorityRecord.persistentID(.text(id))
+        try removeTree(["atomic-authority-work", id], releaseAccounting: false)
+    }
+    /// The preparation owner already disposed only its inode-pinned SQLite files. Remove its
+    /// directory only when empty; preserve unknown/replaced entries, never sweep a mixed parent.
+    func removeAtomicIntakeWork(_ id: String) throws {
+        _ = try AuthorityRecord.persistentID(.text(id))
+        let path = ["atomic-intake-work", id]
+        let chain: [Int32]
+        do { chain = try directories(path, create: false) } catch let error as TractandaError
+            where error.osError == ENOENT
+        { return }
+        defer { closeAll(chain) }
+        var occupied = false
+        try withDirectoryEntries(path: path) { _ in
+            occupied = true
+            return false
+        }
+        if occupied { return }
+        let parent = chain[chain.count - 2]
+        let result = id.withCString { unlinkat(parent, $0, AT_REMOVEDIR) }
+        if result < 0, errno == ENOTEMPTY || errno == EEXIST { return }
+        guard result == 0 || errno == ENOENT, fsync(parent) == 0 else {
+            throw failure("Cannot synchronize empty atomic preparation directory cleanup.")
+        }
+    }
+    /// Caller has proved this exact LOCAL packet never acquired a PREPARED/ACCEPTED seal.
+    /// This removes only private proposed bytes, never an original/history publication.
+    func removeUnsealedAtomicDraft(_ packageID: String) throws {
+        _ = try AuthorityRecord.persistentID(.text(packageID))
+        try removeTree(["authority", "intake", packageID], releaseAccounting: false)
+    }
     /// Called only after the immutable receiver original and sealed receipt are synchronized.
     /// Disposal is limited to one framed peer object's private stage, never canonical history.
     func removePeerObjectStage(packageID: String, objectID: String) throws {

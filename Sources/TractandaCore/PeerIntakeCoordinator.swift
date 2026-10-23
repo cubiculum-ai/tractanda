@@ -62,6 +62,7 @@ final class PeerIntakeCoordinator {
     let ownerUID: UInt32
     let storeID: String
     let journal: PeerIntakeJournal
+    var canonicalFormatSupport: CanonicalFormatSupport = .current
     var documentVerification: PeerDocumentVerification?
     var progress: (() throws -> Void)?
     var provisioningScope: PeerEnrollmentActivation.Scope?
@@ -118,6 +119,61 @@ final class PeerIntakeCoordinator {
         }
         return try body()
     }
+    /// A Store-minted local continuation owns one ordinary bounded window, separate from any
+    /// suspended caller allowance. It cannot be minted by a peer or used as an authority grant.
+    func withStoreOwnedAtomicValidationWindow<T>(
+        _ owner: ItemStore.AtomicLocalValidationOwner, _ body: () throws -> T
+    ) throws -> T {
+        _ = try AuthorityRecord.persistentID(.text(owner.root.recordID))
+        _ = try AuthorityRecord.digest(.text(owner.contextSHA256))
+        let saved = (operationDepth, remainingReadBytes, operationReadCapacity, verifiedOriginals)
+        operationDepth = 0
+        remainingReadBytes = 0
+        operationReadCapacity = 0
+        verifiedOriginals = nil
+        defer {
+            operationDepth = saved.0
+            remainingReadBytes = saved.1
+            operationReadCapacity = saved.2
+            verifiedOriginals = saved.3
+        }
+        return try withOperation {
+            try Task.checkCancellation()
+            try progress?()
+            return try body()
+        }
+    }
+    /// An exact durable accepted decision owns local activation, separate from peer validation
+    /// windows. Preserve the enclosing read allowance/cache untouched; individual immutable
+    /// originals still use the ordinary bounded loader, fresh custody, and cancellation.
+    func withAcceptedAtomicActivation<T>(
+        plan: AuthorityStore.VerifiedAtomicControlPlan, sealed: AtomicAuthorityAcceptance.Sealed,
+        _ body: () throws -> T
+    ) throws -> T {
+        let acceptedContext = try plan.acceptanceContextSHA256(sealed)
+        guard sealed.receipt.root == plan.binding,
+            sealed.receipt.validationContextSHA256 == acceptedContext,
+            sealed.receipt.storeID == storeID
+        else { throw AtomicAuthorityFormat.invalid("Local activation lost its exact accepted seal.") }
+        let depth = operationDepth
+        let remaining = remainingReadBytes
+        let capacity = operationReadCapacity
+        let cache = verifiedOriginals
+        operationDepth = 0
+        remainingReadBytes = 0
+        operationReadCapacity = 0
+        verifiedOriginals = nil
+        defer {
+            operationDepth = depth
+            remainingReadBytes = remaining
+            operationReadCapacity = capacity
+            verifiedOriginals = cache
+        }
+        try Task.checkCancellation()
+        try progress?()
+        return try body()
+    }
+
     /// One owning operation shares this counter across every admission/publication metadata read.
     func admissionReadBudget() -> (Int) throws -> Void {
         let local = PeerOriginAdmission.ReadBudget(journal.limits.maximumReadBytes)
@@ -255,7 +311,7 @@ final class PeerIntakeCoordinator {
         if row.descriptor.kind == .item {
             origin = try AuthorityRevision(originalBytes: original).revision.provenance?.originReplicaID
         } else {
-            origin = try AuthorityRecordCodec.decode(original).record.originReplicaID
+            origin = try CanonicalAuthorityOriginal(original).origin
         }
         if let origin, !publication.context.permittedOrigins.contains(origin),
             try !admittedReceiptPermits(packageID: row.packageID, origin: origin, index: index)
@@ -281,6 +337,14 @@ final class PeerIntakeCoordinator {
             maximumSteps: journal.limits.maximumWork,
             workingCapacity: operationDepth > 0 ? operationReadCapacity : journal.limits.maximumReadBytes)
     }
+    /// Payload preparation borrows this same operation's read tail, including on failure.
+    /// The bridge owns debit exactly once and cannot renew an enclosing admission allowance.
+    func withAtomicPreparationReadBudget<T>(_ body: (PeerOriginalReadBudget) throws -> T) throws -> T {
+        let budget = originalReadBudget()
+        defer { if operationDepth > 0 { remainingReadBytes -= budget.used } }
+        return try body(budget)
+    }
+
     func verifiedCanonicalOriginal(_ descriptor: AttachmentDescriptor) throws -> Bool {
         guard let originals = journal.originals else { return false }
         let budget = originalReadBudget()
@@ -363,12 +427,17 @@ final class PeerIntakeCoordinator {
         try index.authorityBeginWalk(token: token)
         defer { try? index.authorityEndWalk(token: token) }
         func visit(_ object: PeerPackage.Object) throws {
+            // Unified packet preflight/raw retention independently check all control identities.
+            // Storage closure need not rehydrate/queue an arbitrary number of atomic parts.
+            if object.kind == .authority { return }
             try requireStorageIdentity(object, index: index)
             guard try index.authorityVisitOnce(token: token, id: object.id) else {
                 throw TractandaError("invalidPeerPackage", "Repeated all-kind identity in package closure.")
             }
         }
-        try journal.walk(packageID, visitIndex: visit) { object, bytes in
+        try journal.walk(
+            packageID, visitIndex: visit, hydrate: { $0.kind != .authority }
+        ) { object, bytes in
             try self.progress?()
             try visit(object)
             if object.kind == .attachment {
@@ -465,6 +534,17 @@ final class PeerIntakeCoordinator {
             }
         }
     }
+    /// Recognition is not activation. Physical atomic bytes may enter canonical storage only
+    /// after the explicit coordinated store transition; intermediate parts remain raw originals.
+    func requireAtomicCanonicalActivation() throws {
+        guard let requirement = try CanonicalReaderRequirement.load(root: root, ownerUID: ownerUID),
+            requirement.storeID == storeID, requirement.minimumReaderLevel >= 15,
+            requirement.capabilities.contains(AtomicAuthorityFormat.profile)
+        else {
+            throw TractandaError(
+                "incompatibleCanonicalWriter", "Atomic originals require coordinated canonical activation.")
+        }
+    }
     func retainSealed(
         _ packageID: String, index: ItemIndex, applyAssessment: Bool = true, allowReviewClosure: Bool = false,
         recovering: Bool = false
@@ -486,104 +566,11 @@ final class PeerIntakeCoordinator {
             guard try index.authorityVisitOnce(token: token, id: descriptor.id) else {
                 throw TractandaError("invalidPeerPackage", "Repeated object in hierarchical package index.")
             }
-            if descriptor.kind == .attachment || descriptor.kind == .document { return }
-            let known = try index.retainedAuthorityObject(id: descriptor.id)
-            let data = try data ?? known.flatMap { try bytes($0) }
-            guard let data else {
-                throw TractandaError("missingDependencies", "A sealed original is missing.")
-            }
-            let revision = descriptor.kind == .item ? try AuthorityRevision(originalBytes: data) : nil
-            let authority = descriptor.kind == .authority ? try AuthorityRecordCodec.decode(data) : nil
-            guard descriptor.kind == .item || descriptor.kind == .authority else {
-                throw TractandaError("missingDependencies", "Metadata intake cannot publish payload objects.")
-            }
-            let origin =
-                try revision?.revision.provenance?.originReplicaID ?? authority?.record.originReplicaID
-            if let authority {
-                guard authority.record.storeID == storeID, authority.record.recordID == descriptor.id else {
-                    throw TractandaError("invalidAuthority", "Authority StoreID/object identity differs.")
-                }
-                let unsupportedParents =
-                    authority.record.kind == .authoredEvidence
-                    ? try !AuthorityRecord.list(authority.record.payload["acceptedAuthority"]).isEmpty
-                    : false
-                if authority.record.kind == .reviewHold, publication.context.peerID == "local" {
-                    unsupportedLocalHold = true
-                }
-                if (authority.record.kind == .reviewDecision || unsupportedParents) && !allowReviewClosure {
-                    throw TractandaError(
-                        "authorityReconciliationRequired",
-                        "This reader cannot enforce later review/control causality; authority fallback is forbidden."
-                    )
-                }
-            }
-            if let revision, revision.revision.revisionID != descriptor.id {
-                throw TractandaError("invalidPeerPackage", "Revision object identity differs.")
-            }
-            let existing = try index.retainedAuthorityObject(id: descriptor.id)
-            let previouslyAccepted = try revision.flatMap { try index.revision($0.revision.revisionID) }
-            let path: String
-            if let existing {
-                guard existing.descriptor == descriptor, try bytes(existing) == data else {
-                    throw TractandaError("peerObjectCollision", "Global immutable identity collides.")
-                }
-                path = try journal.publishOriginal(
-                    descriptor, bytes: data, publication: publication, existingPath: existing.path)
-            } else if let previouslyAccepted {
-                let original = try PooledCanonicalRecord.read(
-                    row: previouslyAccepted, root: root, ownerUID: ownerUID)
-                guard original.revision == revision?.revision,
-                    previouslyAccepted.digest == Data(SHA256.hash(data: data))
-                else { throw TractandaError("peerObjectCollision", "Existing accepted original differs.") }
-                path = try journal.publishOriginal(
-                    descriptor, bytes: data, publication: publication, existingPath: previouslyAccepted.path)
-            } else if descriptor.kind == .item, publication.context.peerID == "local",
-                let selected = publication.localItemPath,
-                let existingBytes = try InitialAuthorityBootstrap.retainedItemBytes(
-                    root: root, path: selected, object: descriptor, ownerUID: ownerUID)
-            {
-                guard let revision, existingBytes == data,
-                    CanonicalRecordPath.validate(
-                        selected, itemID: revision.revision.itemID, revisionID: descriptor.id)
-                else {
-                    throw TractandaError(
-                        "invalidAuthority", "Local publication locator differs from original.")
-                }
-                path = try journal.publishOriginal(
-                    descriptor, bytes: data, publication: publication, existingPath: selected)
-            } else {
-                path = try journal.publishOriginal(descriptor, bytes: data, publication: publication)
-            }
-            let admitted: Bool
-            if let origin, !publication.context.permittedOrigins.contains(origin), !recovering {
-                admitted = try sealAdmittedOrigin(packageID: packageID, origin: origin, index: index)
-            } else {
-                admitted = false
-            }
-            if admitted, let old = try index.authorityReceipt(objectID: descriptor.id, packageID: packageID),
-                !old.permittedOrigin
-            {
-                try index.admitOriginReceipt(old)
-            }
-            let row = AuthorityStore.RetainedObject(
-                descriptor: descriptor, path: path,
-                packageID: packageID, peerID: publication.context.peerID,
-                configurationDigest: publication.context.configurationDigest,
-                permittedOrigin: (origin.map(publication.context.permittedOrigins.contains) ?? false)
-                    || admitted)
-            try index.retainAuthorityObject(row, revision: revision, authority: authority)
-            if applyAssessment, publication.context.peerID != "local", let revision {
-                try assessRetiredOriginalIfNeeded(revision, row: row, index: index)
-            }
-            if descriptor.kind == .authority,
-                try index.authorityDisposition(id: descriptor.id)?.disposition == .pending
-            {
-                try index.setAuthorityDisposition(
-                    id: descriptor.id,
-                    evaluation: .init(
-                        disposition: .held,
-                        reason: "Retained control witness; target eligibility is evaluated separately."))
-            }
+            let unsupported = try retainSealedOriginal(
+                descriptor, data: data, publication: publication, index: index,
+                applyAssessment: applyAssessment, allowReviewClosure: allowReviewClosure,
+                recovering: recovering)
+            unsupportedLocalHold = unsupportedLocalHold || unsupported
         }
         if unsupportedLocalHold {
             throw TractandaError(
@@ -595,6 +582,129 @@ final class PeerIntakeCoordinator {
         // established CURRENT disposition; fresh originals remain pending until validation.
         // Only quarantined cold recovery below restores historical acceptance and then
         // reconciles current authority before any serving.
+    }
+    /// One bounded raw-original publication. It creates no control acceptance or item admission.
+    /// Both the old whole-packet path and the new native window driver use this same checked body.
+    func retainSealedOriginal(
+        _ descriptor: PeerPackage.Object, data transferredData: Data?,
+        publication: PeerIntakeJournal.Publication, index: ItemIndex,
+        applyAssessment: Bool = true, allowReviewClosure: Bool = false, recovering: Bool = false
+    ) throws -> Bool {
+        let packageID = publication.packageID
+        guard publication.context.storeID == storeID,
+            try journal.publication(packageID) == publication
+        else { throw TractandaError("invalidPeerPackage", "Raw publication lost its exact canonical seal.") }
+        if !index.authorityControlSchemaReady { try index.initializeAuthorityControlSchema() }
+        var unsupportedLocalHold = false
+        if descriptor.kind == .attachment || descriptor.kind == .document { return false }
+        let known = try index.retainedAuthorityObject(id: descriptor.id)
+        let data = try transferredData ?? known.flatMap { try bytes($0) }
+        guard let data else {
+            throw TractandaError("missingDependencies", "A sealed original is missing.")
+        }
+        let revision = descriptor.kind == .item ? try AuthorityRevision(originalBytes: data) : nil
+        let canonical = descriptor.kind == .authority ? try CanonicalAuthorityOriginal(data) : nil
+        let authority = canonical?.legacy
+        if let canonical, case .atomic = canonical.payload {
+            try requireAtomicCanonicalActivation()
+        }
+        guard descriptor.kind == .item || descriptor.kind == .authority else {
+            throw TractandaError("missingDependencies", "Metadata intake cannot publish payload objects.")
+        }
+        let origin =
+            try revision?.revision.provenance?.originReplicaID ?? canonical?.origin
+        if let canonical {
+            guard canonical.storeID == storeID, canonical.recordID == descriptor.id else {
+                throw TractandaError("invalidAuthority", "Authority StoreID/object identity differs.")
+            }
+        }
+        if let authority {
+            guard authority.record.storeID == storeID, authority.record.recordID == descriptor.id else {
+                throw TractandaError("invalidAuthority", "Authority StoreID/object identity differs.")
+            }
+            let unsupportedParents =
+                authority.record.kind == .authoredEvidence
+                ? try !AuthorityRecord.list(authority.record.payload["acceptedAuthority"]).isEmpty
+                : false
+            if authority.record.kind == .reviewHold, publication.context.peerID == "local" {
+                unsupportedLocalHold = true
+            }
+            if (authority.record.kind == .reviewDecision || unsupportedParents) && !allowReviewClosure {
+                throw TractandaError(
+                    "authorityReconciliationRequired",
+                    "This reader cannot enforce later review/control causality; authority fallback is forbidden."
+                )
+            }
+        }
+        if let revision, revision.revision.revisionID != descriptor.id {
+            throw TractandaError("invalidPeerPackage", "Revision object identity differs.")
+        }
+        let existing = try index.retainedAuthorityObject(id: descriptor.id)
+        let previouslyAccepted = try revision.flatMap { try index.revision($0.revision.revisionID) }
+        let path: String
+        if let existing {
+            guard existing.descriptor == descriptor, try bytes(existing) == data else {
+                throw TractandaError("peerObjectCollision", "Global immutable identity collides.")
+            }
+            path = try journal.publishOriginal(
+                descriptor, bytes: data, publication: publication, existingPath: existing.path)
+        } else if let previouslyAccepted {
+            let original = try PooledCanonicalRecord.read(
+                row: previouslyAccepted, root: root, ownerUID: ownerUID)
+            guard original.revision == revision?.revision,
+                previouslyAccepted.digest == Data(SHA256.hash(data: data))
+            else { throw TractandaError("peerObjectCollision", "Existing accepted original differs.") }
+            path = try journal.publishOriginal(
+                descriptor, bytes: data, publication: publication, existingPath: previouslyAccepted.path)
+        } else if descriptor.kind == .item, publication.context.peerID == "local",
+            let selected = publication.localItemPath,
+            let existingBytes = try InitialAuthorityBootstrap.retainedItemBytes(
+                root: root, path: selected, object: descriptor, ownerUID: ownerUID)
+        {
+            guard let revision, existingBytes == data,
+                CanonicalRecordPath.validate(
+                    selected, itemID: revision.revision.itemID, revisionID: descriptor.id)
+            else {
+                throw TractandaError(
+                    "invalidAuthority", "Local publication locator differs from original.")
+            }
+            path = try journal.publishOriginal(
+                descriptor, bytes: data, publication: publication, existingPath: selected)
+        } else {
+            path = try journal.publishOriginal(descriptor, bytes: data, publication: publication)
+        }
+        let admitted: Bool
+        if let origin, !publication.context.permittedOrigins.contains(origin), !recovering {
+            admitted = try sealAdmittedOrigin(packageID: packageID, origin: origin, index: index)
+        } else {
+            admitted = false
+        }
+        if admitted, let old = try index.authorityReceipt(objectID: descriptor.id, packageID: packageID),
+            !old.permittedOrigin
+        {
+            try index.admitOriginReceipt(old)
+        }
+        let row = AuthorityStore.RetainedObject(
+            descriptor: descriptor, path: path,
+            packageID: packageID, peerID: publication.context.peerID,
+            configurationDigest: publication.context.configurationDigest,
+            permittedOrigin: (origin.map(publication.context.permittedOrigins.contains) ?? false)
+                || admitted)
+        try index.retainAuthorityObject(
+            row, revision: revision, authority: authority, atomic: authority == nil ? canonical : nil)
+        if applyAssessment, publication.context.peerID != "local", let revision {
+            try assessRetiredOriginalIfNeeded(revision, row: row, index: index)
+        }
+        if descriptor.kind == .authority,
+            try index.authorityDisposition(id: descriptor.id)?.disposition == .pending
+        {
+            try index.setAuthorityDisposition(
+                id: descriptor.id,
+                evaluation: .init(
+                    disposition: .held,
+                    reason: "Retained control witness; target eligibility is evaluated separately."))
+        }
+        return unsupportedLocalHold
     }
     func recoverInventory(index: ItemIndex, validateClosure: Bool = true) throws {
         try index.initializeAuthoritySchema()
@@ -612,6 +722,9 @@ final class PeerIntakeCoordinator {
             try progress?()
             guard let publication = try journal.publication(id) else { return }
             if publication.context.peerID == "local" {
+                if try !index.authorityKindPage(kind: "atomicControl", limit: 1, packageID: id).isEmpty {
+                    return // Store reconstructs only exact canonical ACCEPTED logical outcomes.
+                }
                 var cursor: String?
                 while true {
                     let rows = try index.authorityPackagePage(packageID: id, after: cursor, limit: 128)
@@ -843,7 +956,7 @@ final class PeerIntakeCoordinator {
             context: context, contextToken: contextToken, arrivalMinute: arrivalMinute)
         publication.localItemPath = localItemPath
         try journal.prepare(publication)
-        try CanonicalReaderRequirement.beforeControlPublication(root: root, ownerUID: ownerUID)
+        try CanonicalReaderRequirement.beforeControlPublication(root: root, ownerUID: ownerUID, support: canonicalFormatSupport)
         try StoreCheckpoint.markDirty(root: root)
         try journal.seal(packageID)
         afterSeal?()
@@ -1008,7 +1121,7 @@ final class PeerIntakeCoordinator {
 
     func freshReceipt(
         _ objectID: String, origin: String, index: ItemIndex,
-        forAdministratorReview: Bool = false
+        forAdministratorReview: Bool = false, configuration: AuthorityStore.Configuration? = nil
     ) throws -> AuthorityStore
         .RetainedObject?
     {
@@ -1027,7 +1140,7 @@ final class PeerIntakeCoordinator {
                 guard
                     try receiptContextPermits(
                         row, origin: origin, index: index,
-                        forAdministratorReview: forAdministratorReview)
+                        configuration: configuration, forAdministratorReview: forAdministratorReview)
                 else { continue }
                 return row
             }
@@ -1090,16 +1203,78 @@ final class PeerIntakeCoordinator {
                 disposition: .missingDependencies,
                 reason: "No complete currently authorized original evidence is available.")
     }
+    /// The same normal assessment, one retained original at a time. Callers retain their
+    /// private cursor across healthy yields; no service principal substitutes for its author.
+    @discardableResult
+    func evaluatePendingOriginal(
+        _ row: AuthorityStore.RetainedObject, index: ItemIndex,
+        evaluate: (AuthorityRevision, AuthorityRecord) throws -> AuthorityStore.Evaluation,
+        evaluateMaterialization: ((AuthorityRevision) throws -> AuthorityStore.Evaluation)? = nil,
+        beforeAcceptance: ((AuthorityRevision, AuthorityStore.Evaluation) throws -> Void)? = nil
+    ) throws -> AuthorityStore.Evaluation {
+        let packageID = row.packageID
+        guard row.descriptor.kind == .item,
+            let publication = try journal.publication(packageID),
+            try index.authorityReceipt(objectID: row.descriptor.id, packageID: packageID) == row
+        else { throw TractandaError("invalidAuthority", "Assessment lost its exact retained publication.") }
+        let currentReceipt = try intakePublicationIsCurrent(publication)
+        let node = try AuthorityRevision(originalBytes: bytes(row))
+        let result: AuthorityStore.Evaluation
+        let retired = try retirementBlocks(node, index: index)
+        if retired {
+            try index.notePeerRetirementEffect(row.descriptor.id)
+            result = .init(
+                disposition: .held,
+                reason:
+                    "Retired-origin revision is at or after the event cutoff; exact administrator review required."
+            )
+        } else if try
+            (!currentReceipt
+            && !index.authorityHasLocalHistoryAdmission(revisionID: row.descriptor.id))
+            || !row.permittedOrigin
+        {
+            result = .init(
+                disposition: .unknownOrigin,
+                reason: "No current configured relay receipt permits this origin.")
+        } else if try node.revision.provenance?.kind == .automaticMerge,
+            let evaluateMaterialization
+        {
+            result = try evaluateMaterialization(node)
+        } else {
+            result = try electEvidence(node, index: index, evaluate: evaluate)
+        }
+        if result.disposition == .eligible { try beforeAcceptance?(node, result) }
+        if !retired
+            && (result.disposition == .eligible || result.disposition == .held
+                || result.disposition == .unknownOrigin)
+        {
+            if try assessment(packageID: packageID, object: row.descriptor) == nil
+                || (assessment(packageID: packageID, object: row.descriptor)?.evaluation
+                    .disposition == .unknownOrigin
+                    && result.disposition != .unknownOrigin)
+            {
+                try recordAssessment(
+                    packageID: packageID, object: row.descriptor, evaluation: result)
+            }
+            if result.disposition == .eligible,
+                try node.revision.provenance?.kind == .automaticMerge
+            {
+                try index.retainLocalAssessedMaterialization(node, packageID: packageID)
+            }
+        }
+        try index.setAuthorityDisposition(id: row.descriptor.id, evaluation: result)
+        return result
+    }
+
     func evaluatePending(
         packageID: String, index: ItemIndex,
         evaluate: (AuthorityRevision, AuthorityRecord) throws -> AuthorityStore.Evaluation,
         evaluateMaterialization: ((AuthorityRevision) throws -> AuthorityStore.Evaluation)? = nil,
         beforeAcceptance: ((AuthorityRevision, AuthorityStore.Evaluation) throws -> Void)? = nil
     ) throws -> AuthorityStore.Result {
-        guard let publication = try journal.publication(packageID) else {
+        guard try journal.publication(packageID) != nil else {
             throw TractandaError("invalidAuthority", "Pending evaluation needs a sealed publication.")
         }
-        let currentReceipt = try intakePublicationIsCurrent(publication)
         var madeProgress = true
         var work = 0
         while madeProgress {
@@ -1115,51 +1290,10 @@ final class PeerIntakeCoordinator {
                     guard work <= journal.limits.maximumWork else {
                         throw TractandaError("resourceLimit", "Eligibility delta work exceeded.")
                     }
-                    let node = try AuthorityRevision(originalBytes: bytes(row))
-                    let result: AuthorityStore.Evaluation
-                    let retired = try retirementBlocks(node, index: index)
-                    if retired {
-                        try index.notePeerRetirementEffect(row.descriptor.id)
-                        result = .init(
-                            disposition: .held,
-                            reason:
-                                "Retired-origin revision is at or after the event cutoff; exact administrator review required."
-                        )
-                    } else if try
-                        (!currentReceipt
-                        && !index.authorityHasLocalHistoryAdmission(revisionID: row.descriptor.id))
-                        || !row.permittedOrigin
-                    {
-                        result = .init(
-                            disposition: .unknownOrigin,
-                            reason: "No current configured relay receipt permits this origin.")
-                    } else if try node.revision.provenance?.kind == .automaticMerge,
-                        let evaluateMaterialization
-                    {
-                        result = try evaluateMaterialization(node)
-                    } else {
-                        result = try electEvidence(node, index: index, evaluate: evaluate)
-                    }
-                    if result.disposition == .eligible { try beforeAcceptance?(node, result) }
-                    if !retired
-                        && (result.disposition == .eligible || result.disposition == .held
-                            || result.disposition == .unknownOrigin)
-                    {
-                        if try assessment(packageID: packageID, object: row.descriptor) == nil
-                            || (assessment(packageID: packageID, object: row.descriptor)?.evaluation
-                                .disposition == .unknownOrigin
-                                && result.disposition != .unknownOrigin)
-                        {
-                            try recordAssessment(
-                                packageID: packageID, object: row.descriptor, evaluation: result)
-                        }
-                        if result.disposition == .eligible,
-                            try node.revision.provenance?.kind == .automaticMerge
-                        {
-                            try index.retainLocalAssessedMaterialization(node, packageID: packageID)
-                        }
-                    }
-                    try index.setAuthorityDisposition(id: row.descriptor.id, evaluation: result)
+                    let result = try evaluatePendingOriginal(
+                        row, index: index, evaluate: evaluate,
+                        evaluateMaterialization: evaluateMaterialization,
+                        beforeAcceptance: beforeAcceptance)
                     madeProgress = madeProgress || result.disposition == .eligible
                 }
             }

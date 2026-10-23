@@ -92,6 +92,8 @@ final class ItemIndex {
     }
     let corpusIndexPath: String
     private var database: OpaquePointer?
+    private let createdForConstruction: Bool
+    private var atomicCanonicalReconstruction = false
     private var activeCatalogueScanBudget: CatalogueScanBudget?
     var onPersistentFailure: (() -> Void)?
     static func shouldQuarantineSQLiteFailure(_ code: Int32) -> Bool {
@@ -109,12 +111,69 @@ final class ItemIndex {
     var currentProjectionSchemaReady = false
     var projectionAppendActive = false
     var authorityControlSchemaReady = false
+    /// Queue-confined borrow, present only inside a complete canonical-to-staged finalization.
+    var activeAtomicControlFinalization: AuthorityBinding?
+    private var atomicAcceptedStepError: TractandaError?
+    private var atomicAcceptedActivation: (root: AuthorityBinding, context: String, receipt: String)?
+    /// Trusted post-seal phase only. Structural comparison alone never enables this classification.
+    func withAtomicAcceptedActivation<T>(
+        plan: AuthorityStore.VerifiedAtomicControlPlan,
+        sealed: AtomicAuthorityAcceptance.Sealed, _ body: () throws -> T
+    ) throws -> T {
+        guard plan.reconstruction == nil || atomicCanonicalReconstruction else {
+            throw AtomicAuthorityFormat.invalid("Historical activation cannot run on a serving Index.")
+        }
+        let acceptedContext = try plan.acceptanceContextSHA256(sealed)
+        guard activeAtomicControlFinalization == plan.binding,
+            sealed.receipt.root == plan.binding,
+            sealed.receipt.validationContextSHA256 == acceptedContext,
+            atomicAcceptedActivation == nil
+        else {
+            throw AtomicAuthorityFormat.invalid("Atomic activation lacks exact validated accepted proof.")
+        }
+        // The immutable decision has already passed private, charged work windows. Its local
+        // durable activation is not another network-sized logical-root budget: each SQLite step
+        // below owns a bounded native allowance, while the enclosing caller keeps its exact tail.
+        guard let database else { throw graphSQLiteError() }
+        let enclosing = activeCatalogueScanBudget
+        try enclosing?.requireAvailable()
+        activeCatalogueScanBudget = nil
+        sqlite3_progress_handler(database, 0, nil, nil)
+        atomicAcceptedStepError = nil
+        atomicAcceptedActivation = (plan.binding, acceptedContext, sealed.bytesSHA256)
+        defer {
+            atomicAcceptedActivation = nil
+            atomicAcceptedStepError = nil
+            activeCatalogueScanBudget = enclosing
+            if let enclosing {
+                sqlite3_progress_handler(
+                    database, Int32(enclosing.quantum), catalogueScanProgress,
+                    Unmanaged.passUnretained(enclosing).toOpaque())
+            }
+        }
+        return try body()
+    }
+    /// Queue-confined borrow of the completed original-PRE closure during final Store activation.
+    /// It is released before its private work closes; accepted facts never retain this callback.
+    var activeAtomicOriginalPREContains: ((AuthorityBinding) throws -> Bool)?
+    private var installedAtomicAuthoritySchemas: Set<AtomicAuthorityIndexSchema.Slice> = []
+    var atomicPublicationSpoolActive = false
+    private var atomicStageMutationGeneration: UInt64 = 0
+    private var atomicStageMutationOverflow = false
+    private var frozenAtomicStage: AtomicStageFreeze?
+    struct AtomicStageFreeze {
+        fileprivate let id: String
+        let root: AuthorityBinding
+        fileprivate let generation: UInt64
+        fileprivate let dataVersion: Int64
+    }
     var lastAnalyzedProjection: RevisionProjection.Snapshot?
     var admittedProjectionCheckpointWatermark: Int64?
     private var validatedGraphWatermark: Int64?
     private var validatedGraphAllowsOnlyLinear = false
     private(set) var graphValidationPassesForTesting = 0
     private(set) var lastCatalogueScanWorkForTesting: Int64 = 0
+    var atomicRemainingScanWorkForTesting: Int64? { activeCatalogueScanBudget?.remaining }
     private(set) var seekVMInstructionsForTesting = 0
     private(set) var principalLookupVMInstructionsForTesting = 0
     private(set) var savedViewCategoryPlanLookupsForTesting = 0
@@ -183,9 +242,12 @@ final class ItemIndex {
             aclNamed = nil
         }
     }
-    init(path: String, create: Bool) throws {
+    enum JournalMode: String { case wal, delete }
+    init(path: String, create: Bool, noFollow: Bool = false, journalMode: JournalMode = .wal) throws {
         corpusIndexPath = path
-        guard sqlite3_open_v2(path, &database, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil) == SQLITE_OK
+        createdForConstruction = create
+        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | (noFollow ? SQLITE_OPEN_NOFOLLOW : 0)
+        guard sqlite3_open_v2(path, &database, flags, nil) == SQLITE_OK
         else {
             if let database { sqlite3_close(database) }
             database = nil
@@ -194,7 +256,7 @@ final class ItemIndex {
         sqlite3_busy_timeout(database, 3000)
         if path != ":memory:" {
             do {
-                try configureWriter()
+                try configureWriter(journalMode: journalMode)
             } catch {
                 sqlite3_close_v2(database)
                 self.database = nil
@@ -370,8 +432,24 @@ final class ItemIndex {
             "CREATE TEMP TABLE request_groups (name TEXT PRIMARY KEY, gid INTEGER NOT NULL, member INTEGER NOT NULL)"
         )
         try execute("CREATE TEMP TABLE request_actor (uid INTEGER NOT NULL)")
+        sqlite3_update_hook(
+            database,
+            { context, _, _, name, _ in
+                guard let context, let name else { return }
+                if strcmp(name, "authority_atomic_stage") == 0
+                    || strcmp(name, "authority_atomic_parent_stage") == 0
+                    || strcmp(name, "authority_atomic_support_stage") == 0
+                {
+                    Unmanaged<ItemIndex>.fromOpaque(context).takeUnretainedValue().noteAtomicStageMutation()
+                }
+            }, Unmanaged.passUnretained(self).toOpaque())
     }
-    deinit { if let database { sqlite3_close_v2(database) } }
+    deinit {
+        if let database {
+            sqlite3_update_hook(database, nil, nil)
+            sqlite3_close_v2(database)
+        }
+    }
     func close() {
         try? closeChecked()
     }
@@ -381,21 +459,24 @@ final class ItemIndex {
         guard status == SQLITE_OK else { throw error() }
         self.database = nil
     }
-    private func configureWriter() throws {
+    private func configureWriter(journalMode: JournalMode) throws {
         guard let database else { throw TractandaError("indexError", "Index closed.") }
         var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(database, "PRAGMA journal_mode=WAL", -1, &statement, nil) == SQLITE_OK,
+        guard
+            sqlite3_prepare_v2(database, "PRAGMA journal_mode=" + journalMode.rawValue, -1, &statement, nil)
+                == SQLITE_OK,
             let statement
         else { throw error() }
         guard catalogueStep(statement) == SQLITE_ROW,
-            let mode = sqlite3_column_text(statement, 0), String(cString: mode).lowercased() == "wal"
+            let mode = sqlite3_column_text(statement, 0),
+            String(cString: mode).lowercased() == journalMode.rawValue
         else {
             sqlite3_finalize(statement)
-            throw TractandaError("indexError", "SQLite did not enable WAL mode.")
+            throw TractandaError("indexError", "SQLite did not enable its selected journal mode.")
         }
         sqlite3_finalize(statement)
         try execute("PRAGMA synchronous=FULL")
-        try execute("PRAGMA wal_autocheckpoint=1000")
+        if journalMode == .wal { try execute("PRAGMA wal_autocheckpoint=1000") }
         var syncStatement: OpaquePointer?
         guard sqlite3_prepare_v2(database, "PRAGMA synchronous", -1, &syncStatement, nil) == SQLITE_OK,
             let syncStatement
@@ -448,6 +529,17 @@ final class ItemIndex {
         default: target = nil
         }
         let targetTable = target?.split(separator: "(", maxSplits: 1).first.map(String.init)
+        if frozenAtomicStage != nil,
+            !["select", "explain", "savepoint", "release", "rollback", "begin", "commit", "end"].contains(
+                verb),
+            targetTable == nil
+                || [
+                    "authority_atomic_stage", "authority_atomic_parent_stage",
+                    "authority_atomic_support_stage",
+                ].contains(targetTable!)
+        {
+            throw TractandaError("storeBusy", "The exact atomic stage is frozen for canonical comparison.")
+        }
         let projectionTargets: Set<String> = [
             "peer_original_required", "peer_original_present", "peer_original_revision", "peer_original_text",
             "temp.peer_original_required", "temp.peer_original_present", "temp.peer_original_revision",
@@ -455,7 +547,7 @@ final class ItemIndex {
             "peer_original_document", "peer_original_document_present",
             "temp.peer_original_document", "temp.peer_original_document_present",
             "peer_original_item", "temp.peer_original_item",
-            "peer_inventory_state", "peer_inventory_receipt",
+            "peer_inventory_state", "peer_inventory_receipt", "authority_atomic_publication_spool",
             "peer_export_plan", "peer_export_object", "peer_export_ready", "peer_export_page",
             "peer_document_work", "peer_document_part", "peer_document_corpus_owner",
             "peer_document_corpus_work",
@@ -498,6 +590,7 @@ final class ItemIndex {
             "authority_control", "authority_control_origin", "authority_control_heads",
             "authority_control_edges",
             "authority_control_children", "authority_control_delta", "authority_control_target",
+            "authority_atomic_stage", "authority_atomic_parent_stage", "authority_atomic_support_stage",
             "authority_control_affected", "authority_control_work", "authority_control_work_order",
             "authority_exposure", "authority_exposure_order", "authority_reconciliation",
             "authority_exposure_revision", "authority_local_exposure", "authority_local_exposure_order",
@@ -512,8 +605,19 @@ final class ItemIndex {
         // The canonical catalogue audit uses this exact read-only pragma. All other
         // pragma syntax retains the conservative fallback, including unknown queries.
         let readOnlyIntegrityAudit = bindings.isEmpty && tokens == ["pragma", "integrity_check"]
+        let exactAtomicAcceptedInsert =
+            atomicAcceptedActivation.map { activation in
+                verb == "insert"
+                    && [
+                        "authority_control_support", "authority_atomic_outcome", "authority_atomic_accepted",
+                    ].contains(targetTable ?? "")
+                    && (sql.hasPrefix("INSERT INTO " + (targetTable ?? "") + " VALUES(")
+                        || sql.hasPrefix("INSERT OR IGNORE INTO " + (targetTable ?? "") + " VALUES("))
+                    && bindings.count >= 2 && bindings[0] == activation.root.recordID
+                    && bindings[1] == activation.root.sha256
+            } ?? false
         if !readOrControl.contains(verb),
-            !readOnlyIntegrityAudit,
+            !readOnlyIntegrityAudit, !exactAtomicAcceptedInsert,
             targetTable == nil || !projectionTargets.contains(targetTable!)
         {
             // Only our explicitly known work targets retain proof. Unsupported syntax,
@@ -540,6 +644,7 @@ final class ItemIndex {
         return statement
     }
     private func error() -> TractandaError {
+        if let atomicAcceptedStepError { return atomicAcceptedStepError }
         if let budget = activeCatalogueScanBudget {
             if let callbackError = budget.callbackError {
                 return callbackError as? TractandaError
@@ -709,6 +814,148 @@ final class ItemIndex {
         defer { sqlite3_finalize(statement) }
         let status = catalogueStep(statement)
         guard status == SQLITE_DONE || status == SQLITE_ROW else { throw error() }
+    }
+
+    /// Only this fixed CREATE IF NOT EXISTS list bypasses data-write invalidation. Adding empty
+    /// disposable tables/views is not an authority transition; accepted INSERT/UPDATE/DELETE still
+    /// use execute and invalidate relevant current state. No arbitrary SQL is accepted here.
+    func installAtomicAuthorityIndexSchema(_ slice: AtomicAuthorityIndexSchema.Slice) throws {
+        guard !installedAtomicAuthoritySchemas.contains(slice) else { return }
+        guard let database else { throw TractandaError("indexError", "Catalogue is closed.") }
+        for sql in AtomicAuthorityIndexSchema.statements(slice) {
+            try checkCatalogueScanProgress()
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
+                let statement
+            else { throw error() }
+            let status = catalogueStep(statement)
+            sqlite3_finalize(statement)
+            guard status == SQLITE_DONE else { throw error() }
+        }
+        installedAtomicAuthoritySchemas.insert(slice)
+    }
+
+    /// Final local writer phase, not a renewable peer scan budget. Caller validates current
+    /// rights before the durable seal, retains it through derived activation, and owns recovery
+    /// if an error/crash follows that seal. No nested or partially visible transaction is allowed.
+    /// Native reconstruction only: a fresh, unpublished rebuild-UUID database in its outer
+    /// transaction, borrowing the Store's already-held lifetime canonical writer descriptor.
+    /// Portable inode checks bind the descriptor; the caller retains the actual flock lease.
+    func withAtomicCanonicalReconstruction<T>(
+        canonicalRoot: URL, indexDirectory: URL, ownerUID: UInt32, writerDescriptor: Int32,
+        _ body: () throws -> T
+    ) throws -> T {
+        let path = URL(fileURLWithPath: corpusIndexPath)
+        let name = path.lastPathComponent
+        var held = stat()
+        var named = stat()
+        guard createdForConstruction, !atomicCanonicalReconstruction, let database,
+            sqlite3_get_autocommit(database) == 0,
+            path.deletingLastPathComponent().path == indexDirectory.path,
+            name.hasPrefix("rebuild-"), name.hasSuffix(".sqlite"),
+            UUID(uuidString: String(name.dropFirst(8).dropLast(7))) != nil,
+            writerDescriptor >= 0, fstat(writerDescriptor, &held) == 0,
+            lstat(canonicalRoot.appendingPathComponent(".writer.lock").path, &named) == 0,
+            held.st_dev == named.st_dev, held.st_ino == named.st_ino,
+            held.st_uid == ownerUID, held.st_nlink == 1,
+            held.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG), held.st_mode & 0o777 == 0o600
+        else {
+            throw TractandaError(
+                "storeBusy", "Historical atomic activation requires its unpublished native rebuild owner.")
+        }
+        atomicCanonicalReconstruction = true
+        defer { atomicCanonicalReconstruction = false }
+        return try body()
+    }
+    func withAtomicFinalWriter<T>(
+        existingAcceptance: AtomicAuthorityAcceptance.Sealed? = nil,
+        _ body: () throws -> T
+    ) throws -> T {
+        guard let database else { throw graphSQLiteError() }
+        let nested = sqlite3_get_autocommit(database) == 0
+        guard existingAcceptance == nil || atomicCanonicalReconstruction,
+            !nested || (existingAcceptance != nil && atomicCanonicalReconstruction)
+        else {
+            throw TractandaError("storeBusy", "Atomic activation requires its own final writer phase.")
+        }
+        // Only exact, already canonical historical proof may enter the unpublished rebuild's
+        // outer transaction. Ordinary online acceptance never receives this restoration mode.
+        try execute(nested ? "SAVEPOINT atomic_canonical_reconstruction" : "BEGIN IMMEDIATE")
+        do {
+            let result = try body()
+            try execute(nested ? "RELEASE atomic_canonical_reconstruction" : "COMMIT")
+            return result
+        } catch {
+            try? rollbackAtomicFinalWriter(reconstruction: nested)
+            throw error
+        }
+    }
+    private func rollbackAtomicFinalWriter(reconstruction: Bool = false) throws {
+        guard let database else {
+            throw TractandaError("indexError", "Catalogue closed during atomic cleanup.")
+        }
+        let budget = activeCatalogueScanBudget
+        activeCatalogueScanBudget = nil
+        sqlite3_progress_handler(database, 0, nil, nil)
+        defer {
+            activeCatalogueScanBudget = budget
+            if let budget {
+                sqlite3_progress_handler(
+                    database, Int32(budget.quantum), catalogueScanProgress,
+                    Unmanaged.passUnretained(budget).toOpaque())
+            }
+        }
+        if reconstruction {
+            try execute("ROLLBACK TO atomic_canonical_reconstruction")
+            try execute("RELEASE atomic_canonical_reconstruction")
+        } else {
+            try execute("ROLLBACK")
+        }
+    }
+
+    /// Freeze is a private read-input lease, never authority. Executed prepared/trigger writes
+    /// are observed by SQLite's update hook even when they bypass a new prepare() call.
+    func freezeAtomicStage(_ root: AuthorityBinding) throws -> AtomicStageFreeze {
+        guard frozenAtomicStage == nil, !atomicStageMutationOverflow else {
+            throw TractandaError("storeBusy", "Atomic input is already frozen or its generation exhausted.")
+        }
+        let token = AtomicStageFreeze(
+            id: Identifier.make(), root: root, generation: atomicStageMutationGeneration,
+            dataVersion: try atomicIndexDataVersion())
+        frozenAtomicStage = token
+        return token
+    }
+    func checkAtomicStageFreeze(_ token: AtomicStageFreeze) throws {
+        guard frozenAtomicStage?.id == token.id, !atomicStageMutationOverflow,
+            atomicStageMutationGeneration == token.generation,
+            try atomicIndexDataVersion() == token.dataVersion
+        else {
+            throw AtomicAuthorityFormat.invalid("Frozen canonical comparison input changed between windows.")
+        }
+    }
+    func releaseAtomicStageFreeze(_ token: AtomicStageFreeze) throws {
+        guard frozenAtomicStage?.id == token.id else {
+            throw AtomicAuthorityFormat.invalid("A stale atomic stage lease cannot release another owner.")
+        }
+        frozenAtomicStage = nil
+    }
+    private func noteAtomicStageMutation() {
+        let next = atomicStageMutationGeneration.addingReportingOverflow(1)
+        if next.overflow {
+            atomicStageMutationOverflow = true
+        } else {
+            atomicStageMutationGeneration = next.partialValue
+        }
+    }
+    private func atomicIndexDataVersion() throws -> Int64 {
+        guard let database else { throw TractandaError("indexError", "Catalogue is closed.") }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, "PRAGMA main.data_version", -1, &statement, nil) == SQLITE_OK,
+            let statement
+        else { throw error() }
+        defer { sqlite3_finalize(statement) }
+        guard catalogueStep(statement) == SQLITE_ROW else { throw error() }
+        return sqlite3_column_int64(statement, 0)
     }
 
     func registerRecoveryDocument(_ document: AttachmentDocumentRepresentation, itemID: String) throws -> Bool
@@ -1260,7 +1507,24 @@ final class ItemIndex {
     /// handler bounds in-flight work and preparation without charging the same step twice.
     func catalogueStep(_ statement: OpaquePointer?) -> Int32 {
         guard let statement else { return SQLITE_MISUSE }
-        guard let budget = activeCatalogueScanBudget else { return sqlite3_step(statement) }
+        guard let budget = activeCatalogueScanBudget else {
+            // Only an exact post-seal Store activation can borrow this local batch allowance.
+            // Every step remains cancellable and VM-bounded; no whole-logical-root ceiling or
+            // silent renewal of the suspended peer allowance is introduced.
+            if atomicAcceptedActivation != nil {
+                do {
+                    return try withCatalogueScanBudget(progress: { try Task.checkCancellation() }) {
+                        catalogueStep(statement)
+                    }
+                } catch {
+                    atomicAcceptedStepError =
+                        error as? TractandaError
+                        ?? TractandaError("cancelled", "Local accepted activation was cancelled.")
+                    return SQLITE_INTERRUPT
+                }
+            }
+            return sqlite3_step(statement)
+        }
         let before = sqlite3_stmt_status(statement, SQLITE_STMTSTATUS_VM_STEP, 0)
         guard budget.beginStep(before: before) else { return SQLITE_INTERRUPT }
         let status = sqlite3_step(statement)
@@ -1330,6 +1594,55 @@ final class ItemIndex {
             budget.callbackError = error
             throw error
         }
+    }
+
+    /// Private staging may yield BEFORE exhausting its enclosing allowance. This only observes
+    /// remaining work; it never renews/resets a caller's security or catalogue budget.
+    func atomicPrivateWindowHasRoom(minimumVMInstructions: Int64 = 4096) throws -> Bool {
+        guard minimumVMInstructions > 0 else {
+            throw TractandaError("resourceLimit", "Invalid atomic work-window reserve.")
+        }
+        try checkCatalogueScanProgress()
+        return activeCatalogueScanBudget.map { $0.remaining >= minimumVMInstructions } ?? true
+    }
+
+    /// Explicit Store-owned local step; the enclosing scan tail is suspended, never renewed.
+    /// Peer callbacks cannot mint the owner and continue to borrow/yield their network window.
+    func withStoreOwnedAtomicValidationWindow<T>(
+        _ owner: ItemStore.AtomicLocalValidationOwner, _ body: () throws -> T
+    ) throws -> T {
+        _ = try AuthorityRecord.persistentID(.text(owner.root.recordID))
+        _ = try AuthorityRecord.digest(.text(owner.contextSHA256))
+        guard let database else { throw graphSQLiteError() }
+        let saved = activeCatalogueScanBudget
+        activeCatalogueScanBudget = nil
+        sqlite3_progress_handler(database, 0, nil, nil)
+        defer {
+            activeCatalogueScanBudget = saved
+            if let saved {
+                sqlite3_progress_handler(
+                    database, Int32(saved.quantum), catalogueScanProgress,
+                    Unmanaged.passUnretained(saved).toOpaque())
+            }
+        }
+        return try withCatalogueScanBudget { try body() }
+    }
+    /// Private payload descriptor scratch belongs to the same serialized Store request. It
+    /// borrows, rather than resets, that request's active measured VM allowance.
+    func withBorrowedAtomicPreparationBudget<T>(from owner: ItemIndex, _ body: () throws -> T) throws -> T {
+        guard self !== owner, let database, activeCatalogueScanBudget == nil,
+            let borrowed = owner.activeCatalogueScanBudget
+        else { throw TractandaError("resourceLimit", "Missing atomic preparation owner allowance.") }
+        try borrowed.requireAvailable()
+        activeCatalogueScanBudget = borrowed
+        sqlite3_progress_handler(
+            database, Int32(borrowed.quantum), catalogueScanProgress,
+            Unmanaged.passUnretained(borrowed).toOpaque())
+        defer {
+            sqlite3_progress_handler(database, 0, nil, nil)
+            activeCatalogueScanBudget = nil
+        }
+        return try body()
     }
 
     func withCatalogueScanBudget<T>(

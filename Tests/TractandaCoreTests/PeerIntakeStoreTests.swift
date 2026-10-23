@@ -126,10 +126,21 @@ final class PeerIntakeStoreTests: XCTestCase {
             else { return false }
             return target.revisionID == revisionID
         }
+        // Historical14 input fixture: deliberately authors standalone pre-bootstrap history.
+        // Actual15 factory/enrollment/replication use their separate native initialized fixtures.
+        static var historical14Support: CanonicalFormatSupport {
+            let capabilities = CanonicalFormatSupport.current.capabilities.filter {
+                $0 != AtomicAuthorityFormat.profile
+            }
+            return .init(
+                readerLevel: 14, writerLevel: 14, read: [1, 2], write: [2],
+                capabilities: capabilities, writeCapabilities: capabilities)
+        }
         static func open(_ root: URL, _ accounts: Accounts) throws -> ItemStore {
             try AttachmentFixtureCapacity.requireFree()
             return try ItemStore(
-                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+                root: root, accounts: accounts, revisionProjectionEnabled: true, authorityIntakeEnabled: true,
+                firstSourceOperation: nil, canonicalFormatSupport: historical14Support)
         }
         /// Lower-level authority fixture only: share logical identity before any derived state exists.
         func openFreshSharedReplica(_ root: URL, _ accounts: Accounts) throws -> ItemStore {

@@ -148,7 +148,18 @@ enum PeerEnrollmentActivation {
         {
             try owner().resumeTargetEnrollment(packageID: packageID, cursor: cursor, limit: limit)
         }
-        func finish() throws -> Receipt { try owner().activateTargetEnrollment() }
+        /// Native finite provisioning owner, outside any untrusted network work frame. A healthy
+        /// private-window yield retains the same Store, package and operation; every call restores
+        /// its completed read/VM scope before the next. Cancellation/control/reserve checks stay
+        /// on the actual Store work path. Semantic/dependency/custody failures are never retried.
+        func finish() throws -> Receipt {
+            while true {
+                try Task.checkCancellation()
+                do { return try owner().activateTargetEnrollment() } catch let error as TractandaError
+                    where error.code == "peerSyncYield"
+                { continue }
+            }
+        }
         func withControl<T>(_ check: @escaping () throws -> Void, body: () throws -> T) throws -> T {
             try owner().withTargetEnrollmentControl(check, body: body)
         }
@@ -297,6 +308,51 @@ enum PeerEnrollmentActivation {
         )
         .map { try PeerPackage.decode(Receipt.self, $0) }
     }
+    /// Reconstruct only the native trust context of an already accepted baseline/proof packet.
+    /// This does not accept an origin/control or substitute today's peer configuration. The
+    /// source-approved immutable request and completed protected transition must match the exact
+    /// pre-pairing configuration captured by the historical atomic receipt.
+    static func permitsHistoricalPublication(
+        _ publication: PeerIntakeJournal.Publication,
+        receiverReplicaID: String, capturedConfiguration: AuthorityStore.Configuration,
+        files: DocumentContentFiles, readBudget: ((Int) throws -> Void)? = nil
+    ) throws -> Bool {
+        guard let record = try loadRecord(files, readBudget: readBudget),
+            publication.context == record.targetContext,
+            publication.packageID == record.baseline.packageID
+                || publication.packageID == record.proof.manifest.packageID,
+            let receipt = try loadReceipt(files, readBudget: readBudget)
+        else { return false }
+        let manifest =
+            publication.packageID == record.baseline.packageID
+            ? record.baseline : record.proof.manifest
+        let commit = try PeerPackage.decode(
+            ConfigurationCommit.self,
+            files.read(
+                path: [directory, "configuration.json"], maximumBytes: maximumBytes,
+                readBudget: readBudget))
+        try validateTargetConfiguration(commit, record: record)
+        let committed = try files.read(
+            path: [".peer-configuration", String(format: "%020llu.json", receipt.configurationSequence)],
+            maximumBytes: maximumBytes, readBudget: readBudget)
+        guard receiverReplicaID == (try record.preparation.targetReplicaID),
+            capturedConfiguration == commit.before,
+            publication.manifestDigest == AuthorityRecordCodec.sha256(try JSON.encode(manifest)),
+            receipt.profile == capability, receipt.requestDigest == (try record.digest),
+            receipt.approval == record.pin.approval,
+            receipt.baselineDigest == AuthorityRecordCodec.sha256(try JSON.encode(record.baseline)),
+            receipt.configurationSequence == commit.sequence,
+            receipt.configurationDigest == AuthorityRecordCodec.sha256(committed),
+            try PeerPackage.decode(AuthorityStore.Configuration.self, committed) == commit.after,
+            try files.read(
+                path: [PeerEnrollment.intentName], maximumBytes: PeerEnrollment.maximumBytes,
+                readBudget: readBudget) == record.preparationBytes
+        else {
+            throw failure("Historical target publication lost its exact completed provisioning proof.")
+        }
+        return true
+    }
+
     /// The Store already owns this exact lifetime writer descriptor. This never locks a second time.
     static func prepareUnderLock(
         root: URL, suppliedRoot: URL, ownerUID: UInt32, writer: Int32,

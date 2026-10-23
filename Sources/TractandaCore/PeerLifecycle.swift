@@ -128,7 +128,8 @@ extension PeerIntakeCoordinator {
         return operation
     }
     func prepareLifecycleOperation(_ operation: PeerLifecycle.Operation) throws {
-        try CanonicalReaderRequirement.beforePeerLifecyclePublication(root: root, ownerUID: ownerUID)
+        try CanonicalReaderRequirement.beforePeerLifecyclePublication(
+            root: root, ownerUID: ownerUID, support: canonicalFormatSupport)
         try StoreCheckpoint.markDirty(root: root)
         try journal.files.writeImmutable(
             try JSON.encode(operation),
@@ -231,7 +232,8 @@ extension PeerIntakeCoordinator {
         }
     }
     func activateForeignRetirement(_ binding: AuthorityBinding, packageID: String) throws {
-        try CanonicalReaderRequirement.beforePeerLifecyclePublication(root: root, ownerUID: ownerUID)
+        try CanonicalReaderRequirement.beforePeerLifecyclePublication(
+            root: root, ownerUID: ownerUID, support: canonicalFormatSupport)
         try StoreCheckpoint.markDirty(root: root)
         try journal.files.writeImmutable(
             try JSON.encode(
@@ -371,7 +373,7 @@ extension PeerIntakeCoordinator {
             let root = try retirementOriginal(binding, index: index).record
             let cut = try AuthorityBinding(value: root.payload["cut"]!)
             guard try index.hasValidatedAuthorityControl(cut),
-                try control(cut, index: index).record.originReplicaID == root.originReplicaID
+                try logicalControlHeader(cut, index: index).origin == root.originReplicaID
             else {
                 throw TractandaError("invalidPeerLifecycle", "Retirement source PRE cut is not validated.")
             }
@@ -405,11 +407,23 @@ extension PeerIntakeCoordinator {
             return true
         }
         if configuration?.peers.contains(publication.context) == true { return true }
-        guard configuration?.lifecycle?.historicalContexts.contains(publication.context) == true else {
-            return false
+        if configuration?.lifecycle?.historicalContexts.contains(publication.context) == true {
+            return true
         }
-        if forAdministratorReview { return true }
-        return true
+        // Captured pre-pairing native trust is reconstructed from its exact approved request
+        // and completed transition. This applies to roots AND selected source testimony; it
+        // does not substitute today's peer list, grant an origin, or qualify pending targets
+        // for ordinary opening. The private scope above owns unfinished activation recovery.
+        if let supplied,
+            let receiver = try ReplicaIdentity.load(
+                root: root, storeID: storeID, ownerUID: ownerUID,
+                readBudget: readBudget ?? admissionReadBudget())?.replicaID
+        {
+            return try PeerEnrollmentActivation.permitsHistoricalPublication(
+                publication, receiverReplicaID: receiver, capturedConfiguration: supplied,
+                files: journal.files, readBudget: readBudget ?? admissionReadBudget())
+        }
+        return false
     }
     /// This hold is independent of parent readiness. It grants no dependency closure or
     /// reviewability and never overwrites an earlier immutable assessment/acceptance.
@@ -452,7 +466,8 @@ extension PeerIntakeCoordinator {
         return value
     }
     func activateForeignReview(_ plan: AuthorityStore.VerifiedReviewPlan, packageID: String) throws {
-        try CanonicalReaderRequirement.beforeReviewPublication(root: root, ownerUID: ownerUID)
+        try CanonicalReaderRequirement.beforeReviewPublication(
+            root: root, ownerUID: ownerUID, support: canonicalFormatSupport)
         try StoreCheckpoint.markDirty(root: root)
         try journal.files.writeImmutable(
             try JSON.encode(

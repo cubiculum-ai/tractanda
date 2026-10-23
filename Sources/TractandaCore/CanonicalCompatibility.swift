@@ -8,13 +8,42 @@ import Foundation
     import Glibc
 #endif
 
+/// The implementation declaration is distinct from each Store's durable activation. Existing
+/// initialized14 stores remain read-only until an explicit coordinated15 transition.
+enum AtomicAuthorityCompatibility {
+    static let capability = AtomicAuthorityFormat.profile
+    static let minimumReaderLevel = 15
+    private static let retainedCapabilities = [
+        "tractanda.peer-enrollment-approval.v1", "tractanda.peer-origin-admission.v1",
+        "tractanda.peer-enrollment-activation.v1", "tractanda.peer-enrollment-target.v1",
+        "tractanda.authority.v1", "tractanda.authority-causal.v1", "tractanda.authority-review.v1",
+        "tractanda.peer-lifecycle.v1", "tractanda.shared-authority.v1", "tractanda.payload-placement.v1",
+        "tractanda.peer-originals.v1", "tractanda.document-placement.v1", "tractanda.peer-documents.v1",
+    ]
+    static let support = CanonicalFormatSupport(
+        readerLevel: minimumReaderLevel, writerLevel: minimumReaderLevel, read: [1, 2], write: [2],
+        capabilities: (retainedCapabilities + [capability]).sorted(),
+        writeCapabilities: (retainedCapabilities + [capability]).sorted())
+    static func requireWriter(_ support: CanonicalFormatSupport) throws {
+        try support.validate()
+        guard support.readerLevel >= minimumReaderLevel, support.writerLevel >= minimumReaderLevel,
+            support.capabilities.contains(capability), support.writeCapabilities.contains(capability)
+        else {
+            throw TractandaError(
+                "incompatibleCanonicalReader",
+                "Atomic publication requires explicit floor15 reader/writer support and capability.")
+        }
+    }
+}
+
 /// Canonical semantics, independent of wire/API versions. Future authority persistence needs a
 /// new level/capability even when its item MIME version remains 2.
 public struct CanonicalFormatSupport: Codable, Equatable, Sendable {
     public static let profileName = "tractanda.canonical-formats.v1"
     public static let current = Self(
-        readerLevel: 14, writerLevel: 14, read: [1, 2], write: [2],
+        readerLevel: 15, writerLevel: 15, read: [1, 2], write: [2],
         capabilities: [
+            AtomicAuthorityFormat.profile,
             "tractanda.peer-enrollment-approval.v1", "tractanda.peer-origin-admission.v1",
             "tractanda.peer-enrollment-activation.v1", "tractanda.peer-enrollment-target.v1",
             "tractanda.authority.v1", "tractanda.authority-causal.v1", "tractanda.authority-review.v1",
@@ -22,6 +51,7 @@ public struct CanonicalFormatSupport: Codable, Equatable, Sendable {
             "tractanda.peer-originals.v1", "tractanda.document-placement.v1", "tractanda.peer-documents.v1",
         ].sorted(),
         writeCapabilities: [
+            AtomicAuthorityFormat.profile,
             "tractanda.peer-enrollment-approval.v1", "tractanda.peer-origin-admission.v1",
             "tractanda.peer-enrollment-activation.v1", "tractanda.peer-enrollment-target.v1",
             "tractanda.authority.v1", "tractanda.authority-causal.v1", "tractanda.authority-review.v1",
@@ -75,7 +105,11 @@ public struct CanonicalFormatSupport: Codable, Equatable, Sendable {
             capabilities == Array(Set(capabilities)).sorted(),
             writeCapabilities == Array(Set(writeCapabilities)).sorted(),
             capabilities.count <= 64, capabilities.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 128 }),
-            Set(writeCapabilities).isSubset(of: capabilities)
+            Set(writeCapabilities).isSubset(of: capabilities),
+            !capabilities.contains(AtomicAuthorityCompatibility.capability)
+                || readerLevel >= AtomicAuthorityCompatibility.minimumReaderLevel,
+            !writeCapabilities.contains(AtomicAuthorityCompatibility.capability)
+                || writerLevel >= AtomicAuthorityCompatibility.minimumReaderLevel
         else {
             throw TractandaError(
                 "unknownCanonicalCompatibility", "Invalid or unknown canonical format declaration.")
@@ -129,13 +163,239 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
             !recordFormats.isEmpty, recordFormats == Array(Set(recordFormats)).sorted(),
             recordFormats.allSatisfy({ (1...minimumReaderLevel).contains($0) }),
             capabilities == Array(Set(capabilities)).sorted(), capabilities.count <= 64,
-            capabilities.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 128 })
+            capabilities.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 128 }),
+            !capabilities.contains(AtomicAuthorityCompatibility.capability)
+                || minimumReaderLevel >= AtomicAuthorityCompatibility.minimumReaderLevel
         else {
             throw TractandaError(
                 "unknownCanonicalCompatibility",
                 "Invalid canonical reader requirement; services must remain stopped.")
         }
     }
+    /// Internal persistence primitive only. Store must already own the actual lifetime flock and
+    /// fresh authenticated administrator/all-active-node maintenance proof. An inode comparison
+    /// cannot prove portable kernel flock ownership; this API does not manufacture that evidence.
+    /// The borrowed descriptor is neither acquired nor unlocked here.
+    static func transitionToAtomicAuthority(
+        root: URL, ownerUID: UInt32, writerDescriptor: Int32,
+        expectedRequirement: Self, expectedRequirementSHA256: String,
+        support: CanonicalFormatSupport
+    ) throws -> Self {
+        try expectedRequirement.validate()
+        _ = try AuthorityRecord.digest(.text(expectedRequirementSHA256))
+        try AtomicAuthorityCompatibility.requireWriter(support)
+        let custody = try AtomicWriterCustody(root: root, ownerUID: ownerUID, writer: writerDescriptor)
+        defer { close(custody.directory) }
+        let priorIdentity = try storeIdentity(root: root, ownerUID: ownerUID)
+        guard
+            let bytes = try privateMetadata(
+                root: root, name: fileName, ownerUID: ownerUID, maximumBytes: 16 * 1024),
+            AuthorityRecordCodec.sha256(bytes) == expectedRequirementSHA256,
+            let prior = try load(root: root, ownerUID: ownerUID), prior == expectedRequirement,
+            try JSON.encode(prior) == bytes,
+            prior.storeID == priorIdentity
+        else {
+            throw TractandaError(
+                "unknownCanonicalCompatibility", "Atomic transition lost its exact prior requirement/StoreID."
+            )
+        }
+        let target = Self(
+            storeID: prior.storeID,
+            minimumReaderLevel: max(
+                prior.minimumReaderLevel, AtomicAuthorityCompatibility.minimumReaderLevel),
+            recordFormats: prior.recordFormats,
+            capabilities: Set(prior.capabilities + [AtomicAuthorityCompatibility.capability]).sorted())
+        try target.validate()
+        try support.require(target)
+        guard try JSON.encode(target).count <= 16 * 1024 else {
+            throw TractandaError(
+                "resourceLimit", "Raised atomic requirement exceeds its existing metadata window.")
+        }
+        try custody.requireUnchanged()
+        guard try storeIdentity(root: root, ownerUID: ownerUID) == priorIdentity,
+            try privateMetadata(root: root, name: fileName, ownerUID: ownerUID, maximumBytes: 16 * 1024)
+                == bytes,
+            try load(root: root, ownerUID: ownerUID) == prior
+        else {
+            throw TractandaError("unknownCanonicalCompatibility", "Atomic transition's prior marker changed.")
+        }
+        if target != prior {
+            try target.persistAtomicTransition(directory: custody.directory, ownerUID: ownerUID)
+        } else {
+            // A prior attempt may have renamed successfully but failed to acknowledge parent
+            // durability. Exact retry must synchronize again even when no bytes need rewriting.
+            let marker = openat(custody.directory, fileName, O_RDWR | O_NOFOLLOW | O_CLOEXEC)
+            guard marker >= 0 else {
+                throw TractandaError(
+                    "canonicalCompatibilityWriteFailed", "Cannot reopen atomic requirement for durable retry."
+                )
+            }
+            defer { close(marker) }
+            guard fsync(marker) == 0, fsync(custody.directory) == 0 else {
+                throw TractandaError(
+                    "canonicalCompatibilityWriteFailed",
+                    "Atomic retry durability is uncertain; do not publish.")
+            }
+        }
+        try custody.requireUnchanged()
+        guard try storeIdentity(root: root, ownerUID: ownerUID) == priorIdentity,
+            try load(root: root, ownerUID: ownerUID) == target
+        else {
+            throw TractandaError(
+                "canonicalCompatibilityWriteFailed",
+                "Atomic requirement readback/StoreID is uncertain; do not publish.")
+        }
+        return target
+    }
+
+    /// Guard only: ordinary publication cannot activate or repair a missing atomic floor.
+    static func beforeAtomicAuthorityPublication(
+        root: URL, ownerUID: UInt32, support: CanonicalFormatSupport = .current
+    ) throws {
+        try AtomicAuthorityCompatibility.requireWriter(support)
+        guard let prior = try load(root: root, ownerUID: ownerUID),
+            prior.minimumReaderLevel >= AtomicAuthorityCompatibility.minimumReaderLevel,
+            prior.capabilities.contains(AtomicAuthorityCompatibility.capability)
+        else {
+            throw TractandaError(
+                "atomicAuthorityTransitionRequired",
+                "Explicit coordinated atomic activation is required before publication.")
+        }
+        try support.require(prior)
+    }
+
+    private struct AtomicWriterCustody {
+        let directory: Int32
+        let root: URL
+        let ownerUID: UInt32
+        let writer: Int32
+        let device: dev_t
+        let inode: ino_t
+        init(root: URL, ownerUID: UInt32, writer: Int32) throws {
+            self.root = root
+            self.ownerUID = ownerUID
+            self.writer = writer
+            directory = open(root.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            guard directory >= 0 else {
+                throw TractandaError("storeBusy", "Atomic transition cannot open its private root.")
+            }
+            var value = stat()
+            guard fstat(directory, &value) == 0 else {
+                close(directory)
+                throw TractandaError("storeBusy", "Atomic transition cannot inspect its root.")
+            }
+            device = value.st_dev
+            inode = value.st_ino
+            do { try requireUnchanged() } catch {
+                close(directory)
+                throw error
+            }
+        }
+        func requireUnchanged() throws {
+            let namedRoot = open(root.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            guard namedRoot >= 0 else {
+                throw TractandaError("storeBusy", "Atomic transition root was replaced.")
+            }
+            defer { close(namedRoot) }
+            var heldRoot = stat()
+            var currentRoot = stat()
+            var heldWriter = stat()
+            var namedWriter = stat()
+            guard fstat(directory, &heldRoot) == 0, fstat(namedRoot, &currentRoot) == 0,
+                heldRoot.st_dev == device, heldRoot.st_ino == inode,
+                currentRoot.st_dev == device, currentRoot.st_ino == inode,
+                heldRoot.st_uid == ownerUID, heldRoot.st_mode & 0o7777 == 0o700,
+                currentRoot.st_uid == ownerUID, currentRoot.st_mode == heldRoot.st_mode,
+                tractanda_peer_configuration_no_mutation_acl(directory) == 0,
+                tractanda_peer_configuration_no_mutation_acl(namedRoot) == 0,
+                fstat(writer, &heldWriter) == 0,
+                fstatat(directory, ".writer.lock", &namedWriter, AT_SYMLINK_NOFOLLOW) == 0,
+                heldWriter.st_dev == namedWriter.st_dev, heldWriter.st_ino == namedWriter.st_ino,
+                heldWriter.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+                heldWriter.st_mode & 0o7777 == 0o600, namedWriter.st_mode == heldWriter.st_mode,
+                heldWriter.st_uid == ownerUID, namedWriter.st_uid == ownerUID,
+                heldWriter.st_nlink == 1, namedWriter.st_nlink == 1,
+                tractanda_peer_configuration_no_mutation_acl(writer) == 0
+            else {
+                throw TractandaError(
+                    "storeBusy", "Atomic transition lost private root/writer descriptor custody.")
+            }
+            for name in [CanonicalReaderRequirement.fileName, ".tractanda-store-identity.json"] {
+                let file = openat(directory, name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+                guard file >= 0 else {
+                    throw TractandaError("storeBusy", "Atomic transition metadata is missing or unsafe.")
+                }
+                defer { close(file) }
+                var held = stat()
+                var named = stat()
+                guard fstat(file, &held) == 0,
+                    fstatat(directory, name, &named, AT_SYMLINK_NOFOLLOW) == 0,
+                    held.st_dev == named.st_dev, held.st_ino == named.st_ino,
+                    held.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG), held.st_mode & 0o7777 == 0o600,
+                    held.st_uid == ownerUID, named.st_uid == ownerUID,
+                    held.st_nlink == 1, named.st_nlink == 1, named.st_mode == held.st_mode,
+                    tractanda_peer_configuration_no_mutation_acl(file) == 0
+                else {
+                    throw TractandaError("storeBusy", "Atomic transition lost protected metadata custody.")
+                }
+            }
+        }
+    }
+
+    private func persistAtomicTransition(directory: Int32, ownerUID: UInt32) throws {
+        let temporary = ".atomic-reader-" + (try UUID.makeVersion1().uuidString.lowercased()) + ".stage"
+        let fd = openat(directory, temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard fd >= 0 else {
+            throw TractandaError(
+                "canonicalCompatibilityWriteFailed", "Cannot stage atomic reader requirement.")
+        }
+        defer {
+            var held = stat()
+            var named = stat()
+            if fstat(fd, &held) == 0,
+                fstatat(directory, temporary, &named, AT_SYMLINK_NOFOLLOW) == 0,
+                held.st_dev == named.st_dev, held.st_ino == named.st_ino,
+                unlinkat(directory, temporary, 0) == 0
+            {
+                _ = fsync(directory)
+            }
+            close(fd)
+        }
+        guard fchown(fd, ownerUID, gid_t.max) == 0, fchmod(fd, 0o600) == 0,
+            tractanda_peer_configuration_no_mutation_acl(fd) == 0
+        else {
+            throw TractandaError(
+                "canonicalCompatibilityWriteFailed", "Cannot retain private atomic requirement custody.")
+        }
+        let bytes = try JSON.encode(self)
+        try bytes.withUnsafeBytes { raw in
+            var offset = 0
+            while offset < raw.count {
+                try Task.checkCancellation()
+                let count = write(fd, raw.baseAddress!.advanced(by: offset), raw.count - offset)
+                if count < 0 && errno == EINTR { continue }
+                guard count > 0 else {
+                    throw TractandaError(
+                        "canonicalCompatibilityWriteFailed", "Cannot write atomic requirement.")
+                }
+                offset += count
+            }
+        }
+        var held = stat()
+        var named = stat()
+        guard fsync(fd) == 0, fstat(fd, &held) == 0,
+            fstatat(directory, temporary, &named, AT_SYMLINK_NOFOLLOW) == 0,
+            held.st_dev == named.st_dev, held.st_ino == named.st_ino, held.st_nlink == 1,
+            held.st_uid == ownerUID, held.st_mode & 0o7777 == 0o600,
+            held.st_size == bytes.count, tractanda_peer_configuration_no_mutation_acl(fd) == 0,
+            renameat(directory, temporary, directory, Self.fileName) == 0, fsync(directory) == 0
+        else {
+            throw TractandaError(
+                "canonicalCompatibilityWriteFailed",
+                "Atomic requirement durability is uncertain; do not publish.")
+        }
+    }
+
     public static func withWriterLock<T>(root: URL, ownerUID: UInt32, _ body: () throws -> T) throws -> T {
         let path = root.appendingPathComponent(".writer.lock")
         let before = try FileMetadata.read(at: path)
@@ -310,7 +570,9 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
     }
     /// Authority-aware callers hold the writer lock and enforce sealed controls before serving.
     /// Persist this monotonic capability floor before a bootstrap or sealed control has effects.
-    static func beforePeerOriginalPublication(root: URL, ownerUID: UInt32) throws {
+    static func beforePeerOriginalPublication(
+        root: URL, ownerUID: UInt32, support: CanonicalFormatSupport = .current
+    ) throws {
         let prior =
             try load(root: root, ownerUID: ownerUID)
             ?? admitQuiescent(root: root, ownerUID: ownerUID, persist: false)
@@ -318,7 +580,7 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
             storeID: prior.storeID, minimumReaderLevel: max(9, prior.minimumReaderLevel),
             recordFormats: prior.recordFormats,
             capabilities: Set(prior.capabilities + ["tractanda.peer-originals.v1"]).sorted())
-        try CanonicalFormatSupport.current.require(raised)
+        try support.require(raised)
         if raised != prior { try raised.persist(root: root, ownerUID: ownerUID) }
     }
     static func beforePayloadPlacementPublication(root: URL, ownerUID: UInt32) throws {
@@ -343,8 +605,10 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
         try CanonicalFormatSupport.current.require(raised)
         if raised != prior { try raised.persist(root: root, ownerUID: ownerUID) }
     }
-    static func beforePeerDocumentPublication(root: URL, ownerUID: UInt32) throws {
-        try beforePeerOriginalPublication(root: root, ownerUID: ownerUID)
+    static func beforePeerDocumentPublication(
+        root: URL, ownerUID: UInt32, support: CanonicalFormatSupport = .current
+    ) throws {
+        try beforePeerOriginalPublication(root: root, ownerUID: ownerUID, support: support)
         guard let prior = try load(root: root, ownerUID: ownerUID) else {
             throw TractandaError("unknownCanonicalCompatibility", "Missing peer reader requirement.")
         }
@@ -352,10 +616,12 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
             storeID: prior.storeID, minimumReaderLevel: max(11, prior.minimumReaderLevel),
             recordFormats: prior.recordFormats,
             capabilities: Set(prior.capabilities + ["tractanda.peer-documents.v1"]).sorted())
-        try CanonicalFormatSupport.current.require(raised)
+        try support.require(raised)
         if raised != prior { try raised.persist(root: root, ownerUID: ownerUID) }
     }
-    static func beforeAuthorityPublication(root: URL, ownerUID: UInt32) throws {
+    static func beforeAuthorityPublication(
+        root: URL, ownerUID: UInt32, support: CanonicalFormatSupport = .current
+    ) throws {
         let prior =
             try load(root: root, ownerUID: ownerUID)
             ?? admitQuiescent(root: root, ownerUID: ownerUID, persist: false)
@@ -365,13 +631,15 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
             capabilities: Set(
                 prior.capabilities + [AuthorityStore.capability, "tractanda.shared-authority.v1"]
             ).sorted())
-        try CanonicalFormatSupport.current.require(raised)
+        try support.require(raised)
         if try prior != raised || load(root: root, ownerUID: ownerUID) == nil {
             try raised.persist(root: root, ownerUID: ownerUID)
         }
     }
-    static func beforeControlPublication(root: URL, ownerUID: UInt32) throws {
-        try beforeAuthorityPublication(root: root, ownerUID: ownerUID)
+    static func beforeControlPublication(
+        root: URL, ownerUID: UInt32, support: CanonicalFormatSupport = .current
+    ) throws {
+        try beforeAuthorityPublication(root: root, ownerUID: ownerUID, support: support)
         guard let prior = try load(root: root, ownerUID: ownerUID) else {
             throw TractandaError("unknownCanonicalCompatibility", "Missing authority reader requirement.")
         }
@@ -379,11 +647,13 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
             storeID: prior.storeID, minimumReaderLevel: max(4, prior.minimumReaderLevel),
             recordFormats: prior.recordFormats,
             capabilities: Set(prior.capabilities + [AuthorityStore.causalCapability]).sorted())
-        try CanonicalFormatSupport.current.require(raised)
+        try support.require(raised)
         if raised != prior { try raised.persist(root: root, ownerUID: ownerUID) }
     }
-    static func beforeReviewPublication(root: URL, ownerUID: UInt32) throws {
-        try beforeControlPublication(root: root, ownerUID: ownerUID)
+    static func beforeReviewPublication(
+        root: URL, ownerUID: UInt32, support: CanonicalFormatSupport = .current
+    ) throws {
+        try beforeControlPublication(root: root, ownerUID: ownerUID, support: support)
         guard let prior = try load(root: root, ownerUID: ownerUID) else {
             throw TractandaError("unknownCanonicalCompatibility", "Missing causal reader requirement.")
         }
@@ -391,11 +661,13 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
             storeID: prior.storeID, minimumReaderLevel: max(5, prior.minimumReaderLevel),
             recordFormats: prior.recordFormats,
             capabilities: Set(prior.capabilities + [AuthorityStore.reviewCapability]).sorted())
-        try CanonicalFormatSupport.current.require(raised)
+        try support.require(raised)
         if raised != prior { try raised.persist(root: root, ownerUID: ownerUID) }
     }
-    static func beforePeerLifecyclePublication(root: URL, ownerUID: UInt32) throws {
-        try beforeReviewPublication(root: root, ownerUID: ownerUID)
+    static func beforePeerLifecyclePublication(
+        root: URL, ownerUID: UInt32, support: CanonicalFormatSupport = .current
+    ) throws {
+        try beforeReviewPublication(root: root, ownerUID: ownerUID, support: support)
         guard let prior = try load(root: root, ownerUID: ownerUID) else {
             throw TractandaError("unknownCanonicalCompatibility", "Missing lifecycle reader requirement.")
         }
@@ -405,11 +677,13 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
             capabilities: Set(
                 prior.capabilities + [PeerLifecycle.capability, "tractanda.shared-authority.v1"]
             ).sorted())
-        try CanonicalFormatSupport.current.require(raised)
+        try support.require(raised)
         if raised != prior { try raised.persist(root: root, ownerUID: ownerUID) }
     }
-    static func beforeEnrollmentApprovalPublication(root: URL, ownerUID: UInt32) throws {
-        try beforeControlPublication(root: root, ownerUID: ownerUID)
+    static func beforeEnrollmentApprovalPublication(
+        root: URL, ownerUID: UInt32, support: CanonicalFormatSupport = .current
+    ) throws {
+        try beforeControlPublication(root: root, ownerUID: ownerUID, support: support)
         guard let prior = try load(root: root, ownerUID: ownerUID) else {
             throw TractandaError("unknownCanonicalCompatibility", "Missing authority reader requirement.")
         }
@@ -417,11 +691,13 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
             storeID: prior.storeID, minimumReaderLevel: max(12, prior.minimumReaderLevel),
             recordFormats: prior.recordFormats,
             capabilities: Set(prior.capabilities + [PeerEnrollmentApproval.capability]).sorted())
-        try CanonicalFormatSupport.current.require(raised)
+        try support.require(raised)
         if raised != prior { try raised.persist(root: root, ownerUID: ownerUID) }
     }
-    static func beforeOriginAdmissionPublication(root: URL, ownerUID: UInt32) throws {
-        try beforeEnrollmentApprovalPublication(root: root, ownerUID: ownerUID)
+    static func beforeOriginAdmissionPublication(
+        root: URL, ownerUID: UInt32, support: CanonicalFormatSupport = .current
+    ) throws {
+        try beforeEnrollmentApprovalPublication(root: root, ownerUID: ownerUID, support: support)
         guard let prior = try load(root: root, ownerUID: ownerUID) else {
             throw TractandaError("unknownCanonicalCompatibility", "Missing admission reader requirement.")
         }
@@ -429,11 +705,13 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
             storeID: prior.storeID, minimumReaderLevel: max(13, prior.minimumReaderLevel),
             recordFormats: prior.recordFormats,
             capabilities: Set(prior.capabilities + [PeerOriginAdmission.capability]).sorted())
-        try CanonicalFormatSupport.current.require(raised)
+        try support.require(raised)
         if raised != prior { try raised.persist(root: root, ownerUID: ownerUID) }
     }
-    static func beforeEnrollmentActivationPublication(root: URL, ownerUID: UInt32) throws {
-        try beforeOriginAdmissionPublication(root: root, ownerUID: ownerUID)
+    static func beforeEnrollmentActivationPublication(
+        root: URL, ownerUID: UInt32, support: CanonicalFormatSupport = .current
+    ) throws {
+        try beforeOriginAdmissionPublication(root: root, ownerUID: ownerUID, support: support)
         guard let prior = try load(root: root, ownerUID: ownerUID) else {
             throw TractandaError("unknownCanonicalCompatibility", "Missing activation reader requirement.")
         }
@@ -441,11 +719,13 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
             storeID: prior.storeID, minimumReaderLevel: max(14, prior.minimumReaderLevel),
             recordFormats: prior.recordFormats,
             capabilities: Set(prior.capabilities + [PeerEnrollmentActivation.capability]).sorted())
-        try CanonicalFormatSupport.current.require(raised)
+        try support.require(raised)
         if raised != prior { try raised.persist(root: root, ownerUID: ownerUID) }
     }
-    static func beforeTargetEnrollmentPublication(root: URL, ownerUID: UInt32) throws {
-        try beforeEnrollmentActivationPublication(root: root, ownerUID: ownerUID)
+    static func beforeTargetEnrollmentPublication(
+        root: URL, ownerUID: UInt32, support: CanonicalFormatSupport = .current
+    ) throws {
+        try beforeEnrollmentActivationPublication(root: root, ownerUID: ownerUID, support: support)
         guard let prior = try load(root: root, ownerUID: ownerUID) else {
             throw TractandaError("unknownCanonicalCompatibility", "Missing required target role marker.")
         }
@@ -453,7 +733,7 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
             storeID: prior.storeID, minimumReaderLevel: max(14, prior.minimumReaderLevel),
             recordFormats: prior.recordFormats,
             capabilities: Set(prior.capabilities + [PeerEnrollmentActivation.targetCapability]).sorted())
-        try CanonicalFormatSupport.current.require(raised)
+        try support.require(raised)
         if raised != prior { try raised.persist(root: root, ownerUID: ownerUID) }
     }
     private static func privateMetadata(root: URL, name: String, ownerUID: UInt32, maximumBytes: Int) throws

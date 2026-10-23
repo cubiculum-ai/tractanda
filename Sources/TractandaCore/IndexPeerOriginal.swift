@@ -10,29 +10,43 @@ extension ItemIndex {
         let document: AttachmentDocumentRepresentation
         let object: PeerPackage.Object?
     }
-    func peerOriginalBegin() throws {
-        for table in [
+    enum PeerOriginalWorkStorage {
+        case temporary, privateDatabase
+    }
+    /// The privateDatabase mode belongs only to a fresh caller-private scratch ItemIndex.
+    /// Ordinary callers retain their existing TEMP-table behavior.
+    func peerOriginalBegin(storage: PeerOriginalWorkStorage = .temporary) throws {
+        let tables = [
             "peer_original_required", "peer_original_present", "peer_original_revision", "peer_original_text",
-            "peer_original_document", "peer_original_document_present",
-            "peer_original_item",
-        ] {
+            "peer_original_document", "peer_original_document_present", "peer_original_item",
+        ]
+        let schema = storage == .temporary ? "temp" : "main"
+        for table in tables {
             try execute("DROP TABLE IF EXISTS temp." + table)
+            if storage == .privateDatabase { try execute("DROP TABLE IF EXISTS main." + table) }
         }
         try execute(
-            "CREATE TEMP TABLE peer_original_required(id TEXT PRIMARY KEY,item TEXT NOT NULL,descriptor TEXT NOT NULL)"
-        )
-        try execute("CREATE TEMP TABLE peer_original_present(id TEXT PRIMARY KEY,descriptor TEXT NOT NULL)")
-        try execute(
-            "CREATE TEMP TABLE peer_original_revision(revision TEXT NOT NULL,attachment TEXT NOT NULL,item TEXT NOT NULL,descriptor TEXT NOT NULL,PRIMARY KEY(revision,attachment))"
-        )
-        try execute("CREATE TEMP TABLE peer_original_text(id TEXT PRIMARY KEY,source TEXT NOT NULL)")
-        try execute("CREATE TEMP TABLE peer_original_item(revision TEXT PRIMARY KEY,item TEXT NOT NULL)")
-        try execute(
-            "CREATE TEMP TABLE peer_original_document(id TEXT PRIMARY KEY,content TEXT NOT NULL,document TEXT NOT NULL)"
+            "CREATE TABLE \(schema).peer_original_required(id TEXT PRIMARY KEY,item TEXT NOT NULL,descriptor TEXT NOT NULL)"
         )
         try execute(
-            "CREATE TEMP TABLE peer_original_document_present(id TEXT PRIMARY KEY,descriptor TEXT NOT NULL)"
+            "CREATE TABLE \(schema).peer_original_present(id TEXT PRIMARY KEY,descriptor TEXT NOT NULL)")
+        try execute(
+            "CREATE TABLE \(schema).peer_original_revision(revision TEXT NOT NULL,attachment TEXT NOT NULL,item TEXT NOT NULL,descriptor TEXT NOT NULL,PRIMARY KEY(revision,attachment))"
         )
+        try execute("CREATE TABLE \(schema).peer_original_text(id TEXT PRIMARY KEY,source TEXT NOT NULL)")
+        try execute("CREATE TABLE \(schema).peer_original_item(revision TEXT PRIMARY KEY,item TEXT NOT NULL)")
+        try execute(
+            "CREATE TABLE \(schema).peer_original_document(id TEXT PRIMARY KEY,content TEXT NOT NULL,document TEXT NOT NULL)"
+        )
+        try execute(
+            "CREATE TABLE \(schema).peer_original_document_present(id TEXT PRIMARY KEY,descriptor TEXT NOT NULL)"
+        )
+        if storage == .privateDatabase {
+            // Closure lookups need no automatic-index or sort work proportional to the packet.
+            try execute("CREATE INDEX main.peer_original_item_identity ON peer_original_item(item)")
+            try execute(
+                "CREATE INDEX main.peer_original_document_content ON peer_original_document(content,id)")
+        }
     }
     private func originalText(_ statement: OpaquePointer, _ column: Int32, maximum: Int = 16 * 1024) throws
         -> String

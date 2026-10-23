@@ -44,6 +44,7 @@ extension ItemIndex {
                 "CREATE INDEX IF NOT EXISTS authority_reconciliation_recovery ON authority_reconciliation_witness(recovery,revision)",
                 "CREATE TABLE IF NOT EXISTS authority_reconciliation(key TEXT PRIMARY KEY,item TEXT NOT NULL,revision TEXT NOT NULL UNIQUE,witness TEXT NOT NULL,witness_digest TEXT NOT NULL,plan_digest TEXT NOT NULL,modified TEXT NOT NULL,output_digest TEXT,parents TEXT NOT NULL,frontier TEXT NOT NULL,base_floor TEXT NOT NULL)",
             ] { try execute(sql) }
+            try initializeAtomicAuthorityAcceptedSchema()
             authorityControlSchemaReady = true
             // Local applied shared review is now a history proof alongside local controls.
             try initializeAuthorityReviewSchema()
@@ -56,7 +57,11 @@ extension ItemIndex {
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='authority_control')")
                 == 1
         else { return }
+        try initializeAtomicAuthoritySchema()
+        try initializeAtomicAuthorityAcceptedSchema()
         for table in [
+            "authority_control_support", "authority_atomic_outcome", "authority_atomic_accepted",
+            "authority_atomic_support_stage", "authority_atomic_parent_stage", "authority_atomic_stage",
             "authority_pending_effect", "authority_retired_items", "authority_control_pending",
             "authority_reconciliation_witness", "authority_absorbed",
             "authority_absorbed_cut", "authority_invalidation",
@@ -73,7 +78,7 @@ extension ItemIndex {
     // History is backed by private-local acceptance/bootstrap OR actual local exposure.
     // None of these membership rows confers current writing or reading authority.
     private var authorityLocalHistoryProof: String {
-        "(EXISTS(SELECT 1 FROM authority_local_exposure l JOIN authority_exposure e ON e.id=l.witness WHERE l.revision=v.revision AND l.item=v.item AND l.ticks=v.ticks AND e.revision=v.revision AND e.item=v.item AND e.digest=v.digest AND e.ticks=v.ticks) OR EXISTS(SELECT 1 FROM authority_control_delta d INDEXED BY authority_control_target JOIN authority_local_acceptance l ON l.control=d.control JOIN authority_control c ON c.id=l.control AND c.sha256=l.sha256 WHERE d.target=v.revision AND d.item=v.item AND d.sha256=v.digest AND d.eligible=1) OR EXISTS(SELECT 1 FROM authority_local_assessment a JOIN authority_objects o ON o.id=a.revision AND o.sha256=a.sha256 AND o.item=v.item WHERE a.revision=v.revision AND a.sha256=v.digest) OR EXISTS(SELECT 1 FROM authority_review_applied a JOIN authority_review_event e ON e.id=a.decision AND e.sha256=a.sha256 JOIN authority_control c ON c.id=a.control AND c.sha256=a.control_digest WHERE a.recovery=0 AND e.item=v.item AND ((e.target=v.revision AND e.target_digest=v.digest) OR (a.revision=v.revision AND a.digest=v.digest))) OR EXISTS(SELECT 1 FROM authority_dependencies d JOIN authority_local_bootstrap l ON l.pin=d.target AND l.sha256=d.sha256 JOIN authority_objects o ON o.id=d.source AND o.sha256=v.digest WHERE d.source=v.revision AND d.kind='bootstrap'))"
+        "(EXISTS(SELECT 1 FROM authority_local_exposure l JOIN authority_exposure e ON e.id=l.witness WHERE l.revision=v.revision AND l.item=v.item AND l.ticks=v.ticks AND e.revision=v.revision AND e.item=v.item AND e.digest=v.digest AND e.ticks=v.ticks) OR EXISTS(SELECT 1 FROM authority_control_outcomes d JOIN authority_local_acceptance l ON l.control=d.control JOIN authority_control c ON c.id=l.control AND c.sha256=l.sha256 WHERE d.target=v.revision AND d.item=v.item AND d.sha256=v.digest AND d.eligible=1) OR EXISTS(SELECT 1 FROM authority_local_assessment a JOIN authority_objects o ON o.id=a.revision AND o.sha256=a.sha256 AND o.item=v.item WHERE a.revision=v.revision AND a.sha256=v.digest) OR EXISTS(SELECT 1 FROM authority_review_applied a JOIN authority_review_event e ON e.id=a.decision AND e.sha256=a.sha256 JOIN authority_control c ON c.id=a.control AND c.sha256=a.control_digest WHERE a.recovery=0 AND e.item=v.item AND ((e.target=v.revision AND e.target_digest=v.digest) OR (a.revision=v.revision AND a.digest=v.digest))) OR EXISTS(SELECT 1 FROM authority_dependencies d JOIN authority_local_bootstrap l ON l.pin=d.target AND l.sha256=d.sha256 JOIN authority_objects o ON o.id=d.source AND o.sha256=v.digest WHERE d.source=v.revision AND d.kind='bootstrap'))"
     }
     private func enqueueLocalAuthorityVisibility(itemID: String, cause: AuthorityBinding, kind: String) throws
     {
@@ -163,6 +168,42 @@ extension ItemIndex {
                     try controlOriginalBinding(evidence, kind: "authoredEvidence")
                 }
                 try retainLocalHistoryTarget(delta.target)
+            }
+        }
+    }
+    /// One fully validated atomic logical decision supplies local history only for its explicit
+    /// new eligible effects. Inherited parent facts and context-only joins never admit originals.
+    func retainLocalAtomicAuthorityAcceptance(_ plan: AuthorityStore.VerifiedAtomicControlPlan) throws {
+        let binding = plan.stage.header.binding
+        guard activeAtomicControlFinalization == binding,
+            try hasValidatedAuthorityControl(binding), try isAcceptedAtomicControl(binding)
+        else { throw controlInvalid("Local atomic history requires the exact accepted final writer.") }
+        if try controlNumber(
+            "SELECT EXISTS(SELECT 1 FROM authority_local_acceptance WHERE control=? AND sha256=?)",
+            [binding.recordID, binding.sha256]) == 1
+        {
+            return
+        }
+        try controlCapacity(8192)
+        try execute(
+            "INSERT INTO authority_local_acceptance VALUES(?,?)", [binding.recordID, binding.sha256])
+        let source = LogicalControlSource.atomic(plan.stage)
+        var cursor: Int64 = -1
+        while true {
+            let page = try source.supports(index: self, afterOrdinal: cursor, limit: 128)
+            if page.isEmpty { break }
+            for support in page {
+                try checkCatalogueScanProgress()
+                let delta = support.delta
+                try enqueueLocalAuthorityVisibility(
+                    itemID: delta.target.itemID, cause: binding, kind: "control")
+                if delta.eligible {
+                    if let evidence = delta.evidence {
+                        try controlOriginalBinding(evidence, kind: "authoredEvidence")
+                    }
+                    try retainLocalHistoryTarget(delta.target)
+                }
+                cursor = support.ordinal
             }
         }
     }
@@ -317,25 +358,56 @@ extension ItemIndex {
             guard try authorityControlHead(originID: originID) == control else {
                 throw controlInvalid("Old or foreign control cannot clear pending effects.")
             }
-            var cursor: String?
+            var cursor: AuthorityStore.SupportCursor?
+            let atomic = try isAcceptedAtomicControl(control)
+            if atomic, activeAtomicControlFinalization != control {
+                throw controlInvalid("Atomic pending CAS requires the exact final writer scope.")
+            }
             while true {
-                let page = try authorityControlDeltaPage(control, afterRevisionID: cursor, limit: 128)
+                let page = try acceptedControlSupports(control, after: cursor, limit: 128)
                 if page.isEmpty { break }
-                for delta in page {
-                    for cause in delta.causes {
-                        guard try hasValidatedAuthorityControl(cause),
-                            try authorityControlContains(cause, in: control)
-                        else { throw controlInvalid("Covering control omitted a bound effect cause.") }
-                    }
+                for support in page {
+                    let delta = support.delta
                     let bytes = try JSON.encode(delta.itemValue)
+                    guard AuthorityRecordCodec.sha256(bytes) == support.fingerprint else {
+                        throw controlInvalid("Accepted support lost exact pending payload identity.")
+                    }
+                    // New local/review decisions are not implicitly pending effects. In particular
+                    // an exact D/B/C positive is governed by the review supersession API below,
+                    // not a queued-control cause. Unmatched facts cannot consume any queue row.
+                    guard
+                        try controlNumber(
+                            "SELECT EXISTS(SELECT 1 FROM authority_pending_effect WHERE revision=? AND fingerprint=? AND payload=?)",
+                            [
+                                delta.target.revisionID, support.fingerprint,
+                                String(decoding: bytes, as: UTF8.self),
+                            ]) == 1
+                    else {
+                        cursor = support.cursor
+                        continue
+                    }
+                    for cause in delta.causes {
+                        let contained: Bool
+                        if atomic {
+                            guard let contains = activeAtomicOriginalPREContains else {
+                                throw controlInvalid("Atomic pending CAS lost its completed original PRE.")
+                            }
+                            contained = try contains(cause)
+                        } else {
+                            contained = try authorityControlContains(cause, in: control)
+                        }
+                        guard try hasValidatedAuthorityControl(cause), contained else {
+                            throw controlInvalid("Covering control omitted a bound effect cause.")
+                        }
+                    }
                     try execute(
                         "DELETE FROM authority_pending_effect WHERE revision=? AND fingerprint=? AND payload=?",
                         [
-                            delta.target.revisionID, AuthorityRecordCodec.sha256(bytes),
+                            delta.target.revisionID, support.fingerprint,
                             String(decoding: bytes, as: UTF8.self),
                         ])
+                    cursor = support.cursor
                 }
-                cursor = page.last?.target.revisionID
             }
         }
     }
@@ -417,6 +489,9 @@ extension ItemIndex {
         try withCatalogueScanBudget(reusingActiveBudget: true) {
             guard try hasValidatedAuthorityControl(binding) else {
                 throw controlInvalid("Unknown exact control cut.")
+            }
+            guard try !isAcceptedAtomicControl(binding) else {
+                throw controlInvalid("Atomic logical parents require the bounded accepted-parent cursor.")
             }
             let s = try corpusPrepare(
                 "SELECT parent,sha256 FROM authority_control_edges WHERE child=? ORDER BY parent",
@@ -546,9 +621,8 @@ extension ItemIndex {
             while let node = try controlNext(token) {
                 try checkCatalogueScanProgress()
                 if node.0 == ancestor.recordID { return true }
-                for parent in try authorityControlParents(
-                    .init(recordID: node.0, sha256: controlDigest(node.0)))
-                { try controlQueue(token: token, id: parent.recordID, covered: false) }
+                try controlQueueParents(
+                    .init(recordID: node.0, sha256: controlDigest(node.0)), token: token, covered: false)
                 try execute(
                     "UPDATE authority_control_work SET processed=1 WHERE token=? AND id=?", [token, node.0])
             }
@@ -622,11 +696,8 @@ extension ItemIndex {
                     try controlCapacity(UInt64(next.partialValue))
                     cost = next.partialValue
                     try execute("INSERT INTO authority_absorbed VALUES(?)", [node.0])
-                    let parents = try authorityControlParents(
-                        try .init(recordID: node.0, sha256: controlDigest(node.0)))
-                    for parent in parents {
-                        try controlQueue(token: token, id: parent.recordID, covered: false)
-                    }
+                    try controlQueueParents(
+                        .init(recordID: node.0, sha256: controlDigest(node.0)), token: token, covered: false)
                 }
                 try execute(
                     "UPDATE authority_control_work SET processed=1 WHERE token=? AND id=?", [token, node.0])
@@ -650,6 +721,9 @@ extension ItemIndex {
         try withCatalogueScanBudget(reusingActiveBudget: true) {
             guard (1...1024).contains(limit), try hasValidatedAuthorityControl(binding) else {
                 throw controlInvalid("Unknown control or invalid delta page.")
+            }
+            guard try !isAcceptedAtomicControl(binding) else {
+                throw controlInvalid("Atomic supports require the complete target/fingerprint cursor.")
             }
             let s = try corpusPrepare(
                 "SELECT item,target,sha256,eligible,actor,policies,causes,evidence FROM authority_control_delta WHERE control=?"
@@ -740,19 +814,50 @@ extension ItemIndex {
     /// Complete negative causal-maximal dispositions at the reviewed PRE cut.
     /// Uses the same bounded sparse control walk as eligibilityAtCut.
     func authorityReviewControlHolds(revisionID: String, cut: AuthorityBinding) throws -> [AuthorityBinding] {
+        guard try hasValidatedAuthorityControl(cut) else {
+            throw controlInvalid("Review PRE cut is not validated.")
+        }
+        return try authorityReviewControlHolds(revisionID: revisionID) { token in
+            try self.controlQueue(token: token, id: cut.recordID, covered: false)
+        }
+    }
+    /// Read-only review snapshot across all accepted heads. Descending causal ordinals reduce
+    /// superseded holds before old ancestors; independent concurrent holds remain explicit.
+    /// No temporary join is published by a preview and no physical part can seed this walk.
+    func authorityReviewCurrentControlHolds(revisionID: String) throws -> [AuthorityBinding] {
+        try authorityReviewControlHolds(revisionID: revisionID) { token in
+            var after: String?
+            var count = 0
+            while true {
+                let page = try self.atomicCurrentHeadPage(afterRecordID: after, limit: 128)
+                if page.isEmpty { break }
+                for head in page {
+                    guard try self.hasValidatedAuthorityControl(head) else {
+                        throw self.controlInvalid("Current review head is not an accepted logical root.")
+                    }
+                    try self.controlQueue(token: token, id: head.recordID, covered: false)
+                    after = head.recordID
+                    count += 1
+                }
+            }
+            guard count > 0 else { throw self.controlInvalid("Current review has no admitted PRE head.") }
+        }
+    }
+    private func authorityReviewControlHolds(
+        revisionID: String, seed: (String) throws -> Void
+    ) throws -> [AuthorityBinding] {
         let token = "review.holds." + Identifier.make()
         defer {
             try? execute("DELETE FROM authority_control_work WHERE token=?", [token])
             try? authorityEndWalk(token: token)
         }
         return try withCatalogueScanBudget(reusingActiveBudget: true) {
-            guard try hasValidatedAuthorityControl(cut),
-                let raw = try retainedAuthorityObject(id: revisionID), raw.descriptor.kind == .item
+            guard let raw = try retainedAuthorityObject(id: revisionID), raw.descriptor.kind == .item
             else {
                 throw controlInvalid("Review PRE cut or target is not validated.")
             }
             try authorityBeginWalk(token: token)
-            try controlQueue(token: token, id: cut.recordID, covered: false)
+            try seed(token)
             var result: [AuthorityBinding] = []
             var bytes = 0
             while let node = try controlNext(token) {
@@ -780,11 +885,8 @@ extension ItemIndex {
                         covered = true
                     }
                 }
-                for parent in try authorityControlParents(
-                    .init(recordID: node.0, sha256: controlDigest(node.0)))
-                {
-                    try controlQueue(token: token, id: parent.recordID, covered: covered)
-                }
+                try controlQueueParents(
+                    .init(recordID: node.0, sha256: controlDigest(node.0)), token: token, covered: covered)
                 try execute(
                     "UPDATE authority_control_work SET processed=1 WHERE token=? AND id=?", [token, node.0])
             }
@@ -812,7 +914,7 @@ extension ItemIndex {
                 try hasValidatedAuthorityControl(plan.control),
                 try hasValidatedAuthorityControl(plan.sourceCut),
                 try eligibilityAtCut(revisionID: policy.revisionID, cut: plan.control) == .eligible,
-                try authorityControlParents(plan.control).contains(plan.sourceCut)
+                try acceptedControlHasParent(plan.control, parent: plan.sourceCut)
             else {
                 throw controlInvalid("Invalidation does not bind validated policy/control source context.")
             }
@@ -940,6 +1042,20 @@ extension ItemIndex {
             guard try hasValidatedAuthorityControl(cut) else {
                 throw controlInvalid("Unknown exact policy cut.")
             }
+            let issuer = try { () throws -> String in
+                let statement = try corpusPrepare(
+                    "SELECT origin FROM authority_control WHERE id=? AND sha256=?",
+                    [cut.recordID, cut.sha256])
+                defer { sqlite3_finalize(statement) }
+                guard catalogueStep(statement) == SQLITE_ROW else {
+                    throw controlInvalid("Policy cut lost its exact canonical issuer.")
+                }
+                return try controlText(statement, 0)
+            }()
+            let reviewSchema =
+                try controlNumber(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN('authority_review_applied','authority_review_event')"
+                ) == 2
             try authorityBeginWalk(token: token)
             var after: String?
             while true {
@@ -949,6 +1065,10 @@ extension ItemIndex {
                     [itemID] + (after.map { [$0] } ?? []), limit: 128)
                 if page.isEmpty { break }
                 for id in page where try eligibilityAtCut(revisionID: id, cut: cut) == .eligible {
+                    guard
+                        try sourcePolicyAdmissionAtCut(
+                            revisionID: id, cut: cut, issuer: issuer, reviewSchema: reviewSchema)
+                    else { continue }
                     _ = try authorityVisitOnce(token: token, id: id)
                     try execute("INSERT INTO authority_control_work VALUES(?,?,0,0,1)", [token, id])
                 }
@@ -1001,6 +1121,53 @@ extension ItemIndex {
             return try controlStringPage(
                 "SELECT id FROM authority_control_work WHERE token=? AND covered=0 ORDER BY id LIMIT 2147483647",
                 [token], limit: 1024, allowPrefix: false)
+        }
+    }
+    /// Source-policy membership is the cut issuer's actual admission, not every foreign
+    /// source opinion inherited by a context join. Current receiver admission is irrelevant.
+    /// Complete-cut eligibility is checked separately before this exact ancestry proof.
+    private func sourcePolicyAdmissionAtCut(
+        revisionID: String, cut: AuthorityBinding, issuer: String, reviewSchema: Bool
+    ) throws -> Bool {
+        guard let target = try retainedAuthorityObject(id: revisionID), target.descriptor.kind == .item else {
+            throw controlInvalid("Source policy original is not retained.")
+        }
+        if try controlNumber(
+            "SELECT EXISTS(SELECT 1 FROM authority_control c JOIN authority_local_bootstrap b ON b.pin=c.bootstrap AND b.sha256=c.bootstrap_digest JOIN authority_objects o ON o.id=b.pin AND o.sha256=b.sha256 AND o.control_kind='bootstrap' JOIN authority_dependencies d ON d.target=b.pin AND d.sha256=b.sha256 AND d.kind='bootstrap' WHERE c.id=? AND c.sha256=? AND d.source=?)",
+            [cut.recordID, cut.sha256, revisionID]) == 1
+        {
+            return true
+        }
+        let review =
+            reviewSchema
+            ? " OR EXISTS(SELECT 1 FROM authority_review_applied a JOIN authority_review_event e ON e.id=a.decision AND e.sha256=a.sha256 JOIN authority_objects decision ON decision.id=e.id AND decision.sha256=e.sha256 AND decision.control_kind='reviewDecision' WHERE a.control=c.id AND a.control_digest=c.sha256 AND a.origin=c.origin AND decision.origin=c.origin AND a.recovery=0 AND e.item=o.item AND ((e.target=o.target AND e.target_digest=o.sha256) OR (e.resolution=o.target AND e.resolution_digest=o.sha256)))"
+            : ""
+        var after: String?
+        while true {
+            let statement = try corpusPrepare(
+                "SELECT c.id,c.sha256 FROM authority_control_outcomes o JOIN authority_control c ON c.id=o.control WHERE o.target=? AND o.sha256=? AND o.eligible=1 AND (c.origin=?"
+                    + review + ")" + (after == nil ? "" : " AND c.id>?") + " ORDER BY c.id LIMIT 128",
+                [revisionID, target.descriptor.sha256, issuer] + (after.map { [$0] } ?? []))
+            var page: [AuthorityBinding] = []
+            do {
+                while true {
+                    let status = catalogueStep(statement)
+                    if status == SQLITE_DONE { break }
+                    guard status == SQLITE_ROW else { throw graphSQLiteError() }
+                    page.append(
+                        try .init(recordID: controlText(statement, 0), sha256: controlText(statement, 1)))
+                }
+                sqlite3_finalize(statement)
+            } catch {
+                sqlite3_finalize(statement)
+                throw error
+            }
+            if page.isEmpty { return false }
+            for candidate in page {
+                if candidate == cut { return true }
+                if try authorityControlContains(candidate, in: cut) { return true }
+                after = candidate.recordID
+            }
         }
     }
     private func controlItemAncestorQueue(token: String, id: String, itemID: String) throws {
@@ -1668,7 +1835,7 @@ extension ItemIndex {
     func authorityLocallyAccepted(revisionID: String, originID: String) throws -> Bool {
         try withCatalogueScanBudget(reusingActiveBudget: true) {
             try controlNumber(
-                "SELECT EXISTS(SELECT 1 FROM authority_control_delta d INDEXED BY authority_control_target JOIN authority_control c ON c.id=d.control WHERE d.target=? AND d.eligible=1 AND c.origin=? LIMIT 1) OR EXISTS(SELECT 1 FROM authority_dependencies d JOIN authority_control c ON c.bootstrap=d.target AND c.bootstrap_digest=d.sha256 WHERE d.source=? AND d.kind='bootstrap' AND c.origin=? LIMIT 1)",
+                "SELECT EXISTS(SELECT 1 FROM authority_control_outcomes d JOIN authority_control c ON c.id=d.control WHERE d.target=? AND d.eligible=1 AND c.origin=? LIMIT 1) OR EXISTS(SELECT 1 FROM authority_dependencies d JOIN authority_control c ON c.bootstrap=d.target AND c.bootstrap_digest=d.sha256 WHERE d.source=? AND d.kind='bootstrap' AND c.origin=? LIMIT 1)",
                 [revisionID, originID, revisionID, originID]) == 1
         }
     }
@@ -1695,7 +1862,7 @@ extension ItemIndex {
     func authorityAcceptanceControl(revisionID: String) throws -> AuthorityBinding? {
         try withCatalogueScanBudget(reusingActiveBudget: true) {
             let s = try corpusPrepare(
-                "SELECT c.id,c.sha256 FROM authority_control_delta d INDEXED BY authority_control_target CROSS JOIN authority_control c ON c.id=d.control WHERE d.target=? AND d.eligible=1 ORDER BY d.control LIMIT 1",
+                "SELECT c.id,c.sha256 FROM authority_control_outcomes d CROSS JOIN authority_control c ON c.id=d.control WHERE d.target=? AND d.eligible=1 ORDER BY d.control LIMIT 1",
                 [revisionID])
             defer { sqlite3_finalize(s) }
             let status = catalogueStep(s)
@@ -1758,7 +1925,7 @@ extension ItemIndex {
     }
     private func controlDelta(_ control: String, _ revision: String, _ digest: String) throws -> Bool? {
         let s = try corpusPrepare(
-            "SELECT sha256,eligible FROM authority_control_delta WHERE control=? AND target=?",
+            "SELECT sha256,eligible FROM authority_control_outcomes WHERE control=? AND target=?",
             [control, revision])
         defer { sqlite3_finalize(s) }
         let status = catalogueStep(s)
@@ -1775,6 +1942,17 @@ extension ItemIndex {
                 [token, covered ? "1" : "0", id])
         } else if covered {
             try execute("UPDATE authority_control_work SET covered=1 WHERE token=? AND id=?", [token, id])
+        }
+    }
+    private func controlQueueParents(_ binding: AuthorityBinding, token: String, covered: Bool) throws {
+        var cursor: String?
+        while true {
+            let page = try acceptedControlParents(binding, afterRecordID: cursor)
+            if page.isEmpty { return }
+            for parent in page {
+                try controlQueue(token: token, id: parent.recordID, covered: covered)
+                cursor = parent.recordID
+            }
         }
     }
     private func controlNext(_ token: String) throws -> (String, Bool)? {

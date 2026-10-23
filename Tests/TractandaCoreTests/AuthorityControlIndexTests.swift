@@ -5,6 +5,141 @@ import XCTest
 @testable import TractandaCore
 
 final class AuthorityControlIndexTests: XCTestCase {
+    func testSourcePolicyFrontierRequiresCutIssuerAdmissionAndCompleteEligibility() throws {
+        let f = try Fixture()
+        let a = try f.item(subject: "local policy")
+        let b = try f.item(subject: "foreign opinion")
+        let remote = try f.id()
+        let prior = try f.commit(changes: [(a, true)], origin: f.origin)
+        let foreign = try f.commit(changes: [(b, true)], origin: remote)
+        let joined = try f.commit(
+            parents: [prior.binding, foreign.binding], origin: f.origin,
+            localParent: prior.binding)
+        XCTAssertEqual(try f.index.eligibilityAtCut(revisionID: b.id, cut: joined.binding), .eligible)
+        XCTAssertTrue(
+            try f.index.authorityItemFrontierAtCut(itemID: b.target.itemID, cut: joined.binding).isEmpty)
+        let admitted = try f.commit(
+            parents: [joined.binding], changes: [(b, true)], origin: f.origin,
+            localParent: joined.binding)
+        XCTAssertEqual(
+            try f.index.authorityItemFrontierAtCut(itemID: b.target.itemID, cut: admitted.binding), [b.id])
+        XCTAssertTrue(
+            try f.index.authorityItemFrontierAtCut(itemID: b.target.itemID, cut: joined.binding).isEmpty,
+            "A later local admission cannot supply an older exact source cut.")
+        let held = try f.commit(
+            parents: [admitted.binding, foreign.binding], changes: [(b, false)],
+            origin: remote, localParent: foreign.binding)
+        let complete = try f.commit(
+            parents: [admitted.binding, held.binding], origin: f.origin,
+            localParent: admitted.binding)
+        XCTAssertEqual(try f.index.eligibilityAtCut(revisionID: b.id, cut: complete.binding), .held)
+        XCTAssertTrue(
+            try f.index.authorityItemFrontierAtCut(itemID: b.target.itemID, cut: complete.binding).isEmpty,
+            "Earlier positive admission cannot bypass a genuine complete-cut hold.")
+    }
+    func testAcceptedSupportCursorPreservesLegacyFactsAndBoundedParents() throws {
+        let f = try Fixture()
+        let a = try f.item()
+        let b = try f.item()
+        let prior = try f.commit(changes: [(a, true)], origin: f.origin)
+        let plan = try f.commit(
+            parents: [prior.binding], changes: [(a, false), (b, true)], origin: f.origin,
+            localParent: prior.binding)
+        var cursor: AuthorityStore.SupportCursor?
+        var facts: [ItemValue] = []
+        while let next = try f.index.acceptedControlSupports(plan.binding, after: cursor, limit: 1).first {
+            facts.append(next.delta.itemValue)
+            XCTAssertEqual(
+                next.fingerprint, AuthorityRecordCodec.sha256(try JSON.encode(next.delta.itemValue)))
+            cursor = next.cursor
+        }
+        XCTAssertEqual(facts, plan.deltas.map(\.itemValue))
+        XCTAssertEqual(try f.index.acceptedControlParents(plan.binding, limit: 1), [prior.binding])
+        XCTAssertTrue(
+            try f.index.acceptedControlParents(plan.binding, afterRecordID: prior.binding.recordID).isEmpty)
+    }
+
+    func testAtomicOriginalPREWindowsReduceAllParentsAndCoveredAncestors() throws {
+        let f = try Fixture()
+        let a = try f.item()
+        let old = try f.commit(changes: [(a, false)])
+        // This Index fixture supplies already accepted facts; it does not claim ordinary positive
+        // authorization after a hold. Actual producer/D/B/C/receiver proof is a Store-level case.
+        let later = try f.commit(parents: [old.binding], changes: [(a, true)])
+        let concurrent = try f.commit(changes: [(a, false)])
+        for (parents, expected) in [
+            ([old.binding, later.binding], AuthorityStore.HistoricalEligibility.eligible),
+            ([later.binding, concurrent.binding], .held),
+        ] {
+            let draft = try f.commit(parents: parents, admit: false)
+            let walk = try AtomicAuthorityOriginalPRE(
+                index: f.index, source: .legacy(draft), target: a.target)
+            defer { try? walk.close() }
+            var result: AuthorityStore.HistoricalEligibility?
+            for _ in 0..<128 where result == nil { result = try walk.step(maximumUnits: 1) }
+            XCTAssertEqual(result, expected)
+            XCTAssertGreaterThan(walk.processedUnits, 2)
+            try walk.close()
+        }
+        XCTAssertEqual(try f.count("authority_control_work"), 0)
+    }
+
+    func testGloballyAbsentOriginalPREAvoidsHistoryWalkWithoutInventingMembership() throws {
+        let f = try Fixture()
+        let known = try f.item()
+        let absent = try f.item()
+        let first = try f.commit(changes: [(known, false)])
+        var head = first
+        for _ in 0..<8 { head = try f.commit(parents: [head.binding]) }
+        let unrelated = try f.commit()
+        let draft = try f.commit(parents: [head.binding], admit: false)
+        let work = try AtomicAuthorityOriginalPRE(
+            index: f.index, source: .legacy(draft), target: absent.target)
+        defer { try? work.close() }
+        XCTAssertEqual(try work.step(maximumUnits: 1), .unknown)
+        XCTAssertEqual(work.processedUnits, 0)
+        XCTAssertTrue(try work.contains(head.binding))
+        XCTAssertTrue(
+            try work.contains(first.binding),
+            "An ancestor denial/context cause is not erased for a new target")
+        XCTAssertEqual(try f.index.eligibilityAtCut(revisionID: known.id, cut: head.binding), .held)
+        XCTAssertFalse(try work.contains(unrelated.binding))
+    }
+
+    func testAtomicOriginalPREWindowYieldsWithoutRenewingOuterBudget() throws {
+        let f = try Fixture()
+        let a = try f.item()
+        var head = try f.commit(changes: [(a, true)])
+        for _ in 0..<8 { head = try f.commit(parents: [head.binding]) }
+        let draft = try f.commit(parents: [head.binding], admit: false)
+        let walk = try AtomicAuthorityOriginalPRE(index: f.index, source: .legacy(draft), target: a.target)
+        defer { try? walk.close() }
+        f.index.graphMaximumVMInstructions = 6000
+        var result: AuthorityStore.HistoricalEligibility?
+        var yieldedForAllowance = false
+        try f.index.withCatalogueScanBudget {
+            for _ in 0..<128 {
+                let before = walk.processedUnits
+                result = try walk.step(maximumUnits: 1)
+                if result != nil { break }
+                if before == walk.processedUnits {
+                    yieldedForAllowance = true
+                    break
+                }
+            }
+        }
+        XCTAssertNil(result)
+        XCTAssertTrue(yieldedForAllowance)
+        XCTAssertGreaterThan(walk.processedUnits, 0)
+        XCTAssertLessThan(f.index.lastCatalogueScanWorkForTesting, 6000)
+        let progressed = walk.processedUnits
+        f.index.graphMaximumVMInstructions = 200_000_000
+        for _ in 0..<128 where result == nil { result = try walk.step(maximumUnits: 1) }
+        XCTAssertEqual(result, .eligible)
+        XCTAssertGreaterThan(walk.processedUnits, progressed)
+        try walk.close()
+        XCTAssertEqual(try f.count("authority_control_work"), 0)
+    }
     private struct Item {
         let original: AuthorityRevision
         let row: ItemIndex.CatalogueRow

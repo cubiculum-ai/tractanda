@@ -7,10 +7,17 @@ import XCTest
 final class PeerEnrollmentApprovalTests: XCTestCase {
     final class Accounts: AccountDirectory, @unchecked Sendable {
         let human: UInt32 = 51001
+        let contributor: UInt32 = 51003
+        var contributorHasWriterGroup = true
         var administrator = true
         func user(forUID uid: UInt32) throws -> AccountIdentity {
             if uid == tractanda_uid() {
                 return .init(uid: uid, name: "daemon", primaryGroupName: "service", groupIDs: [71002])
+            }
+            if uid == contributor {
+                return .init(
+                    uid: uid, name: "contributor", primaryGroupName: "writers",
+                    groupIDs: contributorHasWriterGroup ? [71003] : [])
             }
             if uid == human {
                 return .init(
@@ -22,11 +29,13 @@ final class PeerEnrollmentApprovalTests: XCTestCase {
         func user(named name: String) throws -> AccountIdentity {
             if name == "daemon" { return try user(forUID: tractanda_uid()) }
             if name == "human" { return try user(forUID: human) }
+            if name == "contributor" { return try user(forUID: contributor) }
             throw TractandaError("unresolvedPrincipal", "Unknown enrollment test user")
         }
         func groupID(named name: String) throws -> UInt32 {
             if ["staff", "admin", "sudo"].contains(name) { return 71001 }
             if name == "service" { return 71002 }
+            if name == "writers" { return 71003 }
             throw TractandaError("unresolvedPrincipal", "Unknown enrollment test group")
         }
     }
@@ -45,7 +54,7 @@ final class PeerEnrollmentApprovalTests: XCTestCase {
                 "administration": .text("system"), "administratorGroup": .text("staff"),
             ])
         }
-        init(capturedPolicySource: Bool = false) throws {
+        init(capturedPolicySource: Bool = false, initialPolicy: ItemValue? = nil) throws {
             try AttachmentFixtureCapacity.requireFree()
             // One initialized tiny source and an empty prepared target estimate below16MiB.
             guard AttachmentFixtureCapacity.fixtureCapBytes >= 16 * 1024 * 1024 else {
@@ -63,7 +72,7 @@ final class PeerEnrollmentApprovalTests: XCTestCase {
                 // Established-peer fixture: capture its real existing policy through the accepted
                 // development conversion transaction. Never forge imported policy eligibility.
                 source = try ItemStore(root: sourceRoot, accounts: accounts, revisionProjectionEnabled: true)
-                _ = try source.configureAccess(Self.policy, operationID: Self.id())
+                _ = try source.configureAccess(initialPolicy ?? Self.policy, operationID: Self.id())
                 var limits = InitialAuthorityBootstrap.Limits()
                 limits.maximumRecords = 16
                 limits.maximumBytes = 1024 * 1024
@@ -78,7 +87,8 @@ final class PeerEnrollmentApprovalTests: XCTestCase {
                 try source.finishInitialAuthority(conversion)
             } else {
                 source = try ItemStore.initializeFresh(
-                    root: sourceRoot, accounts: accounts, initialAccessConfiguration: Self.policy)
+                    root: sourceRoot, accounts: accounts,
+                    initialAccessConfiguration: initialPolicy ?? Self.policy)
             }
             let storeID = try CanonicalReaderRequirement.storeIdentity(
                 root: sourceRoot, ownerUID: tractanda_uid())

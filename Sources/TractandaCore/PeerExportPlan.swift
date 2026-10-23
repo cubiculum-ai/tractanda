@@ -601,11 +601,11 @@ final class PeerExportPlan {
             else { return nil }
             return data
         } else if row.descriptor.kind == .authority {
-            let record = try AuthorityRecordCodec.decode(data).record
+            let record = try CanonicalAuthorityOriginal(data)
             guard record.recordID == row.descriptor.id, record.storeID == context.storeID else {
                 throw TractandaError("peerObjectCollision", "Export authority identity/store differs.")
             }
-            origin = record.originReplicaID
+            origin = record.origin
         } else {
             throw TractandaError(
                 "unsupportedPeerDependency", "Payload transfer remains outside metadata export.")
@@ -624,7 +624,7 @@ final class PeerExportPlan {
         let origin =
             slot.kind == .item
             ? try AuthorityRevision(originalBytes: bytes).revision.provenance?.originReplicaID
-            : try AuthorityRecordCodec.decode(bytes).record.originReplicaID
+            : try CanonicalAuthorityOriginal(bytes).origin
         if let origin, let decision = try coordinator.originDecision(origin, readBudget: chargeBootstrapProof)
         {
             refs.append(.init(id: decision.approval.id, kind: .authority, digest: decision.approval.sha256))
@@ -691,72 +691,85 @@ final class PeerExportPlan {
                 id(pin.recordID, .authority, pin.sha256)
             }
         } else {
-            let record = try AuthorityRecordCodec.decode(bytes).record
-            for parent in record.parentAuthorityIDs { id(parent, .authority) }
-            for field in [
-                "controls", "localParent", "bootstrap", "pages", "children", "acceptedAuthority", "previous",
-                "sourceControl", "causes", "exposures", "controlHolds", "retirements", "issuerAdmission",
-            ] {
-                for value in try AuthorityRecord.list(record.payload[field] ?? .list([])) {
-                    try control(value)
+            let original = try CanonicalAuthorityOriginal(bytes)
+            if let legacy = original.legacy {
+                let record = legacy.record
+                for parent in record.parentAuthorityIDs { id(parent, .authority) }
+                for field in [
+                    "controls", "localParent", "bootstrap", "pages", "children", "acceptedAuthority",
+                    "previous",
+                    "sourceControl", "causes", "exposures", "controlHolds", "retirements", "issuerAdmission",
+                ] {
+                    for value in try AuthorityRecord.list(record.payload[field] ?? .list([])) {
+                        try control(value)
+                    }
                 }
-            }
-            for field in ["cut", "evidence"] {
-                if let value = record.payload[field] { try control(value) }
-            }
-            for field in [
-                "itemPolicies", "admissionPolicies", "administrationPolicies", "revocations", "resolution",
-            ] {
-                for value in try AuthorityRecord.list(record.payload[field] ?? .list([])) {
-                    try target(value)
+                for field in ["cut", "evidence"] {
+                    if let value = record.payload[field] { try control(value) }
                 }
-            }
-            if let value = record.payload["target"] { try target(value) }
-            for field in ["parents", "frontier", "holds", "decisionFrontier"] {
-                for value in try AuthorityRecord.ids(record.payload[field] ?? .list([]), maximum: 1024) {
-                    id(value, (field == "holds" || field == "decisionFrontier") ? .authority : .item)
+                for field in [
+                    "itemPolicies", "admissionPolicies", "administrationPolicies", "revocations",
+                    "resolution",
+                ] {
+                    for value in try AuthorityRecord.list(record.payload[field] ?? .list([])) {
+                        try target(value)
+                    }
                 }
-            }
-            for entry in try AuthorityRecord.list(record.payload["entries"] ?? .list([])) {
-                try target(entry.map!["target"]!)
-                for author in try AuthorityRecord.ids(entry.map!["frontier"], maximum: 1024) {
-                    id(author, .item)
+                if let value = record.payload["target"] { try target(value) }
+                for field in ["parents", "frontier", "holds", "decisionFrontier"] {
+                    for value in try AuthorityRecord.ids(record.payload[field] ?? .list([]), maximum: 1024) {
+                        id(value, (field == "holds" || field == "decisionFrontier") ? .authority : .item)
+                    }
                 }
-            }
-            for delta in try AuthorityRecord.list(record.payload["deltas"] ?? .list([])) {
-                try target(delta.map!["target"]!)
-                for policy in try AuthorityRecord.ids(delta.map!["policies"]) { id(policy, .item) }
-                for field in ["causes", "evidence"] {
-                    for value in try AuthorityRecord.list(delta.map![field]) { try control(value) }
+                for entry in try AuthorityRecord.list(record.payload["entries"] ?? .list([])) {
+                    try target(entry.map!["target"]!)
+                    for author in try AuthorityRecord.ids(entry.map!["frontier"], maximum: 1024) {
+                        id(author, .item)
+                    }
                 }
-            }
-            for value in try AuthorityRecord.list(record.payload["members"] ?? .list([])) {
-                let member = try PeerLifecycle.Member(value)
-                id(member.objectID, member.kind, member.sha256)
-            }
-            if let manifest = record.payload["manifestID"]?.string { id(manifest, .authority) }
-            if record.kind == .reconciliationWitness {
-                // The witness names its output as well as its exact parents/exposures.
-                id(try AuthorityRecord.persistentID(record.payload["outputRevisionID"]), .item)
-            }
-            if record.kind == .reviewHold {
-                unsupported = "unsupportedForeignProtectedReviewHold"
-            }
-            if record.kind == .reviewDecision {
-                let cuts = try AuthorityRecord.list(record.payload["sourceControl"])
-                let resolutions = try AuthorityRecord.list(record.payload["resolution"])
-                if record.payload["decision"] != .text("accept") || cuts.count != 1 || resolutions.count != 1
+                for delta in try AuthorityRecord.list(record.payload["deltas"] ?? .list([])) {
+                    try target(delta.map!["target"]!)
+                    for policy in try AuthorityRecord.ids(delta.map!["policies"]) { id(policy, .item) }
+                    for field in ["causes", "evidence"] {
+                        for value in try AuthorityRecord.list(delta.map![field]) { try control(value) }
+                    }
+                }
+                for value in try AuthorityRecord.list(record.payload["members"] ?? .list([])) {
+                    let member = try PeerLifecycle.Member(value)
+                    id(member.objectID, member.kind, member.sha256)
+                }
+                if let manifest = record.payload["manifestID"]?.string { id(manifest, .authority) }
+                if record.kind == .reconciliationWitness {
+                    // The witness names its output as well as its exact parents/exposures.
+                    id(try AuthorityRecord.persistentID(record.payload["outputRevisionID"]), .item)
+                }
+                if record.kind == .reviewHold {
+                    unsupported = "unsupportedForeignProtectedReviewHold"
+                }
+                if record.kind == .reviewDecision {
+                    let cuts = try AuthorityRecord.list(record.payload["sourceControl"])
+                    let resolutions = try AuthorityRecord.list(record.payload["resolution"])
+                    if record.payload["decision"] != .text("accept") || cuts.count != 1
+                        || resolutions.count != 1
+                    {
+                        unsupported = "unsupportedForeignNonAtomicReview"
+                    }
+                }
+                if record.kind == .originRetirementPage {
+                    unsupported = "unsupportedHistoricalRetirementAdmission"
+                }
+                if record.kind == .originRetirement,
+                    record.payload["retirementProfile"] != .text(PeerLifecycle.timestampProfile)
                 {
-                    unsupported = "unsupportedForeignNonAtomicReview"
+                    unsupported = "unsupportedHistoricalRetirementAdmission"
                 }
-            }
-            if record.kind == .originRetirementPage {
-                unsupported = "unsupportedHistoricalRetirementAdmission"
-            }
-            if record.kind == .originRetirement,
-                record.payload["retirementProfile"] != .text(PeerLifecycle.timestampProfile)
-            {
-                unsupported = "unsupportedHistoricalRetirementAdmission"
+            } else {
+                // Atomic bodies are physical framing only. Logical parents/support inputs come
+                // from the accepted normalized dependency rows, never decoded effect arrays or
+                // a part's controlID masquerading as a causal cut.
+                for child in try original.physicalChildren() {
+                    id(child.binding.recordID, .authority, child.binding.sha256)
+                }
             }
         }
         // Duplicates retain all competing digest constraints; merged() rejects ambiguity.

@@ -368,12 +368,12 @@ enum PeerInventory {
                         proof = .pinnedLegacy
                     }
                 } else {
-                    let record = try AuthorityRecordCodec.decode(bytes).record
+                    let record = try CanonicalAuthorityOriginal(bytes)
                     guard record.recordID == row.descriptor.id, record.storeID == context.storeID else {
                         throw TractandaError(
                             "peerObjectCollision", "Inventory control identity/store differs.")
                     }
-                    guard try currentReceipt(row, origin: record.originReplicaID) else { continue }
+                    guard try currentReceipt(row, origin: record.origin) else { continue }
                     proof = .configuredOrigin
                 }
                 let entry = Entry(

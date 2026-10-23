@@ -20,9 +20,27 @@ final class PeerEnrollmentActivationTests: XCTestCase {
         let pin: PeerEnrollmentActivation.Pin
         var session: PeerEnrollmentActivation.Session?
         var target: ItemStore?
-        init(withAttachment: Bool = false) throws {
-            source = try Source()  // Real fresh profilev2, not a converted/importer-special fixture.
-            let base = try source.commit("actual prepared target baseline")
+        init(
+            withAttachment: Bool = false, sourcePolicy: ItemValue? = nil,
+            basePermissions: ItemValue? = nil
+        ) throws {
+            source = try Source(initialPolicy: sourcePolicy)  // Real fresh profilev2, not a converted/importer-special fixture.
+            let base: Revision
+            if let basePermissions {
+                let fixture = source
+                base = try fixture.source.withAccess(forUID: fixture.uid) {
+                    try fixture.source.commit(
+                        .init(
+                            classID: "Item",
+                            changes: [
+                                "subject": .text("actual prepared target baseline"),
+                                "permissions": basePermissions,
+                            ], operationID: "actual prepared target baseline")
+                    ).revision
+                }
+            } else {
+                base = try source.commit("actual prepared target baseline")
+            }
             if withAttachment {
                 let fixture = source
                 revision = try fixture.source.withAccess(forUID: fixture.uid) {
@@ -147,7 +165,9 @@ final class PeerEnrollmentActivationTests: XCTestCase {
     func testActualPreparedTargetActivatesRegistersReopensAndRebuilds() throws {
         let f = try Fixture()
         f.assertPending()
-        try f.open()
+        try f.open(progress: { phase in
+            FileHandle.standardError.write(Data(("TARGET_ACTIVATION_TEST " + phase + "\n").utf8))
+        })
         try f.transfer()
         let receipt = try f.finish()
         XCTAssertEqual(receipt.approval, f.pin.approval)
@@ -165,6 +185,7 @@ final class PeerEnrollmentActivationTests: XCTestCase {
         _ = try f.source.source.readPeerEnrollment(
             f.handle, object: f.material.baseline.root, offset: 0, forUID: f.source.uid)
         XCTAssertEqual(try f.finish(), receipt)
+        FileHandle.standardError.write(Data("TARGET_ACTIVATION_TEST coldReopen\n".utf8))
         try f.reopen(cold: true)
         XCTAssertEqual(
             try f.target!.withAccess(forUID: f.source.uid) { try f.target!.get(f.revision.itemID) },
@@ -186,7 +207,7 @@ final class PeerEnrollmentActivationTests: XCTestCase {
             ))
         XCTAssertEqual(
             try CanonicalReaderRequirement.load(root: f.source.targetRoot, ownerUID: tractanda_uid())?
-                .minimumReaderLevel, 14)
+                .minimumReaderLevel, 15)
         try f.source.reopen(removeIndex: true)
         XCTAssertEqual(
             try f.source.source.loadPeerCredential(peerID: f.material.sourceContext.peerID).commitment,
@@ -330,6 +351,34 @@ final class PeerEnrollmentActivationTests: XCTestCase {
             try f.target!.withAccess(forUID: f.source.uid) { try f.target!.get(f.revision.itemID) },
             f.revision)
     }
+    func testAcceptedBaselineCrashBeforeActivationConfigurationResumesOnlyPrivateOwner() throws {
+        let f = try Fixture()
+        try f.open(progress: {
+            if $0 == "baselineAccepted" {
+                throw TractandaError("testInterruption", "Accepted baseline before pairing configuration")
+            }
+        })
+        try f.transfer()
+        code("testInterruption") { _ = try f.finish() }
+        XCTAssertNil(try PeerEnrollmentActivation.loadReceipt(f.targetFiles()))
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath:
+                    f.source.targetRoot.appendingPathComponent(
+                        PeerEnrollmentActivation.directory + "/configuration.json"
+                    ).path))
+        f.closeSession()
+        f.assertPending()
+        // The dirty rebuild must replay the exact accepted source roots using the private
+        // approved provisioning scope, without a fabricated completed activation receipt.
+        try f.open()
+        _ = try f.finish()
+        try f.reopen(cold: true)
+        XCTAssertEqual(
+            try f.target!.withAccess(forUID: f.source.uid) { try f.target!.get(f.revision.itemID) },
+            f.revision)
+    }
+
     func testPreparedTargetCannotExposeUnattendedRuntimeCredentialsBeforeActivation() throws {
         let f = try Fixture()
         let record = try PeerEnrollmentActivation.makeRecord(f.material, pin: f.pin)

@@ -98,7 +98,7 @@ extension AuthorityStore {
         let heldRow: ItemIndex.CatalogueRow
         let resolution: AuthorityRevision
         let evidence: AuthorityRecordCodec.Verified
-        let control: VerifiedControlPlan
+        let control: ReviewControlSummary
         let policyFrontier: [Target]
         let operationID: String
 
@@ -106,6 +106,16 @@ extension AuthorityStore {
             event: VerifiedReviewEvent, held: AuthorityRevision, heldRow: ItemIndex.CatalogueRow,
             resolution: AuthorityRevision, evidence: AuthorityRecordCodec.Verified,
             control: VerifiedControlPlan, policyFrontier: [Target], operationID: String
+        ) throws {
+            try self.init(
+                event: event, held: held, heldRow: heldRow, resolution: resolution,
+                evidence: evidence, control: ReviewControlSummary(legacy: control),
+                policyFrontier: policyFrontier, operationID: operationID)
+        }
+        init(
+            event: VerifiedReviewEvent, held: AuthorityRevision, heldRow: ItemIndex.CatalogueRow,
+            resolution: AuthorityRevision, evidence: AuthorityRecordCodec.Verified,
+            control: ReviewControlSummary, policyFrontier: [Target], operationID: String
         ) throws {
             self.event = event
             self.held = held
@@ -139,7 +149,9 @@ extension AuthorityStore {
                                 + resolution.revision.provenance!.unsetFields)),
                 resolution.revision.fields["operationID"]?.string == operationID,
                 try resolution.revision.provenance?.kind == .resolution,
-                control.control.record.originReplicaID == evidence.record.originReplicaID,
+                control.origin == evidence.record.originReplicaID,
+                control.actor == event.record.record.actorPrincipal,
+                control.previous == event.preCut,
                 control.parents.contains(event.preCut),
                 control.deltas.count == 2,
                 control.deltas.allSatisfy({ $0.eligible }),
@@ -217,5 +229,21 @@ extension AuthorityStore {
             throw TractandaError(
                 "invalidAuthority", "Review policy transition was not an explicit fresh C choice.")
         }
+    }
+}
+
+extension AuthorityStore.ReviewControlSummary {
+    /// Explicit immutable legacy decoding, never a fallback writer or synthetic control.
+    func requireLegacyPlan() throws -> AuthorityStore.VerifiedControlPlan {
+        guard kind == .legacy else {
+            throw TractandaError(
+                "invalidAuthority", "Atomic review must use its logical-root activation path.")
+        }
+        let plan = try AuthorityStore.VerifiedControlPlan(control: AuthorityRecordCodec.decode(originalBytes))
+        guard try AuthorityStore.ReviewControlSummary(legacy: plan) == self else {
+            throw TractandaError(
+                "invalidAuthority", "Legacy review summary differs from its canonical bytes.")
+        }
+        return plan
     }
 }

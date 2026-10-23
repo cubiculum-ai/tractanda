@@ -268,7 +268,13 @@ extension PeerIntakeCoordinator {
             admission: admission, manifestDigest: publication.manifestDigest,
             contextDigest: AuthorityRecordCodec.sha256(try JSON.encode(publication.context)))
         let path = ["authority", "intake", packageID, "origin-admissions", origin]
-        try CanonicalReaderRequirement.beforeOriginAdmissionPublication(root: root, ownerUID: ownerUID)
+        if try atomicCanonicalActivated() {
+            try CanonicalReaderRequirement.beforeAtomicAuthorityPublication(
+                root: root, ownerUID: ownerUID, support: canonicalFormatSupport)
+        } else {
+            try CanonicalReaderRequirement.beforeOriginAdmissionPublication(
+                root: root, ownerUID: ownerUID, support: canonicalFormatSupport)
+        }
         if let old = try originReceipt(packageID: packageID, origin: origin, readBudget: charge) {
             guard old == value else { throw PeerOriginAdmission.failure("Immutable origin receipt differs.") }
         } else {

@@ -133,8 +133,7 @@ final class AtomicAuthorityCodecTests: XCTestCase {
         let v4Store = replacing(
             root.itemValue, "storeID", with: .text("00000001-0000-4000-8000-000000000001"))
         XCTAssertNoThrow(try Format.Record(value: v4Store), "Match legacy authority StoreID validation")
-        XCTAssertEqual(CanonicalFormatSupport.current.readerLevel, 14, "No format activation in this slice")
-        XCTAssertFalse(CanonicalFormatSupport.current.capabilities.contains(Format.profile))
+
     }
     func testValidSemanticEntryCrossesPhysicalLeaves() throws {
         let value = try largeEffect()

@@ -65,10 +65,17 @@ enum PeerNeedsTransfer {
                 return Result(descriptor: descriptor, state: .repairRequired, disposition: disposition)
             }
             let node = descriptor.kind == .item ? try AuthorityRevision(originalBytes: raw) : nil
-            let origin =
-                try node?.revision.provenance?.originReplicaID
-                ?? (descriptor.kind == .authority
-                    ? AuthorityRecordCodec.decode(raw).record.originReplicaID : nil)
+            let authority = descriptor.kind == .authority ? try CanonicalAuthorityOriginal(raw) : nil
+            if let authority {
+                guard authority.recordID == descriptor.id, authority.storeID == coordinator.storeID,
+                    authority.sha256 == descriptor.sha256
+                else {
+                    throw TractandaError(
+                        "peerObjectCollision", "Receiver authority original identity/store/digest differs.")
+                }
+            }
+            // Physical atomic parts supply an exact original origin only, never a control cut.
+            let origin = try node?.revision.provenance?.originReplicaID ?? authority?.origin
             var permitted = false
             var cursor: String?
             var hadAdmittedReceipt = row.permittedOrigin

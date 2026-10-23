@@ -16,6 +16,63 @@ extension PeerIntakeCoordinator {
         }
         return try AuthorityRecordCodec.decode(bytes(row))
     }
+    /// Header dispatch for immutable legacy originals and one logical atomic root. A physical
+    /// part cannot be used as a source cut even when its original bytes are valid and retained.
+    func logicalControlHeader(_ binding: AuthorityBinding, index: ItemIndex) throws
+        -> LogicalControlSource.Header
+    {
+        guard let row = try index.retainedAuthorityObject(id: binding.recordID),
+            row.descriptor.kind == .authority, row.descriptor.sha256 == binding.sha256
+        else { throw TractandaError("missingDependencies", "Exact logical control is missing.") }
+        let original = try CanonicalAuthorityOriginal(bytes(row))
+        switch original.payload {
+        case .legacy(let value):
+            return try LogicalControlSource.legacy(.init(control: value)).header()
+        case .atomic(let record):
+            guard record.kind == .atomicControl else {
+                throw AtomicAuthorityFormat.invalid("Physical parts are not logical source cuts.")
+            }
+            return try AtomicControlStage(rootBytes: original.bytes).header
+        }
+    }
+    /// A first logical root does not get to choose a different ordinary authority object as its
+    /// baseline. The configured root was already fully admitted by the native baseline path;
+    /// private atomic validation never seeds/changes that admission as a side effect.
+    func requireAtomicBootstrap(_ header: LogicalControlSource.Header, index: ItemIndex) throws {
+        if let pin = try configuration()?.bootstrap {
+            let binding = try AuthorityBinding(recordID: pin.recordID, sha256: pin.sha256)
+            guard header.bootstrap == binding,
+                let raw = try index.retainedAuthorityObject(id: pin.recordID),
+                raw.descriptor.kind == .authority,
+                raw.descriptor.sha256 == pin.sha256
+            else {
+                throw AtomicAuthorityFormat.invalid(
+                    "Atomic baseline differs from the configured initial pin.")
+            }
+            let original = try AuthorityRecordCodec.decode(bytes(raw)).record
+            // pin.actor is the local administrator who approved this baseline; the hashed
+            // original's actor is its source creator. They are separate historical principals.
+            _ = try AuthorityRecord.text(.text(pin.actor))
+            guard original.kind == .bootstrap, original.storeID == storeID else {
+                throw AtomicAuthorityFormat.invalid(
+                    "Atomic baseline is not the exact configured bootstrap original.")
+            }
+            if header.previous == nil {
+                guard try index.hasAcceptedInitialBootstrap(binding) else {
+                    throw TractandaError(
+                        "missingDependencies",
+                        "Atomic genesis awaits fully validated initial baseline admission.")
+                }
+            }
+        } else {
+            // Native fresh-store initialization creates the exact reserved policy/bootstrap
+            // first. Empty derived state or a self-issued UUID is never a founding capability.
+            throw TractandaError(
+                "missingBootstrap",
+                "Initialize the canonical pinned baseline before an atomic authority root.")
+        }
+    }
+
     func bindingAtCut(_ value: ItemValue, cut: AuthorityBinding, index: ItemIndex) throws
         -> AuthorityRevision?
     {
@@ -34,7 +91,7 @@ extension PeerIntakeCoordinator {
         guard let cut = try sourceControl(evidence), try index.hasValidatedAuthorityControl(cut) else {
             throw TractandaError("missingDependencies", "Source PRE-publication cut is not validated.")
         }
-        guard try control(cut, index: index).record.originReplicaID == evidence.originReplicaID else {
+        guard try logicalControlHeader(cut, index: index).origin == evidence.originReplicaID else {
             throw TractandaError(
                 "invalidAuthority", "A source PRE cut must be this writing replica's validated context.")
         }
@@ -518,7 +575,8 @@ extension PeerIntakeCoordinator {
     /// later grant. A different policy UUID alone does not establish a loss of authority.
     func invalidationOutcome(
         _ node: AuthorityRevision, evidence: AuthorityRecord,
-        contextHeads: [AuthorityBinding]? = nil, index: ItemIndex
+        contextHeads: [AuthorityBinding]? = nil,
+        contextContains: ((AuthorityBinding) throws -> Bool)? = nil, index: ItemIndex
     ) throws -> InvalidationOutcome {
         var outcome = InvalidationOutcome()
         let policies =
@@ -546,7 +604,7 @@ extension PeerIntakeCoordinator {
                     {
                         continue
                     }
-                    if contextHeads == nil,
+                    if contextHeads == nil, contextContains == nil,
                         try index.authorityDisposition(id: transition.policy.revisionID)?.disposition
                             != .eligible
                     {
@@ -560,6 +618,7 @@ extension PeerIntakeCoordinator {
                         continue
                     }
 
+                    if let contextContains, try !contextContains(transition.control) { continue }
                     if let heads = contextHeads {
                         var relevant = false
                         for head in heads
@@ -750,6 +809,15 @@ extension PeerIntakeCoordinator {
 
 extension PeerIntakeCoordinator {
     func stageControlUnit(_ records: [AuthorityRecord], contextToken: String) throws -> String {
+        let atomic = try atomicCanonicalActivated()
+        if atomic {
+            guard records.allSatisfy({ $0.kind != .controlCommit }) else {
+                throw TractandaError(
+                    "unsupportedAtomicProducer", "Activated writers cannot emit legacy logical controls.")
+            }
+            try CanonicalReaderRequirement.beforeAtomicAuthorityPublication(
+                root: root, ownerUID: ownerUID, support: canonicalFormatSupport)
+        }
         let context = try context(peerID: "local")
         let packageID = try UUID.makeVersion1().uuidString.lowercased()
         let objects = try records.map { record -> (PeerPackage.Object, Data) in
@@ -769,7 +837,9 @@ extension PeerIntakeCoordinator {
                 packageID: packageID,
                 manifestDigest: AuthorityRecordCodec.sha256(JSON.encode(manifest)), context: context,
                 contextToken: contextToken, arrivalMinute: minute))
-        try CanonicalReaderRequirement.beforeControlPublication(root: root, ownerUID: ownerUID)
+        if !atomic {
+            try CanonicalReaderRequirement.beforeControlPublication(root: root, ownerUID: ownerUID)
+        }
         try StoreCheckpoint.markDirty(root: root)
         try journal.seal(packageID)
         return packageID

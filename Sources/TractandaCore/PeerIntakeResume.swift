@@ -421,3 +421,96 @@ extension PeerIntakeJournal {
             blockedOnIndex: false)
     }
 }
+
+extension PeerIntakeJournal {
+    /// Private descriptor walk for atomic intake work. Unlike wire resume it does not expand a
+    /// saved document into repeated composite IDs or hydrate every original. The namespace-bound
+    /// cursor is never accepted by the public transfer-resume parser. Prefixes grant no authority.
+    func atomicMetadataPage(
+        context: PeerPackage.Context, packageID: String,
+        cursor: PeerPackage.ResumeCursor?, limit: Int = 16,
+        readBudget: ((Int) throws -> Void)? = nil,
+        visitIndex: ((PeerPackage.Object) throws -> Void)? = nil
+    ) throws -> (objects: [PeerPackage.Object], next: PeerPackage.ResumeCursor?) {
+        guard (1...128).contains(limit) else {
+            throw TractandaError("resourceLimit", "Invalid atomic metadata work window.")
+        }
+        let begin = try beginRecord(packageID, readBudget: readBudget)
+        guard begin.context == context else {
+            throw TractandaError("untrustedPeer", "Atomic metadata work changed authenticated context.")
+        }
+        let manifest = AuthorityRecordCodec.sha256(try JSON.encode(begin.manifest))
+        let namespace = AuthorityRecordCodec.sha256(
+            Data("tractanda.private-atomic-metadata.v1".utf8) + (try JSON.encode(context)))
+        var next = cursor ?? .init(
+            packageID: packageID, manifestDigest: manifest, contextDigest: namespace,
+            frames: [.init(descriptor: begin.manifest.root)])
+        let depth = min(64, limits.maximumDepth)
+        guard next.packageID == packageID, next.manifestDigest == manifest,
+            next.contextDigest == namespace, next.document == nil,
+            next.frames.count <= depth + 1,
+            next.frames.first?.descriptor == begin.manifest.root || next.frames.isEmpty,
+            next.frames.allSatisfy({ $0.descriptor.kind == .index && (-1...256).contains($0.position) }),
+            Set(next.frames.map { $0.descriptor.id }).count == next.frames.count,
+            next.work >= 0, next.work <= min(limits.maximumWork, limits.maximumObjects)
+        else { throw TractandaError("invalidPeerCursor", "Atomic private metadata cursor lost its root.") }
+        var pages: [String: PeerPackage.Page] = [:]
+        var result: [PeerPackage.Object] = []
+        var units = 0
+        while !next.frames.isEmpty, result.count < limit, units < limit * 4 + 128 {
+            try Task.checkCancellation()
+            let position = next.frames.count - 1
+            let frame = next.frames[position]
+            let page: PeerPackage.Page
+            if let saved = pages[frame.descriptor.id] {
+                page = saved
+            } else {
+                guard let bytes = try object(
+                    frame.descriptor, packageID: packageID, readBudget: readBudget)
+                else {
+                    throw TractandaError("missingDependencies", "Atomic metadata index is incomplete.")
+                }
+                page = try PeerPackage.decode(PeerPackage.Page.self, bytes)
+                try page.validate(retainedProfile: begin.manifest.profile)
+                pages[frame.descriptor.id] = page
+            }
+            if frame.position == -1 {
+                guard next.work < min(limits.maximumWork, limits.maximumObjects) else {
+                    throw TractandaError("resourceLimit", "Atomic metadata closure work exhausted.")
+                }
+                try visitIndex?(frame.descriptor)
+                next.work += 1
+                units += 1
+                next.frames[position].position = 0
+                continue
+            }
+            let entries = page.children.isEmpty ? page.objects : page.children
+            guard frame.position <= entries.count else {
+                throw TractandaError("invalidPeerCursor", "Atomic metadata cursor skipped its page.")
+            }
+            if frame.position == entries.count {
+                next.frames.removeLast()
+                pages.removeValue(forKey: frame.descriptor.id)
+                units += 1
+                continue
+            }
+            let entry = entries[frame.position]
+            try entry.validate(retainedProfile: begin.manifest.profile)
+            next.frames[position].position += 1
+            if entry.kind == .index {
+                guard next.frames.count <= depth,
+                    !next.frames.contains(where: { $0.descriptor.id == entry.id })
+                else { throw TractandaError("invalidPeerPackage", "Atomic metadata index cycle/depth.") }
+                next.frames.append(.init(descriptor: entry))
+            } else {
+                guard next.work < min(limits.maximumWork, limits.maximumObjects) else {
+                    throw TractandaError("resourceLimit", "Atomic metadata closure object count exhausted.")
+                }
+                next.work += 1
+                result.append(entry)
+            }
+            units += 1
+        }
+        return (result, next.frames.isEmpty ? nil : next)
+    }
+}
