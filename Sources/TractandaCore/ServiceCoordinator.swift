@@ -148,7 +148,7 @@ public actor ServiceCoordinator {
                 }
             }
         }
-        peerClockIntakeEnabled = requireInitializedStore || authorityIntakeEnabledForTesting
+        peerClockIntakeEnabled = opened.peerClockIntakeEnabled
         core = opened
         readPool = opened.readPool
         self.makeAccountDirectory = makeAccountDirectory
@@ -1801,6 +1801,7 @@ private final class CoreBox: @unchecked Sendable {
     private let queue = DispatchQueue(label: "ai.tractanda.service-coordinator")
     private var service: ItemService?
     let readPool: SQLiteReadPool
+    let peerClockIntakeEnabled: Bool
 
     init(
         root: URL, indexDirectory: URL?, accounts: any AccountDirectory,
@@ -1822,6 +1823,7 @@ private final class CoreBox: @unchecked Sendable {
                 revisionProjectionEnabled: revisionProjectionEnabled,
                 authorityIntakeEnabled: authorityIntakeEnabled)
         }
+        peerClockIntakeEnabled = store.authorityIntakeEnabled
         if let embeddingProviderForTesting {
             guard documentConverter == nil else {
                 throw TractandaError(

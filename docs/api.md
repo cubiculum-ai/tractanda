@@ -61,7 +61,33 @@ MCP reference resources are compiled into the adapter, while `tractanda_describe
 
 ## Permissions and administration
 
-All reads, writes and history requests use current item permissions; changing access affects historical visibility too. OS identity and group membership are refreshed per request. An optional `AccessConfigurationItem` has profile `tractanda.access.v1`; `administration: "system"` recognizes root plus `admin` on macOS or `sudo` on Linux, unless `administratorGroup` overrides the OS group. Without an access configuration, legacy `serviceOwner` administration remains in effect pending migration.
+All reads, writes and history requests use current item permissions; changing access affects historical visibility too. OS identity and group membership are refreshed per request. On historical-development stores, an optional canonical `AccessConfigurationItem` has profile `tractanda.access.v1`; `administration: "system"` recognizes root plus `admin` on macOS or `sudo` on Linux, unless `administratorGroup` overrides the OS group. Without that canonical configuration, legacy `serviceOwner` administration remains in effect pending migration.
+
+### Personal/workgroup source profile
+
+The current source adds a personal/workgroup profile whose local access policy is operational configuration, not a canonical item revision. Use `TractandaStore/info` to inspect `persistenceProfile` (`personal-workgroup` or `historical-development`), `clustering.state` (`unsupported` for personal/workgroup; `historical-development` for the older profile), and `activeCanonicalFormats`. The existing `canonicalFormats` remains the software declaration used for format compatibility; `activeCanonicalFormats` describes this personal runtime. The personal capability and reader/writer fence use level16. This profile has not been released or activated on production hosts. Bounded source suites passed 9/9 for Mac entrypoints and 34/34 for Linux entrypoints. The content CLI separately passed four tests on both Mac and Linux; the conditional filesystem case-alias path was exercised on Mac but is not evidenced in the Linux focused log. These results do not establish installed-runtime behavior. See the [personal/workgroup entrypoint contract](personal-workgroup-api.md).
+
+An administrator may call `TractandaStore/configureAccess` with exactly one `configuration` argument containing a tagged `ItemValue` with profile `tractanda.access.v1`. The method validates the policy and all current item permissions, writes it to the local personal profile, and returns `{ "state": STATE, "configured": true, "persistenceProfile": "personal-workgroup" }`. It does not create or revise an `AccessConfigurationItem`; existing historical access-configuration items do not overwrite this local policy during recovery.
+
+Example native arguments (the inner value uses the regular tagged `ItemValue` encoding):
+
+```json
+{
+  "configuration": {
+    "type": "object",
+    "value": {
+      "profile": { "type": "text", "value": "tractanda.access.v1" },
+      "users": { "type": "list", "value": [{ "type": "text", "value": "alice" }] },
+      "groups": { "type": "list", "value": [{ "type": "text", "value": "research" }] },
+      "administration": { "type": "text", "value": "system" }
+    }
+  }
+}
+```
+
+For CLI setup, `tractanda configure-access STORE TAGGED_CONFIG_JSON OPERATION_ID [--index-directory PATH]` reads the same tagged `ItemValue` from a file. The `OPERATION_ID` argument is retained as a compatibility request label and checked as 1–200 UTF-8 bytes without NUL; it is not a canonical operation ID. CLI and native RPC return the same acknowledgement. Item and JMAP user-content query formats are unchanged.
+
+An ordinary open of a raw or historical-authority root without an established personal profile returns `personalMigrationRequired`; it does not reinterpret or migrate that store. A personal/workgroup daemon start with `peerRuntimeConfigurationPath` configured fails with `unsupportedPersonalPeers` before the peer configuration is read, the store is opened for service, listeners are allocated, or readiness is published. A fresh pairing workflow is not implemented by this source profile.
 
 ## Guarded changes and compact retrieval
 

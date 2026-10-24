@@ -31,6 +31,7 @@ extension SetupEngine {
     func quiescentCanonicalRequirement(_ receipt: InstallationReceipt) throws -> CanonicalReaderRequirement {
         let root = URL(fileURLWithPath: receipt.store).resolvingSymlinksInPath()
         let uid = try canonicalOwnerUID(root)
+        try ItemStore.verifyPersonalWorkgroupRoot(root: root, ownerUID: uid)
         return try CanonicalReaderRequirement.withWriterLock(root: root, ownerUID: uid) {
             try CanonicalReaderRequirement.admitQuiescent(root: root, ownerUID: uid)
         }
@@ -39,6 +40,7 @@ extension SetupEngine {
         let support = try verifiedCanonicalSupport(
             release: URL(fileURLWithPath: receipt.release), expectedDigest: receipt.manifestSHA256)
         let root = URL(fileURLWithPath: receipt.store).resolvingSymlinksInPath()
+        try ItemStore.verifyPersonalWorkgroupRoot(root: root, ownerUID: canonicalOwnerUID(root))
         let required: CanonicalReaderRequirement
         if quiescent {
             required = try quiescentCanonicalRequirement(receipt)
@@ -75,6 +77,7 @@ extension SetupEngine {
                 continue
             }
             let root = URL(fileURLWithPath: receipt.store).resolvingSymlinksInPath()
+            try ItemStore.verifyPersonalWorkgroupRoot(root: root, ownerUID: canonicalOwnerUID(root))
             guard
                 let proof = try CanonicalReaderRequirement.load(root: root, ownerUID: canonicalOwnerUID(root))
             else {
@@ -105,6 +108,15 @@ extension SetupEngine {
         }
         guard observed == expected else {
             throw SetupError("Runtime canonical format support differs from the signed bundle.")
+        }
+        guard info["persistenceProfile"] as? String == "personal-workgroup",
+            (info["clustering"] as? [String: Any])?["state"] as? String == "unsupported",
+            let activeObject = info["activeCanonicalFormats"],
+            try JSONDecoder().decode(
+                CanonicalFormatSupport.self,
+                from: JSONSerialization.data(withJSONObject: activeObject)) == .personalWorkgroup
+        else {
+            throw SetupError("Runtime personal/workgroup profile or active capability declaration differs.")
         }
         try requireCanonicalReader(receipt, quiescent: false)
     }

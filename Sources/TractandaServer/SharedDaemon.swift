@@ -63,9 +63,14 @@ public actor SharedDaemon {
         peerLimits: PeerConnectionLimits, syncLimits: PeerSyncLimits
     ) async throws -> SharedDaemon {
         try configuration.validate()
-        let peerConfiguration = try configuration.peerRuntimeConfigurationPath.map {
-            try PeerRuntimeConfiguration.load(from: $0)
+        // Reject before reading old credentials/configuration, opening the store mutably,
+        // allocating listeners or claiming readiness. Fresh pairing is a later capability.
+        guard configuration.peerRuntimeConfigurationPath == nil else {
+            throw TractandaError(
+                "unsupportedPersonalPeers",
+                "Personal/workgroup standalone cannot start with configured peer runtime.")
         }
+        let peerConfiguration: PeerRuntimeConfiguration? = nil
         let nonce = Self.nonce()
         let manual = configuration.httpPort == nil ? Data() : try KanbanPage.manual()
         let page = try Self.page(configuration: configuration, nonce: nonce, fallback: manual)

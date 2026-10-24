@@ -1977,6 +1977,15 @@ public final class ItemService {
             try check(args, allowed: [])
             try store.rebuildIndex()
             return ["state": store.state, "warnings": store.recoveryWarnings]
+        case "TractandaStore/configureAccess":
+            try check(args, allowed: ["configuration"])
+            guard let configuration = args["configuration"] as? [String: Any] else {
+                throw TractandaError("invalidArguments", "Supply a typed local access configuration.")
+            }
+            let policy = try JSON.decode(
+                ItemValue.self, JSONSerialization.data(withJSONObject: configuration))
+            try store.configurePersonalAccess(policy)
+            return ["state": store.state, "configured": true, "persistenceProfile": store.persistenceProfile]
         case "TractandaStore/info":
             try check(args, allowed: [])
             return [
@@ -2009,6 +2018,10 @@ public final class ItemService {
                 },
                 "canonicalFormats": try JSONSerialization.jsonObject(
                     with: JSON.encode(CanonicalFormatSupport.current)),
+                "activeCanonicalFormats": try JSONSerialization.jsonObject(
+                    with: JSON.encode(store.canonicalFormats)),
+                "persistenceProfile": store.persistenceProfile,
+                "clustering": ["state": store.isPersonalWorkgroup ? "unsupported" : "historical-development"],
                 "server": try JSONSerialization.jsonObject(with: JSON.encode(RuntimeIdentity.current)),
                 "state": store.state, "ownerUID": store.ownerUID, "queryProfile": SpotlightQuery.profile,
                 "binding": "local experimental; not JMAP conformant", "capability": Self.capability,
@@ -2336,7 +2349,7 @@ public final class ItemService {
 
     func preparePooledHistory(_ data: Data, peerUID: UInt32) throws -> PreparedPooledHistory? {
         // Retired authority history uses the bounded verified serial union; raw locators are not pooled catalogue rows.
-        if store.authorityIntakeEnabled { return nil }
+        if store.authorityIntakeEnabled || store.isPersonalWorkgroup { return nil }
         guard data.count <= 8 * 1024 * 1024,
             let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
             Set(request.keys) == ["using", "methodCalls"],

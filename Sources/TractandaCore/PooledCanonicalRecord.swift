@@ -30,6 +30,87 @@ struct PooledCanonicalRecord: Sendable {
 
     static let maximumRecordBytes = 8 * 1024 * 1024
 
+    /// Reopens a selected inventory locator through the same no-follow descriptor chain.
+    /// Recovery writes only the resulting derived catalogue, never the original envelope.
+    static func selectedRecoveryRow(
+        _ expected: PersonalRecoveryInventory.Record, path: String, root: URL, ownerUID: UInt32,
+        readBudget: (Int) throws -> Void = { _ in }, activity: (() throws -> Void)? = nil
+    ) throws -> (ItemIndex.CatalogueRow, Revision) {
+        let descriptors = try openDescriptorChain(root: root, relativePath: path)
+        defer { for descriptor in descriptors.reversed() { _ = close(descriptor) } }
+        guard let descriptor = descriptors.last else { throw PooledCanonicalRecordError.invalidPath }
+        let value = try readForInventory(
+            path: path, descriptor: descriptor, ownerUID: ownerUID, readBudget: readBudget, progress: activity
+        )
+        guard value.digest == expected.sha256, value.record.metadata.size == expected.byteCount else {
+            throw PooledCanonicalRecordError.digestMismatch
+        }
+        let revision = value.record.revision
+        let metadata = value.record.metadata
+        guard revision.itemID == expected.itemID, revision.revisionID == expected.revisionID,
+            let actor = revision.fields["actor"]?.string,
+            let operation = revision.fields["operationID"]?.string,
+            let created = revision.fields["createdAt"]?.dateString
+        else { throw PooledCanonicalRecordError.identityMismatch }
+        let feedback =
+            try revision.fields["learningFeedback"]?.map?.values.map {
+                try LearningFeedback($0).revisionID
+            } ?? []
+        return (
+            ItemIndex.CatalogueRow(
+                revisionID: revision.revisionID, itemID: revision.itemID, path: path,
+                parentID: revision.supersedes, actor: actor, operationID: operation,
+                size: metadata.size, inode: metadata.inode, uid: metadata.uid, mode: metadata.mode,
+                modificationSeconds: metadata.modificationSeconds,
+                modificationNanoseconds: metadata.modificationNanoseconds, digest: value.digest,
+                createdAt: created, feedbackRevisionIDs: feedback, modifiedAt: revision.modifiedAt,
+                provenance: try revision.provenance), revision
+        )
+    }
+
+    /// Read-only inventory of administrator-selected canonical item files, independent of an old index.
+    /// This checks structural content and custody, not historical peer admission.
+    static func readForInventory(
+        path: String, descriptor: Int32, ownerUID: UInt32,
+        readBudget: (Int) throws -> Void, progress: (() throws -> Void)? = nil
+    ) throws
+        -> (record: Self, digest: Data)
+    {
+        let components = path.split(separator: "/", omittingEmptySubsequences: false)
+        guard components.count == 8, components[7].hasSuffix(".tractanda") else {
+            throw PooledCanonicalRecordError.invalidPath
+        }
+        let itemID = String(components[6])
+        let revisionID = String(components[7].dropLast(".tractanda".count))
+        guard CanonicalRecordPath.validate(path, itemID: itemID, revisionID: revisionID) else {
+            throw PooledCanonicalRecordError.invalidPath
+        }
+        let before = try metadata(for: descriptor)
+        guard before.type == .regular, before.uid == ownerUID, before.mode & 0o077 == 0 else {
+            throw PooledCanonicalRecordError.unsafePermissions
+        }
+        guard before.size <= UInt64(maximumRecordBytes) else {
+            throw PooledCanonicalRecordError.sizeLimit
+        }
+        try readBudget(Int(before.size))
+        // The enumerator lends this descriptor; never reopen a possibly replaced path.
+        let bytes = try readAll(
+            descriptor: descriptor, expectedSize: before.size, maximumBytes: maximumRecordBytes,
+            progress: progress)
+        guard try metadata(for: descriptor) == before else {
+            throw PooledCanonicalRecordError.metadataChanged
+        }
+        let revision = try RecordCodec.decode(bytes)
+        try ItemSemantics.validate(revision)
+        guard revision.itemID == itemID, revision.revisionID == revisionID else {
+            throw PooledCanonicalRecordError.identityMismatch
+        }
+        return (
+            Self(revision: revision, metadata: before, archived: false, metadataDrifted: false),
+            Data(SHA256.hash(data: bytes))
+        )
+    }
+
     static func read(
         row: ItemIndex.CatalogueRow, root: URL, ownerUID: UInt32,
         maximumBytes: Int = maximumRecordBytes
@@ -118,7 +199,7 @@ struct PooledCanonicalRecord: Sendable {
                 throw PooledCanonicalRecordError.invalidPath
             }
             let file = filename.withCString {
-                openat(descriptors[descriptors.count - 1], $0, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+                openat(descriptors[descriptors.count - 1], $0, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
             }
             guard file >= 0 else { throw PooledCanonicalRecordError.openFailed(errno) }
             descriptors.append(file)
@@ -127,6 +208,10 @@ struct PooledCanonicalRecord: Sendable {
             for descriptor in descriptors.reversed() { _ = close(descriptor) }
             throw error
         }
+    }
+
+    static func inventoryMetadata(for descriptor: Int32) throws -> FileMetadata {
+        try metadata(for: descriptor)
     }
 
     private static func metadata(for descriptor: Int32) throws -> FileMetadata {
@@ -155,19 +240,24 @@ struct PooledCanonicalRecord: Sendable {
             && metadata.modificationNanoseconds == row.modificationNanoseconds
     }
 
-    private static func readAll(descriptor: Int32, expectedSize: UInt64, maximumBytes: Int) throws -> Data {
+    private static func readAll(
+        descriptor: Int32, expectedSize: UInt64, maximumBytes: Int, progress: (() throws -> Void)? = nil
+    ) throws -> Data {
         guard expectedSize <= UInt64(maximumBytes), expectedSize <= UInt64(Int.max) else {
             throw PooledCanonicalRecordError.sizeLimit
         }
         var data = Data()
         data.reserveCapacity(Int(expectedSize))
         var buffer = [UInt8](repeating: 0, count: 64 * 1024)
-        while true {
+        // Never read beyond the retained descriptor's charged size if a concurrent writer grows it.
+        // The caller's final metadata comparison still rejects mutation during this bounded read.
+        while data.count < Int(expectedSize) {
+            let window = min(buffer.count, Int(expectedSize) - data.count)
             let count = buffer.withUnsafeMutableBytes { rawBuffer -> Int in
                 #if canImport(Darwin)
-                    Darwin.read(descriptor, rawBuffer.baseAddress, rawBuffer.count)
+                    Darwin.read(descriptor, rawBuffer.baseAddress, window)
                 #else
-                    Glibc.read(descriptor, rawBuffer.baseAddress, rawBuffer.count)
+                    Glibc.read(descriptor, rawBuffer.baseAddress, window)
                 #endif
             }
             if count < 0 {
@@ -177,6 +267,7 @@ struct PooledCanonicalRecord: Sendable {
             if count == 0 { break }
             guard data.count <= maximumBytes - count else { throw PooledCanonicalRecordError.sizeLimit }
             data.append(contentsOf: buffer.prefix(count))
+            try progress?()
         }
         guard UInt64(data.count) == expectedSize else { throw PooledCanonicalRecordError.metadataChanged }
         return data

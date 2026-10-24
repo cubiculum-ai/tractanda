@@ -221,6 +221,21 @@ public final class ItemStore {
     public var isMultiUser: Bool {
         accessConfiguration != nil || accessConfigurationAmbiguous || accessConfigurationProofUnavailable
     }
+    public var isPersonalWorkgroup: Bool { personalProfile != nil }
+    public var persistenceProfile: String {
+        isPersonalWorkgroup ? "personal-workgroup" : "historical-development"
+    }
+    public var canonicalFormats: CanonicalFormatSupport { canonicalFormatSupport }
+    func contentActivationReport() throws -> ContentActivationReport {
+        guard personalProfile != nil, isCanonicalReady, let index, let replicaID else {
+            throw TractandaError("recoveryRequired", "Selected content activation is not ready.")
+        }
+        return try ContentActivationReport(
+            profile: "tractanda.content-activation.v1", storePath: root.path,
+            indexDirectory: indexDirectory.path, storeID: canonicalStoreIdentity(creatingIfMissing: false),
+            replicaID: replicaID, persistenceProfile: persistenceProfile, state: state, ready: true,
+            items: index.currentHeadCount(), revisions: index.catalogueCount())
+    }
     var cursorActorUID: UInt32 { accessContext?.uid ?? UInt32.max }
     var cursorStoreIdentity: String {
         get throws {
@@ -554,6 +569,13 @@ public final class ItemStore {
     private let usesExternalIndexDirectory: Bool
     private var index: ItemIndex?
     private let canonicalFormatSupport: CanonicalFormatSupport
+    /// Internal qualification of rebuilt selected content, pending fresh operational-state integration.
+    /// It uses this Store's existing readers; it cannot publish canonical changes.
+    private var contentRecoveryQualification = false
+    private var personalProfile: PersonalWorkgroupProfile.Record?
+    private var personalPolicyNeedsReopen = false
+    private var personalIndexLimits = PersonalRecoveryIndex.Limits()
+    private var personalIndexAvailableBytes: (@Sendable (URL) throws -> UInt64)?
     private var indexRebuildInProgress = false
     /// Full recovery validates every immutable file, then keeps only locations for history.
     /// Current heads remain resident; old bodies are loaded through the bounded cache below.
@@ -898,6 +920,8 @@ public final class ItemStore {
         guard isCanonicalReady else { return }
         isCanonicalReady = false
         canonicalVerificationStatus = ["state": "recoveryRequired", "reason": "indexFailure"]
+        // Qualification has no canonical checkpoint/dirty-marker lifecycle.
+        guard !contentRecoveryQualification else { return }
         do {
             try beforeIndexQuarantineMarkerForTesting?()
             try StoreCheckpoint.markDirty(root: root, maintenance: maintenanceContext)
@@ -962,6 +986,8 @@ public final class ItemStore {
     private(set) var canonicalVerificationStatus: [String: Any] = ["state": "pending"]
     // Failure injection at the file/index boundary, available to core tests only.
     var beforeIndexUpdate: (() throws -> Void)?
+    var beforeCanonicalPublicationForTesting: (() throws -> Void)?
+    var afterPersonalPolicyPublicationForTesting: (() throws -> Void)?
     var beforeCheckpointClear: (() throws -> Void)?
     var afterCanonicalSyncEntryForTesting: (() throws -> Void)?
     var beforeCanonicalDurabilitySync: (() throws -> Void)?
@@ -1079,6 +1105,318 @@ public final class ItemStore {
             firstSourceOperation: nil)
     }
 
+    /// Transient source qualification over the existing native read engine. The underlying Store
+    /// is private and never escapes to services, writers, background jobs or caller closures.
+    /// This is not the future standalone runtime: writable/local-state integration remains separate.
+    final class ReadQualification {
+        private let store: ItemStore
+
+        init(
+            recoveredContent: PersonalRecoveryIndex.Completed,
+            accounts: any AccountDirectory, configuration: AccessConfiguration
+        ) throws {
+            store = try ItemStore(
+                recoveredContent: recoveredContent, accounts: accounts, configuration: configuration)
+        }
+
+        func withAccess<T>(forUID uid: UInt32, _ body: () throws -> T) throws -> T {
+            try store.withAccess(forUID: uid, body)
+        }
+
+        func get(_ itemID: String, revisionID: String? = nil) throws -> Revision {
+            try store.get(itemID, revisionID: revisionID)
+        }
+
+        func history(_ itemID: String) throws -> [Revision] { try store.history(itemID) }
+
+        func candidates(text: String? = nil, includeDeleted: Bool = false) throws -> [Revision] {
+            try store.candidates(text: text, includeDeleted: includeDeleted)
+        }
+
+        func query(expression: String? = nil, text: String? = nil) throws -> [Revision] {
+            try Categories.query(store: store, expression: expression, text: text)
+        }
+
+        var isCanonicalTrusted: Bool { store.isCanonicalTrusted }
+    }
+
+    /// Opens only a completed private content rebuild. This does not use normal startup or
+    /// claim to be a writable standalone installation; fresh operational state is a later unit.
+    private init(
+        recoveredContent: PersonalRecoveryIndex.Completed,
+        accounts: any AccountDirectory, configuration: AccessConfiguration
+    ) throws {
+        root = recoveredContent.root
+        indexDirectory = recoveredContent.directory
+        ownerUID = recoveredContent.ownerUID
+        self.accounts = accounts
+        usesExternalIndexDirectory = true
+        canonicalFormatSupport = .current
+        attachmentUploadPolicy = AttachmentUploadPolicy()
+        attachmentCapacityProvider = nil
+        revisionProjectionEnabled = false
+        authorityIntakeEnabled = false
+        contentRecoveryQualification = true
+        accessConfiguration = configuration
+        try configuration.validate(
+            using: PrincipalResolver(directory: accounts, configuration: configuration))
+        try PrivateConfiguration.validate(indexDirectory, directory: true)
+        indexWriter = tractanda_lock(indexDirectory.appendingPathComponent(Self.indexLockName).path)
+        guard indexWriter >= 0 else {
+            throw TractandaError("storeBusy", "The recovered content index is already open.")
+        }
+        do {
+            let candidate = try ItemIndex(
+                path: indexDirectory.appendingPathComponent("items.sqlite").path,
+                create: false, noFollow: true, journalMode: .delete)
+            index = candidate
+            clockDependentCategories = try candidate.hasClockDependentCategories()
+            // The private read capability never acquires upload, job, payload or peer runtimes.
+            isCanonicalReady = true
+            startupRecovery = ["mode": "selectedContentQualification"]
+            canonicalVerificationStatus = ["state": "selectedContentRebuilt"]
+        } catch {
+            index?.close()
+            index = nil
+            tractanda_unlock(indexWriter)
+            indexWriter = -1
+            throw error
+        }
+    }
+
+    /// Shared ordinary runtime initialization for both persistence profiles. Identity and the
+    /// lifetime writer are established before placement, quota or pending local jobs are loaded.
+    private func initializeOrdinaryRuntime() throws {
+        // Recover bounded upload intents/cleanup first, then rebuild shared accounting.
+        let recoveryPayloads = try AttachmentPayloadStore(
+            root: root, ownerUID: ownerUID,
+            reserveBytes: attachmentUploadPolicy.minimumFreeBytes,
+            availableBytes: attachmentCapacityProvider, indexDirectory: indexDirectory,
+            maintenance: maintenanceContext)
+        try recoveryPayloads.preparePlacement()
+        let recoveryDocuments = DocumentContentStore(
+            root: root, ownerUID: ownerUID,
+            minimumFreeBytes: attachmentUploadPolicy.minimumFreeBytes,
+            availableBytes: attachmentCapacityProvider, indexDirectory: indexDirectory,
+            maintenance: maintenanceContext)
+        try recoveryDocuments.preparePlacement()
+        attachmentUploads = try recoveryPayloads.loadUploads()
+        stagingByteQuota = try StagingByteQuota(
+            root: root, ownerUID: ownerUID, maximumBytes: attachmentUploadPolicy.maximumStagedBytes,
+            pendingUploads: attachmentUploads, payloads: recoveryPayloads, documents: recoveryDocuments)
+        attachmentPayloads = try AttachmentPayloadStore(
+            root: root, ownerUID: ownerUID, reserveBytes: attachmentUploadPolicy.minimumFreeBytes,
+            availableBytes: attachmentCapacityProvider, stagingQuota: stagingByteQuota,
+            indexDirectory: indexDirectory, maintenance: maintenanceContext)
+        documentContents = DocumentContentStore(
+            root: root, ownerUID: ownerUID,
+            minimumFreeBytes: attachmentUploadPolicy.minimumFreeBytes,
+            availableBytes: attachmentCapacityProvider, stagingQuota: stagingByteQuota,
+            indexDirectory: indexDirectory, maintenance: maintenanceContext)
+        documentJobRecords = DocumentJobRecords(
+            root: root,
+            files: DocumentContentFiles(
+                root: root, ownerUID: ownerUID,
+                minimumFreeBytes: attachmentUploadPolicy.minimumFreeBytes,
+                availableBytes: attachmentCapacityProvider, stagingQuota: stagingByteQuota))
+        documentJobs = try documentJobRecords.load()
+    }
+
+    private func requireOperationalContent() throws {
+        guard !personalPolicyNeedsReopen else {
+            throw TractandaError(
+                "recoveryRequired",
+                "Reopen after uncertain local policy publication before resuming operations.")
+        }
+        guard !contentRecoveryQualification else {
+            throw TractandaError(
+                "recoveryQualificationOnly",
+                "Selected content qualification requires fresh operational-state integration before this operation."
+            )
+        }
+    }
+
+    /// Fully initialized standalone personal/workgroup lifecycle, separate from historical
+    /// authority initialization. Ordinary writers and services receive a complete ItemStore.
+    init(
+        personalRoot suppliedRoot: URL, indexDirectory requestedIndex: URL? = nil,
+        opening: PersonalWorkgroupProfile.Opening, accounts: any AccountDirectory,
+        attachmentUploadPolicy: AttachmentUploadPolicy = .init(),
+        attachmentAvailableBytes: (@Sendable () throws -> UInt64)? = nil,
+        indexAvailableBytes: (@Sendable (URL) throws -> UInt64)? = nil,
+        recoveryLimits: PersonalRecoveryIndex.Limits = .init()
+    ) throws {
+        if case .existing = opening {
+            try PrivateConfiguration.validate(suppliedRoot, directory: true)
+        } else {
+            try PrivateConfiguration.makeDirectory(suppliedRoot)
+        }
+        guard let physical = realpath(suppliedRoot.path, nil) else { throw FileMetadataError.posix(errno) }
+        defer { free(physical) }
+        root = URL(fileURLWithPath: String(cString: physical), isDirectory: true)
+        ownerUID = tractanda_uid()
+        self.accounts = accounts
+        self.attachmentUploadPolicy = attachmentUploadPolicy
+        attachmentCapacityProvider = attachmentAvailableBytes
+        canonicalFormatSupport = .personalWorkgroup
+        revisionProjectionEnabled = false
+        authorityIntakeEnabled = false
+        indexDirectory = requestedIndex ?? root.appendingPathComponent("index")
+        usesExternalIndexDirectory = indexDirectory.path != root.appendingPathComponent("index").path
+        personalIndexLimits = recoveryLimits
+        personalIndexAvailableBytes = indexAvailableBytes
+        guard root.path != "/", indexDirectory.path.hasPrefix("/"),
+            !Self.isDescendant(indexDirectory, of: root.appendingPathComponent("items")),
+            !Self.isDescendant(indexDirectory, of: root.appendingPathComponent("attachments")),
+            !Self.isDescendant(indexDirectory, of: root.appendingPathComponent("documents"))
+        else {
+            throw TractandaError(
+                "invalidIndexDirectory", "Choose a dedicated ordinary derived index directory.")
+        }
+        try attachmentUploadPolicy.validate()
+        writer = tractanda_lock(root.appendingPathComponent(".writer.lock").path)
+        guard writer >= 0 else { throw TractandaError("storeBusy", "Another writer owns this root.") }
+        do {
+            let record = try PersonalWorkgroupProfile.prepare(root, opening: opening, accounts: accounts)
+            personalProfile = record
+            accessConfiguration = try AccessConfiguration(record.accessConfiguration)
+            try accessConfiguration!.validate(
+                using: PrincipalResolver(directory: accounts, configuration: accessConfiguration))
+            replicaID = record.replicaID
+            try ensureDirectory(root.appendingPathComponent("items"))
+            try ensureDirectory(indexDirectory)
+            try rejectIndexInsideCanonicalSubtrees()
+            if usesExternalIndexDirectory { try bindExternalIndexDirectory() }
+            try initializeOrdinaryRuntime()
+            try rebuildPersonalIndex()
+            try restoreCorpusRecoveryCharges()
+            try reclaimStartupCorpusReaders()
+            try PersonalWorkgroupProfile.complete(record, root: root)
+            startupRecovery = ["mode": "personalWorkgroup", "reason": "ordinaryCanonicalRebuild"]
+        } catch {
+            index?.close()
+            index = nil
+            if indexWriter >= 0 {
+                tractanda_unlock(indexWriter)
+                indexWriter = -1
+            }
+            tractanda_unlock(writer)
+            writer = -1
+            throw error
+        }
+    }
+
+    private func rebuildPersonalIndex() throws {
+        guard let profile = personalProfile, let policy = accessConfiguration else {
+            throw TractandaError(
+                "invalidPersonalProfile", "Ordinary reconstruction lacks local configuration.")
+        }
+        try StoreCheckpoint.markDirty(root: root)
+        isCanonicalReady = false
+        if let index { try index.closeChecked() }
+        index = nil
+        let temporary = indexDirectory.appendingPathComponent(
+            "personal-rebuild-" + Identifier.make() + ".sqlite")
+        defer {
+            for suffix in ["", "-journal", "-wal", "-shm"] {
+                try? FileManager.default.removeItem(atPath: temporary.path + suffix)
+            }
+        }
+        var limits = personalIndexLimits
+        limits.minimumAvailableBytes = max(
+            limits.minimumAvailableBytes, UInt64(max(0, attachmentUploadPolicy.minimumFreeBytes)))
+        func capacity() throws {
+            try checkPersonalIndexCapacity(database: temporary, limits: limits)
+            try rebuildControl?.graphProgress()
+        }
+        try capacity()
+        let fresh = try ItemIndex(path: temporary.path, create: true, journalMode: .delete)
+        defer { fresh.close() }
+        fresh.graphReserveBytes = limits.minimumAvailableBytes
+        fresh.graphMaximumTemporaryBytes = limits.maximumDerivedBytes
+        fresh.maintenanceCapacityCheck = capacity
+        try capacity()
+        try fresh.execute("BEGIN IMMEDIATE")
+        let control = rebuildControl
+        _ = try PersonalRecoveryIndex.populate(
+            source: .init(root: root, ownerUID: ownerUID), index: fresh, accounts: accounts,
+            configuration: policy, limits: limits, rebuildContextID: profile.storeID,
+            boundary: capacity,
+            inventoryCheck: { try control?.check() },
+            inventoryActivity: { try control?.graphProgress() },
+            originalVerified: { try control?.pulse(originalBytes: $0) },
+            pageVerified: { try control?.pulse(pages: 1) },
+            recordVerified: { try control?.pulse(records: 1) },
+            itemProjected: { try control?.pulse(items: 1) })
+        try rebuildControl?.pulse(phase: "finalizingIndex")
+        try fresh.sealCatalogue(identity: profile.storeID)
+        try syncCanonicalForCheckpoint(index: fresh)
+        try fresh.execute("COMMIT")
+        try capacity()
+        try fresh.closeChecked()
+        let destination = indexDirectory.appendingPathComponent("items.sqlite")
+        for suffix in ["-journal", "-wal", "-shm"] {
+            try? FileManager.default.removeItem(atPath: destination.path + suffix)
+        }
+        try rebuildControl?.authorizePublication()
+        try rebuildControl?.pulse(phase: "publishingIndex")
+        guard rename(temporary.path, destination.path) == 0 else { throw FileMetadataError.posix(errno) }
+        try StoreCheckpoint.syncDirectory(indexDirectory)
+        let installed = try ItemIndex(path: destination.path, create: false)
+        index = installed
+        installIndexFailureHandler(installed)
+        installed.graphReserveBytes = limits.minimumAvailableBytes
+        installed.graphMaximumTemporaryBytes = limits.maximumDerivedBytes
+        heads.removeAll()
+        headCacheOrder.removeAll()
+        headCacheBytes = 0
+        historicalCache.removeAll()
+        historicalOrder.removeAll()
+        historicalCacheBytes = 0
+        operations.removeAll()
+        operationIDs.removeAll()
+        revisionLocations.removeAll()
+        clockDependentCategories = try installed.hasClockDependentCategories()
+        clearSavedViewPages()
+        generation = Identifier.make()
+        isCanonicalReady = true
+        try StoreCheckpoint.clear(root: root)
+    }
+
+    /// Both staged and installed personal indexes retain the same configured byte/free-space guards.
+    private func checkPersonalIndexCapacity(database: URL, limits: PersonalRecoveryIndex.Limits) throws {
+        try Task.checkCancellation()
+        try requireIndexFilesystemCapacity(additionalBytes: 0)
+        var observation = statvfs()
+        guard statvfs(indexDirectory.path, &observation) == 0, observation.f_frsize > 0 else {
+            throw TractandaError("resourceLimit", "Cannot observe ordinary reconstruction free capacity.")
+        }
+        let free = UInt64(observation.f_bavail).multipliedReportingOverflow(
+            by: UInt64(observation.f_frsize))
+        guard !free.overflow else {
+            throw TractandaError("resourceLimit", "Ordinary capacity observation overflowed.")
+        }
+        // The injected observation is bound to the derived filesystem path, not originals.
+        // It can lower genuine statvfs availability, never inflate it.
+        let available =
+            try personalIndexAvailableBytes.map { min(free.partialValue, try $0(indexDirectory)) }
+            ?? free.partialValue
+        guard available >= limits.minimumAvailableBytes else {
+            throw TractandaError("resourceLimit", "Ordinary reconstruction free-space reserve crossed.")
+        }
+        var bytes: UInt64 = 0
+        for suffix in ["", "-journal", "-wal", "-shm"] {
+            do {
+                let metadata = try FileMetadata.read(at: URL(fileURLWithPath: database.path + suffix))
+                guard metadata.type == .regular, metadata.size <= limits.maximumDerivedBytes - bytes
+                else {
+                    throw TractandaError("resourceLimit", "Ordinary staged-index byte limit crossed.")
+                }
+                bytes += metadata.size
+            } catch FileMetadataError.posix(let code) where code == ENOENT { continue }
+        }
+    }
+
     // Internal opening capability is bound to the immutable first-source operation receipt.
     init(
         root: URL, indexDirectory requestedIndexDirectory: URL? = nil,
@@ -1171,6 +1509,12 @@ public final class ItemStore {
                 "invalidIndexDirectory", "Index files cannot be stored inside canonical items.")
         }
         try ensureDirectory(self.root)
+        if try PersonalWorkgroupProfile.load(self.root) != nil
+            || PersonalWorkgroupProfile.load(self.root, pending: true) != nil
+        {
+            throw TractandaError(
+                "personalProfileRequired", "Open this root using its personal/workgroup persistence profile.")
+        }
         writer = tractanda_lock(self.root.appendingPathComponent(".writer.lock").path)
         guard writer >= 0 else {
             throw TractandaError("storeBusy", "Cannot lock store; another writer may be running.")
@@ -1298,37 +1642,7 @@ public final class ItemStore {
                 _ = try canonicalStoreIdentity(creatingIfMissing: true)
             }
             try targetProvisioningControl?()
-            // Recover bounded upload intents/cleanup first, then rebuild shared accounting.
-            let recoveryPayloads = try AttachmentPayloadStore(
-                root: self.root, ownerUID: ownerUID,
-                reserveBytes: attachmentUploadPolicy.minimumFreeBytes,
-                availableBytes: attachmentAvailableBytes, indexDirectory: indexDirectory, maintenance: maintenanceContext)
-            try recoveryPayloads.preparePlacement()
-            let recoveryDocuments = DocumentContentStore(
-                root: self.root, ownerUID: ownerUID,
-                minimumFreeBytes: attachmentUploadPolicy.minimumFreeBytes,
-                availableBytes: attachmentAvailableBytes, indexDirectory: indexDirectory, maintenance: maintenanceContext)
-            try recoveryDocuments.preparePlacement()
-            attachmentUploads = try recoveryPayloads.loadUploads()
-            stagingByteQuota = try StagingByteQuota(
-                root: self.root, ownerUID: ownerUID, maximumBytes: attachmentUploadPolicy.maximumStagedBytes,
-                pendingUploads: attachmentUploads, payloads: recoveryPayloads, documents: recoveryDocuments)
-            attachmentPayloads = try AttachmentPayloadStore(
-                root: self.root, ownerUID: ownerUID, reserveBytes: attachmentUploadPolicy.minimumFreeBytes,
-                availableBytes: attachmentAvailableBytes, stagingQuota: stagingByteQuota,
-                indexDirectory: indexDirectory, maintenance: maintenanceContext)
-            documentContents = DocumentContentStore(
-                root: self.root, ownerUID: ownerUID,
-                minimumFreeBytes: attachmentUploadPolicy.minimumFreeBytes,
-                availableBytes: attachmentAvailableBytes, stagingQuota: stagingByteQuota,
-                indexDirectory: indexDirectory, maintenance: maintenanceContext)
-            documentJobRecords = DocumentJobRecords(
-                root: self.root,
-                files: DocumentContentFiles(
-                    root: self.root, ownerUID: ownerUID,
-                    minimumFreeBytes: attachmentUploadPolicy.minimumFreeBytes,
-                    availableBytes: attachmentAvailableBytes, stagingQuota: stagingByteQuota))
-            documentJobs = try documentJobRecords.load()
+            try initializeOrdinaryRuntime()
             if authorityIntakeEnabled {
                 peerIntake = PeerIntakeCoordinator(
                     root: self.root, ownerUID: ownerUID,
@@ -2773,28 +3087,35 @@ public final class ItemStore {
             if origin == nil { for row in matches { try requireLocalLegacyReceipt(row) } }
             return matches
         }
-        let local = try replicaID.map { try candidates($0) } ?? []
-        if local.isEmpty, kind == .authored, let origin = replicaID, let coordinator = peerIntake {
-            var bytes: UInt64 = 0
-            for raw in try index.authorityHeldReceipts(operationID: id, originID: origin) {
-                guard UInt64(raw.descriptor.length) <= 64 * 1024 * 1024 - min(bytes, 64 * 1024 * 1024) else {
-                    throw TractandaError("resourceLimit", "Held receipt candidates exceed their byte window.")
-                }
-                bytes += UInt64(raw.descriptor.length)
-                let node = try AuthorityRevision(originalBytes: coordinator.bytes(raw))
-                let row = try authorityCatalogueRow(raw, node: node)
-                if matchesCaller(row) {
-                    guard canReadProjection(row.itemID) else {
-                        throw TractandaError("forbidden", "Current item access is denied.")
+        let matches: [ItemIndex.CatalogueRow]
+        if personalProfile != nil {
+            matches = try index.personalOperationRows(id).filter(matchesCaller)
+        } else {
+            let local = try replicaID.map { try candidates($0) } ?? []
+            if local.isEmpty, kind == .authored, let origin = replicaID, let coordinator = peerIntake {
+                var bytes: UInt64 = 0
+                for raw in try index.authorityHeldReceipts(operationID: id, originID: origin) {
+                    guard UInt64(raw.descriptor.length) <= 64 * 1024 * 1024 - min(bytes, 64 * 1024 * 1024)
+                    else {
+                        throw TractandaError(
+                            "resourceLimit", "Held receipt candidates exceed their byte window.")
                     }
-                    throw TractandaError(
-                        "operationReviewRequired",
-                        "This exact local operation is held for authority review; it cannot replay as success."
-                    )
+                    bytes += UInt64(raw.descriptor.length)
+                    let node = try AuthorityRevision(originalBytes: coordinator.bytes(raw))
+                    let row = try authorityCatalogueRow(raw, node: node)
+                    if matchesCaller(row) {
+                        guard canReadProjection(row.itemID) else {
+                            throw TractandaError("forbidden", "Current item access is denied.")
+                        }
+                        throw TractandaError(
+                            "operationReviewRequired",
+                            "This exact local operation is held for authority review; it cannot replay as success."
+                        )
+                    }
                 }
             }
+            matches = try local.isEmpty && kind == .authored ? candidates(nil) : local
         }
-        let matches = try local.isEmpty && kind == .authored ? candidates(nil) : local
         guard matches.count <= 1 else {
             throw TractandaError("operationMismatch", "Aliases merge conflicting operation receipts.")
         }
@@ -2815,6 +3136,11 @@ public final class ItemStore {
     }
 
     public func configureAccess(_ value: ItemValue, operationID: String) throws -> CommitResult {
+        guard personalProfile == nil else {
+            throw TractandaError(
+                "personalConfigurationRequired", "Use explicit local personal/workgroup access configuration."
+            )
+        }
         if revisionProjectionEnabled && (accessConfigurationAmbiguous || accessConfigurationProofUnavailable)
         {
             throw TractandaError(
@@ -2839,6 +3165,49 @@ public final class ItemStore {
                 "invalidAccessConfiguration", "Only one access configuration item is permitted.")
         }
         return try configurations.first.map { try AccessConfiguration($0.fields["accessConfiguration"]!) }
+    }
+
+    /// Local administrator policy is current operational configuration, not a canonical item
+    /// whose historical contents can reinstall admission or overwrite peer trust on rebuild.
+    public func configurePersonalAccess(_ value: ItemValue) throws {
+        try requireOperationalContent()
+        if accessContext == nil {
+            return try withAccess(forUID: ownerUID) { try configurePersonalAccess(value) }
+        }
+        try requireAdministrator()
+        guard let prior = personalProfile else {
+            throw TractandaError("personalProfileRequired", "No personal/workgroup runtime is open.")
+        }
+        let policy = try AccessConfiguration(value)
+        let resolver = PrincipalResolver(directory: accounts, configuration: policy)
+        try policy.validate(using: resolver)
+        try forEachCurrentHead { head in
+            if let value = head.fields["permissions"] { try ItemPermissions(value).validate(using: resolver) }
+        }
+        let next = PersonalWorkgroupProfile.Record(
+            profile: prior.profile, storeID: prior.storeID, replicaID: prior.replicaID,
+            accessConfiguration: value, initialization: prior.initialization)
+        do {
+            try PersonalWorkgroupProfile.persist(
+                next, root: root,
+                afterPublication: {
+                    try self.afterPersonalPolicyPublicationForTesting?()
+                })
+        } catch {
+            // Atomic rename may precede a durability error; never continue with stale admission.
+            isCanonicalReady = false
+            personalPolicyNeedsReopen = true
+            index?.close()
+            index = nil
+            throw error
+        }
+        personalProfile = next
+        accessConfiguration = policy
+        accessPolicyEpoch &+= 1
+        visibleStates.removeAll()
+        visibleStateOrder.removeAll()
+        clearSavedViewPages()
+        generation = Identifier.make()
     }
 
     /// Personal decisions belong to their own immutable meta-item, not the shared target.
@@ -5518,6 +5887,7 @@ public final class ItemStore {
         preparedCopyDocuments: [AttachmentDocumentRepresentation]? = nil,
         indexedCorpus: IndexedCorpusStage? = nil
     ) throws -> CommitResult {
+        try requireOperationalContent()
         try CanonicalMaintenanceContext.deny(root: root, path: ["items"], operation: "ordinary item commit")
         if accessContext == nil {
             return try withAccess(forUID: actorUID ?? ownerUID) {
@@ -5768,7 +6138,7 @@ public final class ItemStore {
                 retainedCategoryRevisions(excluding: revision.itemID) + [revision])
         }
         var updatedConfiguration = accessConfiguration
-        if isConfiguration {
+        if isConfiguration, personalProfile == nil {
             updatedConfiguration = try configuration(
                 in: retainedConfigurationRevisions(excluding: revision.itemID) + [revision])
             let resolver = PrincipalResolver(directory: accounts, configuration: updatedConfiguration)
@@ -5876,7 +6246,7 @@ public final class ItemStore {
                 revision.itemID))
         try ensureDirectory(folder)
         let path = folder.appendingPathComponent(revision.revisionID + ".tractanda").path
-        if revisionProjectionEnabled {
+        if revisionProjectionEnabled || personalProfile != nil {
             try beforeProjectionCommitAuthorityForTesting?()
             try withAccess(forUID: uid) {
                 guard accessContext?.account?.name == context.account?.name else {
@@ -5909,7 +6279,7 @@ public final class ItemStore {
                         }
                     }
                 }
-                if isCategoryRecord {
+                if isCategoryRecord, personalProfile == nil {
                     guard try !knownCategoryConstraintConflicts(replacing: revision).contains(revision.itemID)
                     else {
                         throw TractandaError(
@@ -5918,7 +6288,11 @@ public final class ItemStore {
                 }
             }
         }
-        guard let publicationIndex = index, try publicationIndex.acceptedGraphProofIsCurrent() else {
+        guard let publicationIndex = index else {
+            throw TractandaError(
+                "projectionRequired", "The current native catalogue must be rebuilt before publication.")
+        }
+        if personalProfile == nil, try !publicationIndex.acceptedGraphProofIsCurrent() {
             throw TractandaError(
                 "projectionRequired", "Accepted graph proof must be rebuilt before publication.")
         }
@@ -5939,6 +6313,7 @@ public final class ItemStore {
                 root: root, ownerUID: ownerUID, format: revision.formatVersion,
                 beforePersist: beforeCanonicalReaderRequirementForTesting)
         }
+        try beforeCanonicalPublicationForTesting?()
         try StoreCheckpoint.markDirty(root: root, maintenance: maintenanceContext)
         let actualPublish = data.withUnsafeBytes { tractanda_publish(path, $0.baseAddress, $0.count) }
         let published = publishResultOverrideForTesting ?? actualPublish
@@ -6020,6 +6395,13 @@ public final class ItemStore {
             try beforeIndexUpdate?()
             guard let index else { throw TractandaError("indexUnavailable", "Index requires rebuilding.") }
             let appendLocal = {
+                if self.personalProfile != nil {
+                    try index.appendPersonalContent(
+                        row: newLocation.catalogueRow(revisionID: revision.revisionID), revision: revision,
+                        parent: isNew ? nil : base, corpus: indexedCorpus)
+                    try self.requirePersonalWriteCapacity()
+                    return
+                }
                 try index.appendValidatedLocal(
                     row: newLocation.catalogueRow(revisionID: revision.revisionID), revision: revision,
                     parent: isNew ? nil : base,
@@ -6044,6 +6426,7 @@ public final class ItemStore {
                     try finishLocalAuthority(localAuthorityPackage, index: index)
                     try appendLocal()
                     try index.execute("COMMIT")
+                    if self.personalProfile != nil { try self.requirePersonalWriteCapacity() }
                 }
                 if isConfiguration, revisionProjectionEnabled {
                     try refreshCurrentAccessConfigurations(using: index)
@@ -6088,6 +6471,13 @@ public final class ItemStore {
     func rebuildIndex(control: RebuildControl?) throws {
         try requireAdministrator()
         try requireAuthorityWriterActivation()
+        if personalProfile != nil {
+            rebuildControl = control
+            defer { rebuildControl = nil }
+            try control?.pulse(phase: "verifyingCanonicalClosure")
+            try rebuildPersonalIndex()
+            return
+        }
         let maintenanceEvent = try maintenanceContext?.beginDerived(.indexRebuild)
         var maintenanceFinished = false
         defer {
@@ -6336,7 +6726,8 @@ extension ItemStore {
     private func atomicWriterDirectories(id: String) throws -> AtomicWriterDirectories {
         _ = try AuthorityRecord.persistentID(.text(id))
         if maintenanceContext != nil {
-            try CanonicalMaintenanceContext.deny(root: root,
+            try CanonicalMaintenanceContext.deny(
+                root: root,
                 path: ["index", "atomic-authority-work", id], operation: "atomic producer workspace")
         }
         let base = indexDirectory.appendingPathComponent("atomic-authority-work")
@@ -6370,7 +6761,8 @@ extension ItemStore {
             return
         }
         if maintenanceContext != nil {
-            try CanonicalMaintenanceContext.deny(root: root,
+            try CanonicalMaintenanceContext.deny(
+                root: root,
                 path: ["index", "atomic-authority-work", directory.root.lastPathComponent],
                 operation: "unscoped atomic workspace cleanup")
         }
@@ -10107,12 +10499,14 @@ extension ItemStore {
         // This remains filesystem permission only; the full validator below still runs.
         let bytes = try reopen()
         let stage = try AtomicControlStage(rootBytes: bytes)
-        try requireHistoricalAtomicHeader(stage.header, attestation: attestation,
+        try requireHistoricalAtomicHeader(
+            stage.header, attestation: attestation,
             coordinator: coordinator, index: index)
         let directories: AtomicWriterDirectories
         if let maintenanceContext {
             let scope = try maintenanceContext.prepareHistoricalScratch(attestation, coordinator: coordinator)
-            directories = .init(root: scope.root, control: scope.control,
+            directories = .init(
+                root: scope.root, control: scope.control,
                 package: scope.root.appendingPathComponent("package"),
                 context: scope.root.appendingPathComponent("context"), maintenanceScratch: scope)
         } else {
@@ -14430,6 +14824,7 @@ extension ItemStore {
             || !requirement.capabilities.contains(AtomicAuthorityFormat.profile)
     }
     private func requireAuthorityWriterActivation() throws {
+        try requireOperationalContent()
         if try requiresAtomicAuthorityActivation() {
             throw TractandaError(
                 "atomicAuthorityTransitionRequired",
@@ -14439,6 +14834,7 @@ extension ItemStore {
     }
     private func requireActivePublishingOrigin() throws {
         try requireAuthorityWriterActivation()
+        if personalProfile != nil { try requirePersonalWriteCapacity() }
         guard authorityIntakeEnabled, let origin = replicaID, let index else { return }
         if canonicalFormatSupport.writerLevel >= 15, try peerIntake?.configuration()?.bootstrap == nil {
             throw TractandaError(
@@ -14451,6 +14847,14 @@ extension ItemStore {
                 "This replica was retired; normal publication is disabled. Read and administrator recovery remain available."
             )
         }
+    }
+
+    private func requirePersonalWriteCapacity() throws {
+        var limits = personalIndexLimits
+        limits.minimumAvailableBytes = max(
+            limits.minimumAvailableBytes, UInt64(max(0, attachmentUploadPolicy.minimumFreeBytes)))
+        try checkPersonalIndexCapacity(
+            database: indexDirectory.appendingPathComponent("items.sqlite"), limits: limits)
     }
 }
 
@@ -14735,7 +15139,11 @@ extension ItemStore {
         operationID: String, actorUID: UInt32, limits: InitialAuthorityBootstrap.Limits = .init(),
         progress: (() throws -> Void)? = nil
     ) throws -> InitialAuthorityBootstrap.Request {
-        try withAccess(forUID: actorUID) {
+        guard personalProfile == nil else {
+            throw TractandaError(
+                "personalProfileRequired", "Historical authority conversion does not apply to this profile.")
+        }
+        return try withAccess(forUID: actorUID) {
             try requireAdministrator()
             guard !authorityIntakeEnabled, !accessConfigurationAmbiguous,
                 !accessConfigurationProofUnavailable,

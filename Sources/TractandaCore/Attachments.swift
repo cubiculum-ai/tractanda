@@ -345,6 +345,47 @@ final class AttachmentPayloadStore: @unchecked Sendable {
         try verifyPayload(attachment, descriptor: files.last!, cacheResult: true, progress: progress)
     }
 
+    /// A private validator has no placement database and cannot escape via a replaced root path.
+    private init(inventoryRoot: URL, ownerUID: UInt32) {
+        root = inventoryRoot
+        self.ownerUID = ownerUID
+        stagingQuota = nil
+        reserveBytes = Self.defaultReserveBytes
+        availableBytesOverride = nil
+        fileByteLimit = Self.maximumFileBytes
+        chunkByteLimit = Self.maximumChunkBytes
+    }
+
+    /// Descriptor-anchored offline reads never open/rebuild placement SQLite or mutate payloads.
+    static func validateForInventory(
+        _ attachment: AttachmentDescriptor, path: String, root: URL, rootDescriptor: Int32,
+        ownerUID: UInt32, readBudget: @escaping (Int) throws -> Void,
+        progress: @Sendable (Int64) throws -> Void = { _ in }
+    ) throws {
+        _ = try Self.validated(attachment)
+        try PayloadPlacement.validate(path, id: attachment.attachmentID)
+        let components = path.split(separator: "/").map(String.init)
+        var descriptors: [Int32] = []
+        defer { for fd in descriptors.reversed() { _ = close(fd) } }
+        var parent = rootDescriptor
+        try Self.validateDirectory(parent, ownerUID: ownerUID)
+        for component in components.dropLast() {
+            let fd = component.withCString {
+                openat(parent, $0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            }
+            guard fd >= 0 else { throw Self.posix("Cannot open selected payload directory.") }
+            descriptors.append(fd)
+            try Self.validateDirectory(fd, ownerUID: ownerUID)
+            parent = fd
+        }
+        let fd = try Self.openFile(
+            in: parent, name: components.last!, flags: O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+        descriptors.append(fd)
+        let validator = Self(inventoryRoot: root, ownerUID: ownerUID)
+        try validator.verifyPayload(
+            attachment, descriptor: fd, cacheResult: false, readBudget: readBudget, progress: progress)
+    }
+
     /// Returns no more than one transfer chunk from an immutable payload.
     func read(
         descriptor attachment: AttachmentDescriptor, offset: Int64, limit: Int,
@@ -854,7 +895,7 @@ final class AttachmentPayloadStore: @unchecked Sendable {
 
     private func verifyPayload(
         _ attachment: AttachmentDescriptor, descriptor: Int32, cacheResult: Bool,
-        progress: @Sendable (Int64) throws -> Void = { _ in }
+        readBudget: ((Int) throws -> Void)? = nil, progress: @Sendable (Int64) throws -> Void = { _ in }
     ) throws {
         let before = try Self.metadata(for: descriptor)
         guard
@@ -871,7 +912,8 @@ final class AttachmentPayloadStore: @unchecked Sendable {
         }
         recordDigestPass()
         let digest = try Self.sha256(
-            descriptor: descriptor, byteCount: before.size, chunkLimit: chunkByteLimit, progress: progress)
+            descriptor: descriptor, byteCount: before.size, chunkLimit: chunkByteLimit,
+            readBudget: readBudget, progress: progress)
         let after = try Self.metadata(for: descriptor)
         guard before == after, digest == attachment.sha256 else {
             invalidate(attachment.attachmentID)
@@ -1008,7 +1050,7 @@ final class AttachmentPayloadStore: @unchecked Sendable {
 
     private static func sha256(
         descriptor: Int32, byteCount: UInt64, chunkLimit: Int,
-        progress: @Sendable (Int64) throws -> Void = { _ in }
+        readBudget: ((Int) throws -> Void)? = nil, progress: @Sendable (Int64) throws -> Void = { _ in }
     ) throws -> String {
         guard byteCount <= UInt64(maximumFileBytes) else {
             throw TractandaError(
@@ -1019,6 +1061,7 @@ final class AttachmentPayloadStore: @unchecked Sendable {
         while UInt64(offset) < byteCount {
             let count = Int(min(UInt64(chunkLimit), byteCount - UInt64(offset)))
             try Task.checkCancellation()
+            try readBudget?(count)
             let bytes = try readExactly(descriptor: descriptor, offset: offset, count: count)
             hasher.update(data: bytes)
             offset += Int64(count)
@@ -1316,11 +1359,12 @@ extension AttachmentPayloadStore {
                 throw TractandaError(
                     "attachmentIntegrity", "Document original metadata differs from its descriptor.")
             }
-            let digest = try Self.sha256(descriptor: fd, byteCount: before.size, chunkLimit: chunkByteLimit) {
-                bytes in
-                try cancellation.check()
-                try progress(bytes)
-            }
+            let digest = try Self.sha256(
+                descriptor: fd, byteCount: before.size, chunkLimit: chunkByteLimit,
+                progress: { bytes in
+                    try cancellation.check()
+                    try progress(bytes)
+                })
             let after = try Self.metadata(for: fd)
             guard before == after, digest == descriptor.sha256 else {
                 throw TractandaError("attachmentIntegrity", "Document original changed while hashing.")

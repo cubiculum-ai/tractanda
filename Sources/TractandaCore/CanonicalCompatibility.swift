@@ -41,8 +41,9 @@ enum AtomicAuthorityCompatibility {
 public struct CanonicalFormatSupport: Codable, Equatable, Sendable {
     public static let profileName = "tractanda.canonical-formats.v1"
     public static let current = Self(
-        readerLevel: 15, writerLevel: 15, read: [1, 2], write: [2],
+        readerLevel: 16, writerLevel: 16, read: [1, 2], write: [2],
         capabilities: [
+            PersonalWorkgroupProfile.capability,
             AtomicAuthorityFormat.profile,
             "tractanda.peer-enrollment-approval.v1", "tractanda.peer-origin-admission.v1",
             "tractanda.peer-enrollment-activation.v1", "tractanda.peer-enrollment-target.v1",
@@ -51,12 +52,23 @@ public struct CanonicalFormatSupport: Codable, Equatable, Sendable {
             "tractanda.peer-originals.v1", "tractanda.document-placement.v1", "tractanda.peer-documents.v1",
         ].sorted(),
         writeCapabilities: [
+            PersonalWorkgroupProfile.capability,
             AtomicAuthorityFormat.profile,
             "tractanda.peer-enrollment-approval.v1", "tractanda.peer-origin-admission.v1",
             "tractanda.peer-enrollment-activation.v1", "tractanda.peer-enrollment-target.v1",
             "tractanda.authority.v1", "tractanda.authority-causal.v1", "tractanda.authority-review.v1",
             "tractanda.peer-lifecycle.v1", "tractanda.shared-authority.v1", "tractanda.payload-placement.v1",
             "tractanda.peer-originals.v1", "tractanda.document-placement.v1", "tractanda.peer-documents.v1",
+        ].sorted())
+    package static let personalWorkgroup = Self(
+        readerLevel: 16, writerLevel: 16, read: [1, 2], write: [2],
+        capabilities: [
+            PersonalWorkgroupProfile.capability, PayloadPlacement.capability,
+            "tractanda.document-placement.v1",
+        ].sorted(),
+        writeCapabilities: [
+            PersonalWorkgroupProfile.capability, PayloadPlacement.capability,
+            "tractanda.document-placement.v1",
         ].sorted())
     public static let legacy = Self(readerLevel: 1, writerLevel: 1, read: [1], write: [1])
     public let profile: String
@@ -735,6 +747,15 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
             capabilities: Set(prior.capabilities + [PeerEnrollmentActivation.targetCapability]).sorted())
         try support.require(raised)
         if raised != prior { try raised.persist(root: root, ownerUID: ownerUID) }
+    }
+    /// Bounded no-follow reader for current private 0600 operational configuration.
+    static func localConfigurationBytes(root: URL, name: String, ownerUID: UInt32, maximumBytes: Int) throws
+        -> Data?
+    {
+        guard !name.isEmpty, !name.contains("/"), name != ".", name != ".." else {
+            throw TractandaError("unknownCanonicalCompatibility", "Invalid local configuration name.")
+        }
+        return try privateMetadata(root: root, name: name, ownerUID: ownerUID, maximumBytes: maximumBytes)
     }
     private static func privateMetadata(root: URL, name: String, ownerUID: UInt32, maximumBytes: Int) throws
         -> Data?

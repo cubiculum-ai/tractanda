@@ -48,6 +48,20 @@ final class SetupPeerRuntimeTests: XCTestCase {
             manifestSHA256: String(repeating: "a", count: 64))
     }
 
+    func testPersonalManagedDefinitionOmitsPeerArgumentAndRefusesRetainedConfiguration() throws {
+        try fixture { root, engine in
+            var value = try receipt(root, engine)
+            let definition =
+                try PropertyListSerialization.propertyList(from: engine.serviceDefinition(value), format: nil)
+                as? [String: Any]
+            let arguments = try XCTUnwrap(definition?["ProgramArguments"] as? [String])
+            XCTAssertFalse(arguments.contains("--peer-runtime-config"))
+            value.peerRuntimeConfiguration = try .init(
+                path: engine.peerConfigurationURL(value.instance).path, bytes: bytes())
+            XCTAssertThrowsError(try engine.serviceDefinition(value))
+        }
+    }
+
     func testCaptureNormalizesOnceAndRejectsSymlinkFIFOAndOversizedInput() throws {
         try fixture { root, engine in
             let input = root.appendingPathComponent("input.json")

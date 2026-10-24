@@ -15,10 +15,12 @@ let usage = """
     Tractanda — experimental local item server
 
       tractanda init STORE [--index-directory PATH]
+      tractanda inspect-content STORE [--owner OS_USER] [--output PRIVATE_JSON]
+      tractanda activate-content STORE TAGGED_CONFIG_JSON --index-directory PATH
       tractanda seed STORE [--index-directory PATH]
       tractanda configure-access STORE TAGGED_CONFIG_JSON OPERATION_ID [--index-directory PATH]
       tractanda serve STORE SOCKET [--max-requests N] [--index-directory PATH]
-      tractanda daemon STORE SOCKET [--index-directory PATH] [--http-port PORT|--no-http] [--managed] [--document-converter PATH --document-model-directory PATH --document-scratch-directory PATH] [--document-inspect-seconds N] [--document-model-load-seconds N] [--document-page-seconds N] [--document-no-progress-seconds N] [--document-termination-grace-seconds N] [--attachment-upload-idle-seconds N] [--attachment-staged-byte-quota N] [--attachment-minimum-free-bytes N] [--rebuild-no-progress-seconds N] [--view ID | --project-root ID --status-root ID [--project ID]] [--peer-runtime-config ABSOLUTE_PATH]
+      tractanda daemon STORE SOCKET [--index-directory PATH] [--http-port PORT|--no-http] [--managed] [--document-converter PATH --document-model-directory PATH --document-scratch-directory PATH] [--document-inspect-seconds N] [--document-model-load-seconds N] [--document-page-seconds N] [--document-no-progress-seconds N] [--document-termination-grace-seconds N] [--attachment-upload-idle-seconds N] [--attachment-staged-byte-quota N] [--attachment-minimum-free-bytes N] [--rebuild-no-progress-seconds N] [--view ID | --project-root ID --status-root ID [--project ID]]
       tractanda connections list|add|default|remove ...
       tractanda service prepare|install|activate|start|stop|status|uninstall ...
       tractanda uuid-v1 [COUNT]
@@ -92,8 +94,10 @@ let usage = """
     Learning reset preserves canonical assignments and feedback. Use call for pagination.
 
     Fields use tagged JSON values, e.g. {"phone":{"type":"text","value":"123"}}.
-    Mutations require an operation ID; reuse it with identical arguments when retrying.
-    Stores default to single-user access. Shared stores admit configured OS users/groups.
+    Item mutations require an operation ID; reuse identical arguments when retrying.
+    Local access configuration replaces current settings without creating an item revision.
+    Fresh stores use the personal/workgroup profile and admit the creating OS account.
+    configure-access changes current local OS user/group policy; peer networking is unavailable.
     Set TRACTANDA_SERVER_USER to pin another account's daemon identity. This is not network JMAP.
     """
 
@@ -136,6 +140,7 @@ func run() throws {
         print(usage)
         return
     }
+    if try contentCommand(args, hasConnectionOptions: hasConnectionOptions) { return }
     if command == "uuid-v1" || command == "inspect-uuid" || command == "uuid-node" {
         guard !hasConnectionOptions else {
             throw TractandaError("usage", "UUID utilities run locally, without a connection profile.")
@@ -248,11 +253,16 @@ func run() throws {
         if command == "configure-access" {
             try require(4)
             let value = try JSON.decode(ItemValue.self, Data(contentsOf: URL(fileURLWithPath: args[2])))
+            guard !args[3].isEmpty, args[3].utf8.count <= 200, !args[3].contains("\0") else {
+                throw TractandaError("invalidArguments", "Supply a bounded configuration request label.")
+            }
+            try store.withAccess(forUID: store.ownerUID) { try store.configurePersonalAccess(value) }
             output(
-                try JSON.encode(
-                    store.withAccess(forUID: store.ownerUID) {
-                        try store.configureAccess(value, operationID: args[3])
-                    }))
+                try JSONSerialization.data(
+                    withJSONObject: [
+                        "state": store.state, "configured": true,
+                        "persistenceProfile": store.persistenceProfile,
+                    ], options: [.sortedKeys]))
             return
         }
         try require(3)

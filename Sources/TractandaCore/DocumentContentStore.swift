@@ -282,7 +282,20 @@ final class DocumentContentStore: @unchecked Sendable {
         identity: DocumentConverterIdentity, extractedAt: String, boundary: () throws -> Void = {},
         progress: (Int64) throws -> Void = { _ in }
     ) throws {
-        let manifest = try manifest(reference)
+        try validateStoredContent(
+            reference, source: source, identity: identity, extractedAt: extractedAt,
+            base: directory(reference.contentID), boundary: boundary, progress: progress)
+    }
+    private func validateStoredContent(
+        _ reference: DocumentContentReference, source: AttachmentDocumentSource,
+        identity: DocumentConverterIdentity, extractedAt: String, base: [String],
+        boundary: () throws -> Void = {}, progress: (Int64) throws -> Void = { _ in },
+        readBudget: ((Int) throws -> Void)? = nil,
+        visit: (DocumentStoredPage, Int) throws -> Void = { _, _ in }
+    ) throws {
+        let data = try files.read(
+            path: base + ["manifest.json"], maximumBytes: Self.maximumNodeBytes, readBudget: readBudget)
+        let manifest = try decodeManifest(data, reference: reference)
         guard manifest.source == source, manifest.identity == identity, manifest.extractedAt == extractedAt
         else {
             throw integrity("Document provenance differs from its canonical representation.")
@@ -290,17 +303,19 @@ final class DocumentContentStore: @unchecked Sendable {
         var total: Int64 = 0
         var counts = [Int64](repeating: 0, count: 5)
         try visitClosure(
-            base: directory(reference.contentID),
+            base: base,
             rootEntry: .init(
                 ordinal: 0, firstPage: 1, lastPage: manifest.pageCount,
                 byteCount: manifest.rootByteCount, sha256: manifest.rootSHA256),
-            level: manifest.rootLevel, source: source, identity: identity, boundary: boundary
+            level: manifest.rootLevel, source: source, identity: identity, boundary: boundary,
+            readBudget: readBudget
         ) { page, encodedCount in
             let sum = total.addingReportingOverflow(Int64(encodedCount))
             guard !sum.overflow else { throw integrity("Saved document byte count overflowed.") }
             total = sum.partialValue
             counts[try statusIndex(page.status)] += 1
             try progress(page.pageNumber)
+            try visit(page, encodedCount)
         }
         let coverage = try DocumentCoverage(
             converted: counts[0], unsupported: counts[1], truncated: counts[2], timedOut: counts[3],
@@ -308,6 +323,51 @@ final class DocumentContentStore: @unchecked Sendable {
         guard total == manifest.totalEncodedBytes, coverage == manifest.coverage else {
             throw integrity("Document closure count or coverage changed.")
         }
+    }
+
+    private init(inventoryRoot: URL, ownerUID: UInt32, rootDescriptor: Int32) {
+        root = inventoryRoot
+        self.ownerUID = ownerUID
+        files = DocumentContentFiles(
+            root: inventoryRoot, ownerUID: ownerUID, minimumFreeBytes: 0, rootDescriptor: rootDescriptor)
+    }
+    /// Read-only recovery borrows the selected root descriptor and never resolves placement SQLite.
+    static func validateForInventory(
+        _ representation: AttachmentDocumentRepresentation, path: String, root: URL,
+        rootDescriptor: Int32, ownerUID: UInt32, readBudget: @escaping (Int) throws -> Void,
+        progress: (Int64) throws -> Void = { _ in }
+    ) throws {
+        guard let reference = representation.content else {
+            throw TractandaError("documentIntegrity", "Recovery requires a saved document reference.")
+        }
+        try DocumentPlacement.validate(path, id: reference.contentID)
+        let validator = Self(inventoryRoot: root, ownerUID: ownerUID, rootDescriptor: rootDescriptor)
+        try validator.validateStoredContent(
+            reference, source: representation.source, identity: representation.identity,
+            extractedAt: representation.extractedAt, base: path.split(separator: "/").map(String.init),
+            progress: progress, readBudget: readBudget)
+    }
+
+    /// Streams the same authenticated immutable closure against an explicitly selected base.
+    /// No placement database, local store identity or canonical operational state is consulted.
+    /// The caller keeps the borrowed root descriptor open until this synchronous visit returns.
+    static func forEachRecoveryPage(
+        document: PageCorpusDocumentPlan, path: String, root: URL, rootDescriptor: Int32,
+        ownerUID: UInt32, readBudget: @escaping (Int) throws -> Void,
+        visit: (DocumentStoredPage, Int) throws -> Void
+    ) throws {
+        guard !document.isIncoming, let reference = document.savedContent,
+            document.rootSHA256 == reference.rootSHA256, document.pageCount == reference.pageCount,
+            document.totalEncodedBytes == reference.totalEncodedBytes, document.coverage == reference.coverage
+        else {
+            throw TractandaError("documentIntegrity", "Recovery requires committed saved document content.")
+        }
+        try DocumentPlacement.validate(path, id: reference.contentID)
+        let reader = Self(inventoryRoot: root, ownerUID: ownerUID, rootDescriptor: rootDescriptor)
+        try reader.validateStoredContent(
+            reference, source: document.source, identity: document.identity,
+            extractedAt: document.extractedAt, base: path.split(separator: "/").map(String.init),
+            readBudget: readBudget, visit: visit)
     }
     func part(
         _ reference: DocumentContentReference, kind: String, level requestedLevel: Int = 0,
@@ -420,14 +480,14 @@ final class DocumentContentStore: @unchecked Sendable {
         base: [String], rootEntry: DocumentHashEntry, level: Int,
         source: AttachmentDocumentSource, identity: DocumentConverterIdentity,
         boundary: () throws -> Void = {}, part: () throws -> Void = {},
-        visit: (DocumentStoredPage, Int) throws -> Void
+        readBudget: ((Int) throws -> Void)? = nil, visit: (DocumentStoredPage, Int) throws -> Void
     ) throws {
         try Task.checkCancellation()
         try boundary()
         try part()
         let data = try files.read(
             path: base + nodePath(level: level, ordinal: rootEntry.ordinal),
-            maximumBytes: Self.maximumNodeBytes)
+            maximumBytes: Self.maximumNodeBytes, readBudget: readBudget)
         guard Int64(data.count) == rootEntry.byteCount, digest(data) == rootEntry.sha256 else {
             throw integrity("Document closure node checksum changed.")
         }
@@ -445,11 +505,12 @@ final class DocumentContentStore: @unchecked Sendable {
             if level > 0 {
                 try visitClosure(
                     base: base, rootEntry: entry, level: level - 1, source: source, identity: identity,
-                    boundary: boundary, part: part, visit: visit)
+                    boundary: boundary, part: part, readBudget: readBudget, visit: visit)
             } else {
                 try part()
                 let bytes = try files.read(
-                    path: base + pagePath(entry.ordinal), maximumBytes: Self.maximumPageBytes)
+                    path: base + pagePath(entry.ordinal), maximumBytes: Self.maximumPageBytes,
+                    readBudget: readBudget)
                 guard Int64(bytes.count) == entry.byteCount, digest(bytes) == entry.sha256 else {
                     throw integrity("Saved page checksum changed.")
                 }

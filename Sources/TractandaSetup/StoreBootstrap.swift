@@ -2,7 +2,8 @@ import Foundation
 import TractandaCore
 
 /// First-store initialization, executed as the selected service UID. It resumes only the
-/// exact access configuration it created; it never adopts or rewrites another database.
+/// current personal/workgroup access configuration it created; it never adopts historical
+/// authority/raw content. Existing roots require separately authorized in-place preparation.
 enum StoreBootstrap {
     static func initialize(
         store root: URL, indexDirectory: URL, owner: String, instance: String,

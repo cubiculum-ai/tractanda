@@ -8,8 +8,41 @@ import Foundation
 #endif
 
 extension ItemStore {
-    /// Explicit creation, bound to the executing OS identity. The key identifies only this
-    /// local initialization request; it never supplies administrator authority.
+    /// Explicit personal/workgroup creation. Historical authority initialization remains separate.
+    public static func initializePersonalWorkgroup(
+        root: URL, indexDirectory: URL? = nil,
+        accounts: any AccountDirectory = SystemAccountDirectory(),
+        accessConfiguration: ItemValue
+    ) throws -> ItemStore {
+        try ItemStore(
+            personalRoot: root, indexDirectory: indexDirectory,
+            opening: .fresh(accessConfiguration), accounts: accounts)
+    }
+
+    /// Explicit administrator-selected prepared raw content; this is not ordinary legacy startup.
+    public static func activatePersonalWorkgroupContent(
+        root: URL, indexDirectory: URL? = nil,
+        accounts: any AccountDirectory = SystemAccountDirectory(),
+        accessConfiguration: ItemValue
+    ) throws -> ItemStore {
+        try ItemStore(
+            personalRoot: root, indexDirectory: indexDirectory,
+            opening: .selectedContent(accessConfiguration), accounts: accounts)
+    }
+
+    public static func openPersonalWorkgroup(
+        root: URL, indexDirectory: URL? = nil,
+        accounts: any AccountDirectory = SystemAccountDirectory(),
+        attachmentUploadPolicy: AttachmentUploadPolicy = .init()
+    ) throws -> ItemStore {
+        try ItemStore(
+            personalRoot: root, indexDirectory: indexDirectory, opening: .existing, accounts: accounts,
+            attachmentUploadPolicy: attachmentUploadPolicy)
+    }
+
+    /// Normal fresh creation uses the personal/workgroup profile and executing OS identity.
+    /// The bounded request label is accepted for Setup callers; it grants no authority and
+    /// never selects another store or replaces an established local policy.
     public static func initializeFresh(
         root: URL, indexDirectory: URL? = nil,
         accounts: any AccountDirectory = SystemAccountDirectory(),
@@ -33,12 +66,9 @@ extension ItemStore {
                 "profile": .text(AccessConfiguration.profile),
                 "users": .list([.text(accounts.user(forUID: uid).name)]), "groups": .list([]),
             ])
-        let prior = try InitialAuthorityBootstrap.load(root: root)
-        let operation = try prior?.operationID ?? UUID.makeVersion1().uuidString.lowercased()
-        return try createInitialized(
+        return try initializePersonalWorkgroup(
             root: root, indexDirectory: indexDirectory, accounts: accounts,
-            initialAccessConfiguration: configuration, actorUID: uid, operationID: operation,
-            initializationKey: initializationKey)
+            accessConfiguration: configuration)
     }
 
     /// Normal runtime opening never creates canonical identity or admits standalone history.
@@ -49,51 +79,45 @@ extension ItemStore {
         attachmentUploadPolicy: AttachmentUploadPolicy = AttachmentUploadPolicy()
     ) throws -> ItemStore {
         try requireInitializedRoot(root)
-        return try ItemStore(
+        return try openPersonalWorkgroup(
             root: root, indexDirectory: indexDirectory, accounts: accounts,
-            attachmentUploadPolicy: attachmentUploadPolicy,
-            revisionProjectionEnabled: true, authorityIntakeEnabled: true, firstSourceOperation: nil,
-            requireInitializedStore: true)
+            attachmentUploadPolicy: attachmentUploadPolicy)
     }
 
-    static func requireInitializedRoot(_ root: URL) throws {
-        // Check the lexical leaf before resolving system aliases such as /tmp on macOS.
-        try PrivateConfiguration.validate(root, directory: true)
-        let canonical = root.standardizedFileURL.resolvingSymlinksInPath()
-        try PeerEnrollment.requireOrdinaryOpeningAllowed(root: canonical, ownerUID: tractanda_uid())
-        try InitialAuthorityBootstrap.requireOpeningAllowed(
-            root: canonical, ownerUID: tractanda_uid(),
-            request: nil, accounts: SystemAccountDirectory())
-        guard
-            let requirement = try CanonicalReaderRequirement.load(root: canonical, ownerUID: tractanda_uid()),
-            requirement.capabilities.contains(AuthorityStore.capability)
-        else {
+    static func requireInitializedRoot(_ root: URL, ownerUID: UInt32 = tractanda_uid()) throws {
+        let metadata = try FileMetadata.read(at: root)
+        guard metadata.type == .directory, metadata.uid == ownerUID, metadata.mode & 0o077 == 0 else {
             throw TractandaError(
-                "uninitializedStore",
-                "Explicit fresh initialization or stopped development conversion is required.")
+                "privateConfiguration", "Personal store root custody differs from the selected owner.")
         }
-        try CanonicalFormatSupport.current.require(requirement)
-        _ = try InitialAuthorityBootstrap.storeIdentityBytes(root: canonical)
         guard
-            try AuthorityStore.configuration(
-                root: canonical,
-                files: DocumentContentFiles(root: canonical, ownerUID: tractanda_uid(), minimumFreeBytes: 0))?
-                .bootstrap != nil
+            try PersonalWorkgroupProfile.load(root, ownerUID: ownerUID) != nil
+                || PersonalWorkgroupProfile.load(root, pending: true, ownerUID: ownerUID) != nil
         else {
             throw TractandaError(
-                "authorityBootstrapRequired", "Initialized store lacks its accepted bootstrap pin.")
-        }
-        // Loading only: a missing local identity must never allocate a replacement here.
-        let identity =
-            try JSONSerialization.jsonObject(
-                with: InitialAuthorityBootstrap.storeIdentityBytes(root: canonical)) as? [String: Any]
-        guard let storeID = identity?["storeID"] as? String,
-            try ReplicaIdentity.load(root: canonical, storeID: storeID, ownerUID: tractanda_uid()) != nil
-        else {
-            throw TractandaError(
-                "invalidReplicaIdentity", "Initialized store lacks its committed local identity.")
+                "personalMigrationRequired",
+                "This root requires explicit selected-content preparation and personal/workgroup activation; ordinary opening never converts historical or raw stores."
+            )
         }
     }
+
+    /// Read-only Setup validation can run as root for a daemon-owned tree. Every private read
+    /// uses the explicitly selected filesystem owner, never the validator process's UID.
+    package static func verifyPersonalWorkgroupRoot(root: URL, ownerUID: UInt32) throws {
+        try requireInitializedRoot(root, ownerUID: ownerUID)
+        guard let record = try PersonalWorkgroupProfile.load(root, ownerUID: ownerUID),
+            let fence = try CanonicalReaderRequirement.load(root: root, ownerUID: ownerUID),
+            fence.storeID == record.storeID, fence.minimumReaderLevel >= PersonalWorkgroupProfile.readerLevel,
+            fence.capabilities.contains(PersonalWorkgroupProfile.capability),
+            try ReplicaIdentity.load(root: root, storeID: record.storeID, ownerUID: ownerUID)?.replicaID
+                == record.replicaID
+        else {
+            throw TractandaError(
+                "invalidPersonalProfile", "Personal runtime activation or identities are incomplete.")
+        }
+        try CanonicalFormatSupport.personalWorkgroup.require(fence)
+    }
+
 }
 
 extension ItemStore {

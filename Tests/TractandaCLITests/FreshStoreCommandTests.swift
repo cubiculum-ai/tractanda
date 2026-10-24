@@ -23,7 +23,8 @@ final class FreshStoreCommandTests: XCTestCase {
         let process = Process()
         let output = Pipe()
         let error = Pipe()
-        process.executableURL = URL(fileURLWithPath: ".build/debug/tractanda").standardizedFileURL
+        let executable = ProcessInfo.processInfo.environment["TRACTANDA_TEST_CLI"] ?? ".build/debug/tractanda"
+        process.executableURL = URL(fileURLWithPath: executable).standardizedFileURL
         process.arguments = args
         process.standardOutput = output
         process.standardError = error
@@ -32,15 +33,12 @@ final class FreshStoreCommandTests: XCTestCase {
     }
     private func run(_ args: [String]) throws -> (Int32, Data, Data) {
         let (process, output, error) = try process(args)
-        let timeout = DispatchWorkItem { if process.isRunning { process.terminate() } }
-        DispatchQueue.global().asyncAfter(deadline: .now() + 15, execute: timeout)
-        defer { timeout.cancel() }
         let bytes = output.fileHandleForReading.readDataToEndOfFile()
         let diagnostics = error.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         return (process.terminationStatus, bytes, diagnostics)
     }
-    func testCLIInitCreatesCanonicalMetadataAndNormalQueryUsesStrictServe() throws {
+    func testCLIInitAndConfigureAccessPersistPersonalPolicy() throws {
         try capacity()
         let parent = FileManager.default.temporaryDirectory.appendingPathComponent(
             "tcf-" + String(UUID().uuidString.prefix(8)))
@@ -49,38 +47,38 @@ final class FreshStoreCommandTests: XCTestCase {
             attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: parent) }
         let root = parent.appendingPathComponent("store")
-        let socket = parent.appendingPathComponent("s")
         let initialized = try run(["init", root.path])
         XCTAssertEqual(initialized.0, 0, String(decoding: initialized.2, as: UTF8.self))
         let identity = try Data(contentsOf: root.appendingPathComponent(".tractanda-replica-identity.json"))
         XCTAssertTrue(
             FileManager.default.fileExists(
-                atPath: root.appendingPathComponent(".tractanda-first-source-complete.json").path))
+                atPath: root.appendingPathComponent(".tractanda-personal-profile.json").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("authority").path))
         XCTAssertEqual(try run(["init", root.path]).0, 0)
         XCTAssertEqual(
             try Data(contentsOf: root.appendingPathComponent(".tractanda-replica-identity.json")), identity)
-        let (server, _, diagnostics) = try process(["serve", root.path, socket.path, "--max-requests", "1"])
-        defer {
-            if server.isRunning {
-                server.terminate()
-                server.waitUntilExit()
-            }
-        }
-        let deadline = Date().addingTimeInterval(10)
-        while !FileManager.default.fileExists(atPath: socket.path), server.isRunning, Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.01)
-        }
-        XCTAssertTrue(FileManager.default.fileExists(atPath: socket.path))
-        let result = try run(["query", socket.path, "itemID == *"])
-        XCTAssertEqual(result.0, 0, String(decoding: result.2, as: UTF8.self))
-        let allItems = try XCTUnwrap(JSONSerialization.jsonObject(with: result.1) as? [String: Any])
-        XCTAssertEqual(
-            allItems["total"] as? Int, 1, "An unfiltered normal query includes the canonical policy item")
-        if result.0 != 0, server.isRunning { server.terminate() }
-        server.waitUntilExit()
-        XCTAssertEqual(
-            server.terminationStatus, 0,
-            String(decoding: diagnostics.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self))
+        let account = try SystemAccountDirectory().user(forUID: getuid())
+        let policy: ItemValue = .object([
+            "profile": .text(AccessConfiguration.profile),
+            "users": .list([.text(account.name)]), "groups": .list([.text(account.primaryGroupName)]),
+        ])
+        let policyURL = parent.appendingPathComponent("policy.json")
+        try JSONEncoder().encode(policy).write(to: policyURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: policyURL.path)
+        let configured = try run(["configure-access", root.path, policyURL.path, "private-fixture"])
+        XCTAssertEqual(configured.0, 0, String(decoding: configured.2, as: UTF8.self))
+        let acknowledgement = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: configured.1) as? [String: Any])
+        XCTAssertEqual(acknowledgement["configured"] as? Bool, true)
+        XCTAssertEqual(acknowledgement["persistenceProfile"] as? String, "personal-workgroup")
+        struct Profile: Decodable { let accessConfiguration: ItemValue }
+        let persisted = try JSONDecoder().decode(
+            Profile.self,
+            from: Data(contentsOf: root.appendingPathComponent(".tractanda-personal-profile.json")))
+        XCTAssertEqual(persisted.accessConfiguration, policy)
+        let store = try ItemStore.openInitialized(root: root)
+        XCTAssertTrue(store.isPersonalWorkgroup)
+        XCTAssertTrue(try store.candidates().isEmpty, "Local policy is not a canonical item")
     }
     func testCLIServeDoesNotCreateMissingStoreOrAdoptLegacyRoot() throws {
         try capacity()

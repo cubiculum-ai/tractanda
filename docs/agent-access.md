@@ -6,9 +6,11 @@ An MCP label, model name or tool configuration is not an identity boundary. Nati
 
 Category membership and saved views organize records; they do not grant access. Explicitly share the category definitions needed for navigation and the intended items. New items are private to their authenticated creator unless permissions say otherwise.
 
-For a multi-user migration, create and review a canonical `AccessConfigurationItem` (`tractanda.access.v1`) and permission changes first. `administration: "system"` uses root plus the host administrator group (`admin` on macOS, `sudo` on Linux), or a configured `administratorGroup`; old stores retain `serviceOwner` administration until migrated. `legacyUsers` is a receipt-compatibility bridge, not a substitute for identity verification.
+For historical-development stores, a multi-user migration may use a canonical `AccessConfigurationItem` (`tractanda.access.v1`) and item permission changes; `administration: "system"` uses root plus the host administrator group (`admin` on macOS, `sudo` on Linux), or a configured `administratorGroup`. Old stores without an access configuration retain `serviceOwner` administration until migrated. `legacyUsers` is a receipt-compatibility bridge, not a substitute for identity verification.
 
-The existing offline planner can prepare guarded permission requests for an initially unconfigured store, but it neither creates accounts nor installs a shared service. Review every grant, include deleted heads in the inventory, preserve operation IDs, back up canonical data, and stop on conflicts. A plan or fake-identity test is not proof of production isolation.
+The personal/workgroup profile uses a different current-policy source: its validated access configuration is local operational state in `.tractanda-personal-profile.json`, not a canonical item. `TractandaStore/configureAccess` is admin-gated, validates the new policy against current heads, and updates that local profile; historical `AccessConfigurationItem` content cannot reinstall current local admission during rebuild. Bounded Mac and Linux entrypoint suites passed in source; deployment and real-profile operation remain pending.
+
+For historical-development stores, the existing offline planner can prepare guarded permission requests for an initially unconfigured store, but it neither creates accounts nor installs a shared service. Review every grant, include deleted heads in the inventory, preserve operation IDs, back up canonical data, and stop on conflicts. It does not configure the personal/workgroup profile's local policy. A plan or fake-identity test is not proof of production isolation.
 
 ## Shared daemon and browser use
 
