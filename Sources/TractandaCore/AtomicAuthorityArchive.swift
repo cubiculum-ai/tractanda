@@ -91,6 +91,12 @@ final class AtomicAuthorityArchive {
         let value: ItemValue
     }
 
+    /// Optional private filesystem scope; never a logical-authority/acceptance capability.
+    enum StorageMutation: String { case immutableWrite, lease, removeFile, removeDirectory }
+    struct StorageHooks {
+        let begin: (StorageMutation, [String], UInt64) throws -> String
+        let finish: (String, Bool) throws -> Void
+    }
     private let io: Files
     private let chunkBytes: Int
     private let progress: (() throws -> Void)?
@@ -100,7 +106,7 @@ final class AtomicAuthorityArchive {
         root: URL, limits: Limits, chunkBytes: Int = Format.maximumChunkBytes,
         availableBytes: (@Sendable () throws -> UInt64)? = nil, progress: (() throws -> Void)? = nil,
         canonicalPartLoader: ((AuthorityBinding, Int64) throws -> Data)? = nil,
-        canonicalRootLoader: (() throws -> Data)? = nil
+        canonicalRootLoader: (() throws -> Data)? = nil, storageHooks: StorageHooks? = nil
     ) throws {
         guard (1...Format.maximumChunkBytes).contains(chunkBytes), limits.maximumParts > 0,
             (canonicalPartLoader == nil) == (canonicalRootLoader == nil)
@@ -111,7 +117,7 @@ final class AtomicAuthorityArchive {
         self.progress = progress
         self.canonicalPartLoader = canonicalPartLoader
         self.canonicalRootLoader = canonicalRootLoader
-        io = try Files(root: root, limits: limits, availableBytes: availableBytes)
+        io = try Files(root: root, limits: limits, availableBytes: availableBytes, storageHooks: storageHooks)
     }
     private func check() throws {
         try Task.checkCancellation()
@@ -808,11 +814,16 @@ final class AtomicAuthorityArchive {
         let root: URL
         let limits: Limits
         let helpers: DocumentContentFiles
+        private let storageHooks: StorageHooks?
         private var footprint: UInt64 = 0
         private(set) var inventoryRecounts = 0
         private var heldLocks = Set<Int32>()
         private let identity: (UInt64, UInt64)
-        init(root: URL, limits: Limits, availableBytes: (@Sendable () throws -> UInt64)?) throws {
+        init(
+            root: URL, limits: Limits, availableBytes: (@Sendable () throws -> UInt64)?,
+            storageHooks: StorageHooks?
+        ) throws {
+            self.storageHooks = storageHooks
             self.root = root
             self.limits = limits
             let fd = root.path.withCString { tractanda_open_private_directory($0) }
@@ -929,6 +940,32 @@ final class AtomicAuthorityArchive {
             }
             return data
         }
+        private func storageMutation<T>(
+            _ operation: StorageMutation, path: [String],
+            additional: UInt64, body: () throws -> T
+        ) throws -> T {
+            guard let storageHooks else { return try body() }
+            let url = path.reduce(root) { $0.appendingPathComponent($1) }
+            func stamp() throws -> FileMetadata? {
+                do { return try FileMetadata.read(at: url) } catch FileMetadataError.posix(ENOENT) {
+                    return nil
+                }
+            }
+            let before = try stamp()
+            let ticket = try storageHooks.begin(operation, path, additional)
+            do {
+                try checkLease()
+                guard try stamp() == before else {
+                    throw Format.invalid("Private mutation target changed after scope check.")
+                }
+                let result = try body()
+                try storageHooks.finish(ticket, false)
+                return result
+            } catch {
+                try? storageHooks.finish(ticket, true)
+                throw error
+            }
+        }
         func put(_ data: Data, at path: [String]) throws {
             try Task.checkCancellation()
             if let old = try optional(path) {
@@ -940,16 +977,38 @@ final class AtomicAuthorityArchive {
             guard cost <= limits.maximumStoredBytes - min(footprint, limits.maximumStoredBytes) else {
                 throw TractandaError("resourceLimit", "Private archive storage allowance exhausted.")
             }
-            try helpers.requireCapacity(cost, at: root)
-            footprint += cost
-            try helpers.ensurePrivateDirectory(Array(path.dropLast()))
-            try parent(path) { _, _ in
-                try PeerEnrollmentFiles.writeExact(
-                    data, path: path.reduce(root) { $0.appendingPathComponent($1) }.path,
-                    maximum: Format.maximumEnvelopeBytes)
+            try storageMutation(.immutableWrite, path: path, additional: cost) {
+                try helpers.requireCapacity(cost, at: root)
+                footprint += cost
+                try helpers.ensurePrivateDirectory(Array(path.dropLast()))
+                try parent(path) { _, _ in
+                    try PeerEnrollmentFiles.writeExact(
+                        data, path: path.reduce(root) { $0.appendingPathComponent($1) }.path,
+                        maximum: Format.maximumEnvelopeBytes)
+                }
             }
         }
         func lock() throws -> Int32 {
+            let old = try optionalLockMetadata()
+            var acquired: Int32?
+            do {
+                return try storageMutation(.lease, path: [".archive.lock"], additional: old == nil ? 4096 : 0)
+                {
+                    let value = try acquireLock()
+                    acquired = value
+                    return value
+                }
+            } catch {
+                if let acquired { unlock(acquired) }
+                throw error
+            }
+        }
+        private func optionalLockMetadata() throws -> FileMetadata? {
+            do {
+                return try FileMetadata.read(at: root.appendingPathComponent(".archive.lock"))
+            } catch FileMetadataError.posix(ENOENT) { return nil }
+        }
+        private func acquireLock() throws -> Int32 {
             let fd = try rootDescriptor()
             defer { close(fd) }
             var prior = stat()
@@ -1109,13 +1168,17 @@ final class AtomicAuthorityArchive {
                         guard result == 0, let pointer,
                             count == 1 ? pointer.load(as: UInt8.self) == 1 : (temporary && count == 0)
                         else { throw Format.invalid("Unknown reader marker bytes/custody.") }
-                        guard unlinkat(child, marker, 0) == 0 else {
-                            throw Format.invalid("Cannot remove private reader marker.")
+                        try storageMutation(.removeFile, path: ["read-work", id, marker], additional: 0) {
+                            guard unlinkat(child, marker, 0) == 0 else {
+                                throw Format.invalid("Cannot remove private reader marker.")
+                            }
                         }
                         return true
                     }
-                    guard fsync(child) == 0, unlinkat(fd, name, AT_REMOVEDIR) == 0, fsync(fd) == 0 else {
-                        throw Format.invalid("Cannot synchronize reader-work cleanup.")
+                    try storageMutation(.removeDirectory, path: ["read-work", id], additional: 0) {
+                        guard fsync(child) == 0, unlinkat(fd, name, AT_REMOVEDIR) == 0, fsync(fd) == 0 else {
+                            throw Format.invalid("Cannot synchronize reader-work cleanup.")
+                        }
                     }
                 }
                 if refresh { try recount() }

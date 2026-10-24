@@ -10,11 +10,42 @@ import Foundation
 enum StoreCheckpoint {
     static let name = ".tractanda-checkpoint-dirty"
 
-    static func markDirty(root: URL) throws {
+    static func markDirty(root: URL, maintenance: CanonicalMaintenanceContext? = nil) throws {
+        if let maintenance {
+            let event = try maintenance.beginCheckpoint(.checkpointDirty, suppliedRoot: root)
+            do {
+                try maintenance.requireBound(to: root)
+                try replace(Data("dirty-v1\n".utf8), at: root.appendingPathComponent(name), root: root)
+                try maintenance.finishCheckpoint(event, suppliedRoot: root)
+            } catch {
+                try? maintenance.finishCheckpoint(event, suppliedRoot: root, failed: true)
+                throw error
+            }
+            return
+        }
+        try CanonicalMaintenanceContext.deny(
+            root: root, path: [name], operation: "checkpoint mutation without a context")
         try replace(Data("dirty-v1\n".utf8), at: root.appendingPathComponent(name), root: root)
     }
 
-    static func clear(root: URL) throws {
+    static func clear(root: URL, maintenance: CanonicalMaintenanceContext? = nil) throws {
+        if let maintenance {
+            let event = try maintenance.beginCheckpoint(.checkpointClear, suppliedRoot: root)
+            do {
+                try maintenance.requireBound(to: root)
+                try clearDerived(root: root)
+                try maintenance.finishCheckpoint(event, suppliedRoot: root)
+            } catch {
+                try? maintenance.finishCheckpoint(event, suppliedRoot: root, failed: true)
+                throw error
+            }
+            return
+        }
+        try CanonicalMaintenanceContext.deny(
+            root: root, path: [name], operation: "checkpoint clear without a context")
+        try clearDerived(root: root)
+    }
+    private static func clearDerived(root: URL) throws {
         let url = root.appendingPathComponent(name)
         guard unlink(url.path) == 0 || errno == ENOENT else {
             throw TractandaError("checkpointError", "Cannot clear checkpoint marker.")

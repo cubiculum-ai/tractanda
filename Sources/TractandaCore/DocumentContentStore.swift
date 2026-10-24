@@ -108,7 +108,7 @@ final class DocumentContentStore: @unchecked Sendable {
     init(
         root: URL, ownerUID: UInt32, minimumFreeBytes: Int64 = AttachmentPayloadStore.defaultReserveBytes,
         availableBytes: (@Sendable () throws -> UInt64)? = nil, stagingQuota: StagingByteQuota? = nil,
-        indexDirectory: URL? = nil
+        indexDirectory: URL? = nil, maintenance: CanonicalMaintenanceContext? = nil
     ) {
         self.root = root.standardizedFileURL.resolvingSymlinksInPath()
         self.ownerUID = ownerUID
@@ -116,7 +116,9 @@ final class DocumentContentStore: @unchecked Sendable {
             root: self.root, ownerUID: ownerUID, minimumFreeBytes: minimumFreeBytes,
             availableBytes: availableBytes, stagingQuota: stagingQuota
         )
-        placement = DocumentPlacement(root: self.root, indexDirectory: indexDirectory, ownerUID: ownerUID) {
+        placement = DocumentPlacement(
+            root: self.root, indexDirectory: indexDirectory, ownerUID: ownerUID, maintenance: maintenance
+        ) {
             [weak self] bytes, location in
             guard let self else { throw TractandaError("documentIntegrity", "Document storage closed.") }
             try self.files.requireCapacity(bytes, at: location)

@@ -90,6 +90,8 @@ final class DocumentContentFiles: @unchecked Sendable {
         return value
     }
     func requireMutableDocumentPath(_ path: [String]) throws {
+        try CanonicalMaintenanceContext.deny(
+            root: root, path: path, operation: "mutable document/private work")
         guard stageIdentity(path) != nil else { return }
         if try frozenPeerStage(path) != nil {
             throw TractandaError(
@@ -186,12 +188,16 @@ final class DocumentContentFiles: @unchecked Sendable {
         var chain = [fd]
         do {
             try validateDirectory(fd)
+            var walked = [String]()
             for name in components {
+                walked.append(name)
                 let parent = chain.last!
                 var child = name.withCString {
                     openat(parent, $0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
                 }
                 if child < 0, errno == ENOENT, create {
+                    try CanonicalMaintenanceContext.deny(
+                        root: root, path: walked, operation: "directory creation")
                     try reserve(4096, descriptor: parent)
                     let result = name.withCString { mkdirat(parent, $0, 0o700) }
                     guard result == 0 || errno == EEXIST, fsync(parent) == 0 else {
@@ -293,6 +299,7 @@ final class DocumentContentFiles: @unchecked Sendable {
     /// Atomic replacement is restricted to private acknowledgment progress, never canonical data.
     func replacePeerCheckpoint(_ data: Data, path: [String], readBudget: ((Int) throws -> Void)? = nil) throws
     {
+        try CanonicalMaintenanceContext.deny(root: root, path: path, operation: "canonical file write")
         guard data.count > 0, data.count <= 16 * 1024 else {
             throw TractandaError("resourceLimit", "Peer checkpoint exceeds its window.")
         }
@@ -364,6 +371,8 @@ final class DocumentContentFiles: @unchecked Sendable {
         try removeTree(path)
     }
     func removeEmptyPeerDocumentDirectory(_ path: [String]) throws -> Bool {
+        try CanonicalMaintenanceContext.deny(
+            root: root, path: path, operation: "directory removal", onlyIfPresent: true)
         guard (4...7).contains(path.count), path.prefix(2) == ["authority", "document-transfers"] else {
             throw failure("Invalid private document cleanup directory.")
         }
@@ -389,6 +398,8 @@ final class DocumentContentFiles: @unchecked Sendable {
     func stepAppliedPeerDocumentStage(
         _ stage: [String], reference: DocumentContentReference, maximumEntries: Int
     ) throws -> (complete: Bool, used: Int) {
+        try CanonicalMaintenanceContext.deny(
+            root: root, path: stage, operation: "document stage cleanup", onlyIfPresent: true)
         guard stage.count == 3, stage.last == stageIdentity(stage), (1...128).contains(maximumEntries) else {
             throw failure("Invalid bounded applied document cleanup.")
         }
@@ -446,6 +457,7 @@ final class DocumentContentFiles: @unchecked Sendable {
         guard !occupied else { throw failure("Applied document stage has pending bounded cleanup.") }
         try removeTree(stage, completingFrozenReference: reference)
         let marker = ["documents", ".staging", id + ".frozen.json"]
+        if try CanonicalMaintenanceContext.removalIsNoOp(root: root, path: marker) { return }
         let chain = try directories(Array(marker.dropLast()), create: false)
         defer { closeAll(chain) }
         let result = marker.last!.withCString { unlinkat(chain.last!, $0, 0) }
@@ -482,6 +494,7 @@ final class DocumentContentFiles: @unchecked Sendable {
     func writeImmutable(
         _ data: Data, path: [String], maximumBytes: Int = DocumentContentStore.maximumPageBytes
     ) throws {
+        try CanonicalMaintenanceContext.deny(root: root, path: path, operation: "canonical file write")
         try requireMutableDocumentPath(path)
         guard !path.isEmpty, data.count <= maximumBytes else {
             throw TractandaError("resourceLimit", "Document write exceeds its page window.")
@@ -530,6 +543,7 @@ final class DocumentContentFiles: @unchecked Sendable {
     }
     /// Atomically replaces one bounded operational checkpoint; canonical dependencies stay immutable.
     func replaceJobCheckpoint(_ data: Data, path: [String], jobID: String) throws {
+        try CanonicalMaintenanceContext.deny(root: root, path: path, operation: "canonical file write")
         guard data.count <= 16 * 1024, path == ["document-jobs", jobID, "record.json"] else {
             throw TractandaError("resourceLimit", "Invalid bounded job checkpoint path.")
         }
@@ -577,6 +591,8 @@ final class DocumentContentFiles: @unchecked Sendable {
     /// Missing first-write metadata is disposable only when its owned directory is provably empty.
     /// A race adding any entry causes ENOTEMPTY and preserves that recovery material.
     func removeEmptyJobDirectory(id: String) throws -> Bool {
+        try CanonicalMaintenanceContext.deny(
+            root: root, path: ["document-jobs", id], operation: "directory removal", onlyIfPresent: true)
         guard UUID(uuidString: id)?.version1Components != nil else {
             throw TractandaError("documentIntegrity", "Invalid empty job directory identity.")
         }
@@ -664,6 +680,9 @@ final class DocumentContentFiles: @unchecked Sendable {
     /// The preparation owner already disposed only its inode-pinned SQLite files. Remove its
     /// directory only when empty; preserve unknown/replaced entries, never sweep a mixed parent.
     func removeAtomicIntakeWork(_ id: String) throws {
+        try CanonicalMaintenanceContext.deny(
+            root: root, path: ["atomic-intake-work", id], operation: "private work removal",
+            onlyIfPresent: true)
         _ = try AuthorityRecord.persistentID(.text(id))
         let path = ["atomic-intake-work", id]
         let chain: [Int32]
@@ -701,6 +720,9 @@ final class DocumentContentFiles: @unchecked Sendable {
         _ path: [String], releaseAccounting: Bool = true,
         completingFrozenReference: DocumentContentReference? = nil
     ) throws {
+        if try CanonicalMaintenanceContext.removalIsNoOp(root: root, path: path) {
+            return
+        }
         if let reference = completingFrozenReference {
             guard path.count == 3, path.last == stageIdentity(path) else {
                 throw failure("Only a complete applied stage may release its barrier.")
@@ -824,6 +846,8 @@ final class DocumentContentFiles: @unchecked Sendable {
         _ stage: [String], to destination: [String], frozenReference: DocumentContentReference? = nil,
         readBudget: ((Int) throws -> Void)? = nil
     ) throws {
+        try CanonicalMaintenanceContext.deny(
+            root: root, path: destination, operation: "document directory publication")
         if let frozenReference {
             guard try frozenPeerStage(stage, readBudget: readBudget)?.reference == frozenReference else {
                 throw failure("Frozen publication binding changed.")
@@ -918,6 +942,8 @@ final class DocumentContentFiles: @unchecked Sendable {
     /// Adopt a verified receiver-private byte stage into its exact composite tree address.
     /// The only rename is within one filesystem; no whole-page copy is made.
     func adoptPeerDocumentPart(stageID: String, to destination: [String], bytes: Int64) throws {
+        try CanonicalMaintenanceContext.deny(
+            root: root, path: destination, operation: "document part adoption")
         try requireMutableDocumentPath(destination)
         _ = try AuthorityRecord.persistentID(.text(stageID))
         guard destination.count >= 4, destination.prefix(2) == ["documents", ".staging"],

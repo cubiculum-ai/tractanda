@@ -882,6 +882,15 @@ public final class ItemStore {
     }
 
     private func installIndexFailureHandler(_ candidate: ItemIndex) {
+        if let maintenanceContext {
+            candidate.maintenanceCapacityCheck = { [weak maintenanceContext] in
+                guard let maintenanceContext else {
+                    throw TractandaError(
+                        "maintenanceConflict", "Maintenance owner closed during derived work.")
+                }
+                try maintenanceContext.checkDerivedCapacity()
+            }
+        }
         candidate.onPersistentFailure = { [weak self] in self?.quarantineCheckpoint() }
     }
 
@@ -891,7 +900,7 @@ public final class ItemStore {
         canonicalVerificationStatus = ["state": "recoveryRequired", "reason": "indexFailure"]
         do {
             try beforeIndexQuarantineMarkerForTesting?()
-            try StoreCheckpoint.markDirty(root: root)
+            try StoreCheckpoint.markDirty(root: root, maintenance: maintenanceContext)
         } catch {
             canonicalVerificationStatus["state"] = "fatalRecoverySignalFailure"
             canonicalVerificationStatus["markerError"] = String(describing: error)
@@ -900,6 +909,7 @@ public final class ItemStore {
     }
 
     private var rebuildControl: RebuildControl?
+    private var maintenanceContext: CanonicalMaintenanceContext?
     func rebuildAdministratorPolicy() throws -> RebuildAdministratorPolicy {
         try requireAdministrator()
         return RebuildAdministratorPolicy(ownerUID: ownerUID, configuration: accessConfiguration)
@@ -988,11 +998,11 @@ public final class ItemStore {
     func setAttachmentReserveForTesting(_ bytes: Int64) throws {
         attachmentPayloads = try AttachmentPayloadStore(
             root: root, ownerUID: ownerUID, reserveBytes: bytes, availableBytes: attachmentCapacityProvider,
-            stagingQuota: stagingByteQuota, indexDirectory: indexDirectory)
+            stagingQuota: stagingByteQuota, indexDirectory: indexDirectory, maintenance: maintenanceContext)
         documentContents = DocumentContentStore(
             root: root, ownerUID: ownerUID, minimumFreeBytes: bytes,
             availableBytes: attachmentCapacityProvider, stagingQuota: stagingByteQuota,
-            indexDirectory: indexDirectory)
+            indexDirectory: indexDirectory, maintenance: maintenanceContext)
         documentJobRecords = DocumentJobRecords(
             root: root,
             files: DocumentContentFiles(
@@ -1082,9 +1092,20 @@ public final class ItemStore {
         targetProvisioning: PeerEnrollmentActivation.Opening? = nil,
         targetProvisioningProgress: ((String) throws -> Void)? = nil,
         targetProvisioningControl: (() throws -> Void)? = nil,
-        canonicalFormatSupport: CanonicalFormatSupport = .current
+        canonicalFormatSupport: CanonicalFormatSupport = .current,
+        maintenanceOpening: CanonicalMaintenanceContext.Opening? = nil
     ) throws {
         self.canonicalFormatSupport = canonicalFormatSupport
+        if let maintenanceOpening {
+            guard firstSourceOperation == nil, targetProvisioning == nil,
+                requireInitializedStore, authorityIntakeEnabled, revisionProjectionEnabled
+            else {
+                throw TractandaError(
+                    "maintenanceConflict",
+                    "Maintenance cannot combine with creation/provisioning or relaxed store opening.")
+            }
+            try CanonicalMaintenanceContext.preflight(root: root, opening: maintenanceOpening)
+        }
         guard targetProvisioning != nil || targetProvisioningControl == nil else {
             throw TractandaError(
                 "invalidTargetProtocol", "Only a finite target owner installs opening control.")
@@ -1155,8 +1176,18 @@ public final class ItemStore {
             throw TractandaError("storeBusy", "Cannot lock store; another writer may be running.")
         }
         var openingProgress: (() throws -> Void)?
+        var maintenanceOpeningEvent: String?
         do {
             defer { if targetProvisioningControl != nil { peerIntake?.progress = openingProgress } }
+            // A pending local maintenance journal is never ordinary recovery authority.
+            if let maintenanceOpening {
+                maintenanceContext = try .init(
+                    root: self.root, indexDirectory: indexDirectory, writer: writer,
+                    opening: maintenanceOpening)
+                maintenanceOpeningEvent = try maintenanceContext?.beginDerived(.indexOpening)
+            } else {
+                try CanonicalMaintenanceJournal.requireOrdinaryOpeningAllowed(root: self.root)
+            }
             // The lifetime writer is owned before this cancellable boundary.
             try targetProvisioningControl?()
             if requireInitializedStore { try Self.requireInitializedRoot(self.root) }
@@ -1271,12 +1302,12 @@ public final class ItemStore {
             let recoveryPayloads = try AttachmentPayloadStore(
                 root: self.root, ownerUID: ownerUID,
                 reserveBytes: attachmentUploadPolicy.minimumFreeBytes,
-                availableBytes: attachmentAvailableBytes, indexDirectory: indexDirectory)
+                availableBytes: attachmentAvailableBytes, indexDirectory: indexDirectory, maintenance: maintenanceContext)
             try recoveryPayloads.preparePlacement()
             let recoveryDocuments = DocumentContentStore(
                 root: self.root, ownerUID: ownerUID,
                 minimumFreeBytes: attachmentUploadPolicy.minimumFreeBytes,
-                availableBytes: attachmentAvailableBytes, indexDirectory: indexDirectory)
+                availableBytes: attachmentAvailableBytes, indexDirectory: indexDirectory, maintenance: maintenanceContext)
             try recoveryDocuments.preparePlacement()
             attachmentUploads = try recoveryPayloads.loadUploads()
             stagingByteQuota = try StagingByteQuota(
@@ -1285,12 +1316,12 @@ public final class ItemStore {
             attachmentPayloads = try AttachmentPayloadStore(
                 root: self.root, ownerUID: ownerUID, reserveBytes: attachmentUploadPolicy.minimumFreeBytes,
                 availableBytes: attachmentAvailableBytes, stagingQuota: stagingByteQuota,
-                indexDirectory: indexDirectory)
+                indexDirectory: indexDirectory, maintenance: maintenanceContext)
             documentContents = DocumentContentStore(
                 root: self.root, ownerUID: ownerUID,
                 minimumFreeBytes: attachmentUploadPolicy.minimumFreeBytes,
                 availableBytes: attachmentAvailableBytes, stagingQuota: stagingByteQuota,
-                indexDirectory: indexDirectory)
+                indexDirectory: indexDirectory, maintenance: maintenanceContext)
             documentJobRecords = DocumentJobRecords(
                 root: self.root,
                 files: DocumentContentFiles(
@@ -1306,7 +1337,10 @@ public final class ItemStore {
                 peerIntake?.canonicalFormatSupport = canonicalFormatSupport
                 peerIntake?.provisioningScope = targetProvisioningScope
                 try configurePeerOriginals(reserveBytes: attachmentUploadPolicy.minimumFreeBytes)
-                peerIntake?.progress = { [weak self] in try self?.rebuildControl?.graphProgress() }
+                peerIntake?.progress = { [weak self] in
+                    try self?.maintenanceContext?.checkDerivedCapacity()
+                    try self?.rebuildControl?.graphProgress()
+                }
                 openingProgress = peerIntake?.progress
                 if let targetProvisioningControl {
                     let previous = openingProgress
@@ -1411,7 +1445,13 @@ public final class ItemStore {
                     }
                 }
             }
+            if let maintenanceOpeningEvent { try maintenanceContext?.finishDerived(maintenanceOpeningEvent) }
         } catch {
+            if let maintenanceOpeningEvent {
+                try? maintenanceContext?.finishDerived(maintenanceOpeningEvent, failed: true)
+            }
+            maintenanceContext?.close()
+            maintenanceContext = nil
             if indexWriter >= 0 { tractanda_unlock(indexWriter) }
             tractanda_unlock(writer)
             writer = -1
@@ -1426,6 +1466,8 @@ public final class ItemStore {
         atomicReceiveWork.removeAll()
         try? deferredAtomicLocalContinuation?.validation.close()
         deferredAtomicLocalContinuation = nil
+        maintenanceContext?.close()
+        maintenanceContext = nil
         if indexWriter >= 0 { tractanda_unlock(indexWriter) }
         if writer >= 0 { tractanda_unlock(writer) }
     }
@@ -1613,6 +1655,8 @@ public final class ItemStore {
         guard !populated else {
             throw TractandaError("invalidStoreIdentity", "Retained items require their original StoreID.")
         }
+        try CanonicalMaintenanceContext.deny(
+            root: root, path: [Self.canonicalIdentityName], operation: "canonical identity creation")
         let identity = CanonicalStoreIdentity(
             formatVersion: 1, storeID: try allocate().uuidString.lowercased())
         try PrivateConfiguration.write(try JSON.encode(identity), to: identityURL)
@@ -1622,6 +1666,13 @@ public final class ItemStore {
     private func ensureDirectory(_ url: URL) throws {
         let fm = FileManager.default
         if !fm.fileExists(atPath: url.path) {
+            if maintenanceContext != nil, url.path != indexDirectory.path {
+                try CanonicalMaintenanceContext.deny(
+                    root: root,
+                    path: url.path.hasPrefix(root.path + "/")
+                        ? url.path.dropFirst(root.path.count + 1).split(separator: "/").map(String.init)
+                        : [url.path], operation: "unplanned directory creation")
+            }
             try fm.createDirectory(
                 at: url, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         }
@@ -1880,6 +1931,8 @@ public final class ItemStore {
         snapshot: RevisionProjection.Snapshot, policies: [RevisionProjection.PolicyWitness],
         using index: ItemIndex
     ) throws -> Revision {
+        try CanonicalMaintenanceContext.deny(
+            root: root, path: ["items", snapshot.itemID], operation: "automatic item materialization")
         combinationPublicationAwaitingIndex = false
         guard writer >= 0, isAdministrator, tractanda_path_read_only(root.path) == 0 else {
             throw TractandaError("forbidden", "Canonical maintenance needs writable store authority.")
@@ -1921,6 +1974,8 @@ public final class ItemStore {
         policies: [RevisionProjection.PolicyWitness], using index: ItemIndex,
         authorityControls: [AuthorityRecord] = []
     ) throws -> Revision {
+        try CanonicalMaintenanceContext.deny(
+            root: root, path: ["items", revision.itemID, revision.revisionID], operation: "item publication")
         try requireActivePublishingOrigin()
         combinationPublicationAwaitingIndex = false
         guard try index.acceptedGraphProofIsCurrent() else {
@@ -1949,7 +2004,7 @@ public final class ItemStore {
         try CanonicalReaderRequirement.beforePublication(
             root: root, ownerUID: ownerUID, format: revision.formatVersion,
             beforePersist: beforeCanonicalReaderRequirementForTesting)
-        try StoreCheckpoint.markDirty(root: root)
+        try StoreCheckpoint.markDirty(root: root, maintenance: maintenanceContext)
         let published = data.withUnsafeBytes { tractanda_publish(file.path, $0.baseAddress, $0.count) }
         guard published >= 0 else {
             throw TractandaError("writeFailed", "Materialization publication failed.")
@@ -2899,6 +2954,7 @@ public final class ItemStore {
         guard FileManager.default.fileExists(atPath: database.path) else { return false }
         let candidate: ItemIndex
         do { candidate = try ItemIndex(path: database.path, create: false) } catch { return false }
+        installIndexFailureHandler(candidate)
         guard let identity = try? canonicalStoreIdentity(creatingIfMissing: false),
             let validated = try? candidate.validatedCatalogue(identity: identity)
         else {
@@ -3183,7 +3239,7 @@ public final class ItemStore {
             ]
             isCanonicalReady = false
             do {
-                try StoreCheckpoint.markDirty(root: root)
+                try StoreCheckpoint.markDirty(root: root, maintenance: maintenanceContext)
             } catch let markerFailure {
                 canonicalVerificationStatus["state"] = "fatalRecoverySignalFailure"
                 canonicalVerificationStatus["markerError"] = String(describing: markerFailure)
@@ -3272,6 +3328,7 @@ public final class ItemStore {
             }
             try POSIXDirectory.withEntries(at: directory) { name in
                 try self.rebuildControl?.check()
+                try self.maintenanceContext?.checkDerivedCapacity()
                 let url = directory.appendingPathComponent(name, isDirectory: false)
                 let metadata = try FileMetadata.read(at: url)
                 let archiveState = tractanda_path_read_only(url.path)
@@ -5461,6 +5518,7 @@ public final class ItemStore {
         preparedCopyDocuments: [AttachmentDocumentRepresentation]? = nil,
         indexedCorpus: IndexedCorpusStage? = nil
     ) throws -> CommitResult {
+        try CanonicalMaintenanceContext.deny(root: root, path: ["items"], operation: "ordinary item commit")
         if accessContext == nil {
             return try withAccess(forUID: actorUID ?? ownerUID) {
                 try commitInternal(
@@ -5881,7 +5939,7 @@ public final class ItemStore {
                 root: root, ownerUID: ownerUID, format: revision.formatVersion,
                 beforePersist: beforeCanonicalReaderRequirementForTesting)
         }
-        try StoreCheckpoint.markDirty(root: root)
+        try StoreCheckpoint.markDirty(root: root, maintenance: maintenanceContext)
         let actualPublish = data.withUnsafeBytes { tractanda_publish(path, $0.baseAddress, $0.count) }
         let published = publishResultOverrideForTesting ?? actualPublish
         guard published >= 0 else {
@@ -6015,7 +6073,7 @@ public final class ItemStore {
         if index != nil, isCanonicalReady, directoryDurabilityConfirmed, !markerPreviouslyDirty {
             do {
                 try beforeCheckpointClear?()
-                try StoreCheckpoint.clear(root: root)
+                try StoreCheckpoint.clear(root: root, maintenance: maintenanceContext)
             } catch {
                 warnings.append("Committed; checkpoint marker remains and startup will recover fully.")
             }
@@ -6030,6 +6088,13 @@ public final class ItemStore {
     func rebuildIndex(control: RebuildControl?) throws {
         try requireAdministrator()
         try requireAuthorityWriterActivation()
+        let maintenanceEvent = try maintenanceContext?.beginDerived(.indexRebuild)
+        var maintenanceFinished = false
+        defer {
+            if !maintenanceFinished, let maintenanceEvent {
+                try? maintenanceContext?.finishDerived(maintenanceEvent, failed: true)
+            }
+        }
         rebuildControl = control
         defer { rebuildControl = nil }
         try control?.check()
@@ -6053,7 +6118,7 @@ public final class ItemStore {
         let priorFindingCount = canonicalVerificationStatus["findingCount"] as? Int ?? 0
         // A caller may request this after an offline restore. If the process stops before the
         // replacement catalogue is durable, the previous clean catalogue must not be reused.
-        try StoreCheckpoint.markDirty(root: root)
+        try StoreCheckpoint.markDirty(root: root, maintenance: maintenanceContext)
         isCanonicalReady = false
         try attachmentPayloads.preparePlacement()
         try documentContents.preparePlacement()
@@ -6073,6 +6138,7 @@ public final class ItemStore {
             }
         }
         let fresh = try ItemIndex(path: temporary.path, create: true)
+        installIndexFailureHandler(fresh)
         try recoveryCatalogueForTesting?(fresh)
         try fresh.execute("BEGIN IMMEDIATE")
         let statements = try fresh.makeRebuildStatements()
@@ -6143,7 +6209,7 @@ public final class ItemStore {
         if StoreCheckpoint.isDirty(root: root) {
             try control?.authorizePublication()
             try beforeCheckpointClear?()
-            try StoreCheckpoint.clear(root: root)
+            try StoreCheckpoint.clear(root: root, maintenance: maintenanceContext)
         }
         isCanonicalReady = true
         revisionLocations.removeAll(keepingCapacity: false)
@@ -6196,6 +6262,8 @@ public final class ItemStore {
                 FileHandle.standardError.write(Data(("TRACTANDA_STARTUP_METRICS " + line + "\n").utf8))
             }
         }
+        if let maintenanceEvent { try maintenanceContext?.finishDerived(maintenanceEvent) }
+        maintenanceFinished = true
         rebuildPublished = true
     }
 
@@ -6263,9 +6331,14 @@ extension ItemStore {
         let control: URL
         let package: URL
         let context: URL
+        var maintenanceScratch: CanonicalMaintenanceContext.HistoricalScratch? = nil
     }
     private func atomicWriterDirectories(id: String) throws -> AtomicWriterDirectories {
         _ = try AuthorityRecord.persistentID(.text(id))
+        if maintenanceContext != nil {
+            try CanonicalMaintenanceContext.deny(root: root,
+                path: ["index", "atomic-authority-work", id], operation: "atomic producer workspace")
+        }
         let base = indexDirectory.appendingPathComponent("atomic-authority-work")
         try ensureDirectory(base)
         let directory = base.appendingPathComponent(id)
@@ -6292,6 +6365,15 @@ extension ItemStore {
     /// Exact generated workspace only; no canonical package, original, receipt or identity lives
     /// here. The normal descriptor-relative remover rejects links and foreign custody.
     private func removeAtomicWriterDirectories(_ directory: AtomicWriterDirectories) throws {
+        if let scope = directory.maintenanceScratch {
+            try scope.cleanup()
+            return
+        }
+        if maintenanceContext != nil {
+            try CanonicalMaintenanceContext.deny(root: root,
+                path: ["index", "atomic-authority-work", directory.root.lastPathComponent],
+                operation: "unscoped atomic workspace cleanup")
+        }
         let files = DocumentContentFiles(
             root: indexDirectory, ownerUID: ownerUID,
             minimumFreeBytes: peerIntake?.journal.limits.reserveBytes ?? 10 * 1024 * 1024 * 1024)
@@ -6359,7 +6441,7 @@ extension ItemStore {
         // the source builder's private copies of bytes already published to the journal.
         try finishAtomicLocalAuthority(
             packageID, index: index, purpose: .sourceCut(draft.cut), sqlActivation: { _ in })
-        if !priorDirty { try StoreCheckpoint.clear(root: root) }
+        if !priorDirty { try StoreCheckpoint.clear(root: root, maintenance: maintenanceContext) }
         return draft.cut
     }
     private func stageAtomicLocalRevision(
@@ -9431,7 +9513,7 @@ extension ItemStore {
             return
         }
         let wasDirty = StoreCheckpoint.isDirty(root: root)
-        try StoreCheckpoint.markDirty(root: root)
+        try StoreCheckpoint.markDirty(root: root, maintenance: maintenanceContext)
         do {
             try coordinator.withOperation(recovery: true) {
                 try index.withCatalogueScanBudget(progress: coordinator.progress, reusingActiveBudget: true) {
@@ -9463,7 +9545,7 @@ extension ItemStore {
             }
             try coordinator.journal.files.writeImmutable(
                 try JSON.encode(expected), path: path, maximumBytes: 4096)
-            if !wasDirty { try StoreCheckpoint.clear(root: root) }
+            if !wasDirty { try StoreCheckpoint.clear(root: root, maintenance: maintenanceContext) }
         } catch {
             quarantineCheckpoint()
             throw error
@@ -10016,12 +10098,28 @@ extension ItemStore {
         coordinator: PeerIntakeCoordinator, index: ItemIndex
     ) throws -> (AtomicAuthorityControlValidation, AtomicWriterDirectories) {
         let original = attestation.original
-        let directories = try atomicWriterDirectories(id: original.descriptor.id)
         let reopen = {
             let bytes = try coordinator.bytes(original)
             try coordinator.requireRetainedReceipt(original, original: bytes, index: index)
             return bytes
         }
+        // Header and exact captured proof are read before any derived scope is minted.
+        // This remains filesystem permission only; the full validator below still runs.
+        let bytes = try reopen()
+        let stage = try AtomicControlStage(rootBytes: bytes)
+        try requireHistoricalAtomicHeader(stage.header, attestation: attestation,
+            coordinator: coordinator, index: index)
+        let directories: AtomicWriterDirectories
+        if let maintenanceContext {
+            let scope = try maintenanceContext.prepareHistoricalScratch(attestation, coordinator: coordinator)
+            directories = .init(root: scope.root, control: scope.control,
+                package: scope.root.appendingPathComponent("package"),
+                context: scope.root.appendingPathComponent("context"), maintenanceScratch: scope)
+        } else {
+            directories = try atomicWriterDirectories(id: original.descriptor.id)
+        }
+        var handedToWorkOwner = false
+        defer { if !handedToWorkOwner { try? removeAtomicWriterDirectories(directories) } }
         let archive = try AtomicAuthorityArchive(
             root: directories.control,
             limits: .init(
@@ -10040,12 +10138,7 @@ extension ItemStore {
                 let bytes = try coordinator.bytes(row)
                 try coordinator.requireRetainedReceipt(row, original: bytes, index: index)
                 return bytes
-            }, canonicalRootLoader: reopen)
-        let bytes = try reopen()
-        let stage = try AtomicControlStage(rootBytes: bytes)
-        try requireHistoricalAtomicHeader(
-            stage.header, attestation: attestation,
-            coordinator: coordinator, index: index)
+            }, canonicalRootLoader: reopen, storageHooks: directories.maintenanceScratch?.storageHooks)
         let handle = try archive.bindCanonicalRoot(bytes)
         let stable: () throws -> String = { [weak self] in
             guard let self else { throw TractandaError("serviceClosed", "Reconstruction owner closed.") }
@@ -10106,6 +10199,7 @@ extension ItemStore {
                     contextContains: closure.contains, coordinator: coordinator, index: index,
                     historicalConfiguration: attestation.configuration)
             })
+        handedToWorkOwner = true
         return (work, directories)
     }
     private func restoreAcceptedAtomicRoots(
@@ -11004,7 +11098,9 @@ extension ItemStore {
         try coordinator.journal.applied(packageID)
         try coordinator.completeDocumentCorpus(packageID: packageID, index: index)
         try closeAtomicReceiveWork(packageID)
-        if !state.markerWasDirty && atomicReceiveWork.isEmpty { try StoreCheckpoint.clear(root: root) }
+        if !state.markerWasDirty && atomicReceiveWork.isEmpty {
+            try StoreCheckpoint.clear(root: root, maintenance: maintenanceContext)
+        }
         clearSavedViewPages()
         generation = Identifier.make()
         return result
@@ -11140,10 +11236,10 @@ extension ItemStore {
                 try CanonicalReaderRequirement.beforeAuthorityPublication(
                     root: root, ownerUID: ownerUID, support: canonicalFormatSupport)
             }
-            try StoreCheckpoint.markDirty(root: root)
+            try StoreCheckpoint.markDirty(root: root, maintenance: maintenanceContext)
             try coordinator.journal.seal(packageID)
         }
-        try StoreCheckpoint.markDirty(root: root)
+        try StoreCheckpoint.markDirty(root: root, maintenance: maintenanceContext)
         var intakePhase = "retainingOriginals"
         do {
             try index.execute("SAVEPOINT peer_intake")
@@ -11250,7 +11346,7 @@ extension ItemStore {
             try index.execute("RELEASE peer_intake")
             try coordinator.journal.applied(packageID)
             try coordinator.completeDocumentCorpus(packageID: packageID, index: index)
-            if !markerWasDirty { try StoreCheckpoint.clear(root: root) }
+            if !markerWasDirty { try StoreCheckpoint.clear(root: root, maintenance: maintenanceContext) }
             clearSavedViewPages()
             generation = Identifier.make()
             return result
@@ -11397,7 +11493,7 @@ extension ItemStore {
                     expectedRequirementSHA256: AuthorityRecordCodec.sha256(JSON.encode(prior)),
                     support: canonicalFormatSupport)
             }
-            try StoreCheckpoint.markDirty(root: root)
+            try StoreCheckpoint.markDirty(root: root, maintenance: maintenanceContext)
             try AuthorityStore.writeConfiguration(
                 .init(
                     profile: "tractanda.peer-configuration.v1", peers: old?.peers ?? [], bootstrap: pin,
@@ -13560,7 +13656,9 @@ extension ItemStore {
                         }
                         generation = Identifier.make()
                         clearSavedViewPages()
-                        if !markerWasDirty { try StoreCheckpoint.clear(root: root) }
+                        if !markerWasDirty {
+                            try StoreCheckpoint.clear(root: root, maintenance: maintenanceContext)
+                        }
                         return .init(
                             revision: revision, decision: decision, wasReplayed: false,
                             current: try itemState(request.itemID), disposition: .approved)
@@ -14789,7 +14887,7 @@ extension ItemStore {
                                 .replacingOccurrences(of: ":", with: "/"))
                     publication.localItemPath = path
                     try coordinator.journal.prepare(publication)
-                    try StoreCheckpoint.markDirty(root: root)
+                    try StoreCheckpoint.markDirty(root: root, maintenance: maintenanceContext)
                     try coordinator.journal.seal(package)
                 }
                 _ = try InitialAuthorityBootstrap.verifyPublication(
@@ -15313,7 +15411,7 @@ extension ItemStore {
                 if approval {
                     try validateEnrollmentAuthority(record, coordinator: coordinator, index: index)
                 }
-                try StoreCheckpoint.markDirty(root: root)
+                try StoreCheckpoint.markDirty(root: root, maintenance: maintenanceContext)
                 try coordinator.journal.seal(packageID)
             }
             if approval { try coordinator.enrollmentBoundaryForTesting?("accepted") }

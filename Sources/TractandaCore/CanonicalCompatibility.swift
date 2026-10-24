@@ -808,6 +808,8 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
     }
 
     private func persist(root: URL, ownerUID: UInt32) throws {
+        try CanonicalMaintenanceContext.deny(
+            root: root, path: [Self.fileName], operation: "canonical reader capability publication")
         try validate()
         let directory = open(root.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard directory >= 0 else {

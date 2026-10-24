@@ -14,6 +14,7 @@ final class DocumentPlacement: @unchecked Sendable {
     static let capability = "tractanda.document-placement.v1"
     private let root: URL
     private let indexDirectory: URL
+    private let maintenance: CanonicalMaintenanceContext?
     private let ownerUID: UInt32
     private let capacityCheck: (UInt64, URL) throws -> Void
     private let lock = NSLock()
@@ -24,7 +25,11 @@ final class DocumentPlacement: @unchecked Sendable {
     var afterIntent: (() throws -> Void)?
     var afterFile: (() throws -> Void)?
 
-    init(root: URL, indexDirectory: URL?, ownerUID: UInt32, reserve: @escaping (UInt64, URL) throws -> Void) {
+    init(
+        root: URL, indexDirectory: URL?, ownerUID: UInt32, maintenance: CanonicalMaintenanceContext? = nil,
+        reserve: @escaping (UInt64, URL) throws -> Void
+    ) {
+        self.maintenance = maintenance
         self.root = root
         self.indexDirectory = (indexDirectory ?? root.appendingPathComponent("index"))
             .standardizedFileURL.resolvingSymlinksInPath()
@@ -93,6 +98,16 @@ final class DocumentPlacement: @unchecked Sendable {
     }
 
     private func reserve(_ bytes: UInt64, canonical: Bool = false) throws {
+        if let maintenance {
+            try maintenance.requireDerivedStorage(root: root, index: indexDirectory)
+            let amount = bytes.addingReportingOverflow(16 * 1024)  // terminal audit headroom
+            guard !amount.overflow else { throw Self.error("Placement allocation overflow.") }
+            try maintenance.checkDerivedCapacity(reserving: amount.partialValue)
+        } else {
+            try CanonicalMaintenanceContext.deny(
+                root: root, path: ["index", "documents.sqlite"],
+                operation: "placement mutation without a context")
+        }
         try capacityCheck(bytes, canonical ? root : indexDirectory)
     }
 
@@ -126,6 +141,20 @@ final class DocumentPlacement: @unchecked Sendable {
     private func exclusive<T>(_ body: () throws -> T) throws -> T {
         lock.lock()
         defer { lock.unlock() }
+        if let maintenance {
+            try maintenance.requireDerivedStorage(root: root, index: indexDirectory)
+        } else {
+            try CanonicalMaintenanceContext.deny(
+                root: root, path: ["index", "documents.sqlite"],
+                operation: "placement opening without a context")
+        }
+        if !FileManager.default.fileExists(
+            atPath: root.appendingPathComponent(".document-placement.lock").path)
+        {
+            try CanonicalMaintenanceContext.deny(
+                root: root, path: [".document-placement.lock"], operation: "unplanned placement lock creation"
+            )
+        }
         let fileLock = tractanda_lock(root.appendingPathComponent(".document-placement.lock").path)
         guard fileLock >= 0 else { throw Self.error("Document placement is busy or unsafe.") }
         defer { tractanda_unlock(fileLock) }
@@ -136,7 +165,16 @@ final class DocumentPlacement: @unchecked Sendable {
             let named = try? FileMetadata.read(at: url), named.type == .regular,
             named.inode == UInt64(held.st_ino), named.device == UInt64(held.st_dev)
         else { throw Self.error("Unsafe document placement lock.") }
-        return try body()
+        let event = try maintenance?.beginDerived(.placement)
+        do {
+            _ = try boundStoreID()
+            let value = try body()
+            if let event { try maintenance?.finishDerived(event) }
+            return value
+        } catch {
+            if let event { try? maintenance?.finishDerived(event, failed: true) }
+            throw error
+        }
     }
 
     private func ready(
@@ -413,6 +451,28 @@ final class DocumentPlacement: @unchecked Sendable {
     private func execute(_ sql: String, _ values: [String] = []) throws {
         let prepared = try statement(sql, values)
         defer { sqlite3_finalize(prepared) }
+        if maintenance != nil {
+            if sql == "ROLLBACK" {
+                // Rollback is always available to release an already reserved transaction.
+                try maintenance?.requireDerivedStorage(root: root, index: indexDirectory)
+            } else if sqlite3_stmt_readonly(prepared) == 0 {
+                var allocation: UInt64 = 64 * 1024
+                if sql == "DELETE FROM placements" {
+                    let bytes = try FileMetadata.read(
+                        at: indexDirectory.appendingPathComponent("documents.sqlite")
+                    ).size
+                    let doubled = bytes.multipliedReportingOverflow(by: 2)
+                    let sum = doubled.partialValue.addingReportingOverflow(allocation)
+                    guard !doubled.overflow, !sum.overflow else {
+                        throw Self.error("Placement allocation overflow.")
+                    }
+                    allocation = sum.partialValue
+                }
+                try reserve(allocation)
+            } else {
+                try maintenance?.requireDerivedStorage(root: root, index: indexDirectory)
+            }
+        }
         let code = sqlite3_step(prepared)
         guard code == SQLITE_DONE || code == SQLITE_ROW else {
             throw indexError("Document index operation failed.")

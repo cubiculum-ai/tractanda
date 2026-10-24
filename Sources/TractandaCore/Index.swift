@@ -95,6 +95,9 @@ final class ItemIndex {
     private let createdForConstruction: Bool
     private var atomicCanonicalReconstruction = false
     private var activeCatalogueScanBudget: CatalogueScanBudget?
+    /// Only the explicit local maintenance owner installs this disk-capacity observation.
+    var maintenanceCapacityCheck: (() throws -> Void)?
+    private var maintenanceCapacityError: TractandaError?
     var onPersistentFailure: (() -> Void)?
     static func shouldQuarantineSQLiteFailure(_ code: Int32) -> Bool {
         ![SQLITE_BUSY, SQLITE_LOCKED, SQLITE_INTERRUPT, SQLITE_NOMEM, SQLITE_TOOBIG, SQLITE_FULL]
@@ -507,6 +510,7 @@ final class ItemIndex {
         try prepare(sql, values)
     }
     private func prepare(_ sql: String, _ bindings: [String] = []) throws -> OpaquePointer {
+        try maintenanceCapacityCheck?()
         try activeCatalogueScanBudget?.requireAvailable()
         let tokens = sql.lowercased().split(whereSeparator: { $0.isWhitespace }).map(String.init)
         let verb = tokens.first ?? ""
@@ -644,6 +648,7 @@ final class ItemIndex {
         return statement
     }
     private func error() -> TractandaError {
+        if let maintenanceCapacityError { return maintenanceCapacityError }
         if let atomicAcceptedStepError { return atomicAcceptedStepError }
         if let budget = activeCatalogueScanBudget {
             if let callbackError = budget.callbackError {
@@ -1506,6 +1511,14 @@ final class ItemIndex {
     /// Every protected step charges its measured VM delta exactly once. The progress
     /// handler bounds in-flight work and preparation without charging the same step twice.
     func catalogueStep(_ statement: OpaquePointer?) -> Int32 {
+        if let maintenanceCapacityCheck {
+            do { try maintenanceCapacityCheck() } catch {
+                maintenanceCapacityError =
+                    error as? TractandaError
+                    ?? TractandaError("cancelled", "Maintenance capacity observation was cancelled.")
+                return SQLITE_INTERRUPT
+            }
+        }
         guard let statement else { return SQLITE_MISUSE }
         guard let budget = activeCatalogueScanBudget else {
             // Only an exact post-seal Store activation can borrow this local batch allowance.
@@ -1586,6 +1599,7 @@ final class ItemIndex {
     /// Explicit short-operation boundary; the active budget remains connection-private.
     func checkCatalogueScanProgress() throws {
         try Task.checkCancellation()
+        try maintenanceCapacityCheck?()
         guard let budget = activeCatalogueScanBudget else { return }
         try budget.requireAvailable()
         do {
