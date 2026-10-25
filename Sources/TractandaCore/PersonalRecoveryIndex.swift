@@ -28,6 +28,11 @@ enum PersonalRecoveryIndex {
     }
     struct Limits {
         var inventory = PersonalRecoveryInventory.Limits()
+        // A bounded fork-analysis window, not a maximum ordinary history length. Linear histories
+        // are streamed; exceeding this window leaves only that fork explicitly unmaterializable.
+        var graph = RevisionGraph.Limits(
+            maximumNodes: 4096, maximumEdges: 16384,
+            maximumEncodedBytes: 32 * 1024 * 1024, maximumWork: 16_000_000)
         var maximumDerivedBytes: UInt64 = 8 * 1024 * 1024 * 1024
         var minimumAvailableBytes: UInt64 = 10 * 1024 * 1024 * 1024
     }
@@ -125,8 +130,13 @@ enum PersonalRecoveryIndex {
         inventoryActivity: @escaping @Sendable () throws -> Void = {},
         originalVerified: @escaping @Sendable (Int64) throws -> Void = { _ in },
         pageVerified: @escaping @Sendable () throws -> Void = {},
-        recordVerified: () throws -> Void = {}, itemProjected: () throws -> Void = {}
+        recordVerified: () throws -> Void = {}, itemProjected: () throws -> Void = {},
+        projectCurrentItems: Bool = true,
+        materialize: ((RevisionGraph, [String: Revision]) throws -> (ItemIndex.CatalogueRow, Revision))? =
+            nil,
+        personalMergeObserved: () throws -> Void = {}
     ) throws -> String {
+        index.personalContentProjectionMode = true
         let inventory = try PersonalRecoveryInventory.inspect(
             [source], limits: limits.inventory,
             check: inventoryCheck, activity: inventoryActivity, originalVerified: originalVerified,
@@ -154,6 +164,7 @@ enum PersonalRecoveryIndex {
         try configuration.validate(using: resolver)
         let statements = try index.makeRebuildStatements()
         defer { statements.close() }
+        var personalAutomaticHeads: Set<String> = []
         for identifier in inventory.records.keys.sorted() {
             try boundary()
             let record = inventory.records[identifier]!
@@ -169,7 +180,18 @@ enum PersonalRecoveryIndex {
             // Ordinary DAG metadata is retained without old admission/reconciliation/retirement replay.
             try index.insertGraphCatalogueRow(row, graphFields: revision.fields)
             try recordVerified()
-            guard inventory.items[record.itemID]?.heads == [identifier] else { continue }
+            guard projectCurrentItems else { continue }
+            if try revision.provenance?.mergeProfile == RevisionMerge.personalProfile {
+                // Raw ancestry, including a merge below an ordinary child, carries its semantics
+                // across fresh identity/index creation. Old local configuration is unnecessary.
+                try personalMergeObserved()
+                if inventory.items[record.itemID]?.heads == [identifier] {
+                    personalAutomaticHeads.insert(record.itemID)
+                }
+            }
+            guard inventory.items[record.itemID]?.heads == [identifier],
+                !personalAutomaticHeads.contains(record.itemID)
+            else { continue }
             if let permissions = revision.fields["permissions"] {
                 try ItemPermissions(permissions).validate(using: resolver)
             } else if revision.classID != AccessConfiguration.classID {
@@ -180,6 +202,71 @@ enum PersonalRecoveryIndex {
             try index.putForRebuild(
                 revision, using: statements, corpusInput: corpus, pageProvider: provider,
                 corpusBoundary: boundary)
+            try index.replacePersonalProjection(
+                itemID: revision.itemID, analysis: nil, representative: revision,
+                permissions: revision.fields["permissions"], physicalHeads: [identifier])
+            try itemProjected()
+        }
+        let recordsByItem = Dictionary(grouping: inventory.records.values, by: \.itemID)
+        for item in inventory.items.values.sorted(by: { $0.itemID < $1.itemID })
+        where projectCurrentItems && (item.heads.count > 1 || personalAutomaticHeads.contains(item.itemID)) {
+            try boundary()
+            var revisions: [String: Revision] = [:]
+            var analysis: RevisionMerge.Analysis?
+            var representative: Revision?
+            var permissions: ItemValue?
+            var physicalHeads = item.heads
+            var resourceCode: String?
+            do {
+                let records = recordsByItem[item.itemID]!
+                guard records.count <= limits.graph.maximumNodes else {
+                    throw TractandaError("resourceLimit", "Personal fork exceeds the analysis window.")
+                }
+                var bytes = 0
+                for record in records {
+                    guard record.byteCount <= UInt64(limits.graph.maximumEncodedBytes - bytes) else {
+                        throw TractandaError("resourceLimit", "Personal fork exceeds the byte window.")
+                    }
+                    bytes += Int(record.byteCount)
+                    let row = try index.revision(record.revisionID)!
+                    try inventoryCheck()
+                    try readBudget.record(Int(row.size))
+                    revisions[record.revisionID] = try PooledCanonicalRecord.read(
+                        row: row, root: source.root, ownerUID: source.ownerUID
+                    ).revision
+                }
+                func graph() throws -> RevisionGraph {
+                    try RevisionGraph(
+                        nodes: revisions.values.map { revision in
+                            try RevisionMerge.node(
+                                revision, parent: revision.supersedes.flatMap { revisions[$0] })
+                        }, profile: RevisionMerge.personalProfile, limits: limits.graph)
+                }
+                var current = try graph()
+                permissions = try current.personalPermissionPlan?.validatedPOSIXValue(using: resolver)
+                analysis = try current.analyze()
+                if analysis!.needsMaterialization, let materialize {
+                    let (row, revision) = try materialize(current, revisions)
+                    revisions[revision.revisionID] = revision
+                    current = try graph()
+                    analysis = try current.analyze()
+                    permissions = try current.personalPermissionPlan?.validatedPOSIXValue(using: resolver)
+                    try index.insertGraphCatalogueRow(row, graphFields: revision.fields)
+                    physicalHeads = [revision.revisionID]
+                }
+                representative = analysis!.representativeRevisionID.flatMap { revisions[$0] }
+            } catch let error as TractandaError where error.code == "resourceLimit" {
+                resourceCode = "personalGraphWindowExceeded"
+            }
+            if let representative {
+                let corpus = try PageCorpusInput(storeID: contextID, revision: representative)
+                try index.putForRebuild(
+                    representative, using: statements, corpusInput: corpus, pageProvider: provider,
+                    corpusBoundary: boundary)
+            }
+            try index.replacePersonalProjection(
+                itemID: item.itemID, analysis: analysis, representative: representative,
+                permissions: permissions, physicalHeads: physicalHeads, resourceCode: resourceCode)
             try itemProjected()
         }
         try index.finalizeSavedViewMaterializations()

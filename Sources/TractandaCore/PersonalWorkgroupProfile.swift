@@ -26,6 +26,7 @@ enum PersonalWorkgroupProfile {
     }
     enum Opening {
         case fresh(ItemValue)
+        case freshReplica(storeID: String, configuration: ItemValue)
         case selectedContent(ItemValue)
         case existing
     }
@@ -44,7 +45,8 @@ enum PersonalWorkgroupProfile {
         guard record.profile == "tractanda.personal-workgroup.v1",
             UUID(uuidString: record.storeID)?.version1Components != nil,
             UUID(uuidString: record.replicaID)?.version1Components != nil,
-            record.storeID != record.replicaID, ["fresh", "selectedContent"].contains(record.initialization)
+            record.storeID != record.replicaID,
+            ["fresh", "freshReplica", "selectedContent"].contains(record.initialization)
         else { throw TractandaError("invalidPersonalProfile", "Invalid local personal/workgroup profile.") }
         _ = try AccessConfiguration(record.accessConfiguration)
         return record
@@ -55,11 +57,26 @@ enum PersonalWorkgroupProfile {
         _ root: URL, opening: Opening, accounts: any AccountDirectory,
         boundary: (String) throws -> Void = { _ in }
     ) throws -> Record {
-        for name in [".peer-configuration", ".peer-runtime.json", "peer-runtime.json"] {
-            guard (try? FileMetadata.read(at: root.appendingPathComponent(name))) == nil else {
+        if (try? FileMetadata.read(at: root.appendingPathComponent(".peer-configuration"))) != nil {
+            throw TractandaError(
+                "unsupportedPersonalPeers", "Old peer configuration is not personal membership.")
+        }
+        if try PersonalPeerRuntimeConfiguration.load(root: root, ownerUID: tractanda_uid()) != nil {
+            let current = try PersonalSyncConfiguration.membership(root: root, ownerUID: tractanda_uid())
+            let pending = try PersonalSyncConfiguration.read(
+                PersonalMembershipPreparation.self,
+                root: root, name: PersonalSyncConfiguration.pendingName, ownerUID: tractanda_uid())
+            try pending?.configuration.validate()
+            guard let active = try load(root), let configuration = current ?? pending?.configuration,
+                configuration.storeID == active.storeID,
+                configuration.members.contains(where: { $0.replicaID == active.replicaID }),
+                let fence = try CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid()),
+                fence.minimumReaderLevel >= 18,
+                fence.capabilities.contains(PersonalSyncValidation.capability)
+            else {
                 throw TractandaError(
-                    "unsupportedPersonalPeers", "This standalone profile cannot open configured peer runtime."
-                )
+                    "unsupportedPersonalPeers",
+                    "Personal runtime needs explicit current or control-only prepared membership.")
             }
         }
         if let active = try load(root) {
@@ -69,6 +86,11 @@ enum PersonalWorkgroupProfile {
                     throw TractandaError(
                         "invalidPersonalProfile",
                         "Existing local policy differs; open or explicitly configure it.")
+                }
+            case .freshReplica(let storeID, let policy):
+                guard active.storeID == storeID, active.accessConfiguration == policy else {
+                    throw TractandaError(
+                        "invalidPersonalProfile", "Existing replica differs from its fresh plan.")
                 }
             case .existing: break
             }
@@ -95,21 +117,34 @@ enum PersonalWorkgroupProfile {
             return active
         }
         if case .existing = opening, let pending = try load(root, pending: true) {
-            let intended: Opening =
-                pending.initialization == "fresh"
-                ? .fresh(pending.accessConfiguration) : .selectedContent(pending.accessConfiguration)
+            let intended: Opening
+            if pending.initialization == "freshReplica" {
+                intended = .freshReplica(storeID: pending.storeID, configuration: pending.accessConfiguration)
+            } else {
+                intended =
+                    pending.initialization == "fresh"
+                    ? .fresh(pending.accessConfiguration) : .selectedContent(pending.accessConfiguration)
+            }
             return try prepare(root, opening: intended, accounts: accounts, boundary: boundary)
         }
         guard case .existing = opening else {
             let policy: ItemValue
             let fresh: Bool
+            let commonStoreID: String?
             switch opening {
             case .fresh(let value):
                 policy = value
                 fresh = true
+                commonStoreID = nil
+            case .freshReplica(let storeID, let value):
+                try PersonalSyncValidation.identifier(storeID)
+                policy = value
+                fresh = true
+                commonStoreID = storeID
             case .selectedContent(let value):
                 policy = value
                 fresh = false
+                commonStoreID = nil
             case .existing:
                 throw TractandaError("uninitializedPersonalProfile", "No established local profile.")
             }
@@ -119,7 +154,9 @@ enum PersonalWorkgroupProfile {
                 using: PrincipalResolver(directory: accounts, configuration: configuration))
             if let pending = try load(root, pending: true) {
                 guard pending.accessConfiguration == policy,
-                    pending.initialization == (fresh ? "fresh" : "selectedContent")
+                    pending.initialization
+                        == (commonStoreID != nil ? "freshReplica" : fresh ? "fresh" : "selectedContent"),
+                    commonStoreID == nil || pending.storeID == commonStoreID
                 else {
                     throw TractandaError("invalidPersonalProfile", "Retry the same local activation policy.")
                 }
@@ -173,9 +210,9 @@ enum PersonalWorkgroupProfile {
             }
             let record = try Record(
                 profile: "tractanda.personal-workgroup.v1",
-                storeID: UUID.makeVersion1().uuidString.lowercased(),
+                storeID: commonStoreID ?? UUID.makeVersion1().uuidString.lowercased(),
                 replicaID: UUID.makeVersion1().uuidString.lowercased(), accessConfiguration: policy,
-                initialization: fresh ? "fresh" : "selectedContent")
+                initialization: commonStoreID != nil ? "freshReplica" : fresh ? "fresh" : "selectedContent")
             try persist(record, root: root, name: pendingName)
             try boundary("pendingPublished")
             try installIdentities(record, root: root, boundary: boundary)

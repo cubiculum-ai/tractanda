@@ -14,6 +14,13 @@ public actor DaemonApplication {
     private var privateEnrollmentControls: [UUID: PeerExchangeControl] = [:]
     private var peerStatusProvider: (@Sendable () async throws -> PeerOperatorRuntimeStatus)?
 
+    private var personalPeerAdminProvider: (@Sendable (PeerExchangeRequest, UInt32) async throws -> Data)?
+    func setPersonalPeerAdminProvider(
+        _ provider: @escaping @Sendable (PeerExchangeRequest, UInt32) async throws -> Data
+    ) {
+        personalPeerAdminProvider = provider
+    }
+
     func setPeerStatusProvider(_ provider: @escaping @Sendable () async throws -> PeerOperatorRuntimeStatus) {
         peerStatusProvider = provider
     }
@@ -32,6 +39,19 @@ public actor DaemonApplication {
     }
 
     public func native(_ request: Data, forUID uid: UInt32) async throws -> Data {
+        do {
+            if let call = try PersonalPeerAdminCall.parse(request) {
+                do {
+                    guard !closed, let provider = personalPeerAdminProvider else {
+                        throw TractandaError("serviceClosed", "Personal peer administration is unavailable.")
+                    }
+                    return try call.response(await provider(call.request, uid))
+                } catch { return call.failure(error) }
+            }
+        } catch {
+            return try JSON.encode(
+                TractandaError("invalidArguments", "Invalid personal native administration request."))
+        }
         do {
             if let call = try PeerEnrollmentNativeCall.parse(request) {
                 do {

@@ -129,7 +129,7 @@ final class PersonalRecoveryInventoryTests: XCTestCase {
         for record in [first, live, deleted] { try save(record, root) }
         let result = try inspect(root)
         XCTAssertEqual(result.items[first.itemID]?.heads, [live.revisionID, deleted.revisionID].sorted())
-        XCTAssertEqual(result.diagnostics.map(\.kind), [.unresolvedHeads])
+        XCTAssertTrue(result.isStructurallyComplete)
         XCTAssertTrue(try XCTUnwrap(result.records[deleted.revisionID]).isDeleted)
     }
 

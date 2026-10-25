@@ -25,6 +25,7 @@ public actor ServiceCoordinator {
     private var privateEnrollmentCompleted = Set<UUID>()
     private var privateEnrollmentPreparedHookForTesting: (@Sendable () async -> Void)?
     private let peerRuntimeSnapshotOwner = UUID()
+    private let personalDependencyWorkOwner = UUID()
     private var peerRuntimeStopped = false
     private var peerRuntimeSnapshotDeliveryHookForTesting: (@Sendable () async -> Void)?
     private var rebuildHookForTesting: (@Sendable () async throws -> Void)?
@@ -1390,7 +1391,12 @@ public actor ServiceCoordinator {
         try beginWork()
         defer { finishWork() }
         let result = try await submit { service in
-            try service.store.withAccess(forUID: uid) { try service.store.peerOperatorCanonicalStatus() }
+            try service.store.withAccess(forUID: uid) {
+                if service.store.isPersonalWorkgroup {
+                    return try service.store.personalPeerCanonicalStatus()
+                }
+                return try service.store.peerOperatorCanonicalStatus()
+            }
         }
         try requireCanonicalGeneration(generation)
         try Task.checkCancellation()
@@ -1525,6 +1531,144 @@ public actor ServiceCoordinator {
         try beginWork()
         defer { finishWork() }
         return try await submit { try $0.store.loadPeerCredential(peerID: peerID) }
+    }
+
+    package func personalPeerLoadCursor(_ binding: PeerExchangeBinding) async throws -> PersonalPeerSyncCursor
+    {
+        let generation = canonicalWorkGeneration
+        try requireCanonicalGeneration(generation)
+        try beginWork()
+        defer { finishWork() }
+        let result = try await submit { try PersonalPeerBridge.loadCursor(store: $0.store, binding: binding) }
+        try requireCanonicalGeneration(generation)
+        return result
+    }
+    package func personalPeerSaveCursor(_ cursor: PersonalPeerSyncCursor, binding: PeerExchangeBinding)
+        async throws
+    {
+        let generation = canonicalWorkGeneration
+        try requireCanonicalGeneration(generation)
+        try beginWork()
+        defer { finishWork() }
+        try await submit { try PersonalPeerBridge.saveCursor(cursor, store: $0.store, binding: binding) }
+        try requireCanonicalGeneration(generation)
+    }
+
+    package func personalPeerCleanOrphanedWork() async throws {
+        try beginWork()
+        defer { finishWork() }
+        try await submit { try PersonalDependencyWorkStack.removeOrphans(store: $0.store) }
+    }
+    package func personalPeerCreateWork(_ binding: PeerExchangeBinding) async throws
+        -> PersonalDependencyWorkStack
+    {
+        let generation = canonicalWorkGeneration
+        try requireCanonicalGeneration(generation)
+        try beginWork()
+        defer { finishWork() }
+        let owner = personalDependencyWorkOwner
+        return try await submit { service in
+            try service.store.validatePersonalPeerBinding(binding)
+            return try PersonalDependencyWorkStack(
+                store: service.store, binding: binding, owner: owner, generation: generation)
+        }
+    }
+    package func personalPeerWork(
+        _ work: PersonalDependencyWorkStack,
+        _ operation: PersonalDependencyWorkOperation
+    ) async throws -> PersonalDependencyWorkFrame? {
+        try work.requireOwner(personalDependencyWorkOwner)
+        try beginWork()
+        defer { finishWork() }
+        if case .close = operation { return try await submit { _ in try work.perform(.close) } }
+        try requireCanonicalGeneration(work.generation)
+        return try await submit { service in
+            try service.store.validatePersonalPeerBinding(work.binding)
+            return try work.perform(operation)
+        }
+    }
+
+    // Personal current-configuration bridge. No Store or access context escapes its owner queue.
+    package func loadPersonalPeerCredentials(includePending: Bool = true) async throws -> [PeerCredential] {
+        let generation = canonicalWorkGeneration
+        try requireCanonicalGeneration(generation)
+        try beginWork()
+        defer { finishWork() }
+        let result = try await submit {
+            try $0.store.loadPersonalPeerCredentials(includePending: includePending)
+        }
+        try requireCanonicalGeneration(generation)
+        try Task.checkCancellation()
+        return result
+    }
+    package func personalPeerValidate(_ binding: PeerExchangeBinding, controlOnly: Bool = false) async throws
+    {
+        let generation = canonicalWorkGeneration
+        try requireCanonicalGeneration(generation)
+        try beginWork()
+        defer { finishWork() }
+        try await submit { try $0.store.validatePersonalPeerBinding(binding, controlOnly: controlOnly) }
+        try requireCanonicalGeneration(generation)
+        try Task.checkCancellation()
+    }
+    package func personalPeerRequest(_ binding: PeerExchangeBinding, request: PeerExchangeRequest)
+        async throws -> Data
+    {
+        let generation = canonicalWorkGeneration
+        try requireCanonicalGeneration(generation)
+        try beginWork()
+        defer { finishWork() }
+        let control = PeerExchangeControl.commitCompletion()
+        return try await withTaskCancellationHandler {
+            try control.check()
+            let result = try await submit { service in
+                try control.check()
+                let result = try PersonalPeerBridge.perform(
+                    store: service.store, binding: binding, request: request)
+                try control.check()
+                return result
+            }
+            try requireCanonicalGeneration(generation)
+            try Task.checkCancellation()
+            return result
+        } onCancel: {
+            control.cancel()
+        }
+    }
+    package func personalPeerLocalRequest(_ request: PeerExchangeRequest, forUID uid: UInt32) async throws
+        -> Data
+    {
+        let generation = canonicalWorkGeneration
+        try requireCanonicalGeneration(generation)
+        try beginWork()
+        defer { finishWork() }
+        let result = try await submit { service in
+            try service.store.withAccess(forUID: uid) {
+                try service.store.requireAdministrator()
+                return try PersonalPeerBridge.local(store: service.store, request: request, uid: uid)
+            }
+        }
+        try requireCanonicalGeneration(generation)
+        try Task.checkCancellation()
+        return result
+    }
+    package func personalPeerCommitMembership(
+        preparation: PersonalMembershipPreparation,
+        acknowledgements: [PersonalMembershipOnlineAcknowledgement],
+        forUID uid: UInt32
+    ) async throws -> PersonalMembershipConfiguration {
+        let generation = canonicalWorkGeneration
+        try requireCanonicalGeneration(generation)
+        try beginWork()
+        defer { finishWork() }
+        let result = try await submit { service in
+            try service.store.commitPersonalMembershipChange(
+                preparation: preparation,
+                acknowledgements: acknowledgements, actorUID: uid)
+        }
+        try requireCanonicalGeneration(generation)
+        try Task.checkCancellation()
+        return result
     }
 
     /// Host-private runtime bridge. A snapshot must be validated again before later admission.

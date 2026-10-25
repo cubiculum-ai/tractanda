@@ -339,20 +339,23 @@ final class PersonalRecoveryIndexTests: XCTestCase {
         }
     }
 
-    func testUnresolvedHeadsFailBeforePublishingAnyDatabase() throws {
+    func testUnresolvedHeadsRemainLocalAndPreserveEveryRevision() throws {
         try fixture { root, output, accounts in
             let first = try revision()
             let left = try revision(item: first.itemID, parents: [first.revisionID], second: 1)
             let right = try revision(
                 item: first.itemID, parents: [first.revisionID], second: 2, deleted: true)
-            for value in [first, left, right] { try save(value, root) }
+            let other = try revision(subject: "unaffected")
+            for value in [first, left, right, other] { try save(value, root) }
             let before = try fingerprint(root)
-            XCTAssertThrowsError(try rebuild(root, output, accounts)) { error in
-                let diagnostics = (error as? PersonalRecoveryIndex.Incomplete)?.diagnostics
-                XCTAssertEqual(diagnostics?.map(\.kind), [.unresolvedHeads])
-                XCTAssertEqual(diagnostics?.first?.itemID, first.itemID)
-            }
-            XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
+            let completed = try rebuild(root, output, accounts)
+            let store = try ItemStore.ReadQualification(
+                recoveredContent: completed, accounts: accounts, configuration: configuration())
+            assertCode("itemUnresolved") { _ = try store.get(first.itemID) }
+            XCTAssertEqual(
+                Set(try store.history(first.itemID).map(\.revisionID)),
+                Set([first, left, right].map(\.revisionID)))
+            XCTAssertEqual(try store.get(other.itemID), other)
             XCTAssertEqual(try fingerprint(root), before)
         }
     }

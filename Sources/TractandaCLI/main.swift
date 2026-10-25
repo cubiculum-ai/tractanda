@@ -15,6 +15,7 @@ let usage = """
     Tractanda — experimental local item server
 
       tractanda init STORE [--index-directory PATH]
+      tractanda personal-peer ...                 (fresh personal membership/enrollment; run without arguments for syntax)
       tractanda inspect-content STORE [--owner OS_USER] [--output PRIVATE_JSON]
       tractanda activate-content STORE TAGGED_CONFIG_JSON --index-directory PATH
       tractanda seed STORE [--index-directory PATH]
@@ -141,6 +142,7 @@ func run() throws {
         return
     }
     if try contentCommand(args, hasConnectionOptions: hasConnectionOptions) { return }
+    if try personalPeerCommand(args, options: options, hasConnectionOptions: hasConnectionOptions) { return }
     if command == "uuid-v1" || command == "inspect-uuid" || command == "uuid-node" {
         guard !hasConnectionOptions else {
             throw TractandaError("usage", "UUID utilities run locally, without a connection profile.")

@@ -8,6 +8,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import platform
@@ -45,13 +46,17 @@ MAC = load_module('tractanda_existing_macos_assets', ROOT / 'scripts/package-mac
 digest = MAC.digest
 
 
-def run(arguments, **kwargs):
+def run(arguments, *, timeout_seconds=60, **kwargs):
+    if (isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float))
+            or not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 2**31 - 1):
+        raise ValueError('Tool timeout must be finite, positive and addressable.')
     environment = {key: value for key, value in os.environ.items() if key not in {'LD_LIBRARY_PATH', 'LD_PRELOAD', 'LD_AUDIT'}}
     environment['LC_ALL'] = 'C'
     result = subprocess.run(list(map(str, arguments)), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            check=False, timeout=60, env=environment, **kwargs)
+                            check=False, timeout=timeout_seconds, env=environment, **kwargs)
     if result.returncode:
-        raise ValueError(Path(str(arguments[0])).name + ' failed: ' + result.stderr.decode(errors='replace')[:2048])
+        raise ValueError(Path(str(arguments[0])).name + ' failed (exit ' + str(result.returncode)
+                         + '): ' + result.stderr.decode(errors='replace')[:2048])
     return result.stdout.decode('utf-8')
 
 

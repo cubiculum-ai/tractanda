@@ -160,7 +160,7 @@ final class PersonalEntrypointTests: XCTestCase, @unchecked Sendable {
         do {
             let info = try object(await call(config.socketPath, "TractandaStore/info"))
             XCTAssertEqual(info["persistenceProfile"] as? String, "personal-workgroup")
-            XCTAssertEqual((info["clustering"] as? [String: Any])?["state"] as? String, "unsupported")
+            XCTAssertEqual((info["clustering"] as? [String: Any])?["state"] as? String, "standalone")
             let active = try JSON.decode(
                 CanonicalFormatSupport.self,
                 JSONSerialization.data(withJSONObject: try XCTUnwrap(info["activeCanonicalFormats"])))
@@ -351,7 +351,7 @@ final class PersonalEntrypointTests: XCTestCase, @unchecked Sendable {
                     return true
                 })
             XCTFail("Configured peers must be refused")
-        } catch { XCTAssertEqual((error as? TractandaError)?.code, "unsupportedPersonalPeers") }
+        } catch { XCTAssertEqual((error as? TractandaError)?.code, "invalidConfiguration") }
         XCTAssertEqual(opened.value(), 0)
         XCTAssertEqual(ready.value(), 0)
         XCTAssertFalse(FileManager.default.fileExists(atPath: store.path))

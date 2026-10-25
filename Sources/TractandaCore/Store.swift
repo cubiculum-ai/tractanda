@@ -222,6 +222,9 @@ public final class ItemStore {
         accessConfiguration != nil || accessConfigurationAmbiguous || accessConfigurationProofUnavailable
     }
     public var isPersonalWorkgroup: Bool { personalProfile != nil }
+    private var usesCurrentItemProjection: Bool {
+        revisionProjectionEnabled || personalProfile != nil || contentRecoveryQualification
+    }
     public var persistenceProfile: String {
         isPersonalWorkgroup ? "personal-workgroup" : "historical-development"
     }
@@ -355,7 +358,7 @@ public final class ItemStore {
         var tokens: [String: String] = [:]
         for id in ids {
             try Identifier.validate(id)
-            if revisionProjectionEnabled {
+            if usesCurrentItemProjection {
                 do {
                     let state = try itemState(id)
                     tokens[id] = state.stateToken
@@ -406,11 +409,14 @@ public final class ItemStore {
     }
 
     func preparePooledHistory(_ id: String) throws -> String {
+        guard !personalBaselineImportActive else {
+            throw TractandaError("baselinePending", "Initial baseline is not ready for history reads.")
+        }
         guard isCanonicalReady else {
             throw TractandaError("recoveryRequired", "The current catalogue is unavailable.")
         }
         try Identifier.validate(id)
-        if revisionProjectionEnabled { return try itemState(id).stateToken }
+        if usesCurrentItemProjection { return try itemState(id).stateToken }
         guard let head = try currentHead(id) else {
             throw TractandaError("notFound", "Item or revision is unavailable.")
         }
@@ -573,6 +579,11 @@ public final class ItemStore {
     /// It uses this Store's existing readers; it cannot publish canonical changes.
     private var contentRecoveryQualification = false
     private var personalProfile: PersonalWorkgroupProfile.Record?
+    private var personalBaselineImportActive = false
+    public var isPersonalBaselinePending: Bool { personalBaselineImportActive }
+    private var personalSyncInventories: [String: PersonalSyncInventorySnapshot] = [:]
+    private var personalSyncInventoryOrder: [String] = []
+    var personalSyncAfterRevisionPublicationForTesting: (() throws -> Void)?
     private var personalPolicyNeedsReopen = false
     private var personalIndexLimits = PersonalRecoveryIndex.Limits()
     private var personalIndexAvailableBytes: (@Sendable (URL) throws -> UInt64)?
@@ -797,7 +808,7 @@ public final class ItemStore {
     }
 
     private func currentHead(_ itemID: String) throws -> ResidentHead? {
-        if revisionProjectionEnabled {
+        if usesCurrentItemProjection {
             guard let projection = try index?.currentProjection(itemID: itemID),
                 projection.state.status == .ready,
                 let representative = projection.state.representativeRevisionID
@@ -1169,6 +1180,7 @@ public final class ItemStore {
             let candidate = try ItemIndex(
                 path: indexDirectory.appendingPathComponent("items.sqlite").path,
                 create: false, noFollow: true, journalMode: .delete)
+            candidate.personalContentProjectionMode = true
             index = candidate
             clockDependentCategories = try candidate.hasClockDependentCategories()
             // The private read capability never acquires upload, job, payload or peer runtimes.
@@ -1223,6 +1235,11 @@ public final class ItemStore {
     }
 
     private func requireOperationalContent() throws {
+        guard !personalBaselineImportActive else {
+            throw TractandaError(
+                "baselinePending",
+                "Finish the explicitly selected initial baseline before normal content operations.")
+        }
         guard !personalPolicyNeedsReopen else {
             throw TractandaError(
                 "recoveryRequired",
@@ -1279,6 +1296,10 @@ public final class ItemStore {
         do {
             let record = try PersonalWorkgroupProfile.prepare(root, opening: opening, accounts: accounts)
             personalProfile = record
+            personalBaselineImportActive =
+                try PersonalSyncConfiguration.read(
+                    PersonalBaselineSelection.self,
+                    root: root, name: PersonalSyncConfiguration.baselineName, ownerUID: ownerUID) != nil
             accessConfiguration = try AccessConfiguration(record.accessConfiguration)
             try accessConfiguration!.validate(
                 using: PrincipalResolver(directory: accounts, configuration: accessConfiguration))
@@ -1304,6 +1325,67 @@ public final class ItemStore {
             writer = -1
             throw error
         }
+    }
+
+    /// All inputs are already ordinary canonical history selected by the administrator. This
+    /// materializes only a resolved personal DAG under the lifetime writer, never staged intake.
+    private func publishPersonalMerge(
+        _ graph: RevisionGraph, revisions: [String: Revision]
+    ) throws -> (ItemIndex.CatalogueRow, Revision) {
+        guard writer >= 0, let profile = personalProfile else {
+            throw TractandaError("forbidden", "Personal materialization requires its lifetime writer.")
+        }
+        try requirePersonalWriteCapacity()
+        let draft = try graph.draft(
+            now: { Timestamp.now() },
+            allocateRevisionID: { try self.makePersistentUUID().uuidString.lowercased() })
+        guard let draft, let parent = revisions[draft.parents[0]] else {
+            throw TractandaError("invalidRevisionGraph", "No eligible personal merge draft.")
+        }
+        let provenance = try RevisionProvenance(
+            kind: .automaticMerge, originReplicaID: profile.replicaID,
+            parents: draft.parents, writtenFields: [], unsetFields: [], frontier: draft.frontier,
+            mergeProfile: draft.profile)
+        var fields = draft.fields
+        fields["itemID"] = .text(draft.itemID)
+        fields["revisionID"] = .text(draft.revisionID)
+        fields["createdAt"] = parent.fields["createdAt"]
+        fields["modifiedAt"] = .date(draft.modifiedAt)
+        fields["actor"] = .text("replica:" + profile.replicaID)
+        fields["operationID"] = .text(draft.revisionID)
+        fields["requestIdentity"] = .text(try JSON.encode(provenance.itemValue).base64EncodedString())
+        fields["revisionAncestry"] = provenance.itemValue
+        let revision = try Revision(fields: fields, formatVersion: 2)
+        try ItemSemantics.validate(revision)
+        // Validate the complete candidate before fencing or publication.
+        _ = try RevisionGraph(
+            nodes: Array(revisions.values).map {
+                try RevisionMerge.node($0, parent: $0.supersedes.flatMap { revisions[$0] })
+            } + [RevisionMerge.node(revision)], profile: RevisionMerge.personalProfile,
+            limits: personalIndexLimits.graph)
+        let bytes = try RecordCodec.encode(revision)
+        guard bytes.count <= PooledCanonicalRecord.maximumRecordBytes else {
+            throw TractandaError("resourceLimit", "Personal merge exceeds the record byte window.")
+        }
+        // Placement is a real current publication minute, independent of logical merge time.
+        let minute = String(Timestamp.now().prefix(16)).replacingOccurrences(of: "-", with: "/")
+            .replacingOccurrences(of: "T", with: "/").replacingOccurrences(of: ":", with: "/")
+        let path = "items/" + minute + "/" + revision.itemID + "/" + revision.revisionID + ".tractanda"
+        try CanonicalReaderRequirement.beforePersonalMergePublication(root: root, ownerUID: ownerUID)
+        guard let reserve = Int64(exactly: personalIndexLimits.minimumAvailableBytes) else {
+            throw TractandaError("resourceLimit", "Personal merge reserve exceeds the supported byte range.")
+        }
+        let files = DocumentContentFiles(
+            root: root, ownerUID: ownerUID, minimumFreeBytes: reserve)
+        try files.writeImmutable(
+            bytes, path: path.split(separator: "/").map(String.init),
+            maximumBytes: PooledCanonicalRecord.maximumRecordBytes)
+        let record = PersonalRecoveryInventory.Record(
+            itemID: revision.itemID, revisionID: revision.revisionID, parents: draft.parents,
+            isDeleted: revision.isDeleted, sha256: Data(SHA256.hash(data: bytes)),
+            byteCount: UInt64(bytes.count), locations: [.init(source: 0, path: path)])
+        return try PooledCanonicalRecord.selectedRecoveryRow(
+            record, path: path, root: root, ownerUID: ownerUID)
     }
 
     private func rebuildPersonalIndex() throws {
@@ -1347,7 +1429,13 @@ public final class ItemStore {
             originalVerified: { try control?.pulse(originalBytes: $0) },
             pageVerified: { try control?.pulse(pages: 1) },
             recordVerified: { try control?.pulse(records: 1) },
-            itemProjected: { try control?.pulse(items: 1) })
+            itemProjected: { try control?.pulse(items: 1) },
+            projectCurrentItems: !personalBaselineImportActive,
+            materialize: { graph, revisions in try self.publishPersonalMerge(graph, revisions: revisions) },
+            personalMergeObserved: {
+                try CanonicalReaderRequirement.beforePersonalMergePublication(
+                    root: self.root, ownerUID: self.ownerUID)
+            })
         try rebuildControl?.pulse(phase: "finalizingIndex")
         try fresh.sealCatalogue(identity: profile.storeID)
         try syncCanonicalForCheckpoint(index: fresh)
@@ -1363,6 +1451,9 @@ public final class ItemStore {
         guard rename(temporary.path, destination.path) == 0 else { throw FileMetadataError.posix(errno) }
         try StoreCheckpoint.syncDirectory(indexDirectory)
         let installed = try ItemIndex(path: destination.path, create: false)
+        installed.personalContentProjectionMode = true
+        personalSyncInventories.removeAll()
+        personalSyncInventoryOrder.removeAll()
         index = installed
         installIndexFailureHandler(installed)
         installed.graphReserveBytes = limits.minimumAvailableBytes
@@ -2093,7 +2184,7 @@ public final class ItemStore {
     }
 
     private func canRead(_ head: Revision) -> Bool {
-        if revisionProjectionEnabled { return canReadProjection(head.itemID) }
+        if usesCurrentItemProjection { return canReadProjection(head.itemID) }
         if isAdministrator { return true }
         aclSwiftReadCheckCount += 1
         guard head.classID != AccessConfiguration.classID,
@@ -2104,7 +2195,7 @@ public final class ItemStore {
     }
 
     private func canRead(_ head: ResidentHead) -> Bool {
-        if revisionProjectionEnabled { return canReadProjection(head.itemID) }
+        if usesCurrentItemProjection { return canReadProjection(head.itemID) }
         if !isAdministrator { aclSwiftReadCheckCount += 1 }
         return head.canRead(accessContext, administrator: isAdministrator)
     }
@@ -2114,7 +2205,7 @@ public final class ItemStore {
     }
 
     private func requireEdit(_ head: Revision, changesPermissions: Bool = false) throws {
-        if revisionProjectionEnabled {
+        if usesCurrentItemProjection {
             try requireProjectionEdit(head.itemID, changesPermissions: changesPermissions)
             return
         }
@@ -2605,7 +2696,7 @@ public final class ItemStore {
     }
 
     func queryProjectionCompleteness() throws -> (completeness: String, conflictsAvailable: Bool) {
-        guard revisionProjectionEnabled else { return ("complete", false) }
+        guard usesCurrentItemProjection else { return ("complete", false) }
         guard let index, isCanonicalReady else {
             throw TractandaError("recoveryRequired", "Current projection is unavailable.")
         }
@@ -2627,7 +2718,7 @@ public final class ItemStore {
     }
 
     func readableUnresolvedStates(after: String? = nil, limit: Int = 128) throws -> [ItemState] {
-        guard revisionProjectionEnabled, isCanonicalReady, let index,
+        guard usesCurrentItemProjection, isCanonicalReady, let index,
             (1...256).contains(limit)
         else {
             throw TractandaError("unsupportedFeature", "Revision projection is not enabled.")
@@ -2744,6 +2835,7 @@ public final class ItemStore {
     public func resolveConflict(_ request: ResolveConflictRequest, actorUID: UInt32? = nil) throws
         -> CommitResult
     {
+        if personalProfile != nil { return try resolvePersonalConflict(request, actorUID: actorUID) }
         if accessContext == nil {
             return try withAccess(forUID: actorUID ?? ownerUID) {
                 try resolveConflict(request, actorUID: actorUID)
@@ -3034,7 +3126,7 @@ public final class ItemStore {
 
     public func itemState(_ itemID: String) throws -> ItemState {
         try Identifier.validate(itemID)
-        guard revisionProjectionEnabled, isCanonicalReady, let index else {
+        guard usesCurrentItemProjection, isCanonicalReady, let index else {
             throw TractandaError("unsupportedFeature", "Revision projection is not enabled for this store.")
         }
         guard let projection = try index.currentProjection(itemID: itemID) else {
@@ -3089,7 +3181,7 @@ public final class ItemStore {
         }
         let matches: [ItemIndex.CatalogueRow]
         if personalProfile != nil {
-            matches = try index.personalOperationRows(id).filter(matchesCaller)
+            matches = try index.personalOperationRows(id, kind: kind).filter(matchesCaller)
         } else {
             let local = try replicaID.map { try candidates($0) } ?? []
             if local.isEmpty, kind == .authored, let origin = replicaID, let coordinator = peerIntake {
@@ -4351,12 +4443,15 @@ public final class ItemStore {
         return result
     }
     public func get(_ itemID: String, revisionID: String? = nil) throws -> Revision {
+        guard !personalBaselineImportActive else {
+            throw TractandaError("baselinePending", "Initial baseline is not ready for content reads.")
+        }
         guard isCanonicalReady else {
             throw TractandaError(
                 "recoveryRequired", "Resolve canonical recovery errors before reading or writing.")
         }
         try Identifier.validate(itemID)
-        if revisionProjectionEnabled {
+        if usesCurrentItemProjection {
             let projection = try itemState(itemID)
             if revisionID == nil, projection.status != .ready {
                 throw TractandaError("itemUnresolved", "Current item projection is unresolved.")
@@ -17132,5 +17227,1616 @@ extension ItemStore {
         -> PeerEnrollmentTargetOutput
     {
         try .init(material: peerEnrollmentActivationMaterial(.init(operationID: operationID), forUID: uid))
+    }
+}
+
+// MARK: Personal current membership and fresh replica configuration
+extension ItemStore {
+    public static func createPersonalSyncReplica(
+        root: URL, storeID: String, accessConfiguration: ItemValue,
+        accounts: any AccountDirectory = SystemAccountDirectory()
+    ) throws -> ItemStore {
+        let store = try ItemStore(
+            personalRoot: root,
+            opening: .freshReplica(storeID: storeID, configuration: accessConfiguration), accounts: accounts)
+        try CanonicalReaderRequirement.beforePersonalSyncPublication(
+            root: store.root, ownerUID: store.ownerUID)
+        return store
+    }
+    public func personalSyncIdentity() throws -> PersonalSyncIdentity {
+        guard let profile = personalProfile, isCanonicalReady else {
+            throw TractandaError("personalProfileRequired", "A ready personal store is required.")
+        }
+        let membership = try PersonalSyncConfiguration.membership(root: root, ownerUID: ownerUID)
+        guard membership == nil || membership?.storeID == profile.storeID else {
+            throw TractandaError("invalidPersonalMembership", "Membership belongs to another store.")
+        }
+        return .init(storeID: profile.storeID, replicaID: profile.replicaID, membership: membership)
+    }
+    public func preparePersonalMembershipChange(
+        configuration: PersonalMembershipConfiguration, expectedDigest: String?, nonce: String? = nil,
+        readmission: Bool = false, actorUID: UInt32? = nil
+    ) throws -> PersonalMembershipPreparation {
+        if accessContext == nil {
+            return try withAccess(forUID: actorUID ?? ownerUID) {
+                try preparePersonalMembershipChange(
+                    configuration: configuration,
+                    expectedDigest: expectedDigest, nonce: nonce, readmission: readmission, actorUID: actorUID
+                )
+            }
+        }
+        try requireAdministrator()
+        let identity = try personalSyncIdentity()
+        try configuration.validate()
+        guard configuration.storeID == identity.storeID,
+            configuration.members.contains(where: { $0.replicaID == identity.replicaID }),
+            try identity.membership?.digest == expectedDigest,
+            let administrator = accessContext?.account?.name
+        else {
+            throw TractandaError("membershipConflict", "Current membership or administrator changed.")
+        }
+        let old = Set(identity.membership?.members.map(\.replicaID) ?? [identity.replicaID])
+        let next = Set(configuration.members.map(\.replicaID))
+        guard readmission || old.subtracting(next).isEmpty || next.subtracting(old).isEmpty else {
+            throw TractandaError(
+                "invalidPersonalMembership", "Add and remove members in separate coordinated operations.")
+        }
+        let required = readmission || next.subtracting(old).isEmpty ? next : old.union(next)
+        let operationNonce = try nonce ?? UUID.makeVersion1().uuidString.lowercased()
+        try PersonalSyncValidation.identifier(operationNonce)
+        let preparation = PersonalMembershipPreparation(
+            configuration: configuration,
+            expectedDigest: expectedDigest, nonce: operationNonce, administrator: administrator,
+            requiredOnlineReplicaIDs: required.sorted(), readmission: readmission)
+        if let pending = try PersonalSyncConfiguration.read(
+            PersonalMembershipPreparation.self,
+            root: root, name: PersonalSyncConfiguration.pendingName, ownerUID: ownerUID)
+        {
+            guard pending == preparation else {
+                throw TractandaError(
+                    "membershipConflict", "Resume or explicitly cancel the pending membership operation.")
+            }
+        } else {
+            try CanonicalReaderRequirement.beforePersonalSyncPublication(root: root, ownerUID: ownerUID)
+            try PersonalSyncConfiguration.write(
+                preparation, root: root, name: PersonalSyncConfiguration.pendingName)
+        }
+        return preparation
+    }
+    package func registerPersonalPeerCredentials(
+        _ credentials: [PeerCredential], configuration: PersonalMembershipConfiguration,
+        actorUID: UInt32? = nil
+    ) throws {
+        if accessContext == nil {
+            return try withAccess(forUID: actorUID ?? ownerUID) {
+                try registerPersonalPeerCredentials(
+                    credentials, configuration: configuration, actorUID: actorUID)
+            }
+        }
+        try requireAdministrator()
+        let identity = try personalSyncIdentity()
+        let digest = try configuration.digest
+        let pending = try PersonalSyncConfiguration.read(
+            PersonalMembershipPreparation.self,
+            root: root, name: PersonalSyncConfiguration.pendingName, ownerUID: ownerUID)
+        guard configuration.storeID == identity.storeID,
+            identity.membership == configuration || pending?.configuration == configuration,
+            credentials.count <= 512, Set(credentials.map { $0.binding.peerID }).count == credentials.count
+        else {
+            throw TractandaError(
+                "invalidPersonalMembership", "Credentials need the exact current or prepared membership.")
+        }
+        let members = Set(configuration.members.map(\.replicaID))
+        let files = DocumentContentFiles(root: root, ownerUID: ownerUID, minimumFreeBytes: 0)
+        let registry = PeerCredentialStore(files: files)
+        for credential in credentials {
+            let binding = credential.binding
+            guard binding.configurationDigest == digest, binding.storeID == identity.storeID,
+                binding.localReplicaID == identity.replicaID, members.contains(binding.remoteReplicaID),
+                binding.remoteReplicaID != identity.replicaID
+            else {
+                throw TractandaError(
+                    "invalidPeerCredential", "Credential is not bound to this local membership role.")
+            }
+            try registry.stage(credential)
+        }
+        try PersonalSyncConfiguration.write(
+            PersonalCredentialAliases(
+                configurationDigest: digest, aliases: credentials.map { $0.binding.peerID }.sorted()),
+            root: root, name: ".personal-credentials-" + digest + ".json")
+    }
+    package func loadPersonalPeerCredentials(includePending: Bool = false) throws -> [PeerCredential] {
+        let identity = try personalSyncIdentity()
+        var configurations = identity.membership.map { [$0] } ?? []
+        if includePending,
+            let pending = try PersonalSyncConfiguration.read(
+                PersonalMembershipPreparation.self,
+                root: root, name: PersonalSyncConfiguration.pendingName, ownerUID: ownerUID),
+            !configurations.contains(pending.configuration)
+        {
+            configurations.append(pending.configuration)
+        }
+        let registry = PeerCredentialStore(
+            files: DocumentContentFiles(root: root, ownerUID: ownerUID, minimumFreeBytes: 0))
+        var values: [PeerCredential] = []
+        for configuration in configurations {
+            let digest = try configuration.digest
+            guard
+                let aliases = try PersonalSyncConfiguration.read(
+                    PersonalCredentialAliases.self,
+                    root: root, name: ".personal-credentials-" + digest + ".json", ownerUID: ownerUID)
+            else { continue }
+            guard aliases.configurationDigest == digest, aliases.aliases.count <= 512,
+                aliases.aliases == Array(Set(aliases.aliases)).sorted()
+            else {
+                throw TractandaError(
+                    "invalidPeerCredential", "Current private credential registry is invalid.")
+            }
+            for alias in aliases.aliases {
+                let credential = try registry.load(peerID: alias, configurationDigest: digest)
+                guard credential.binding.storeID == identity.storeID,
+                    credential.binding.localReplicaID == identity.replicaID,
+                    configuration.members.contains(where: {
+                        $0.replicaID == credential.binding.remoteReplicaID
+                    })
+                else {
+                    throw TractandaError("invalidPeerCredential", "Current private credential role changed.")
+                }
+                values.append(credential)
+            }
+        }
+        return values
+    }
+    package func validatePersonalPeerBinding(_ binding: PeerExchangeBinding, controlOnly: Bool = false) throws
+    {
+        let identity = try personalSyncIdentity()
+        guard binding.storeID == identity.storeID, binding.localReplicaID == identity.replicaID else {
+            throw TractandaError("untrustedPeer", "Peer belongs to another store or local replica.")
+        }
+        var configuration = identity.membership
+        if controlOnly, try configuration?.digest != binding.configurationDigest,
+            let pending = try PersonalSyncConfiguration.read(
+                PersonalMembershipPreparation.self,
+                root: root, name: PersonalSyncConfiguration.pendingName, ownerUID: ownerUID),
+            try pending.configuration.digest == binding.configurationDigest
+        {
+            configuration = pending.configuration
+        }
+        guard let configuration, try configuration.digest == binding.configurationDigest,
+            configuration.members.contains(where: { $0.replicaID == identity.replicaID }),
+            configuration.members.contains(where: { $0.replicaID == binding.remoteReplicaID }),
+            try loadPersonalPeerCredentials(includePending: controlOnly).contains(where: {
+                $0.binding == binding
+            })
+        else {
+            throw TractandaError("untrustedPeer", "Peer membership or credential is no longer current.")
+        }
+    }
+    package func personalMembershipReady(
+        session: PeerExchangeBinding, preparation: PersonalMembershipPreparation
+    ) throws -> PersonalMembershipReady {
+        try validatePersonalPeerBinding(session, controlOnly: true)
+        let identity = try personalSyncIdentity()
+        if identity.membership != preparation.configuration {
+            guard
+                let pending = try PersonalSyncConfiguration.read(
+                    PersonalMembershipPreparation.self,
+                    root: root, name: PersonalSyncConfiguration.pendingName, ownerUID: ownerUID),
+                pending.configuration == preparation.configuration,
+                pending.administrator == preparation.administrator,
+                try identity.membership?.digest == pending.expectedDigest
+            else {
+                throw TractandaError("membershipConflict", "No exact local administrator preparation exists.")
+            }
+        }
+        try PersonalSyncValidation.identifier(preparation.nonce)
+        let administratorUID = try PrincipalResolver(directory: accounts, configuration: accessConfiguration)
+            .userID(preparation.administrator)
+        let administrator = try accounts.user(forUID: administratorUID)
+        try withAccess(forUID: administrator.uid) { try requireAdministrator() }
+        return .init(
+            configurationDigest: try preparation.configuration.digest, nonce: preparation.nonce,
+            replicaID: session.localReplicaID, administrator: preparation.administrator)
+    }
+    package func commitPersonalMembershipChange(
+        preparation: PersonalMembershipPreparation,
+        acknowledgements: [PersonalMembershipOnlineAcknowledgement], actorUID: UInt32? = nil
+    ) throws -> PersonalMembershipConfiguration {
+        if accessContext == nil {
+            return try withAccess(forUID: actorUID ?? ownerUID) {
+                try commitPersonalMembershipChange(
+                    preparation: preparation,
+                    acknowledgements: acknowledgements, actorUID: actorUID)
+            }
+        }
+        try requireAdministrator()
+        let identity = try personalSyncIdentity()
+        let digest = try preparation.configuration.digest
+        if identity.membership == preparation.configuration { return preparation.configuration }
+        guard
+            let pending = try PersonalSyncConfiguration.read(
+                PersonalMembershipPreparation.self,
+                root: root, name: PersonalSyncConfiguration.pendingName, ownerUID: ownerUID),
+            pending == preparation, try identity.membership?.digest == preparation.expectedDigest,
+            accessContext?.account?.name == preparation.administrator
+        else {
+            throw TractandaError(
+                "membershipConflict", "Membership commit lost its exact administrator/CAS plan.")
+        }
+        var online: Set<String> = [identity.replicaID]
+        for acknowledgement in acknowledgements {
+            try acknowledgement.control.check()
+            try validatePersonalPeerBinding(acknowledgement.binding, controlOnly: true)
+            let response = acknowledgement.response
+            guard response.nonce == preparation.nonce, response.configurationDigest == digest,
+                response.administrator == preparation.administrator,
+                response.replicaID == acknowledgement.binding.remoteReplicaID
+            else {
+                throw TractandaError(
+                    "membershipConflict", "Online acknowledgement belongs to another operation.")
+            }
+            online.insert(response.replicaID)
+        }
+        guard Set(preparation.requiredOnlineReplicaIDs).isSubset(of: online) else {
+            throw TractandaError(
+                "membersOffline", "All required current/joining or retained members must be online.")
+        }
+        for acknowledgement in acknowledgements { try acknowledgement.control.check() }
+        try CanonicalReaderRequirement.beforePersonalSyncPublication(root: root, ownerUID: ownerUID)
+        try PersonalSyncConfiguration.write(
+            preparation.configuration, root: root, name: PersonalSyncConfiguration.membershipName)
+        try PersonalSyncConfiguration.remove(root: root, name: PersonalSyncConfiguration.pendingName)
+        personalSyncInventories.removeAll()
+        personalSyncInventoryOrder.removeAll()
+        return preparation.configuration
+    }
+    public func startPersonalBaseline(sourceReplicaID: String, actorUID: UInt32? = nil) throws -> String {
+        if accessContext == nil {
+            return try withAccess(forUID: actorUID ?? ownerUID) {
+                try startPersonalBaseline(sourceReplicaID: sourceReplicaID, actorUID: actorUID)
+            }
+        }
+        try requireAdministrator()
+        try PersonalSyncValidation.identifier(sourceReplicaID)
+        let identity = try personalSyncIdentity()
+        if let current = try PersonalSyncConfiguration.read(
+            PersonalBaselineSelection.self,
+            root: root, name: PersonalSyncConfiguration.baselineName, ownerUID: ownerUID)
+        {
+            guard current.sourceReplicaID == sourceReplicaID, current.storeID == identity.storeID else {
+                throw TractandaError("baselineConflict", "A different baseline selection is already pending.")
+            }
+            return current.selectionID
+        }
+        guard personalProfile?.initialization == "freshReplica", try index?.catalogueCount() == 0,
+            sourceReplicaID != identity.replicaID
+        else {
+            throw TractandaError(
+                "baselineConflict", "Explicit initial baseline requires a fresh empty target replica.")
+        }
+        let token = try UUID.makeVersion1().uuidString.lowercased()
+        try PersonalSyncConfiguration.write(
+            PersonalBaselineSelection(
+                selectionID: token,
+                storeID: identity.storeID, sourceReplicaID: sourceReplicaID), root: root,
+            name: PersonalSyncConfiguration.baselineName)
+        personalBaselineImportActive = true
+        return token
+    }
+    public func finishPersonalBaseline(selectionID: String, actorUID: UInt32? = nil) throws {
+        if accessContext == nil {
+            return try withAccess(forUID: actorUID ?? ownerUID) {
+                try finishPersonalBaseline(selectionID: selectionID, actorUID: actorUID)
+            }
+        }
+        try requireAdministrator()
+        guard
+            let selection = try PersonalSyncConfiguration.read(
+                PersonalBaselineSelection.self,
+                root: root, name: PersonalSyncConfiguration.baselineName, ownerUID: ownerUID),
+            selection.selectionID == selectionID
+        else { throw TractandaError("baselineConflict", "No exact pending baseline selection.") }
+        guard let index else {
+            throw TractandaError("indexUnavailable", "Baseline catalogue is unavailable.")
+        }
+        // Keep the live SQLite file/identity stable: ServiceCoordinator read leases already
+        // refer to it. Current projections are derived only after the selected raw cut arrived.
+        try StoreCheckpoint.markDirty(root: root)
+        try index.execute("BEGIN IMMEDIATE")
+        do {
+            var afterItem: String?
+            while true {
+                let ids = try index.personalItemIDs(after: afterItem, limit: 128)
+                if ids.isEmpty { break }
+                for itemID in ids {
+                    _ = try personalRefreshItem(itemID)
+                    afterItem = itemID
+                }
+            }
+            try index.finalizeSavedViewMaterializations()
+            try index.execute("COMMIT")
+            try StoreCheckpoint.clear(root: root)
+            try PersonalSyncConfiguration.remove(root: root, name: PersonalSyncConfiguration.baselineName)
+            personalBaselineImportActive = false
+        } catch {
+            try? index.execute("ROLLBACK")
+            personalBaselineImportActive = true
+            throw error
+        }
+    }
+}
+
+// MARK: Finite raw personal inventory and bounded physical objects
+extension ItemStore {
+    private func personalDescriptor(_ row: ItemIndex.CatalogueRow) throws -> PersonalObjectDescriptor {
+        guard let size = Int64(exactly: row.size) else {
+            throw TractandaError("resourceLimit", "Revision length is not addressable.")
+        }
+        return try .init(
+            kind: .revision, id: row.revisionID, byteCount: size,
+            sha256: row.digest.map { String(format: "%02x", $0) }.joined(), itemID: row.itemID,
+            parentRevisionIDs: row.provenance?.parents ?? row.parentID.map { [$0] } ?? [])
+    }
+    package func personalCatalogueGeneration() throws -> String {
+        guard let index, personalProfile != nil, isCanonicalReady else {
+            throw TractandaError("indexUnavailable", "Personal catalogue generation is unavailable.")
+        }
+        return try index.personalInventoryGeneration()
+    }
+    package func capturePersonalInventory(
+        session: PeerExchangeBinding, pageSize: Int = 128,
+        knownGeneration: String? = nil, afterRowID: Int64 = 0
+    ) throws
+        -> PersonalInventoryPage
+    {
+        try validatePersonalPeerBinding(session)
+        guard let index else {
+            throw TractandaError("indexUnavailable", "Personal catalogue is unavailable.")
+        }
+        let generation = try index.personalInventoryGeneration()
+        let highWater = try index.personalInventoryHighWater()
+        guard afterRowID >= 0 else {
+            throw TractandaError("invalidArguments", "Invalid disposable inventory watermark.")
+        }
+        let start = knownGeneration == generation && afterRowID <= highWater ? afterRowID : 0
+        let snapshotID = try UUID.makeVersion1().uuidString.lowercased()
+        while personalSyncInventoryOrder.count >= 4 {
+            personalSyncInventories.removeValue(forKey: personalSyncInventoryOrder.removeFirst())
+        }
+        personalSyncInventories[snapshotID] = .init(
+            binding: session,
+            highWaterRowID: highWater,
+            catalogueGeneration: generation)
+        personalSyncInventoryOrder.append(snapshotID)
+        return try continuePersonalInventory(
+            session: session, snapshotID: snapshotID, offset: Int(start), pageSize: pageSize)
+    }
+    package func continuePersonalInventory(
+        session: PeerExchangeBinding, snapshotID: String,
+        offset: Int, pageSize: Int = 128
+    ) throws -> PersonalInventoryPage {
+        try validatePersonalPeerBinding(session)
+        guard let index, let snapshot = personalSyncInventories[snapshotID], snapshot.binding == session,
+            snapshot.catalogueGeneration == (try index.personalInventoryGeneration()),
+            (1...128).contains(pageSize), offset >= 0, Int64(offset) <= snapshot.highWaterRowID
+        else {
+            throw TractandaError(
+                "inventoryExpired", "Rescan a missing, rebuilt or changed finite inventory cut.")
+        }
+        let rows = try index.personalInventoryRows(
+            afterRowID: Int64(offset), through: snapshot.highWaterRowID, limit: pageSize)
+        var entries: [PersonalObjectDescriptor] = []
+        var bytes = 0
+        var cursor = Int64(offset)
+        for (rowID, row) in rows {
+            let descriptor = try personalDescriptor(row)
+            let size = try JSON.encode(descriptor).count
+            guard size <= 128 * 1024 else {
+                throw TractandaError("resourceLimit", "One revision descriptor exceeds the page byte window.")
+            }
+            if size > 128 * 1024 - bytes { break }
+            entries.append(descriptor)
+            bytes += size
+            cursor = rowID
+        }
+        let complete = rows.isEmpty || cursor >= snapshot.highWaterRowID
+        return .init(
+            snapshotID: snapshotID, generationID: snapshot.catalogueGeneration,
+            cutRowID: snapshot.highWaterRowID, entries: entries,
+            nextOffset: complete ? nil : Int(cursor), complete: complete)
+    }
+    package func closePersonalInventory(session: PeerExchangeBinding, snapshotID: String) throws {
+        try validatePersonalPeerBinding(session)
+        guard personalSyncInventories[snapshotID]?.binding == session else { return }
+        personalSyncInventories.removeValue(forKey: snapshotID)
+        personalSyncInventoryOrder.removeAll { $0 == snapshotID }
+    }
+    package func readPersonalObject(
+        session: PeerExchangeBinding, descriptor: PersonalObjectDescriptor,
+        offset: Int64, limit: Int = 262_144
+    ) throws -> Data {
+        try validatePersonalPeerBinding(session)
+        try descriptor.validate()
+        guard offset >= 0, offset <= descriptor.byteCount, (1...262_144).contains(limit) else {
+            throw TractandaError("invalidPeerOffset", "Read outside the bounded immutable object.")
+        }
+        let count = Int(min(Int64(limit), descriptor.byteCount - offset))
+        switch descriptor.kind {
+        case .revision:
+            guard let row = try index?.revision(descriptor.id), try personalDescriptor(row) == descriptor
+            else {
+                throw TractandaError("notFound", "Revision descriptor is absent or changed.")
+            }
+            let bytes = try PooledCanonicalRecord.originalBytes(row: row, root: root, ownerUID: ownerUID)
+            return bytes.subdata(in: Int(offset)..<(Int(offset) + count))
+        case .original:
+            guard let attachment = descriptor.attachment else {
+                throw TractandaError("invalidPersonalObject", "Missing original descriptor.")
+            }
+            let file = try attachmentPayloads.peerOriginal(attachment)
+            return try file.read(offset: offset, count: count)
+        case .document:
+            let base = try documentContents.directory(descriptor.id)
+            let file = try documentContents.peerPartFile(base: base, object: descriptor.peerObject)
+            guard file.metadata.size == UInt64(descriptor.byteCount) else {
+                throw TractandaError("documentIntegrity", "Document length changed.")
+            }
+            return try file.read(offset: offset, count: count)
+        }
+    }
+    package func personalDependencies(
+        session: PeerExchangeBinding, descriptor: PersonalObjectDescriptor,
+        offset: Int = 0, limit: Int = 128
+    ) throws -> PersonalDependencyPage {
+        try validatePersonalPeerBinding(session)
+        try descriptor.validate()
+        guard offset >= 0, (1...128).contains(limit) else {
+            throw TractandaError("invalidArguments", "Use a bounded dependency page.")
+        }
+        var entries: [PersonalObjectDescriptor] = []
+        switch descriptor.kind {
+        case .revision:
+            guard let row = try index?.revision(descriptor.id), try personalDescriptor(row) == descriptor
+            else {
+                throw TractandaError("notFound", "Revision descriptor is absent or changed.")
+            }
+            let revision = try PooledCanonicalRecord.read(row: row, root: root, ownerUID: ownerUID).revision
+            for parent in descriptor.parentRevisionIDs {
+                guard let row = try index?.revision(parent) else {
+                    throw TractandaError("missingDependencies", "Parent is unavailable.")
+                }
+                entries.append(try personalDescriptor(row))
+            }
+            for attachment in try AttachmentDescriptor.descriptors(in: revision.fields) {
+                entries.append(
+                    try .init(
+                        kind: .original, id: attachment.attachmentID,
+                        byteCount: attachment.byteCount, sha256: attachment.sha256, attachment: attachment))
+            }
+            for representation in try AttachmentDocumentRepresentation.representations(in: revision.fields) {
+                if let reference = representation.content {
+                    let bytes = try documentContents.peerManifestBytes(
+                        reference,
+                        budget: PeerOriginalReadBudget(bytes: UInt64(DocumentContentStore.maximumNodeBytes)))
+                    entries.append(
+                        try .init(
+                            kind: .document, id: reference.contentID,
+                            byteCount: Int64(bytes.count), sha256: reference.manifestSHA256,
+                            part: .init(role: .manifest)))
+                }
+            }
+        case .original: break
+        case .document:
+            guard let part = descriptor.part else {
+                throw TractandaError("invalidPersonalObject", "Missing document address.")
+            }
+            if part.role != .page {
+                let bytes = try readPersonalObject(
+                    session: session, descriptor: descriptor, offset: 0,
+                    limit: DocumentContentStore.maximumNodeBytes)
+                guard PersonalSyncValidation.digest(bytes) == descriptor.sha256,
+                    bytes.count == descriptor.byteCount
+                else { throw TractandaError("documentIntegrity", "Document dependency hash changed.") }
+                if part.role == .manifest {
+                    let manifest = try DocumentValue.strictDecode(DocumentManifest.self, data: bytes)
+                    guard manifest.schema == "tractanda.document-manifest.v2",
+                        manifest.contentID == descriptor.id,
+                        (0...8).contains(manifest.rootLevel)
+                    else { throw TractandaError("documentIntegrity", "Invalid document manifest.") }
+                    entries.append(
+                        try .init(
+                            kind: .document, id: descriptor.id,
+                            byteCount: manifest.rootByteCount, sha256: manifest.rootSHA256,
+                            part: .init(role: .node, level: manifest.rootLevel, ordinal: 0)))
+                } else {
+                    let node = try DocumentValue.strictDecode(DocumentHashNode.self, data: bytes)
+                    try node.validate()
+                    guard node.level == part.level, node.ordinal == part.ordinal else {
+                        throw TractandaError("documentIntegrity", "Document node address changed.")
+                    }
+                    for child in node.entries {
+                        entries.append(
+                            try .init(
+                                kind: .document, id: descriptor.id,
+                                byteCount: child.byteCount, sha256: child.sha256,
+                                part: .init(
+                                    role: node.level == 0 ? .page : .node,
+                                    level: max(0, node.level - 1), ordinal: child.ordinal)))
+                    }
+                }
+            }
+        }
+        guard offset <= entries.count else {
+            throw TractandaError("invalidArguments", "Dependency page offset exceeds its immutable list.")
+        }
+        let end = min(entries.count, offset + limit)
+        return .init(
+            entries: Array(entries[offset..<end]), nextOffset: end == entries.count ? nil : end,
+            complete: end == entries.count)
+    }
+    private var personalSyncFiles: DocumentContentFiles {
+        DocumentContentFiles(
+            root: root, ownerUID: ownerUID,
+            minimumFreeBytes: max(
+                attachmentUploadPolicy.minimumFreeBytes,
+                Int64(clamping: personalIndexLimits.minimumAvailableBytes)), stagingQuota: stagingByteQuota)
+    }
+    private func personalStage(_ descriptor: PersonalObjectDescriptor, create: Bool) throws
+        -> PersonalSyncStage?
+    {
+        let key = try descriptor.key
+        let path = [".personal-sync", "stages", key + ".json"]
+        if let bytes = try personalSyncFiles.readIfPresent(path: path, maximumBytes: 16384) {
+            let stage = try JSON.decode(PersonalSyncStage.self, bytes)
+            guard stage.descriptor == descriptor else {
+                throw TractandaError("peerObjectCollision", "Private stage descriptor changed.")
+            }
+            try PersonalSyncValidation.identifier(stage.stageID)
+            return stage
+        }
+        guard create else { return nil }
+        let stage = PersonalSyncStage(
+            descriptor: descriptor,
+            stageID: try UUID.makeVersion1().uuidString.lowercased())
+        try attachmentPayloads.createStaging(id: stage.stageID)
+        try personalSyncFiles.writeImmutable(JSON.encode(stage), path: path, maximumBytes: 16384)
+        return stage
+    }
+    private func personalDocumentStage(_ contentID: String, create: Bool) throws -> [String]? {
+        try PersonalSyncValidation.identifier(contentID)
+        let path = [".personal-sync", "documents", contentID + ".json"]
+        if let bytes = try personalSyncFiles.readIfPresent(path: path, maximumBytes: 4096) {
+            let id = try JSON.decode(String.self, bytes)
+            try PersonalSyncValidation.identifier(id)
+            return ["documents", ".staging", id]
+        }
+        guard create else { return nil }
+        let id = try UUID.makeVersion1().uuidString.lowercased()
+        let stage = ["documents", ".staging", id]
+        try personalSyncFiles.createUniqueDirectory(stage)
+        try personalSyncFiles.writeImmutable(JSON.encode(id), path: path, maximumBytes: 4096)
+        return stage
+    }
+    private func personalVerifiedObjectFile(
+        _ file: PeerOriginalFile, descriptor: PersonalObjectDescriptor,
+        control: PeerExchangeControl? = nil
+    ) throws {
+        guard file.metadata.size == UInt64(descriptor.byteCount) else {
+            throw TractandaError("missingDependencies", "Immutable object is incomplete.")
+        }
+        var hash = SHA256()
+        var offset: Int64 = 0
+        while offset < descriptor.byteCount {
+            try Task.checkCancellation()
+            try control?.check()
+            let bytes = try file.read(offset: offset, count: Int(min(262_144, descriptor.byteCount - offset)))
+            hash.update(data: bytes)
+            offset += Int64(bytes.count)
+        }
+        let actual = hash.finalize().map { String(format: "%02x", $0) }.joined()
+        guard actual == descriptor.sha256 else {
+            throw TractandaError("peerObjectCollision", "Immutable object checksum differs.")
+        }
+        try file.check()
+    }
+    private func personalObjectIsStored(_ descriptor: PersonalObjectDescriptor) throws -> Bool {
+        switch descriptor.kind {
+        case .revision:
+            guard let row = try index?.revision(descriptor.id) else { return false }
+            guard try personalDescriptor(row) == descriptor else {
+                throw TractandaError(
+                    "peerObjectCollision", "Known revision identity has different bytes/ancestry.")
+            }
+            return true
+        case .original:
+            guard try attachmentPayloads.resolvedPayloadPath(descriptor.id) != nil else { return false }
+            try attachmentPayloads.validate(descriptor: descriptor.attachment!)
+            return true
+        case .document:
+            let base: [String]
+            if let canonical = try? documentContents.directory(descriptor.id) {
+                base = canonical
+            } else if let stage = try personalDocumentStage(descriptor.id, create: false) {
+                base = stage
+            } else {
+                return false
+            }
+            do {
+                let file = try documentContents.peerPartFile(base: base, object: descriptor.peerObject)
+                try personalVerifiedObjectFile(file, descriptor: descriptor)
+                return true
+            } catch let error as TractandaError where error.osError == ENOENT { return false }
+        }
+    }
+    package func preparePersonalObject(session: PeerExchangeBinding, descriptor: PersonalObjectDescriptor)
+        throws -> PersonalObjectProgress
+    {
+        try validatePersonalPeerBinding(session)
+        try descriptor.validate()
+        if try personalObjectIsStored(descriptor) {
+            if descriptor.kind == .revision { try personalRetireAcceptedRevisionStage(descriptor) }
+            return .init(
+                nextOffset: descriptor.byteCount, complete: true, knownRevision: descriptor.kind == .revision)
+        }
+        let stage = try personalStage(descriptor, create: true)!
+        let size = try attachmentPayloads.stagedSize(id: stage.stageID)
+        guard size <= descriptor.byteCount else {
+            throw TractandaError("peerObjectCollision", "Private stage exceeds its descriptor.")
+        }
+        return .init(nextOffset: size, complete: false)
+    }
+    package func appendPersonalObject(
+        session: PeerExchangeBinding, descriptor: PersonalObjectDescriptor,
+        offset: Int64, data: Data
+    ) throws -> PersonalObjectProgress {
+        try validatePersonalPeerBinding(session)
+        try descriptor.validate()
+        let end = offset.addingReportingOverflow(Int64(data.count))
+        guard offset >= 0, !end.overflow, end.partialValue <= descriptor.byteCount,
+            data.count <= 262_144
+        else { throw TractandaError("invalidPeerOffset", "Chunk exceeds exact immutable object bounds.") }
+        if try personalObjectIsStored(descriptor) {
+            return .init(
+                nextOffset: descriptor.byteCount, complete: true, knownRevision: descriptor.kind == .revision)
+        }
+        let stage = try personalStage(descriptor, create: true)!
+        let next = try attachmentPayloads.append(id: stage.stageID, offset: offset, data: data)
+        return .init(nextOffset: next, complete: false)
+    }
+    package func finishPersonalObject(
+        session: PeerExchangeBinding, descriptor: PersonalObjectDescriptor,
+        control: PeerExchangeControl? = nil
+    ) throws -> PersonalObjectProgress {
+        try validatePersonalPeerBinding(session)
+        try descriptor.validate()
+        if try personalObjectIsStored(descriptor) {
+            return .init(
+                nextOffset: descriptor.byteCount, complete: true, knownRevision: descriptor.kind == .revision)
+        }
+        guard let stage = try personalStage(descriptor, create: false) else {
+            throw TractandaError("missingDependencies", "No complete private stage exists.")
+        }
+        let file = try attachmentPayloads.peerStage(stage.stageID, maximumBytes: descriptor.byteCount)
+        try personalVerifiedObjectFile(file, descriptor: descriptor, control: control)
+        try validatePersonalPeerBinding(session)
+        switch descriptor.kind {
+        case .revision, .original: break  // Verified bytes stay private until item admission.
+        case .document:
+            let tree = try personalDocumentStage(descriptor.id, create: true)!
+            try personalSyncFiles.adoptPeerDocumentPart(
+                stageID: stage.stageID,
+                to: tree + descriptor.part!.peerPart.relativePath, bytes: descriptor.byteCount)
+            try personalSyncFiles.removePersonalSyncStageBinding(descriptor.key)
+        }
+        return .init(nextOffset: descriptor.byteCount, complete: true)
+    }
+}
+
+// MARK: Personal current-authority intake and incremental projection
+extension ItemStore {
+    private func personalRawRevision(_ descriptor: PersonalObjectDescriptor) throws -> (Data, Revision) {
+        try descriptor.validate()
+        guard descriptor.kind == .revision, let stage = try personalStage(descriptor, create: false) else {
+            throw TractandaError("missingDependencies", "Complete private revision bytes are required.")
+        }
+        let file = try attachmentPayloads.peerStage(stage.stageID, maximumBytes: descriptor.byteCount)
+        try personalVerifiedObjectFile(file, descriptor: descriptor)
+        var bytes = Data()
+        bytes.reserveCapacity(Int(descriptor.byteCount))
+        var offset: Int64 = 0
+        while offset < descriptor.byteCount {
+            let data = try file.read(offset: offset, count: Int(min(262_144, descriptor.byteCount - offset)))
+            bytes.append(data)
+            offset += Int64(data.count)
+        }
+        let revision = try RecordCodec.decode(bytes)
+        try ItemSemantics.validate(revision)
+        let parents = try revision.provenance?.parents ?? revision.supersedes.map { [$0] } ?? []
+        guard revision.itemID == descriptor.itemID, revision.revisionID == descriptor.id,
+            parents == descriptor.parentRevisionIDs
+        else {
+            throw TractandaError(
+                "peerObjectCollision", "Revision bytes do not bind the requested identity and ancestry.")
+        }
+        return (bytes, revision)
+    }
+    private func personalRows(_ itemID: String) throws -> [ItemIndex.CatalogueRow] {
+        guard let index else {
+            throw TractandaError("indexUnavailable", "Personal catalogue is unavailable.")
+        }
+        var result: [ItemIndex.CatalogueRow] = []
+        var after: String?
+        var bytes: UInt64 = 0
+        while true {
+            let rows = try index.graphCatalogueRows(
+                where: after == nil
+                    ? "WHERE item=? ORDER BY revision" : "WHERE item=? AND revision>? ORDER BY revision",
+                bindings: [itemID] + (after.map { [$0] } ?? []), limit: 128)
+            if rows.isEmpty { break }
+            for row in rows {
+                guard result.count < personalIndexLimits.graph.maximumNodes,
+                    row.size <= UInt64(personalIndexLimits.graph.maximumEncodedBytes) - bytes
+                else {
+                    throw TractandaError(
+                        "resourceLimit", "Personal item graph exceeds its bounded analysis window.")
+                }
+                result.append(row)
+                bytes += row.size
+                after = row.revisionID
+            }
+        }
+        return result
+    }
+    private func personalGraph(_ itemID: String, adding: Revision? = nil) throws -> (
+        RevisionGraph, [String: Revision]
+    ) {
+        var revisions: [String: Revision] = [:]
+        for row in try personalRows(itemID) {
+            revisions[row.revisionID] = try PooledCanonicalRecord.read(
+                row: row, root: root, ownerUID: ownerUID
+            ).revision
+        }
+        if let adding { revisions[adding.revisionID] = adding }
+        let graph = try RevisionGraph(
+            nodes: revisions.values.map {
+                try RevisionMerge.node($0, parent: $0.supersedes.flatMap { revisions[$0] })
+            }, profile: RevisionMerge.personalProfile, limits: personalIndexLimits.graph)
+        return (graph, revisions)
+    }
+    private func personalPhysicalHeads(_ itemID: String) throws -> [ItemIndex.CatalogueRow] {
+        guard let index else {
+            throw TractandaError("indexUnavailable", "Personal catalogue is unavailable.")
+        }
+        var result: [ItemIndex.CatalogueRow] = []
+        var after: String?
+        while true {
+            let rows = try index.graphHeadPage(itemID: itemID, afterRevisionID: after, limit: 128)
+            if rows.isEmpty { return result }
+            guard result.count + rows.count <= 1024 else {
+                throw TractandaError("resourceLimit", "Personal physical frontier exceeds its bound.")
+            }
+            result.append(contentsOf: rows)
+            after = rows.last!.revisionID
+        }
+    }
+    private func personalClockFloor(_ itemID: String) throws -> ItemIndex.CatalogueRow {
+        guard
+            let row = try index?.graphCatalogueRows(
+                where: "WHERE item=? ORDER BY modified_ticks DESC,revision DESC",
+                bindings: [itemID], limit: 1
+            ).first
+        else { throw TractandaError("notFound", "Personal item history is unavailable.") }
+        return row
+    }
+    private func personalInvalidateCaches() {
+        heads.removeAll()
+        headCacheOrder.removeAll()
+        headCacheBytes = 0
+        historicalCache.removeAll()
+        historicalOrder.removeAll()
+        historicalCacheBytes = 0
+        visibleStates.removeAll()
+        visibleStateOrder.removeAll()
+        accessPolicyEpoch &+= 1
+        hasLivePersonalStateMemo = nil
+        clearSavedViewPages()
+        generation = Identifier.make()
+    }
+    private func personalRefreshItem(
+        _ itemID: String, materialize: Bool = true,
+        causalRow: ItemIndex.CatalogueRow? = nil
+    ) throws -> ItemState {
+        guard let index, let profile = personalProfile else {
+            throw TractandaError("personalProfileRequired", "Personal index is unavailable.")
+        }
+        var physical = try causalRow.map { [$0] } ?? personalPhysicalHeads(itemID)
+        guard !physical.isEmpty else { throw TractandaError("notFound", "Item history is absent.") }
+        var representative: Revision?
+        var analysis: RevisionMerge.Analysis?
+        var permission: ItemValue?
+        var resource: String?
+        let resolver = PrincipalResolver(directory: accounts, configuration: accessConfiguration)
+        // A causal ordinary/resolution successor already contains its complete validated snapshot.
+        // This keeps ordinary long-lived linear histories off the bounded whole-fork reducer.
+        if physical.count == 1, physical[0].provenance?.kind != .automaticMerge {
+            representative = try PooledCanonicalRecord.read(row: physical[0], root: root, ownerUID: ownerUID)
+                .revision
+            permission = representative!.fields["permissions"]
+            if let permission { try ItemPermissions(permission).validate(using: resolver) }
+        } else {
+            do {
+                var (graph, revisions) = try personalGraph(itemID)
+                analysis = try graph.analyze()
+                permission = try graph.personalPermissionPlan?.validatedPOSIXValue(using: resolver)
+                if analysis!.needsMaterialization, materialize {
+                    let (row, revision) = try publishPersonalMerge(graph, revisions: revisions)
+                    try index.insertGraphCatalogueRow(row, graphFields: revision.fields)
+                    revisions[revision.revisionID] = revision
+                    graph = try RevisionGraph(
+                        nodes: revisions.values.map {
+                            try RevisionMerge.node($0, parent: $0.supersedes.flatMap { revisions[$0] })
+                        }, profile: RevisionMerge.personalProfile, limits: personalIndexLimits.graph)
+                    analysis = try graph.analyze()
+                    permission = try graph.personalPermissionPlan?.validatedPOSIXValue(using: resolver)
+                    physical = [row]
+                }
+                representative = analysis!.representativeRevisionID.flatMap { revisions[$0] }
+            } catch let error as TractandaError where error.code == "resourceLimit" {
+                resource = "personalGraphWindowExceeded"
+            }
+        }
+        if let representative {
+            let input = try PageCorpusInput(storeID: profile.storeID, revision: representative)
+            try index.installCorpusForRebuild(
+                input: input,
+                provider: StoredPageCorpusProvider(contents: documentContents, incoming: nil),
+                boundary: { try self.requirePersonalWriteCapacity() })
+            try index.put(representative)
+        }
+        try index.replacePersonalProjection(
+            itemID: itemID, analysis: analysis, representative: representative,
+            permissions: permission, physicalHeads: physical.map(\.revisionID), resourceCode: resource)
+        personalInvalidateCaches()
+        return try index.currentProjection(itemID: itemID)!.state
+    }
+    private func personalVerifyRevisionDependencies(_ revision: Revision, publish: Bool = true) throws {
+        for attachment in try AttachmentDescriptor.descriptors(in: revision.fields) {
+            if try attachmentPayloads.resolvedPayloadPath(attachment.attachmentID) != nil {
+                try attachmentPayloads.validate(descriptor: attachment)
+                continue
+            }
+            let descriptor = try PersonalObjectDescriptor(
+                kind: .original, id: attachment.attachmentID,
+                byteCount: attachment.byteCount, sha256: attachment.sha256, attachment: attachment)
+            guard let stage = try personalStage(descriptor, create: false) else {
+                throw TractandaError(
+                    "missingDependencies", "Complete owned original bytes are required before admission.")
+            }
+            let file = try attachmentPayloads.peerStage(stage.stageID, maximumBytes: descriptor.byteCount)
+            try personalVerifiedObjectFile(file, descriptor: descriptor)
+            if publish {
+                attachmentPayloads.rememberPeerVerification(attachment, metadata: file.metadata)
+                try attachmentPayloads.publish(
+                    descriptor: attachment, requireVerifiedStage: true, stageID: stage.stageID)
+                try personalSyncFiles.removePersonalSyncStageBinding(descriptor.key)
+            }
+        }
+        for representation in try AttachmentDocumentRepresentation.representations(in: revision.fields) {
+            guard let reference = representation.content else { continue }
+            if (try? documentContents.directory(reference.contentID)) != nil {
+                try documentContents.validate(
+                    reference, source: representation.source,
+                    identity: representation.identity, extractedAt: representation.extractedAt)
+                continue
+            }
+            guard let stage = try personalDocumentStage(reference.contentID, create: false) else {
+                throw TractandaError(
+                    "missingDependencies", "Complete private document closure is required before admission.")
+            }
+            try documentContents.validatePersonalIncomingStage(stage, representation: representation)
+            if publish {
+                let manifest = try personalSyncFiles.read(
+                    path: stage + ["manifest.json"],
+                    maximumBytes: DocumentContentStore.maximumNodeBytes)
+                try documentContents.publishExact(stage: stage, reference: reference, manifestBytes: manifest)
+                try personalSyncFiles.removePersonalSyncDocumentBinding(reference.contentID)
+            }
+        }
+    }
+    private func personalPublishBytes(_ bytes: Data, revision: Revision) throws -> ItemIndex.CatalogueRow {
+        guard personalProfile != nil, writer >= 0, let index else {
+            throw TractandaError("personalProfileRequired", "Personal publication needs the lifetime writer.")
+        }
+        guard bytes.count <= PooledCanonicalRecord.maximumRecordBytes,
+            try index.revision(revision.revisionID) == nil,
+            try index.revisionCount(itemID: revision.revisionID) == 0,
+            try index.revision(revision.itemID) == nil
+        else {
+            throw TractandaError("peerObjectCollision", "Publication repeats another immutable identity.")
+        }
+        try requirePersonalWriteCapacity()
+        try CanonicalReaderRequirement.beforePersonalSyncPublication(root: root, ownerUID: ownerUID)
+        if try revision.provenance?.mergeProfile == RevisionMerge.personalProfile {
+            try CanonicalReaderRequirement.beforePersonalMergePublication(root: root, ownerUID: ownerUID)
+        }
+        let minute = String(Timestamp.now().prefix(16)).replacingOccurrences(of: "-", with: "/")
+            .replacingOccurrences(of: "T", with: "/").replacingOccurrences(of: ":", with: "/")
+        let path = "items/" + minute + "/" + revision.itemID + "/" + revision.revisionID + ".tractanda"
+        try StoreCheckpoint.markDirty(root: root)
+        try personalSyncFiles.writeImmutable(
+            bytes, path: path.split(separator: "/").map(String.init),
+            maximumBytes: PooledCanonicalRecord.maximumRecordBytes)
+        try personalSyncAfterRevisionPublicationForTesting?()
+        let expected = PersonalRecoveryInventory.Record(
+            itemID: revision.itemID, revisionID: revision.revisionID,
+            parents: try revision.provenance?.parents ?? revision.supersedes.map { [$0] } ?? [],
+            isDeleted: revision.isDeleted, sha256: Data(SHA256.hash(data: bytes)),
+            byteCount: UInt64(bytes.count),
+            locations: [.init(source: 0, path: path)])
+        return try PooledCanonicalRecord.selectedRecoveryRow(
+            expected, path: path, root: root, ownerUID: ownerUID
+        ).0
+    }
+    private func personalValidateAppliedDelta(
+        _ revision: Revision, parent: Revision?,
+        selectedHistoricalBaseline: Bool = false
+    ) throws {
+        _ = try RevisionTimestamp(revision.modifiedAt)
+        if let parent, !selectedHistoricalBaseline,
+            parent.fields["createdAt"] != revision.fields["createdAt"]
+        {
+            throw TractandaError(
+                "invalidRevisionGraph", "An incoming ordinary successor cannot change item creation time.")
+        }
+        let node = try RevisionMerge.node(revision, parent: parent)
+        if !node.kind.isAutomatic, node.parents.count <= 1 {
+            var fields = parent.map(RevisionMerge.semanticFields) ?? [:]
+            for (key, write) in node.kind.writes {
+                switch write {
+                case .set(let value): fields[key] = value
+                case .unset: fields.removeValue(forKey: key)
+                }
+            }
+            guard fields == RevisionMerge.semanticFields(revision) else {
+                throw TractandaError(
+                    "invalidRevisionGraph", "Incoming authored fields omit an actual applied delta.")
+            }
+        }
+    }
+    private func personalAuthorizeIncoming(_ revision: Revision, parent: Revision?) throws {
+        guard let actor = revision.fields["actor"]?.string,
+            actor.hasPrefix("user:") || actor.hasPrefix("uid:")
+        else {
+            throw TractandaError(
+                "authorReviewRequired", "Incoming authored change needs a current named author mapping.")
+        }
+        let uid: UInt32
+        if actor.hasPrefix("user:") {
+            uid = try PrincipalResolver(directory: accounts, configuration: accessConfiguration).userID(
+                String(actor.dropFirst(5)))
+        } else if let old = UInt32(actor.dropFirst(4)), let mapped = accessConfiguration?.legacyUsers[old] {
+            uid = try PrincipalResolver(directory: accounts, configuration: accessConfiguration).userID(
+                mapped)
+        } else {
+            throw TractandaError("authorReviewRequired", "Legacy author UID has no explicit current mapping.")
+        }
+        try withAccess(forUID: uid) {
+            guard let context = accessContext, let account = context.account else {
+                throw TractandaError("authorReviewRequired", "Current author account is unavailable.")
+            }
+            if isAdministrator { return }
+            guard revision.classID != AccessConfiguration.classID, let value = revision.fields["permissions"]
+            else {
+                throw TractandaError("forbidden", "Only current administrators may author this item class.")
+            }
+            let proposed = try ItemPermissions(value)
+            try proposed.validate(using: context.resolver)
+            let hasParents = try revision.provenance?.parents.isEmpty == false || revision.supersedes != nil
+            if !hasParents {
+                guard
+                    try proposed.owner == account.name
+                        || context.resolver.userID(proposed.owner) == account.uid
+                else {
+                    throw TractandaError(
+                        "forbidden", "A new ordinary item must be owned by its current author.")
+                }
+                return
+            }
+            guard let current = try index?.currentProjection(itemID: revision.itemID),
+                current.policiesComplete,
+                let policy = try index?.currentPolicyWitnesses(itemID: revision.itemID).first?.permissions
+            else {
+                throw TractandaError("authorReviewRequired", "Current target permissions are unresolved.")
+            }
+            let permissions = try ItemPermissions(policy)
+            let changed: Set<String>
+            if let parent {
+                let before = RevisionMerge.semanticFields(parent)
+                let after = RevisionMerge.semanticFields(revision)
+                changed = Set(Set(before.keys).union(after.keys).filter { before[$0] != after[$0] })
+            } else {
+                let provenance = try revision.provenance
+                changed = Set((provenance?.writtenFields ?? []) + (provenance?.unsetFields ?? []))
+            }
+            let onlySharing = !changed.isEmpty && Set(changed).isSubset(of: ["permissions"])
+            let changesSharing = changed.contains("permissions")
+            let owner = try context.resolver.userID(permissions.owner) == account.uid
+            guard try (onlySharing && owner) || permissions.allows(6, for: account, using: context.resolver),
+                !changesSharing || owner
+            else {
+                throw TractandaError(
+                    "forbidden", "Incoming change is not authorized by current item permissions.")
+            }
+        }
+    }
+    private func personalRetireAcceptedRevisionStage(_ descriptor: PersonalObjectDescriptor) throws {
+        guard descriptor.kind == .revision, let stage = try personalStage(descriptor, create: false) else {
+            return
+        }
+        guard let row = try index?.revision(descriptor.id), try personalDescriptor(row) == descriptor else {
+            throw TractandaError(
+                "recoveryRequired", "Keep the private original until its canonical bytes are verified.")
+        }
+        _ = try PooledCanonicalRecord.read(row: row, root: root, ownerUID: ownerUID)
+        do { try attachmentPayloads.discardStaging(id: stage.stageID) } catch let error as TractandaError
+            where error.osError == ENOENT
+        {}
+        try personalSyncFiles.removePersonalSyncStageBinding(descriptor.key)
+    }
+    private func personalCreateReview(
+        session: PeerExchangeBinding, descriptor: PersonalObjectDescriptor,
+        reason: String
+    ) throws -> PersonalApplyResult {
+        let path = [".personal-sync", "reviews", try descriptor.key + ".json"]
+        let review: PersonalIncomingReview
+        if let bytes = try personalSyncFiles.readIfPresent(path: path, maximumBytes: 128 * 1024) {
+            review = try JSON.decode(PersonalIncomingReview.self, bytes)
+            guard review.descriptor == descriptor else {
+                throw TractandaError("peerObjectCollision", "Review descriptor changed.")
+            }
+        } else {
+            review = PersonalIncomingReview(
+                reviewID: try UUID.makeVersion1().uuidString.lowercased(),
+                descriptor: descriptor, sourceReplicaID: session.remoteReplicaID,
+                currentFrontier: try index?.currentProjection(itemID: descriptor.itemID!)?.state.frontier
+                    ?? [],
+                baseRevisionIDs: descriptor.parentRevisionIDs, reason: reason, disposition: "pending")
+            try personalSyncFiles.replacePersonalSyncMetadata(JSON.encode(review), path: path)
+        }
+        return .init(
+            status: .reviewRequired, revisionID: descriptor.id, itemID: descriptor.itemID!,
+            currentState: try index?.currentProjection(itemID: descriptor.itemID!)?.state,
+            reviewItemID: review.reviewID)
+    }
+    private func personalHasRetainedParentReview(_ revisionID: String, itemID: String) throws -> Bool {
+        var found = false
+        var count = 0
+        var metadataBytes = 0
+        do {
+            try personalSyncFiles.withDirectoryEntries(path: [".personal-sync", "reviews"]) { name in
+                count += 1
+                guard count <= 1024, name.hasSuffix(".json") else {
+                    throw TractandaError("resourceLimit", "Pending review search exceeds its bound.")
+                }
+                let bytes = try personalSyncFiles.read(
+                    path: [".personal-sync", "reviews", name], maximumBytes: 128 * 1024)
+                guard bytes.count <= 16 * 1024 * 1024 - metadataBytes else {
+                    throw TractandaError("resourceLimit", "Pending review search exceeds its byte window.")
+                }
+                metadataBytes += bytes.count
+                let review = try JSON.decode(PersonalIncomingReview.self, bytes)
+                if review.descriptor.id == revisionID, review.descriptor.itemID == itemID {
+                    _ = try personalRawRevision(review.descriptor)
+                    found = true
+                    return false
+                }
+                return true
+            }
+        } catch let error as TractandaError where error.osError == ENOENT { return false }
+        return found
+    }
+    package func applyPersonalRevision(
+        session: PeerExchangeBinding,
+        descriptor: PersonalObjectDescriptor
+    ) throws -> PersonalApplyResult {
+        try validatePersonalPeerBinding(session)
+        try descriptor.validate()
+        guard descriptor.kind == .revision, let index else {
+            throw TractandaError("invalidPersonalObject", "Apply requires a revision.")
+        }
+        if try personalObjectIsStored(descriptor) {
+            try personalRetireAcceptedRevisionStage(descriptor)
+            return .init(
+                status: .known, revisionID: descriptor.id, itemID: descriptor.itemID!,
+                currentState: try index.currentProjection(itemID: descriptor.itemID!)?.state,
+                reviewItemID: nil)
+        }
+        let (bytes, revision) = try personalRawRevision(descriptor)
+        var parent: Revision?
+        for id in descriptor.parentRevisionIDs {
+            guard let row = try index.revision(id), row.itemID == revision.itemID else {
+                if try personalHasRetainedParentReview(id, itemID: revision.itemID) {
+                    try personalVerifyRevisionDependencies(revision, publish: false)
+                    return try personalCreateReview(
+                        session: session, descriptor: descriptor, reason: "parentReviewRequired")
+                }
+                throw TractandaError(
+                    "missingDependencies",
+                    "Apply each unseen parent under current authority before its descendant.")
+            }
+            if descriptor.parentRevisionIDs.count == 1 {
+                parent = try PooledCanonicalRecord.read(row: row, root: root, ownerUID: ownerUID).revision
+            }
+        }
+        let selection = try PersonalSyncConfiguration.read(
+            PersonalBaselineSelection.self,
+            root: root, name: PersonalSyncConfiguration.baselineName, ownerUID: ownerUID)
+        let baseline =
+            selection?.sourceReplicaID == session.remoteReplicaID && selection?.storeID == session.storeID
+        let provenance = try revision.provenance
+        try personalValidateAppliedDelta(revision, parent: parent, selectedHistoricalBaseline: baseline)
+        var causal = false
+        if !baseline {
+            do {
+                if let value = revision.fields["permissions"] {
+                    try ItemPermissions(value).validate(
+                        using: PrincipalResolver(directory: accounts, configuration: accessConfiguration))
+                } else if revision.classID != AccessConfiguration.classID {
+                    throw TractandaError("authorReviewRequired", "Current item policy is missing.")
+                }
+                if provenance?.kind != .automaticMerge {
+                    try personalAuthorizeIncoming(revision, parent: parent)
+                }
+                let current = try index.currentProjection(itemID: revision.itemID)
+                if provenance?.kind != .automaticMerge, descriptor.parentRevisionIDs.count <= 1 {
+                    if let current {
+                        causal =
+                            current.state.status == .ready
+                            && descriptor.parentRevisionIDs
+                                == current.state.representativeRevisionID.map { [$0] }
+                    } else {
+                        let count = try index.revisionCount(itemID: revision.itemID)
+                        causal = count == 0 && descriptor.parentRevisionIDs.isEmpty
+                    }
+                }
+                if !causal { _ = try personalGraph(revision.itemID, adding: revision) }
+            } catch let error as TractandaError
+                where ["forbidden", "unresolvedPrincipal", "authorReviewRequired", "unsupportedMergeProfile"]
+                .contains(error.code)
+            {
+                try personalVerifyRevisionDependencies(revision, publish: false)
+                return try personalCreateReview(session: session, descriptor: descriptor, reason: error.code)
+            }
+        }
+        try personalVerifyRevisionDependencies(revision)
+        try validatePersonalPeerBinding(session)
+        if !baseline, provenance?.kind != .automaticMerge {
+            try personalAuthorizeIncoming(revision, parent: parent)
+        }
+        try index.execute("BEGIN IMMEDIATE")
+        do {
+            let row = try personalPublishBytes(bytes, revision: revision)
+            try index.insertGraphCatalogueRow(row, graphFields: revision.fields)
+            let state: ItemState?
+            if baseline {
+                state = nil
+            } else {
+                state = try personalRefreshItem(revision.itemID, causalRow: causal ? row : nil)
+            }
+            try index.execute("COMMIT")
+            try StoreCheckpoint.clear(root: root)
+            try personalRetireAcceptedRevisionStage(descriptor)
+            personalInvalidateCaches()
+            let status: PersonalApplyResult.Status =
+                state?.status == .conflicted
+                ? .conflicted
+                : state?.representativeRevisionID != nil
+                    && state?.representativeRevisionID != revision.revisionID ? .merged : .accepted
+            return .init(
+                status: status, revisionID: revision.revisionID, itemID: revision.itemID,
+                currentState: state, reviewItemID: nil)
+        } catch {
+            try? index.execute("ROLLBACK")
+            if StoreCheckpoint.isDirty(root: root) { isCanonicalReady = false }
+            throw error
+        }
+    }
+}
+
+// MARK: Personal sharing management and expected-frontier content resolution
+extension ItemStore {
+    public func personalSharingMetadata(_ itemID: String, actorUID: UInt32? = nil) throws
+        -> PersonalSharingMetadata
+    {
+        if accessContext == nil {
+            return try withAccess(forUID: actorUID ?? ownerUID) {
+                try personalSharingMetadata(itemID, actorUID: actorUID)
+            }
+        }
+        try requireOperationalContent()
+        try PersonalSyncValidation.identifier(itemID)
+        guard personalProfile != nil, isCanonicalReady, let index,
+            let projection = try index.currentProjection(itemID: itemID), projection.state.status == .ready,
+            projection.policiesComplete, let revisionID = projection.state.representativeRevisionID,
+            let permissions = try index.currentPolicyWitnesses(itemID: itemID).first?.permissions,
+            let context = accessContext, let account = context.account
+        else {
+            throw TractandaError("itemUnresolved", "Sharing metadata requires one resolved current policy.")
+        }
+        let policy = try ItemPermissions(permissions)
+        try policy.validate(using: context.resolver)
+        guard try isAdministrator || context.resolver.userID(policy.owner) == account.uid else {
+            throw TractandaError(
+                "forbidden", "Only the current owner or an administrator may inspect sharing metadata.")
+        }
+        return .init(
+            itemID: itemID, revisionID: revisionID, stateToken: projection.state.stateToken,
+            permissions: permissions)
+    }
+    public func changePersonalSharing(
+        itemID: String, expectedRevisionID: String,
+        permissions: ItemValue, operationID: String, actorUID: UInt32? = nil
+    ) throws -> PersonalSharingMetadata {
+        if accessContext == nil {
+            return try withAccess(forUID: actorUID ?? ownerUID) {
+                try changePersonalSharing(
+                    itemID: itemID, expectedRevisionID: expectedRevisionID,
+                    permissions: permissions, operationID: operationID, actorUID: actorUID)
+            }
+        }
+        guard let context = accessContext, let account = context.account, let index,
+            !operationID.isEmpty, operationID.utf8.count <= 200, !operationID.contains("\0")
+        else {
+            throw TractandaError("invalidArguments", "Invalid authenticated sharing operation.")
+        }
+        let metadata = try personalSharingMetadata(itemID)
+        let proposed = try ItemPermissions(permissions)
+        try proposed.validate(using: context.resolver)
+        let identity = try JSON.encode(
+            [
+                "itemID": .text(itemID), "expectedRevisionID": .text(expectedRevisionID),
+                "permissions": permissions, "operationID": .text(operationID),
+            ] as [String: ItemValue]
+        ).base64EncodedString()
+        let actor = "user:" + account.name
+        let prior = try index.personalOperationRows(operationID).filter { $0.actor == actor }
+        guard prior.count <= 1 else {
+            throw TractandaError("operationMismatch", "Sharing operation has ambiguous originals.")
+        }
+        if let row = prior.first {
+            let revision = try PooledCanonicalRecord.read(row: row, root: root, ownerUID: ownerUID).revision
+            guard revision.fields["requestIdentity"]?.string == identity else {
+                throw TractandaError("operationMismatch", "Sharing operation already names another intent.")
+            }
+            return metadata
+        }
+        guard metadata.revisionID == expectedRevisionID, let row = try index.revision(expectedRevisionID)
+        else {
+            throw TractandaError("revisionConflict", "Current sharing parent changed.")
+        }
+        let base = try PooledCanonicalRecord.read(row: row, root: root, ownerUID: ownerUID).revision
+        let id = try makePersistentUUID().uuidString.lowercased()
+        let provenance = try RevisionProvenance(
+            kind: .authored, originReplicaID: personalProfile!.replicaID,
+            parents: [base.revisionID], writtenFields: ["permissions"], unsetFields: [], frontier: [])
+        var fields = base.fields
+        fields["revisionID"] = .text(id)
+        fields["supersedes"] = .text(base.revisionID)
+        fields["permissions"] = permissions
+        fields["actor"] = .text(actor)
+        fields["modifiedAt"] = .date(
+            try RevisionPublicationClock.after(
+                [personalClockFloor(itemID).modifiedAt], now: publicationClockForTesting))
+        fields["operationID"] = .text(operationID)
+        fields["requestIdentity"] = .text(identity)
+        fields["revisionAncestry"] = provenance.itemValue
+        let revision = try Revision(fields: fields, formatVersion: 2)
+        try ItemSemantics.validate(revision)
+        try personalValidateAppliedDelta(revision, parent: base)
+        try beforeProjectionCommitAuthorityForTesting?()
+        try withAccess(forUID: context.uid) {
+            guard try personalSharingMetadata(itemID).revisionID == expectedRevisionID,
+                accessContext?.account?.name == account.name
+            else {
+                throw TractandaError(
+                    "revisionConflict", "Current sharing authority changed before publication.")
+            }
+        }
+        try index.execute("BEGIN IMMEDIATE")
+        do {
+            let row = try personalPublishBytes(RecordCodec.encode(revision), revision: revision)
+            try index.insertGraphCatalogueRow(row, graphFields: revision.fields)
+            _ = try personalRefreshItem(itemID, causalRow: row)
+            try index.execute("COMMIT")
+            try StoreCheckpoint.clear(root: root)
+            // Return metadata only: the authenticated owner may have no content read/write rights.
+            return .init(
+                itemID: itemID, revisionID: revision.revisionID,
+                stateToken: try index.currentProjection(itemID: itemID)!.state.stateToken,
+                permissions: permissions)
+        } catch {
+            try? index.execute("ROLLBACK")
+            if StoreCheckpoint.isDirty(root: root) { isCanonicalReady = false }
+            throw error
+        }
+    }
+    private func personalResolutionRevision(
+        itemID: String, graph: RevisionGraph,
+        revisions: [String: Revision], changes: [String: ItemValue], unset: [String],
+        operationID: String, identity: String, actor: String
+    ) throws -> Revision {
+        let analysis = try graph.analyze()
+        let addressed = Set(changes.keys).union(unset)
+        guard Set(changes.keys).isDisjoint(with: unset),
+            addressed.isDisjoint(with: RevisionMerge.managedFields),
+            Set(analysis.conflicts.keys).union(analysis.protectedFields).isSubset(of: addressed),
+            !unset.contains("permissions"), let profile = personalProfile
+        else {
+            throw TractandaError(
+                "stateConflict", "Resolve every current conflict/protected field explicitly.")
+        }
+        let referenced = Set(
+            revisions.values.flatMap { value -> [String] in
+                (try? value.provenance?.parents) ?? value.supersedes.map { [$0] } ?? []
+            })
+        let parents = revisions.keys.filter { !referenced.contains($0) }.sorted()
+        guard !parents.isEmpty, parents.count <= 1024, let source = revisions[parents[0]] else {
+            throw TractandaError("resourceLimit", "Resolution physical frontier exceeds its bound.")
+        }
+        var fields = analysis.fields
+        for (key, value) in changes { fields[key] = value }
+        for key in unset { fields.removeValue(forKey: key) }
+        guard let policy = fields["permissions"] else {
+            throw TractandaError("invalidPermissions", "A personal resolution needs its current policy.")
+        }
+        try ItemPermissions(policy).validate(
+            using: PrincipalResolver(directory: accounts, configuration: accessConfiguration))
+        let id = try makePersistentUUID().uuidString.lowercased()
+        // Closing a human-reviewed frontier adopts its current consolidated policy as an
+        // ordinary write. Automatic merges themselves never create this new policy write.
+        let provenance = try RevisionProvenance(
+            kind: .resolution, originReplicaID: profile.replicaID,
+            parents: parents, writtenFields: Set(changes.keys).union(["permissions"]).sorted(),
+            unsetFields: unset.sorted(), frontier: analysis.frontier)
+        fields["itemID"] = .text(itemID)
+        fields["revisionID"] = .text(id)
+        fields["createdAt"] = source.fields["createdAt"]
+        fields["modifiedAt"] = .date(
+            try RevisionPublicationClock.after(
+                revisions.values.map(\.modifiedAt), now: publicationClockForTesting))
+        fields["actor"] = .text(actor)
+        fields["operationID"] = .text(operationID)
+        fields["requestIdentity"] = .text(identity)
+        fields["revisionAncestry"] = provenance.itemValue
+        let revision = try Revision(fields: fields, formatVersion: 2)
+        try ItemSemantics.validate(revision)
+        _ = try RevisionGraph(
+            nodes: revisions.values.map {
+                try RevisionMerge.node($0, parent: $0.supersedes.flatMap { revisions[$0] })
+            } + [RevisionMerge.node(revision)], profile: RevisionMerge.personalProfile,
+            limits: personalIndexLimits.graph)
+        return revision
+    }
+    private func resolvePersonalConflict(_ request: ResolveConflictRequest, actorUID: UInt32?) throws
+        -> CommitResult
+    {
+        if accessContext == nil {
+            return try withAccess(forUID: actorUID ?? ownerUID) {
+                try resolvePersonalConflict(request, actorUID: actorUID)
+            }
+        }
+        try requireOperationalContent()
+        guard let context = accessContext, let account = context.account, let index, isCanonicalReady,
+            !request.operationID.isEmpty, request.operationID.utf8.count <= 200,
+            !request.operationID.contains("\0"), actorUID == nil || actorUID == context.uid
+        else {
+            throw TractandaError("invalidArguments", "Invalid authenticated personal resolution.")
+        }
+        let identity = try JSON.encode(request).base64EncodedString()
+        if let prior = try priorOperation(request.operationID, uid: context.uid, kind: .resolution) {
+            guard prior.fields["requestIdentity"]?.string == identity else {
+                throw TractandaError(
+                    "operationMismatch", "Resolution operation already names another intent.")
+            }
+            return CommitResult(
+                revision: prior, wasReplayed: true, isIndexReady: true, warnings: [],
+                itemState: try itemState(request.itemID))
+        }
+        let state = try itemState(request.itemID)
+        guard state.status == .conflicted || state.status == .invariantConflict,
+            state.stateToken == request.expectedStateToken,
+            request.reviewedFrontier == state.frontier,
+            request.reviewedFrontier == Array(Set(request.reviewedFrontier)).sorted()
+        else {
+            throw TractandaError("stateConflict", "Reviewed personal frontier/state changed.")
+        }
+        try requireProjectionAuthority(
+            request.itemID,
+            changesPermissions: request.changes["permissions"] != nil || request.unset.contains("permissions")
+        )
+        let (graph, revisions) = try personalGraph(request.itemID)
+        let revision = try personalResolutionRevision(
+            itemID: request.itemID, graph: graph, revisions: revisions,
+            changes: request.changes, unset: request.unset, operationID: request.operationID,
+            identity: identity, actor: "user:" + account.name)
+        if revision.classID == AccessConfiguration.classID { try requireAdministrator() }
+        let floor = try personalClockFloor(request.itemID)
+        let analysis = try graph.analyze()
+        let physical = try personalPhysicalHeads(request.itemID).map(\.revisionID)
+        let snapshot = RevisionProjection.Snapshot(
+            itemID: request.itemID, analysis: analysis, representative: nil,
+            clockFloor: .init(revisionID: floor.revisionID, modifiedAt: floor.modifiedAt),
+            physicalHeads: physical)
+        try validateResolutionReferences(revision, snapshot: snapshot, using: index)
+        guard try !knownCategoryConstraintConflicts(replacing: revision).contains(revision.itemID) else {
+            throw TractandaError("categoryCycle", "Resolution creates conflicting category constraints.")
+        }
+        try personalVerifyRevisionDependencies(revision)
+        try beforeProjectionCommitAuthorityForTesting?()
+        try withAccess(forUID: context.uid) {
+            guard try itemState(request.itemID).stateToken == request.expectedStateToken,
+                accessContext?.account?.name == account.name
+            else { throw TractandaError("stateConflict", "Current resolution authority changed.") }
+            try requireProjectionAuthority(
+                request.itemID, changesPermissions: request.changes["permissions"] != nil)
+        }
+        try index.execute("BEGIN IMMEDIATE")
+        do {
+            let row = try personalPublishBytes(RecordCodec.encode(revision), revision: revision)
+            try index.insertGraphCatalogueRow(row, graphFields: revision.fields)
+            let state = try personalRefreshItem(revision.itemID)
+            try index.execute("COMMIT")
+            try StoreCheckpoint.clear(root: root)
+            return CommitResult(
+                revision: revision, wasReplayed: false, isIndexReady: true, warnings: [], itemState: state)
+        } catch {
+            try? index.execute("ROLLBACK")
+            if StoreCheckpoint.isDirty(root: root) { isCanonicalReady = false }
+            throw error
+        }
+    }
+    public func personalIncomingReviews(actorUID: UInt32? = nil) throws -> [PersonalIncomingReview] {
+        if accessContext == nil {
+            return try withAccess(forUID: actorUID ?? ownerUID) {
+                try personalIncomingReviews(actorUID: actorUID)
+            }
+        }
+        try requireAdministrator()
+        var result: [PersonalIncomingReview] = []
+        var total = 0
+        do {
+            try personalSyncFiles.withDirectoryEntries(path: [".personal-sync", "reviews"]) { name in
+                guard result.count < 1024, name.hasSuffix(".json") else {
+                    throw TractandaError("resourceLimit", "Private review enumeration exceeds its bound.")
+                }
+                let bytes = try personalSyncFiles.read(
+                    path: [".personal-sync", "reviews", name], maximumBytes: 128 * 1024)
+                guard bytes.count <= 16 * 1024 * 1024 - total else {
+                    throw TractandaError("resourceLimit", "Private review metadata exceeds its byte window.")
+                }
+                total += bytes.count
+                let value = try JSON.decode(PersonalIncomingReview.self, bytes)
+                try value.descriptor.validate()
+                try PersonalSyncValidation.identifier(value.reviewID)
+                guard name == (try value.descriptor.key) + ".json" else {
+                    throw TractandaError("peerObjectCollision", "Review identity and private key disagree.")
+                }
+                result.append(value)
+                return true
+            }
+        } catch let error as TractandaError where error.osError == ENOENT { return [] }
+        return result.sorted { $0.reviewID < $1.reviewID }
+    }
+    public func rejectPersonalIncomingReview(_ reviewID: String, actorUID: UInt32? = nil) throws {
+        if accessContext == nil {
+            return try withAccess(forUID: actorUID ?? ownerUID) {
+                try rejectPersonalIncomingReview(reviewID, actorUID: actorUID)
+            }
+        }
+        try requireAdministrator()
+        guard var review = try personalIncomingReviews().first(where: { $0.reviewID == reviewID }) else {
+            throw TractandaError("notFound", "Private incoming review is unavailable.")
+        }
+        guard review.disposition == "pending" || review.disposition == "rejected" else {
+            throw TractandaError("stateConflict", "Accepted history cannot be rejected or demoted.")
+        }
+        review.disposition = "rejected"
+        try personalSyncFiles.replacePersonalSyncMetadata(
+            JSON.encode(review),
+            path: [".personal-sync", "reviews", try review.descriptor.key + ".json"])
+    }
+    public func acceptPersonalIncomingReview(
+        _ reviewID: String, expectedStateToken: String? = nil, changes: [String: ItemValue] = [:],
+        unset: [String] = [], actorUID: UInt32? = nil
+    ) throws -> CommitResult {
+        if accessContext == nil {
+            return try withAccess(forUID: actorUID ?? ownerUID) {
+                try acceptPersonalIncomingReview(
+                    reviewID, expectedStateToken: expectedStateToken,
+                    changes: changes, unset: unset, actorUID: actorUID)
+            }
+        }
+        try requireAdministrator()
+        try requireOperationalContent()
+        guard let index, let account = accessContext?.account,
+            var review = try personalIncomingReviews().first(where: { $0.reviewID == reviewID })
+        else { throw TractandaError("notFound", "Pending incoming review is unavailable.") }
+        let operationID = "personal-review:" + reviewID
+        let identity = try JSON.encode(
+            [
+                "reviewID": .text(reviewID), "changes": .object(changes),
+                "unset": .list(unset.map(ItemValue.text)),
+            ] as [String: ItemValue]
+        ).base64EncodedString()
+        if let prior = try priorOperation(operationID, uid: accessContext!.uid, kind: .resolution) {
+            guard prior.fields["requestIdentity"]?.string == identity else {
+                throw TractandaError("operationMismatch", "Review resolution already names another intent.")
+            }
+            try personalRetireAcceptedRevisionStage(review.descriptor)
+            review.disposition = "accepted"
+            try personalSyncFiles.replacePersonalSyncMetadata(
+                JSON.encode(review),
+                path: [".personal-sync", "reviews", try review.descriptor.key + ".json"])
+            return CommitResult(
+                revision: prior, wasReplayed: true, isIndexReady: true, warnings: [],
+                itemState: try itemState(prior.itemID))
+        }
+        let current = try index.currentProjection(itemID: review.descriptor.itemID!)?.state
+        if let expectedStateToken {
+            guard current?.stateToken == expectedStateToken else {
+                throw TractandaError(
+                    "stateConflict", "Refresh the current target before accepting this review.")
+            }
+        } else {
+            guard (current?.frontier ?? []) == review.currentFrontier else {
+                throw TractandaError(
+                    "stateConflict", "Review context changed; supply the refreshed current state token.")
+            }
+        }
+        let (bytes, incoming) = try personalRawRevision(review.descriptor)
+        let (graph, revisions) = try personalGraph(incoming.itemID, adding: incoming)
+        let resolution = try personalResolutionRevision(
+            itemID: incoming.itemID, graph: graph, revisions: revisions,
+            changes: changes, unset: unset, operationID: operationID, identity: identity,
+            actor: "user:" + account.name)
+        try personalVerifyRevisionDependencies(incoming)
+        try personalVerifyRevisionDependencies(resolution)
+        try index.execute("BEGIN IMMEDIATE")
+        do {
+            if try index.revision(incoming.revisionID) == nil {
+                let row = try personalPublishBytes(bytes, revision: incoming)
+                try index.insertGraphCatalogueRow(row, graphFields: incoming.fields)
+            }
+            let row = try personalPublishBytes(RecordCodec.encode(resolution), revision: resolution)
+            try index.insertGraphCatalogueRow(row, graphFields: resolution.fields)
+            let state = try personalRefreshItem(incoming.itemID)
+            try index.execute("COMMIT")
+            try StoreCheckpoint.clear(root: root)
+            try personalRetireAcceptedRevisionStage(review.descriptor)
+            review.disposition = "accepted"
+            try personalSyncFiles.replacePersonalSyncMetadata(
+                JSON.encode(review),
+                path: [".personal-sync", "reviews", try review.descriptor.key + ".json"])
+            return CommitResult(
+                revision: resolution, wasReplayed: false, isIndexReady: true, warnings: [], itemState: state)
+        } catch {
+            try? index.execute("ROLLBACK")
+            if StoreCheckpoint.isDirty(root: root) { isCanonicalReady = false }
+            throw error
+        }
+    }
+}
+
+extension ItemStore {
+    func personalClusteringInfo() throws -> [String: Any] {
+        guard personalProfile != nil else { return ["state": "historical-development"] }
+        let membership = try PersonalSyncConfiguration.membership(root: root, ownerUID: ownerUID)
+        return [
+            "state": membership == nil ? "standalone" : "configured",
+            "profile": PersonalSyncValidation.capability,
+            "members": membership?.members.count ?? 0,
+            "membershipDigest": try membership?.digest as Any? ?? NSNull(),
+            "baselinePending": personalBaselineImportActive,
+        ]
     }
 }

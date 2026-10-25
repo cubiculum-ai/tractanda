@@ -480,10 +480,6 @@ enum PersonalRecoveryInventory {
             if roots[item, default: 0] != 1 {
                 try problem(.multipleRoots, item: item, "An item must have one initial revision.")
             }
-            if headsByItem[item, default: []].count > 1 {
-                try problem(
-                    .unresolvedHeads, item: item, "Multiple DAG heads require an explicit recovery decision.")
-            }
         }
         let affected = Set(diagnostics.compactMap(\.itemID))
         var items: [String: Item] = [:]

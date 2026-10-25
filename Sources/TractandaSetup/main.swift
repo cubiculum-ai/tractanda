@@ -110,11 +110,11 @@ do {
         else {
             throw SetupError("Prepared target inspection requires the existing non-root service custodian.")
         }
-        try ItemStore.verifyPreparedReplicaForSetup(
+        try ItemStore.verifyPersonalSyncReplicaForSetup(
             root: URL(fileURLWithPath: internalArguments[1]),
             indexDirectory: URL(fileURLWithPath: internalArguments[2]), expectedStoreID: internalArguments[3],
             expectedReplicaID: internalArguments[4])
-        print("Prepared target identity, activation and authority-aware opening verified.")
+        print("Selected personal replica custody, identity pins and initialized opening verified.")
         exit(0)
     }
     if internalArguments == ["--canonical-format-support"] {

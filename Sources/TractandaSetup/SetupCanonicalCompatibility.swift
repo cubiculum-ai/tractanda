@@ -110,7 +110,10 @@ extension SetupEngine {
             throw SetupError("Runtime canonical format support differs from the signed bundle.")
         }
         guard info["persistenceProfile"] as? String == "personal-workgroup",
-            (info["clustering"] as? [String: Any])?["state"] as? String == "unsupported",
+            let clustering = info["clustering"] as? [String: Any],
+            let clusteringState = clustering["state"] as? String,
+            ["standalone", "configured"].contains(clusteringState),
+            clustering["profile"] as? String == "tractanda.personal-sync.v1",
             let activeObject = info["activeCanonicalFormats"],
             try JSONDecoder().decode(
                 CanonicalFormatSupport.self,

@@ -23,12 +23,12 @@ enum PeerExchangeCodec {
         buffer.writeBytes(data)
         return buffer
     }
-    static func decode(_ data: Data) throws -> Frame {
+    static func decode(_ data: Data, expectedVersion: Int = 2) throws -> Frame {
         guard data.count <= maximumFrameBytes else {
             throw TractandaError("resourceLimit", "Peer frame size exceeded.")
         }
         let frame = try JSON.decode(Frame.self, data)
-        guard frame.version == 2,
+        guard frame.version == expectedVersion,
             frame.kind == .declaration || frame.kind == .acknowledgement || frame.kind == .ready
                 ? frame.requestID == 0 : frame.requestID > 0, try JSON.encode(frame) == data
         else {

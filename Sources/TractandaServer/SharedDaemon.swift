@@ -24,6 +24,7 @@ public actor SharedDaemon {
     private let peer: DaemonListener?
     private let peerRuntime: PeerServiceRuntime?
     private let synchronization: PeerSyncRuntime?
+    private let personalPeerRuntime: PersonalPeerRuntime?
     private let readiness: DaemonReadiness
     private let endpointsValue: DaemonEndpoints
     private var maintenance: Task<Void, Never>?
@@ -48,29 +49,30 @@ public actor SharedDaemon {
         makeAccountDirectory: @escaping @Sendable () -> any AccountDirectory,
         peerLimits: PeerConnectionLimits = .init(),
         syncLimits: PeerSyncLimits = .init(),
+        personalChunkObserverForTesting: PersonalChunkObserver? = nil,
         claimStartupReadiness: @escaping @Sendable () -> Bool = { true }
     ) async throws -> SharedDaemon {
         try await startOwned(
             configuration: configuration, authenticator: SystemPasswordAuthenticator(),
             claimStartupReadiness: claimStartupReadiness, makeAccountDirectory: makeAccountDirectory,
-            peerLimits: peerLimits, syncLimits: syncLimits)
+            peerLimits: peerLimits, syncLimits: syncLimits,
+            personalChunkObserverForTesting: personalChunkObserverForTesting)
     }
     private static func startOwned(
         configuration: DaemonConfiguration,
         authenticator: any PasswordAuthenticating,
         claimStartupReadiness: @Sendable () -> Bool,
         makeAccountDirectory: @escaping @Sendable () -> any AccountDirectory,
-        peerLimits: PeerConnectionLimits, syncLimits: PeerSyncLimits
+        peerLimits: PeerConnectionLimits, syncLimits: PeerSyncLimits,
+        personalChunkObserverForTesting: PersonalChunkObserver? = nil
     ) async throws -> SharedDaemon {
         try configuration.validate()
-        // Reject before reading old credentials/configuration, opening the store mutably,
-        // allocating listeners or claiming readiness. Fresh pairing is a later capability.
-        guard configuration.peerRuntimeConfigurationPath == nil else {
-            throw TractandaError(
-                "unsupportedPersonalPeers",
-                "Personal/workgroup standalone cannot start with configured peer runtime.")
+        // An explicit personal profile is decoded before opening canonical content or
+        // allocating listeners. Old authority runtime JSON cannot select this gateway.
+        let personalConfiguration = try configuration.peerRuntimeConfigurationPath.map {
+            try PersonalPeerRuntimeConfiguration.load(from: $0)
         }
-        let peerConfiguration: PeerRuntimeConfiguration? = nil
+        let peerConfiguration = personalConfiguration?.settings
         let nonce = Self.nonce()
         let manual = configuration.httpPort == nil ? Data() : try KanbanPage.manual()
         let page = try Self.page(configuration: configuration, nonce: nonce, fallback: manual)
@@ -82,6 +84,10 @@ public actor SharedDaemon {
             attachmentUploadPolicy: configuration.attachmentUploadPolicy ?? AttachmentUploadPolicy(),
             rebuildNoProgressTimeoutSeconds: configuration.rebuildNoProgressTimeoutSeconds ?? 120,
             makeAccountDirectory: makeAccountDirectory)
+        do { try await coordinator.personalPeerCleanOrphanedWork() } catch {
+            await coordinator.close()
+            throw error
+        }
         let sessions = SessionAuthority(coordinator: coordinator, authenticator: authenticator)
         let application = DaemonApplication(
             coordinator: coordinator, sessions: sessions, page: page, manual: manual, nonce: nonce)
@@ -92,17 +98,14 @@ public actor SharedDaemon {
         var peer: DaemonListener?
         var peerRuntime: PeerServiceRuntime?
         var synchronization: PeerSyncRuntime?
+        var personalPeerRuntime: PersonalPeerRuntime?
         do {
-            if let peerConfiguration {
-                let runtime = try PeerServiceRuntime(
-                    configuration: peerConfiguration,
-                    coordinator: coordinator, group: group, limits: peerLimits)
-                peerRuntime = runtime
-                if peerConfiguration.synchronization.enabled {
-                    synchronization = try PeerSyncRuntime(
-                        configuration: peerConfiguration,
-                        coordinator: coordinator, network: runtime, limits: syncLimits)
-                }
+            if let peerConfiguration, let path = configuration.peerRuntimeConfigurationPath {
+                let runtime = try PersonalPeerRuntime(
+                    configuration: peerConfiguration, configurationPath: path,
+                    coordinator: coordinator, group: group,
+                    chunkObserverForTesting: personalChunkObserverForTesting)
+                personalPeerRuntime = runtime
                 if let endpoint = peerConfiguration.listen {
                     peer = try await DaemonListeners.peer(
                         group: group, host: endpoint.host, port: endpoint.port,
@@ -110,9 +113,22 @@ public actor SharedDaemon {
                 }
                 await runtime.refreshNow()
             }
+            let statusPersonal = personalPeerRuntime
             let statusRuntime = peerRuntime
             let statusSynchronization = synchronization
+            await application.setPersonalPeerAdminProvider { request, uid in
+                if ["membership.commit", "sync.status"].contains(request.operation) {
+                    guard let statusPersonal else {
+                        throw TractandaError(
+                            "peerRuntimeUnavailable",
+                            "Personal membership commit requires its configured runtime.")
+                    }
+                    return try await statusPersonal.admin(request, forUID: uid)
+                }
+                return try await coordinator.personalPeerLocalRequest(request, forUID: uid)
+            }
             await application.setPeerStatusProvider {
+                if let statusPersonal { return try await statusPersonal.operatorStatus() }
                 if let statusRuntime {
                     let sync: PeerSynchronizationStatus
                     if let statusSynchronization {
@@ -170,6 +186,7 @@ public actor SharedDaemon {
             }
             guard claimStartupReadiness() else { throw CancellationError() }
             try Task.checkCancellation()
+            await personalPeerRuntime?.activate()
             await peerRuntime?.activate()
             await synchronization?.activate()
             await readiness.activate()
@@ -177,7 +194,8 @@ public actor SharedDaemon {
             return SharedDaemon(
                 coordinator: coordinator, sessions: sessions, application: application, group: group,
                 unix: unix!, http: http, peer: peer, peerRuntime: peerRuntime,
-                synchronization: synchronization, readiness: readiness,
+                synchronization: synchronization, personalPeerRuntime: personalPeerRuntime,
+                readiness: readiness,
                 endpoints: .init(
                     socketPath: configuration.socketPath,
                     httpURL: http.map { "http://127.0.0.1:\($0.port ?? 0)" },
@@ -186,9 +204,11 @@ public actor SharedDaemon {
                     peerPort: peer?.port, processID: getpid()))
         } catch {
             await readiness.deactivate()
+            await personalPeerRuntime?.deactivate()
             await peerRuntime?.deactivate()
             await synchronization?.close()
             try? await peer?.close()
+            await personalPeerRuntime?.close()
             await peerRuntime?.close()
             try? await http?.close()
             try? await unix?.close()
@@ -203,7 +223,7 @@ public actor SharedDaemon {
         coordinator: ServiceCoordinator, sessions: SessionAuthority, application: DaemonApplication,
         group: MultiThreadedEventLoopGroup, unix: DaemonListener, http: DaemonListener?,
         peer: DaemonListener?, peerRuntime: PeerServiceRuntime?, synchronization: PeerSyncRuntime?,
-        readiness: DaemonReadiness,
+        personalPeerRuntime: PersonalPeerRuntime?, readiness: DaemonReadiness,
         endpoints: DaemonEndpoints
     ) {
         self.coordinator = coordinator
@@ -215,6 +235,7 @@ public actor SharedDaemon {
         self.peer = peer
         self.peerRuntime = peerRuntime
         self.synchronization = synchronization
+        self.personalPeerRuntime = personalPeerRuntime
         self.readiness = readiness
         endpointsValue = endpoints
         let sampler = NISTTimeSampler(group: group)
@@ -229,10 +250,11 @@ public actor SharedDaemon {
             },
             sample: { configuration in try await sampler.sample(configuration: configuration) })
         peerClockMonitor = clockMonitor
-        maintenance = Task { [coordinator, clockMonitor, peerRuntime, synchronization] in
+        maintenance = Task { [coordinator, clockMonitor, peerRuntime, synchronization, personalPeerRuntime] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(250))
                 if !Task.isCancelled {
+                    await personalPeerRuntime?.tick()
                     await peerRuntime?.tick()
                     await synchronization?.tick()
                     await clockMonitor.tick()
@@ -244,6 +266,7 @@ public actor SharedDaemon {
 
     func coordinatorForTesting() -> ServiceCoordinator { coordinator }
     func peerRuntimeForTesting() -> PeerServiceRuntime? { peerRuntime }
+    func personalPeerRuntimeForTesting() -> PersonalPeerRuntime? { personalPeerRuntime }
     func synchronizationForTesting() -> PeerSyncRuntime? { synchronization }
     package func connectPeer(peerID: String) async throws -> PeerExchangeConnection {
         guard !closed, let peerRuntime else {
@@ -268,9 +291,11 @@ public actor SharedDaemon {
         closing = true
         await readiness.deactivate()
         maintenance?.cancel()
+        await personalPeerRuntime?.deactivate()
         await peerRuntime?.deactivate()
         await synchronization?.close()
         try? await peer?.close()
+        await personalPeerRuntime?.close()
         await peerRuntime?.close()
         await coordinator.requestBackgroundStop()
         await peerClockMonitor.close()

@@ -1,5 +1,10 @@
 /// Versioned native behavior contracts. Presence declares API support, not configuration or permission.
 public enum ServerFeature: String, Sendable {
+    /// Personal publication remains separate from historical authority mutation.
+    case personalConflictResolution = "tractanda.personal-conflict-resolution.v1"
+    case personalSharing = "tractanda.personal-sharing.v1"
+    /// Read-only state and conflict discovery.
+    case personalItemState = "tractanda.personal-item-state.v1"
     case revisionProjection = "tractanda.revision-projection.v1"
     case inlineCapture = "tractanda.inline-capture.v1"
     case asynchronousStoreRebuild = "tractanda.store-rebuild.v2"

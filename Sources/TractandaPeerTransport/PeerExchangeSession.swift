@@ -22,10 +22,14 @@ package struct PeerExchangeLimits: Sendable {
 /// Host-private immutable admission snapshot. Current authority is checked by the gateway,
 /// not by possession of a credential retained here.
 package final class PeerExchangeResponder: Sendable {
-    fileprivate let tls: PeerTLSResponderContext
-    fileprivate let pairings: [String: PeerPairing]
+    let tls: PeerTLSResponderContext
+    let pairings: [String: PeerPairing]
 
     package init(pairings: [PeerPairing]) throws {
+        guard Set(pairings.map { $0.tls.profile.pairingID }).count == pairings.count else {
+            throw TractandaError(
+                "invalidPeerCredential", "Duplicate TLS pairing identities are not admitted.")
+        }
         tls = try PeerTLSResponderContext(contexts: pairings.map(\.tls))
         self.pairings = Dictionary(uniqueKeysWithValues: pairings.map { ($0.tls.profile.pairingID, $0) })
     }

@@ -15,6 +15,12 @@ extension PeerRuntimeConfiguration {
     }
 }
 
+extension PersonalPeerRuntimeConfiguration {
+    public static func load(from path: String) throws -> Self {
+        try decode(readPrivateConfiguration(at: path))
+    }
+}
+
 private func readPrivateConfiguration(at path: String) throws -> Data {
     guard path.hasPrefix("/"), path != "/", path.utf8.count <= 4096,
         !path.contains("\0"), !path.contains("\n"), !path.contains("\r")

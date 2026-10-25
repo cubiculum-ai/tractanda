@@ -1295,3 +1295,84 @@ extension DocumentContentFiles {
         try removeTree(["documents", ".staging", "corpus-" + id])
     }
 }
+
+extension DocumentContentFiles {
+    /// Replace only disposable personal-sync metadata; never canonical revisions or payload bytes.
+    func replacePersonalSyncMetadata(_ data: Data, path: [String]) throws {
+        guard path.count == 3, path[0] == ".personal-sync", ["reviews", "work", "cursors"].contains(path[1]),
+            path[2].hasSuffix(".json"), data.count <= 128 * 1024,
+            path.allSatisfy({
+                !$0.isEmpty && $0 != "." && $0 != ".." && !$0.contains("/") && !$0.contains("\0")
+            })
+        else {
+            throw TractandaError("invalidConfiguration", "Invalid personal private metadata path.")
+        }
+        let chain = try directories(Array(path.dropLast()), create: true)
+        defer { closeAll(chain) }
+        try reserve(data.count, descriptor: chain.last!)
+        let temporary = ".metadata-" + UUID().uuidString
+        let fd = openat(chain.last!, temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { throw failure("Cannot create personal metadata replacement.") }
+        defer {
+            close(fd)
+            _ = unlinkat(chain.last!, temporary, 0)
+        }
+        try data.withUnsafeBytes { bytes in
+            var offset = 0
+            while offset < bytes.count {
+                let result = write(fd, bytes.baseAddress!.advanced(by: offset), bytes.count - offset)
+                if result < 0, errno == EINTR { continue }
+                guard result > 0 else { throw failure("Cannot write personal metadata.") }
+                offset += result
+            }
+        }
+        guard fchmod(fd, 0o400) == 0, fsync(fd) == 0,
+            renameat(chain.last!, temporary, chain.last!, path.last!) == 0,
+            fsync(chain.last!) == 0
+        else { throw failure("Cannot durably replace personal metadata.") }
+    }
+}
+
+extension DocumentContentFiles {
+    /// Disposable DFS work only. No caller-selected directory or canonical object can be removed.
+    func removePersonalSyncWorkFile(_ name: String) throws {
+        let metadataTemporary =
+            name.hasPrefix(".metadata-")
+            && UUID(uuidString: String(name.dropFirst(".metadata-".count))) != nil
+        guard name.hasSuffix(".json") || metadataTemporary, name.utf8.count <= 200,
+            !name.contains("/"), !name.contains("\0"), name != ".", name != ".."
+        else {
+            throw TractandaError("invalidConfiguration", "Invalid personal work-file key.")
+        }
+        let chain = try directories([".personal-sync", "work"], create: false)
+        defer { closeAll(chain) }
+        if unlinkat(chain.last!, name, 0) != 0, errno != ENOENT {
+            throw failure("Cannot remove disposable personal sync work.")
+        }
+        guard fsync(chain.last!) == 0 else { throw failure("Cannot synchronize personal sync work removal.") }
+    }
+}
+
+extension DocumentContentFiles {
+    func removePersonalSyncStageBinding(_ key: String) throws {
+        try PersonalSyncValidation.sha256(key)
+        try removePersonalSyncBinding(directory: "stages", name: key + ".json")
+    }
+    func removePersonalSyncDocumentBinding(_ contentID: String) throws {
+        try PersonalSyncValidation.identifier(contentID)
+        try removePersonalSyncBinding(directory: "documents", name: contentID + ".json")
+    }
+    private func removePersonalSyncBinding(directory: String, name: String) throws {
+        let chain: [Int32]
+        do { chain = try directories([".personal-sync", directory], create: false) } catch let error
+            as TractandaError where error.osError == ENOENT
+        { return }
+        defer { closeAll(chain) }
+        if unlinkat(chain.last!, name, 0) != 0, errno != ENOENT {
+            throw failure("Cannot retire completed personal object metadata.")
+        }
+        guard fsync(chain.last!) == 0 else {
+            throw failure("Cannot synchronize completed personal object cleanup.")
+        }
+    }
+}

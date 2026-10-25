@@ -335,7 +335,7 @@ extension ItemIndex {
             throw error
         }
     }
-    private func insertProjectionACL(itemID: String, revisionID: String, value: ItemValue) throws {
+    func insertProjectionACL(itemID: String, revisionID: String, value: ItemValue) throws {
         let p = try ItemPermissions(value)
         try execute(
             "INSERT INTO projection_acl VALUES(?,?,?,?,?,?,?,?)",

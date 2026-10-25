@@ -793,10 +793,8 @@ public final class SetupEngine {
             "daemon", receipt.store, receipt.socket, "--index-directory", receipt.indexDirectory,
             "--managed", "--http-port", String(receipt.port),
         ]
-        guard receipt.peerRuntimeConfiguration == nil else {
-            throw SetupError(
-                "Personal/workgroup standalone requires peer runtime arguments to be explicitly disabled before preparing service registration."
-            )
+        if let peer = receipt.peerRuntimeConfiguration {
+            arguments += ["--peer-runtime-config", peer.path]
         }
         if let document = receipt.documentExtraction {
             guard document == .pinned else { throw SetupError("Unsupported document receipt.") }

@@ -163,6 +163,22 @@ struct PooledCanonicalRecord: Sendable {
             metadataDrifted: metadataDrifted)
     }
 
+    /// Exact original envelope export; the catalogue digest, identity and custody are rechecked.
+    static func originalBytes(row: ItemIndex.CatalogueRow, root: URL, ownerUID: UInt32) throws -> Data {
+        let verified = try read(row: row, root: root, ownerUID: ownerUID)
+        let descriptors = try openDescriptorChain(root: root, relativePath: row.path)
+        defer { for fd in descriptors.reversed() { _ = close(fd) } }
+        guard let fd = descriptors.last, try metadata(for: fd) == verified.metadata else {
+            throw PooledCanonicalRecordError.metadataChanged
+        }
+        let bytes = try readAll(
+            descriptor: fd, expectedSize: verified.metadata.size, maximumBytes: maximumRecordBytes)
+        guard try metadata(for: fd) == verified.metadata, Data(SHA256.hash(data: bytes)) == row.digest else {
+            throw PooledCanonicalRecordError.digestMismatch
+        }
+        return bytes
+    }
+
     private static func canonicalRelativePath(row: ItemIndex.CatalogueRow) -> String? {
         CanonicalRecordPath.validate(row.path, itemID: row.itemID, revisionID: row.revisionID)
             ? row.path : nil

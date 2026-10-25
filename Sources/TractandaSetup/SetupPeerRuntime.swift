@@ -18,7 +18,7 @@ struct ManagedPeerConfiguration: Codable, Equatable {
     let synchronizationEnabled: Bool
 
     init(path: String, bytes: Data) throws {
-        let value = try PeerRuntimeConfiguration.decode(bytes)
+        let value = try PersonalPeerRuntimeConfiguration.decode(bytes).settings
         self.path = path
         rawSHA256 = Self.digest(bytes)
         settingsDigest = value.settingsDigest
@@ -105,7 +105,7 @@ extension SetupEngine {
         let fd = open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else { throw SetupError("Cannot open peer configuration input safely.") }
         defer { close(fd) }
-        return try PeerRuntimeConfiguration.decode(readPeerFile(fd, uid: nil).bytes).encoded()
+        return try PersonalPeerRuntimeConfiguration.decode(readPeerFile(fd, uid: nil).bytes).encoded()
     }
 
     func readPeerFile(_ fd: Int32, uid: UInt32?) throws -> ManagedPeerFile {

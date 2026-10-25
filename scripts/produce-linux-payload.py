@@ -326,6 +326,7 @@ def write_json(path, value):
 
 
 DEFAULT_BUILD_TIMEOUT_SECONDS = 24 * 60 * 60
+DEFAULT_TOOLCHAIN_PROBE_TIMEOUT_SECONDS = 30 * 60
 
 
 def timeout_seconds(value):
@@ -453,14 +454,15 @@ def build_core_product(swift, common, arch, product, work, environment, maximum,
     return reported_bin_directory(reported, work)
 
 
-def toolchain(swift):
+def toolchain(swift, *, probe_timeout_seconds=DEFAULT_TOOLCHAIN_PROBE_TIMEOUT_SECONDS):
     # Keep the 'swift' driver invocation name, while hashing its resolved bytes.
     swift = swift.absolute()
     if swift.name != 'swift':
         raise ValueError('Pass the concrete toolchain usr/bin/swift entry point, not a shim or alternate driver.')
     tools = {'swiftSHA256': swift.resolve(strict=True), 'swiftFrontendSHA256': swift.parent / 'swift-frontend',
              'clangSHA256': (swift.parent / 'clang').resolve(strict=True)}
-    result = {'version': B.run([swift, '--version']).splitlines()[0]}
+    result = {'version': B.run([swift, '--version'],
+                              timeout_seconds=timeout_seconds(probe_timeout_seconds)).splitlines()[0]}
     for key, path in tools.items():
         if not path.is_file():
             raise ValueError('Missing concrete Swift tool: ' + str(path))
@@ -509,7 +511,8 @@ def produce(args):
     build_inputs = build_environment()
     components = {role: component(getattr(args, role + '_manifest'), getattr(args, role + '_root'),
                                   role, args.arch, admitted[role]) for role in COMPONENTS}
-    swift, tools = toolchain(args.swift)
+    probe_budget = getattr(args, 'toolchain_probe_timeout_seconds', DEFAULT_TOOLCHAIN_PROBE_TIMEOUT_SECONDS)
+    swift, tools = toolchain(args.swift, probe_timeout_seconds=probe_budget)
     if any(value['toolchain'] != tools for value in components.values()):
         raise ValueError('Core/MLX Swift toolchain ABI differs from the admitted components.')
     original = source_rows()
@@ -545,7 +548,8 @@ def produce(args):
     for name in ('source', 'payload', 'home', 'tmp', 'modules', 'cache', 'config', 'security'):
         (work / name).mkdir()
     write_json(work / 'source-inputs.json', {'profile': 'tractanda.linux-producer-source.v1', 'files': original,
-               'componentManifests': admitted, 'toolchain': tools, 'baseline': baseline, 'buildEnvironment': build_inputs})
+               'componentManifests': admitted, 'toolchain': tools, 'baseline': baseline, 'buildEnvironment': build_inputs,
+               'toolchainProbeTimeoutSeconds': probe_budget})
     write_json(work / 'operation.json', {'state': 'preparing', 'estimatedAdditionalBytes': estimate})
     environment = controlled_environment(work, swift.parent)
     embedding_runner = descriptor_runner(work, environment, work_limit, storage_guard=build_storage)
@@ -563,7 +567,8 @@ def produce(args):
         if release is not None and reported != release:
             raise ValueError('Swift reported inconsistent product directories within the frozen scratch root.')
         release = reported
-    if toolchain(args.swift)[1] != tools or build_environment() != build_inputs:
+    if (toolchain(args.swift, probe_timeout_seconds=probe_budget)[1] != tools
+            or build_environment() != build_inputs):
         raise ValueError('The compiler or Debian build environment changed during the build.')
     if B.read_json(work / 'source/Package.resolved') != B.read_json(ROOT / 'Package.resolved'):
         raise ValueError('SwiftPM changed the locked dependency graph.')
@@ -626,7 +631,8 @@ def produce(args):
     write_json(work / 'result.json', dict(profile='tractanda.linux-payload-result.v1', bundle=result,
                sourceInputsSHA256=spec['sourceInputsSHA256'], components=admitted, coreRunpathChanges=core_changes,
                modelProjectionReceiptSHA256=B.digest(work / 'model-mode-projection.json'),
-               buildEnvironment=build_inputs, baseline=baseline, toolchain=tools))
+               buildEnvironment=build_inputs, baseline=baseline, toolchain=tools,
+               toolchainProbeTimeoutSeconds=probe_budget))
     return result
 
 
@@ -636,6 +642,8 @@ def main():
     parser.add_argument('action', choices=('plan', 'produce'))
     parser.add_argument('--arch', choices=B.ARCH, required=True)
     parser.add_argument('--build-timeout-seconds', type=timeout_seconds, default=DEFAULT_BUILD_TIMEOUT_SECONDS)
+    parser.add_argument('--toolchain-probe-timeout-seconds', type=timeout_seconds,
+                        default=DEFAULT_TOOLCHAIN_PROBE_TIMEOUT_SECONDS)
     for role in COMPONENTS:
         for suffix in ('manifest', 'root', 'model'):
             parser.add_argument('--' + role + '-' + suffix, type=Path)
@@ -651,7 +659,8 @@ def main():
         print(json.dumps(dict(profile='tractanda.linux-producer-plan.v1', arch=args.arch, products=PRODUCTS,
               baseline={'buildOS': 'debian13', 'minimumCPU': B.ARCH[args.arch][2], 'swiftABI': '6.4'},
               admittedComponents=admitted, missingComponents=[v for v in COMPONENTS if admitted[v] is None],
-              buildStarted=False, reserveBytes=B.RESERVE), indent=2))
+              buildStarted=False, reserveBytes=B.RESERVE,
+              toolchainProbeTimeoutSeconds=args.toolchain_probe_timeout_seconds), indent=2))
         return
     required = ('swift', 'mirrors', 'work', 'output', 'max_work_bytes', 'build_allowance_bytes') + tuple(
         role + '_' + suffix for role in COMPONENTS for suffix in ('manifest', 'root', 'model'))

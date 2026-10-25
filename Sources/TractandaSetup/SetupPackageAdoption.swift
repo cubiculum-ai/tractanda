@@ -54,7 +54,7 @@ extension SetupEngine {
             }
             uid = value.uint32Value
         }
-        try ItemStore.verifyPreparedReplicaIdentity(
+        try ItemStore.verifyPersonalSyncReplicaIdentityForSetup(
             root: root, ownerUID: uid,
             expectedStoreID: storeID, expectedReplicaID: replicaID)
     }

@@ -823,8 +823,12 @@ public final class ItemService {
         }
         return result
     }
-    private func requireRevisionProjectionFeature() throws {
-        guard store.revisionProjectionEnabled else {
+    private func requireRevisionProjectionFeature(readOnly: Bool = false, personalResolution: Bool = false)
+        throws
+    {
+        guard
+            store.revisionProjectionEnabled || ((readOnly || personalResolution) && store.isPersonalWorkgroup)
+        else {
             throw TractandaError("unsupportedFeature", "Revision projection is not enabled.")
         }
     }
@@ -1475,7 +1479,7 @@ public final class ItemService {
                     modelID: args["modelID"] as? String,
                     actorUID: uid)) as! [String: Any]
         case "TractandaItem/state":
-            try requireRevisionProjectionFeature()
+            try requireRevisionProjectionFeature(readOnly: true)
             try check(args, allowed: ["ids", "maxBytes"])
             let ids = try strings(args, "ids")
             guard (1...64).contains(ids.count), Set(ids).count == ids.count else {
@@ -1859,7 +1863,7 @@ public final class ItemService {
             )
                 as! [String: Any]
         case "TractandaItem/conflicts":
-            try requireRevisionProjectionFeature()
+            try requireRevisionProjectionFeature(readOnly: true)
             try check(args, allowed: ["limit", "cursor", "maxBytes"])
             let limit = try integer(args, "limit", default: 64, range: 1...256)
             let maximum = try integer(args, "maxBytes", default: 65_536, range: 8_192...524_288)
@@ -1886,8 +1890,49 @@ public final class ItemService {
                 ItemConflictPage(
                     list: retained, nextCursor: states.count == limit ? retained.last?.itemID : nil,
                     state: store.state))
+        case "TractandaItem/sharing":
+            try check(args, allowed: ["itemID"])
+            return try dictionaryObject(store.personalSharingMetadata(string(args, "itemID"), actorUID: uid))
+        case "TractandaItem/setSharing":
+            try check(args, allowed: ["itemID", "expectedRevisionID", "permissions", "operationID"])
+            guard let permission = args["permissions"] else {
+                throw TractandaError("invalidArguments", "Supply tagged permissions.")
+            }
+            return try dictionaryObject(
+                store.changePersonalSharing(
+                    itemID: string(args, "itemID"),
+                    expectedRevisionID: string(args, "expectedRevisionID"),
+                    permissions: decode(ItemValue.self, permission),
+                    operationID: string(args, "operationID"), actorUID: uid))
+        case "TractandaSync/reviews":
+            try check(args, allowed: ["after", "limit"])
+            let limit = try integer(args, "limit", default: 64, range: 1...128)
+            let after = try args["after"].map { _ in try string(args, "after") }
+            let all = try store.personalIncomingReviews(actorUID: uid).filter {
+                after == nil || $0.reviewID > after!
+            }
+            let page = Array(all.prefix(limit))
+            return [
+                "list": try object(page),
+                "nextCursor": all.count > page.count ? (page.last?.reviewID as Any) : NSNull(),
+            ]
+        case "TractandaSync/rejectReview":
+            try check(args, allowed: ["reviewID"])
+            try store.rejectPersonalIncomingReview(string(args, "reviewID"), actorUID: uid)
+            return ["rejected": true]
+        case "TractandaSync/acceptReview":
+            try check(args, allowed: ["reviewID", "expectedStateToken", "changes", "unset"])
+            let changes = try args["changes"].map { try decode([String: ItemValue].self, $0) } ?? [:]
+            let unset = try args["unset"].map { _ in try strings(args, "unset") } ?? []
+            return try dictionaryObject(
+                store.acceptPersonalIncomingReview(
+                    string(args, "reviewID"),
+                    expectedStateToken: try args["expectedStateToken"].map { _ in
+                        try string(args, "expectedStateToken")
+                    },
+                    changes: changes, unset: unset, actorUID: uid))
         case "TractandaItem/resolveConflict":
-            try requireRevisionProjectionFeature()
+            try requireRevisionProjectionFeature(personalResolution: true)
             try check(
                 args,
                 allowed: [
@@ -1991,6 +2036,8 @@ public final class ItemService {
             return [
                 "features": [
                     ServerFeature.revisionProjection.rawValue,
+                    ServerFeature.personalItemState.rawValue,
+                    ServerFeature.personalConflictResolution.rawValue, ServerFeature.personalSharing.rawValue,
                     ServerFeature.inlineCapture.rawValue,
                     ServerFeature.runtimeIdentity.rawValue, ServerFeature.asynchronousStoreRebuild.rawValue,
                     ServerFeature.semanticJobTiming.rawValue,
@@ -2008,6 +2055,13 @@ public final class ItemService {
                     if $0 == ServerFeature.revisionProjection.rawValue {
                         return store.revisionProjectionEnabled
                     }
+                    if [
+                        ServerFeature.personalItemState.rawValue,
+                        ServerFeature.personalConflictResolution.rawValue,
+                        ServerFeature.personalSharing.rawValue,
+                    ].contains($0) {
+                        return store.isPersonalWorkgroup
+                    }
                     if $0 == ServerFeature.documentJobs.rawValue { return requiresAsyncDocumentJobs }
                     if $0 == ServerFeature.extractedTextUnits.rawValue { return hasExtractedTextUnitRoute }
                     return requiresAsyncAttachmentIntegrity
@@ -2021,7 +2075,7 @@ public final class ItemService {
                 "activeCanonicalFormats": try JSONSerialization.jsonObject(
                     with: JSON.encode(store.canonicalFormats)),
                 "persistenceProfile": store.persistenceProfile,
-                "clustering": ["state": store.isPersonalWorkgroup ? "unsupported" : "historical-development"],
+                "clustering": try store.personalClusteringInfo(),
                 "server": try JSONSerialization.jsonObject(with: JSON.encode(RuntimeIdentity.current)),
                 "state": store.state, "ownerUID": store.ownerUID, "queryProfile": SpotlightQuery.profile,
                 "binding": "local experimental; not JMAP conformant", "capability": Self.capability,

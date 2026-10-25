@@ -41,9 +41,10 @@ enum AtomicAuthorityCompatibility {
 public struct CanonicalFormatSupport: Codable, Equatable, Sendable {
     public static let profileName = "tractanda.canonical-formats.v1"
     public static let current = Self(
-        readerLevel: 16, writerLevel: 16, read: [1, 2], write: [2],
+        readerLevel: 18, writerLevel: 18, read: [1, 2], write: [2],
         capabilities: [
-            PersonalWorkgroupProfile.capability,
+            PersonalWorkgroupProfile.capability, RevisionProvenance.personalMergeProfile,
+            PersonalSyncValidation.capability,
             AtomicAuthorityFormat.profile,
             "tractanda.peer-enrollment-approval.v1", "tractanda.peer-origin-admission.v1",
             "tractanda.peer-enrollment-activation.v1", "tractanda.peer-enrollment-target.v1",
@@ -52,7 +53,8 @@ public struct CanonicalFormatSupport: Codable, Equatable, Sendable {
             "tractanda.peer-originals.v1", "tractanda.document-placement.v1", "tractanda.peer-documents.v1",
         ].sorted(),
         writeCapabilities: [
-            PersonalWorkgroupProfile.capability,
+            PersonalWorkgroupProfile.capability, RevisionProvenance.personalMergeProfile,
+            PersonalSyncValidation.capability,
             AtomicAuthorityFormat.profile,
             "tractanda.peer-enrollment-approval.v1", "tractanda.peer-origin-admission.v1",
             "tractanda.peer-enrollment-activation.v1", "tractanda.peer-enrollment-target.v1",
@@ -61,13 +63,17 @@ public struct CanonicalFormatSupport: Codable, Equatable, Sendable {
             "tractanda.peer-originals.v1", "tractanda.document-placement.v1", "tractanda.peer-documents.v1",
         ].sorted())
     package static let personalWorkgroup = Self(
-        readerLevel: 16, writerLevel: 16, read: [1, 2], write: [2],
+        readerLevel: 18, writerLevel: 18, read: [1, 2], write: [2],
         capabilities: [
-            PersonalWorkgroupProfile.capability, PayloadPlacement.capability,
+            PersonalWorkgroupProfile.capability, RevisionProvenance.personalMergeProfile,
+            PersonalSyncValidation.capability,
+            PayloadPlacement.capability,
             "tractanda.document-placement.v1",
         ].sorted(),
         writeCapabilities: [
-            PersonalWorkgroupProfile.capability, PayloadPlacement.capability,
+            PersonalWorkgroupProfile.capability, RevisionProvenance.personalMergeProfile,
+            PersonalSyncValidation.capability,
+            PayloadPlacement.capability,
             "tractanda.document-placement.v1",
         ].sorted())
     public static let legacy = Self(readerLevel: 1, writerLevel: 1, read: [1], write: [1])
@@ -595,6 +601,34 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
         try support.require(raised)
         if raised != prior { try raised.persist(root: root, ownerUID: ownerUID) }
     }
+    static func beforePersonalSyncPublication(root: URL, ownerUID: UInt32) throws {
+        guard let prior = try load(root: root, ownerUID: ownerUID),
+            prior.capabilities.contains(PersonalWorkgroupProfile.capability)
+        else {
+            throw TractandaError("invalidPersonalProfile", "Personal reader fence is required.")
+        }
+        let raised = Self(
+            storeID: prior.storeID, minimumReaderLevel: max(18, prior.minimumReaderLevel),
+            recordFormats: prior.recordFormats,
+            capabilities: Set(prior.capabilities + [PersonalSyncValidation.capability]).sorted())
+        try CanonicalFormatSupport.personalWorkgroup.require(raised)
+        if raised != prior { try raised.persist(root: root, ownerUID: ownerUID) }
+    }
+
+    /// Personal writer owns its lifetime lock; peer runtime is still rejected by this profile.
+    /// Fence new merge meaning before the first record using it becomes visible.
+    static func beforePersonalMergePublication(root: URL, ownerUID: UInt32) throws {
+        guard let prior = try load(root: root, ownerUID: ownerUID),
+            prior.capabilities.contains(PersonalWorkgroupProfile.capability)
+        else { throw TractandaError("invalidPersonalProfile", "Personal reader fence is required.") }
+        let raised = Self(
+            storeID: prior.storeID, minimumReaderLevel: max(17, prior.minimumReaderLevel),
+            recordFormats: prior.recordFormats,
+            capabilities: Set(prior.capabilities + [RevisionProvenance.personalMergeProfile]).sorted())
+        try CanonicalFormatSupport.personalWorkgroup.require(raised)
+        if raised != prior { try raised.persist(root: root, ownerUID: ownerUID) }
+    }
+
     static func beforePayloadPlacementPublication(root: URL, ownerUID: UInt32) throws {
         let prior =
             try load(root: root, ownerUID: ownerUID)

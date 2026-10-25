@@ -2,6 +2,7 @@ import Foundation
 
 enum RevisionMerge {
     static let profile = "tractanda.merge.v2"
+    static let personalProfile = RevisionProvenance.personalMergeProfile
     static let managedFields: Set<String> = [
         "itemID", "revisionID", "createdAt", "modifiedAt", "supersedes", "actor", "operationID",
         "requestIdentity", "revisionAncestry",

@@ -286,6 +286,20 @@ final class DocumentContentStore: @unchecked Sendable {
             reference, source: source, identity: identity, extractedAt: extractedAt,
             base: directory(reference.contentID), boundary: boundary, progress: progress)
     }
+    /// A complete proposal remains private until its current item authority is accepted.
+    func validatePersonalIncomingStage(_ stage: [String], representation: AttachmentDocumentRepresentation)
+        throws
+    {
+        guard stage.count == 3, stage.prefix(2) == ["documents", ".staging"],
+            UUID(uuidString: stage[2])?.version1Components != nil, let reference = representation.content
+        else {
+            throw TractandaError("documentIntegrity", "Invalid private personal document closure.")
+        }
+        try validateStoredContent(
+            reference, source: representation.source,
+            identity: representation.identity, extractedAt: representation.extractedAt, base: stage)
+    }
+
     private func validateStoredContent(
         _ reference: DocumentContentReference, source: AttachmentDocumentSource,
         identity: DocumentConverterIdentity, extractedAt: String, base: [String],

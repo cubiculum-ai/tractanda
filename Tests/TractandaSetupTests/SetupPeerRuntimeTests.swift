@@ -36,9 +36,11 @@ final class SetupPeerRuntimeTests: XCTestCase {
         XCTAssertLessThanOrEqual(size, 1024 * 1024)
     }
     private func bytes(listen: Bool = false, sync: Bool = false) throws -> Data {
-        try PeerRuntimeConfiguration(
-            listen: listen ? .init(host: "127.0.0.1", port: 48730) : nil,
-            synchronization: .init(enabled: sync, intervalSeconds: 300)
+        try PersonalPeerRuntimeConfiguration(
+            settings: PeerRuntimeConfiguration(
+                listen: listen ? .init(host: "127.0.0.1", port: 48730) : nil,
+                synchronization: .init(enabled: sync, intervalSeconds: 300)
+            )
         ).encoded()
     }
     private func receipt(_ root: URL, _ engine: SetupEngine) throws -> InstallationReceipt {
@@ -48,7 +50,7 @@ final class SetupPeerRuntimeTests: XCTestCase {
             manifestSHA256: String(repeating: "a", count: 64))
     }
 
-    func testPersonalManagedDefinitionOmitsPeerArgumentAndRefusesRetainedConfiguration() throws {
+    func testPersonalManagedDefinitionAddsOnlyExplicitPersonalConfiguration() throws {
         try fixture { root, engine in
             var value = try receipt(root, engine)
             let definition =
@@ -58,14 +60,20 @@ final class SetupPeerRuntimeTests: XCTestCase {
             XCTAssertFalse(arguments.contains("--peer-runtime-config"))
             value.peerRuntimeConfiguration = try .init(
                 path: engine.peerConfigurationURL(value.instance).path, bytes: bytes())
-            XCTAssertThrowsError(try engine.serviceDefinition(value))
+            let enabled =
+                try PropertyListSerialization.propertyList(from: engine.serviceDefinition(value), format: nil)
+                as? [String: Any]
+            let enabledArguments = try XCTUnwrap(enabled?["ProgramArguments"] as? [String])
+            XCTAssertEqual(
+                Array(enabledArguments.suffix(2)),
+                ["--peer-runtime-config", engine.peerConfigurationURL(value.instance).path])
         }
     }
 
     func testCaptureNormalizesOnceAndRejectsSymlinkFIFOAndOversizedInput() throws {
         try fixture { root, engine in
             let input = root.appendingPathComponent("input.json")
-            try Data("{ \"version\": 1 }".utf8).write(to: input)
+            try bytes().write(to: input)
             let captured = try engine.capturePeerConfiguration(input)
             XCTAssertEqual(captured, try bytes())
             try bytes(listen: true).write(to: input)

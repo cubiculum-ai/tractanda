@@ -255,8 +255,24 @@ final class PersonalWorkgroupStoreTests: XCTestCase {
         try fixture { root, accounts in
             var store: ItemStore? = try open(root, accounts, .fresh(policy()))
             let first = try store!.withAccess(forUID: accounts.alice) { try create(store!).revision }
+            // A later item's catalogue/derived writes must not invalidate this item's state.
+            let other = try store!.withAccess(forUID: accounts.alice) {
+                try create(store!, operation: "other-create", subject: "other searchable").revision
+            }
+            let updatedOther = try store!.withAccess(forUID: accounts.alice) {
+                try store!.commit(
+                    .init(
+                        action: .revise, itemID: other.itemID,
+                        expectedRevisionID: other.revisionID,
+                        changes: ["subject": .text("other searchable updated")],
+                        operationID: "other-edit")
+                ).revision
+            }
             try store!.withAccess(forUID: accounts.bob) {
+                XCTAssertEqual(try store!.get(first.itemID), first)
                 XCTAssertEqual(try store!.history(first.itemID), [first])
+                XCTAssertEqual(try store!.get(other.itemID), updatedOther)
+                XCTAssertEqual(try store!.candidates(text: "searchable"), [updatedOther])
             }
             let privateHead = try store!.withAccess(forUID: accounts.alice) {
                 try store!.commit(
@@ -268,6 +284,8 @@ final class PersonalWorkgroupStoreTests: XCTestCase {
             try store!.withAccess(forUID: accounts.bob) {
                 assertCode("forbidden") { _ = try store!.get(first.itemID, revisionID: first.revisionID) }
                 assertCode("forbidden") { _ = try store!.history(first.itemID) }
+                XCTAssertEqual(try store!.get(other.itemID), updatedOther)
+                XCTAssertEqual(try store!.candidates(text: "searchable"), [updatedOther])
             }
             assertCode("personalConfigurationRequired") {
                 _ = try store!.configureAccess(policy(), operationID: "old-route")
@@ -508,28 +526,19 @@ final class PersonalWorkgroupStoreTests: XCTestCase {
         }
     }
 
-    func testNormalOpenCannotReinterpretRawHistoryAndUnresolvedActivationPreservesFiles() throws {
+    func testNormalOpenRequiresExplicitSelectionAndSelectedDAGPreservesFiles() throws {
         try fixture { root, accounts in
             let base = try raw()
-            for revision in [
+            let branches = [
                 base, try raw(item: base.itemID, parents: [base.revisionID], second: 1),
                 try raw(item: base.itemID, parents: [base.revisionID], second: 2),
-            ] { try save(revision, root: root) }
-            let before = try fingerprint(root)
+            ]
+            for revision in branches { try save(revision, root: root) }
             assertCode("uninitializedPersonalProfile") { _ = try open(root, accounts, .existing) }
-            XCTAssertThrowsError(try open(root, accounts, .selectedContent(policy()))) {
-                XCTAssertTrue(
-                    ($0 as? PersonalRecoveryIndex.Incomplete)?.diagnostics.contains {
-                        $0.kind == .unresolvedHeads
-                    } == true)
-            }
-            XCTAssertEqual(try fingerprint(root), before)
-            XCTAssertFalse(
-                FileManager.default.fileExists(
-                    atPath: root.appendingPathComponent(PersonalWorkgroupProfile.name).path))
-            XCTAssertFalse(
-                FileManager.default.fileExists(
-                    atPath: root.appendingPathComponent(".tractanda-store-identity.json").path))
+            let store = try open(root, accounts, .selectedContent(policy()))
+            let history = try store.history(base.itemID)
+            XCTAssertTrue(Set(branches.map(\.revisionID)).isSubset(of: history.map(\.revisionID)))
+            XCTAssertEqual(try store.get(base.itemID).fields["subject"], base.fields["subject"])
         }
     }
 

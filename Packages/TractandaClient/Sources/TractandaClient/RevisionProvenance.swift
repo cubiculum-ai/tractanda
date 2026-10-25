@@ -5,6 +5,7 @@ public struct RevisionProvenance: Equatable, Sendable {
     public enum Kind: String, Sendable { case authored, automaticMerge, resolution }
     public static let profile = "tractanda.revision-ancestry.v1"
     public static let supportedMergeProfile = "tractanda.merge.v2"
+    public static let personalMergeProfile = "tractanda.personal-merge.v1"
     public let kind: Kind
     public let originReplicaID: String
     public let parents: [String]
@@ -125,7 +126,8 @@ public struct RevisionProvenance: Equatable, Sendable {
             }
         case .automaticMerge:
             let ordinary =
-                mergeProfile == Self.supportedMergeProfile && parents.count > 1 && authorityWitness == nil
+                [Self.supportedMergeProfile, Self.personalMergeProfile].contains(mergeProfile ?? "")
+                && parents.count > 1 && authorityWitness == nil
             let reconciliation =
                 mergeProfile == Self.authorityReconciliationProfile && !parents.isEmpty
                 && authorityWitness != nil

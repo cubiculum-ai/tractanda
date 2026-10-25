@@ -1,6 +1,6 @@
 # Personal/workgroup entrypoints
 
-These are source contracts. Installed services and existing stores remain unchanged until separately authorized preparation and deployment.
+These contracts describe the current personal/workgroup source. Raven remains on locally installed `0.1.0-poc.15` until the authorized signed local upgrade; Stash's old installation was archived/removed and its fresh install is pending. Source implements personal-peer v3 enrollment and synchronization. Final source/private validation passed a combined24/24 daemon suite plus separate standalone1/1 and configured-empty-key/online-prepare1/1 checks; initial failures remain historical. No live peer or installed sync runtime is claimed; final source seal/build and deployment are pending. Enrollment commands/prerequisites are documented in [personal peer enrollment](personal-peer-enrollment.md); no new MCP tool surface is implied.
 
 ## Creation and opening
 
@@ -16,6 +16,8 @@ Setup bootstrap uses the same creation contract under the selected service UID. 
 
 `ItemStore.configurePersonalAccess(_:)` atomically replaces current OS admission/admin settings. Old `AccessConfigurationItem` revisions remain content and do not reinstall policy during rebuilding. Item ownership/group/ACL changes still create revisions; current rights govern all history.
 
+The implemented source resolves owner/group differences by the latest authorized revision that actually changes that field; unrelated later revisions carrying stale values do not count as ownership changes. UUIDv1 encoded time is compared at its 100 ns tick precision, with a deterministic revision-ID tie-break for exact timestamp ties. Restrictive permissions are consolidated separately. These graph and permission behaviors passed bounded private source tests; production synchronization is not active.
+
 The native method is `TractandaStore/configureAccess`. Its only argument is `configuration`, containing a complete tagged `ItemValue` descriptor with the existing `tractanda.access.v1` shape. The caller must be a current administrator. Its result contains `state`, `configured: true` and `persistenceProfile: "personal-workgroup"`. This is settings replacement, not an item commit or fabricated policy revision. Pending query delivery rechecks the new admission policy.
 
 `tractanda configure-access STORE POLICY_JSON REQUEST_LABEL` reads that same tagged descriptor and returns those acknowledgement fields. The bounded label is accepted but is not a persistent canonical replay receipt. Item-operation intents and replay receipts remain in ordinary revisions. The old canonical-item `configureAccess` Core helper is not the personal policy route.
@@ -26,9 +28,9 @@ If publication becomes uncertain after replacing the policy file, the object sto
 
 Item/query/get/history/resolve and commit envelopes retain their existing formats. Personal history uses the existing bounded serial path because the historical pooled optimization assumes projection rows. This is a performance follow-up, not a proof requirement. Pooled query/get delivery still rechecks current access and state.
 
-`TractandaStore/info` adds `persistenceProfile`, `clustering.state: "unsupported"` and `activeCanonicalFormats`. Existing `canonicalFormats` remains the software declaration used for signed-bundle comparison; the active declaration describes this personal runtime. The personal capability and reader/writer fence use level16.
+`TractandaStore/info` exposes `persistenceProfile` and `activeCanonicalFormats`; `canonicalFormats` remains the software declaration used for format compatibility. The last installed Raven info response reported `clustering.state: "unsupported"` on `0.1.0-poc.15`; that describes the older installed runtime, not the source-complete personal-peer v3 implementation. The new personal merge profile carries ReaderFloor17. Neither source completion nor an info response establishes a live peer; signed Raven upgrade and fresh Stash install/join remain pending.
 
-Daemon startup rejects any configured peer-runtime path before reading it, opening Store, binding listeners or claiming readiness. Fresh/disabled personal managed definitions omit that argument; nonnil retained settings prevent registration. Startup erases no peer configuration or secrets. Fresh pairing remains future work; no active cluster is advertised.
+The source's personal-peer v3 runtime uses an explicit protected `tractanda.personal-runtime.v1` document and current administrator-controlled membership. Setup passes its owned path as `--peer-runtime-config`; new targets require explicit baseline selection and fresh pairing/credentials, not restored old peer settings. Commands and sequencing are documented in [personal peer enrollment](personal-peer-enrollment.md). Without committed current membership there is no data exchange; installing a package alone does not enroll a peer. The older installed Raven does not yet contain this source update.
 
 Asynchronous rebuilding retains cancellation, genuine capacity checks, bounded chunk/page work and publication authorization. Counters follow actual verified/projected work. Cancellation leaves canonical bytes intact, publishes no partial index and reports `requiresRecovery`/`indexTrusted` truthfully. Private process-level fault tests do not establish hardware power-loss guarantees.
 

@@ -31,6 +31,7 @@ struct RevisionGraph {
     private let result: RevisionMerge.Analysis
     private let profile: String
     private let clockWitnessID: String
+    let personalPermissionPlan: PermissionConsolidation.Plan?
 
     init(nodes: [Node], profile: String = RevisionMerge.profile, limits: Limits = .init()) throws {
         var builder = try Builder(nodes: nodes, profile: profile, limits: limits)
@@ -41,6 +42,7 @@ struct RevisionGraph {
         physicalHeads = builder.nodes.keys.filter { !referenced.contains($0) }.sorted()
         result = try builder.currentAnalysis()
         clockWitnessID = try builder.clockWitness()
+        personalPermissionPlan = builder.personalPermissionPlan
     }
 
     func analyze() throws -> RevisionMerge.Analysis { result }
@@ -78,9 +80,11 @@ struct RevisionGraph {
         var contexts: [String: Set<String>] = [:]
         var remainingWork: Int
         var creationTime: String?
+        var ownershipChanges: [String: [String: String]] = [:]
+        var personalPermissionPlan: PermissionConsolidation.Plan?
 
         init(nodes input: [Node], profile: String, limits: Limits) throws {
-            guard profile == RevisionMerge.profile else {
+            guard [RevisionMerge.profile, RevisionMerge.personalProfile].contains(profile) else {
                 throw TractandaError("unsupportedMergeProfile", "Unknown graph merge profile.")
             }
             guard limits.maximumNodes > 0, limits.maximumEdges >= 0,
@@ -103,7 +107,11 @@ struct RevisionGraph {
                 switch node.kind {
                 case .authored: claimed = []
                 case .automaticMerge(let declaredProfile, let frontier):
-                    guard declaredProfile == profile else {
+                    guard
+                        declaredProfile == profile
+                            || (profile == RevisionMerge.personalProfile
+                                && declaredProfile == RevisionMerge.profile)
+                    else {
                         throw TractandaError("unsupportedMergeProfile", "Unknown materialization profile.")
                     }
                     claimed = frontier
@@ -261,7 +269,13 @@ struct RevisionGraph {
                 try spend(inherited.count)
                 context.formUnion(inherited)
             }
-            let before = try evaluate(context)
+            let validationProfile: String
+            if case .automaticMerge(let declared, _) = node.kind {
+                validationProfile = declared
+            } else {
+                validationProfile = profile
+            }
+            let before = try evaluate(context, using: validationProfile)
             var fields = before.fields
             switch node.kind {
             case .authored(let writes):
@@ -291,7 +305,7 @@ struct RevisionGraph {
                 try apply(writes, to: &fields)
                 context.insert(id)
             case .automaticMerge(let declaredProfile, let frontier):
-                guard declaredProfile == profile, frontier == before.frontier,
+                guard declaredProfile == validationProfile, frontier == before.frontier,
                     !frontier.isEmpty, node.parents.count > 1, before.isResolved
                 else {
                     throw TractandaError(
@@ -335,6 +349,16 @@ struct RevisionGraph {
                     "invalidRevisionGraph", "Snapshot disagrees with applied writes or derived merge payload."
                 )
             }
+            if !node.kind.isAutomatic, node.kind.writes["permissions"] != nil,
+                let value = fields["permissions"]
+            {
+                let current = try ItemPermissions(value)
+                let prior = try before.fields["permissions"].map(ItemPermissions.init)
+                var changes: [String: String] = [:]
+                if prior?.owner != current.owner { changes["owner"] = current.owner }
+                if prior?.group != current.group { changes["group"] = current.group }
+                ownershipChanges[id] = changes
+            }
             contexts[id] = context
         }
 
@@ -368,7 +392,9 @@ struct RevisionGraph {
             return result
         }
 
-        private mutating func evaluate(_ context: Set<String>) throws -> RevisionMerge.Analysis {
+        private mutating func evaluate(_ context: Set<String>, using requestedProfile: String? = nil) throws
+            -> RevisionMerge.Analysis
+        {
             let frontier = try maximal(context)
             var byField: [String: [RevisionMerge.Candidate]] = [:]
             for id in context.sorted() {
@@ -397,6 +423,21 @@ struct RevisionGraph {
                     }
                     if !dominated { maximalWrites.append(candidate) }
                 }
+                if field == "permissions", (requestedProfile ?? profile) == RevisionMerge.personalProfile {
+                    let components = maximalWrites.compactMap { candidate -> ItemValue? in
+                        if case .set(let value) = candidate.write { return value }
+                        return nil
+                    }
+                    if components.count == maximalWrites.count, !components.isEmpty {
+                        let ownership = try selectedOwnership(in: context)
+                        let plan = try PermissionConsolidation.plan(components, selectedOwnership: ownership)
+                        personalPermissionPlan = plan
+                        if let value = plan.outcome.posixValue {
+                            values[field] = .set(value)
+                            continue
+                        }
+                    }
+                }
                 if let first = maximalWrites.first {
                     try spend(maximalWrites.count)
                     if maximalWrites.allSatisfy({ $0.write == first.write }) {
@@ -421,6 +462,36 @@ struct RevisionGraph {
             return RevisionMerge.Analysis(
                 frontier: frontier, values: values, conflicts: conflicts, protectedFields: protected,
                 representativeRevisionID: nil, needsMaterialization: false)
+        }
+
+        /// Only actual property changes participate. A chmod snapshot carrying an older role
+        /// is not another ownership write. Caller must authorize intake; graph validation grants none.
+        private mutating func selectedOwnership(in context: Set<String>) throws -> PermissionConsolidation
+            .Ownership?
+        {
+            func role(_ key: String) throws -> String? {
+                let candidates = context.filter { ownershipChanges[$0]?[key] != nil }
+                var maximal: [String] = []
+                for candidate in candidates {
+                    var dominated = false
+                    for other in candidates where candidate != other {
+                        try spend()
+                        if contexts[other]!.contains(candidate) {
+                            dominated = true
+                            break
+                        }
+                    }
+                    if !dominated { maximal.append(candidate) }
+                }
+                let winner = try maximal.sorted { a, b in
+                    let left = try UUIDVersion1Components(UUID(uuidString: a)!).timestamp
+                    let right = try UUIDVersion1Components(UUID(uuidString: b)!).timestamp
+                    return left == right ? a < b : left < right
+                }.last
+                return winner.flatMap { ownershipChanges[$0]?[key] }
+            }
+            guard let owner = try role("owner"), let group = try role("group") else { return nil }
+            return .init(owner: owner, group: group)
         }
 
         mutating func currentAnalysis() throws -> RevisionMerge.Analysis {

@@ -113,6 +113,9 @@ final class ItemIndex {
     var revisionProjectionActive = false
     var currentProjectionSchemaReady = false
     var projectionAppendActive = false
+    /// Raw personal content has no historical graph-admission proof. Canonical publication
+    /// owns its Store dirty checkpoint and rederives each affected current projection.
+    var personalContentProjectionMode = false
     var authorityControlSchemaReady = false
     /// Queue-confined borrow, present only inside a complete canonical-to-staged finalization.
     var activeAtomicControlFinalization: AuthorityBinding?
@@ -627,7 +630,7 @@ final class ItemIndex {
             // Only our explicitly known work targets retain proof. Unsupported syntax,
             // including CTE mutations/quoted targets, conservatively invalidates it.
             invalidateRevisionGraphValidation()
-            if currentProjectionSchemaReady, !projectionAppendActive {
+            if currentProjectionSchemaReady, !projectionAppendActive, !personalContentProjectionMode {
                 try execute("DELETE FROM checkpoint_meta WHERE key='graphAdmissionProof'")
                 try execute("UPDATE current_projection SET dirty=1")
             }
