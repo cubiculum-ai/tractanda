@@ -10,9 +10,10 @@ import TractandaCore
 
 /// Fresh enrollment commands use explicit private files and current administrator actions.
 /// Offline commands take an exclusive Store writer and never stop/start a live daemon.
-func personalPeerCommand(_ arguments: [String], options: ConnectionOptions, hasConnectionOptions: Bool) throws
-    -> Bool
-{
+func personalPeerCommand(
+    _ arguments: [String], options: ConnectionOptions, hasConnectionOptions: Bool,
+    sendForTesting: CLIRequestSender? = nil
+) throws -> Bool {
     guard arguments.first == "personal-peer" else { return false }
     let help = """
         personal-peer target-create ROOT STORE_ID ACCESS_JSON
@@ -163,7 +164,10 @@ func personalPeerCommand(_ arguments: [String], options: ConnectionOptions, hasC
     selected.startsService = false
     let request = PeerExchangeRequest(action, fields)
     let object = try JSONSerialization.jsonObject(with: JSON.encode(request))
-    output(try call(selected.resolve(), "TractandaPeerPersonal/admin", object))
+    output(
+        try call(
+            selected.resolve(), "TractandaPeerPersonal/admin", object,
+            responseWait: .installerMutation, sendForTesting: sendForTesting))
     return true
 }
 

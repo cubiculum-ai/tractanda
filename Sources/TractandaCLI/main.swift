@@ -98,7 +98,7 @@ let usage = """
     Item mutations require an operation ID; reuse identical arguments when retrying.
     Local access configuration replaces current settings without creating an item revision.
     Fresh stores use the personal/workgroup profile and admit the creating OS account.
-    configure-access changes current local OS user/group policy; peer networking is unavailable.
+    configure-access changes current local OS user/group policy; personal-peer manages explicit peer enrollment.
     Set TRACTANDA_SERVER_USER to pin another account's daemon identity. This is not network JMAP.
     """
 
@@ -109,10 +109,21 @@ func output(_ data: Data) {
 func jsonObject<T: Encodable>(_ value: T) throws -> Any {
     try JSONSerialization.jsonObject(with: JSON.encode(value))
 }
-func call(_ connection: ServerConnection, _ method: String, _ args: Any) throws -> Data {
+typealias CLIRequestSender = (ServerConnection, Data, LocalTransport.ResponseWait) throws -> Data
+
+func call(
+    _ connection: ServerConnection, _ method: String, _ args: Any,
+    responseWait: LocalTransport.ResponseWait = .bounded,
+    sendForTesting: CLIRequestSender? = nil
+) throws -> Data {
     let request: [String: Any] = ["using": [ItemService.capability], "methodCalls": [[method, args, "cli"]]]
-    let response = try connection.send(
-        JSONSerialization.data(withJSONObject: request, options: [.sortedKeys]))
+    let bytes = try JSONSerialization.data(withJSONObject: request, options: [.sortedKeys])
+    let response: Data
+    if let sendForTesting {
+        response = try sendForTesting(connection, bytes, responseWait)
+    } else {
+        response = try connection.send(bytes, responseWait: responseWait)
+    }
     guard let envelope = try JSONSerialization.jsonObject(with: response) as? [String: Any] else {
         throw TractandaError("protocolError", "Invalid response.")
     }
