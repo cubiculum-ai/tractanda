@@ -1,3 +1,4 @@
+import TractandaClient
 import XCTest
 
 @testable import TractandaCore
@@ -14,7 +15,7 @@ final class ResponseBudgetTests: XCTestCase {
     }
 
     private func encodedSize(_ call: [Any]) throws -> Int {
-        try JSONSerialization.data(withJSONObject: call).count
+        try JMAPValue.decode(JSONSerialization.data(withJSONObject: call)).encoded().count
     }
 
     func testMixedReadEnvelopeRetainsEarlierReferenceAndRejectsLaterOverflowWhole() throws {
@@ -40,17 +41,17 @@ final class ResponseBudgetTests: XCTestCase {
         let queryRequest = try request(
             store,
             [
-                ["TractandaItem/query", ["expression": "subject == \"budget target\"", "limit": 1], "query"]
+                ["TractandaItem/query", ["expression": "subject == \"budget target\"", "limit": 1], "q"]
             ])
         let getRequest = try request(
             store,
             [
-                ["TractandaItem/get", ["ids": [item.itemID]], "get"]
+                ["TractandaItem/get", ["ids": [item.itemID]], "g"]
             ])
         let historyRequest = try request(
             store,
             [
-                ["TractandaItem/history", ["itemID": item.itemID, "limit": 4], "history"]
+                ["TractandaItem/history", ["itemID": item.itemID, "limit": 4], "h"]
             ])
         let queryBytes = try encodedSize(firstCall(service.handle(queryRequest, peerUID: store.ownerUID)))
         let getBytes = try encodedSize(firstCall(service.handle(getRequest, peerUID: store.ownerUID)))
@@ -67,13 +68,22 @@ final class ResponseBudgetTests: XCTestCase {
                 canonicalHistoryBytes) + 128
         XCTAssertLessThan(budget, 16 * 1024, "Fixture should keep the pooled response budget small.")
         var extraQueries = 0
-        while queryBytes + getBytes + extraQueries * queryBytes + historyBytes <= budget {
+        var prefixBytes = queryBytes + getBytes
+        while prefixBytes + historyBytes <= budget {
+            let extra = try request(
+                store,
+                [
+                    [
+                        "TractandaItem/query", ["expression": "subject == \"budget target\"", "limit": 1],
+                        "extra-\(extraQueries)",
+                    ]
+                ])
+            prefixBytes += try encodedSize(firstCall(service.handle(extra, peerUID: store.ownerUID)))
             extraQueries += 1
             guard extraQueries <= 20 else {
                 return XCTFail("Small fixture cannot exercise aggregate budget.")
             }
         }
-        let prefixBytes = queryBytes + getBytes + extraQueries * queryBytes
         XCTAssertLessThan(prefixBytes, budget)
         XCTAssertGreaterThan(prefixBytes + historyBytes, budget)
         XCTAssertGreaterThan(budget - prefixBytes, 256)
@@ -116,7 +126,8 @@ final class ResponseBudgetTests: XCTestCase {
         XCTAssertNil(failure["total"])
         XCTAssertNil(failure["list"])
         XCTAssertLessThanOrEqual(
-            try JSONSerialization.data(withJSONObject: results).count, budget + 64,
+            try JMAPValue.decode(JSONSerialization.data(withJSONObject: results)).encoded().count,
+            budget + 64,
             "Retained method responses must remain within the measured aggregate budget.")
     }
 }
