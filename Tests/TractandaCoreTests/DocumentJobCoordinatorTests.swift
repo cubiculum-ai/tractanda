@@ -947,35 +947,73 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         try capacity(fixture.root)
     }
     func testQueuedJobKeepsReadsAndExactAdmissionReplayAvailable() async throws {
-        let fixture = try fixture(pages: 3)
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let fixture: Fixture
+        do { fixture = try self.fixture(pages: 3) } catch {
+            let failure = error as NSError
+            print("DJC queued fixture failed domain=\(failure.domain) code=\(failure.code)")
+            throw error
+        }
+        var phase = "coordinator"
+        var closed = false
+        defer {
+            print("DJC queued remove-root phase=\(phase) closed=\(closed) root=\(fixture.root.path)")
+            do {
+                try FileManager.default.removeItem(at: fixture.root)
+                print("DJC queued remove-root returned")
+            } catch {
+                let failure = error as NSError
+                print("DJC queued cleanup failed domain=\(failure.domain) code=\(failure.code)")
+                print(Thread.callStackSymbols.joined(separator: "\n"))
+            }
+        }
         let coordinator = try await ServiceCoordinator(
             opening: fixture.store, embeddingProviderForTesting: nil, requireInitializedStore: true,
             documentRuntimeVerifierForTesting: { _ in }, documentConverter: fixture.configuration)
         let gate = AdmissionGate()
         await coordinator.setDocumentJobAdmissionHookForTesting { await gate.pause() }
-        let client = client(coordinator)
-        let admitted = try await client.startDocumentJob(fixture.request)
-        try await waitForGate(gate)
-        let info = try nativeFixtureEnvelope(
-            calls: [["TractandaStore/info", [:], "read"]], accountID: nativeFixtureAccountID(fixture.store))
-        let response = try await coordinator.handle(info, forUID: getuid())
-        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: response) as? [String: Any])
-        XCTAssertNil(root["code"])
-        XCTAssertNotNil(root["methodResponses"])
-        let replay = try await client.startDocumentJob(fixture.request)
-        XCTAssertEqual(replay.jobID, admitted.jobID)
-        XCTAssertFalse(
-            FileManager.default.fileExists(atPath: fixture.root.appendingPathComponent("worker-pid").path))
-        await coordinator.setDocumentJobAdmissionHookForTesting(nil)
-        await gate.release()
-        let completed = try await wait(client, id: admitted.jobID, root: fixture.root) {
-            $0.state == "completed"
+        do {
+            phase = "admission-and-replay"
+            let client = client(coordinator)
+            let admitted = try await client.startDocumentJob(fixture.request)
+            try await waitForGate(gate)
+            let info = try nativeFixtureEnvelope(
+                calls: [["TractandaStore/info", [:], "read"]],
+                accountID: nativeFixtureAccountID(fixture.store))
+            let response = try await coordinator.handle(info, forUID: getuid())
+            let root = try XCTUnwrap(JSONSerialization.jsonObject(with: response) as? [String: Any])
+            XCTAssertNil(root["code"])
+            XCTAssertNotNil(root["methodResponses"])
+            let replay = try await client.startDocumentJob(fixture.request)
+            XCTAssertEqual(replay.jobID, admitted.jobID)
+            XCTAssertFalse(
+                FileManager.default.fileExists(atPath: fixture.root.appendingPathComponent("worker-pid").path)
+            )
+            await coordinator.setDocumentJobAdmissionHookForTesting(nil)
+            await gate.release()
+            phase = "wait-completed"
+            let completed = try await wait(client, id: admitted.jobID, root: fixture.root) {
+                $0.state == "completed"
+            }
+            XCTAssertEqual(completed.acceptedPages, 3)
+            print("DJC queued wait-completed returned")
+            let calls = try String(
+                contentsOf: fixture.root.appendingPathComponent("page-calls"), encoding: .utf8)
+            XCTAssertEqual(calls.split(separator: "\n"), ["1", "2", "3"])
+            phase = "close"
+            await coordinator.close()
+            closed = true
+            print("DJC queued coordinator.close returned")
+        } catch {
+            let original = error
+            let failure = original as NSError
+            print("DJC queued body failed phase=\(phase) domain=\(failure.domain) code=\(failure.code)")
+            await coordinator.setDocumentJobAdmissionHookForTesting(nil)
+            await gate.release()
+            await coordinator.close()
+            closed = true
+            print("DJC queued error-path coordinator.close returned")
+            throw original
         }
-        XCTAssertEqual(completed.acceptedPages, 3)
-        let calls = try String(contentsOf: fixture.root.appendingPathComponent("page-calls"), encoding: .utf8)
-        XCTAssertEqual(calls.split(separator: "\n"), ["1", "2", "3"])
-        await coordinator.close()
     }
 
     func testRetainedJobsAccessibleWithoutConfiguredConverter() async throws {
