@@ -3,6 +3,7 @@ import Foundation
 import NIOCore
 import NIOPosix
 import Synchronization
+import TractandaClient
 import XCTest
 
 @testable import TractandaCore
@@ -224,7 +225,7 @@ final class NativeCredentialRegistrationTests: XCTestCase {
         defer { await app.close() }
         let token = try await sessions.issue(forUID: f.accounts.human).token
         let forged = try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability],
+            "using": TractandaJMAP.using,
             "methodCalls": [["TractandaPeer/registerCredential", ["uid": 0, "administrator": true], "x"]],
         ])
         for reply in [
@@ -282,11 +283,9 @@ final class NativeCredentialRegistrationTests: XCTestCase {
             operationID: try PeerServiceFixture.id())
         let arguments = try XCTUnwrap(
             JSONSerialization.jsonObject(with: JSON.encode(commit)) as? [String: Any])
-        let write = try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability],
-            "methodCalls": [["TractandaItem/commit", arguments, "w"]],
-        ])
-        let written = try await coordinator.handle(write, forUID: tractanda_uid())
+        let written = try await nativeFixtureResponse(
+            coordinator, forUID: tractanda_uid(), method: "TractandaItem/commit", arguments: arguments,
+            callID: "w")
         let envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: written) as? [String: Any])
         let responses = try XCTUnwrap(envelope["methodResponses"] as? [[Any]])
         XCTAssertEqual(

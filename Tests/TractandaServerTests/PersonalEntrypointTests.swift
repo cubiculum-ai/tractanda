@@ -96,10 +96,8 @@ final class PersonalEntrypointTests: XCTestCase, @unchecked Sendable {
             "mode": .integer(mode), "acl": .object([:]),
         ])
     }
-    private func request(_ method: String, _ args: [String: Any] = [:]) throws -> Data {
-        try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability], "methodCalls": [[method, args, "client"]],
-        ])
+    private func request(_ method: String, _ args: [String: Any] = [:], accountID: String) throws -> Data {
+        try nativeFixtureRequest(method: method, arguments: args, accountID: accountID, callID: "client")
     }
     private func call(_ socket: String, _ method: String, _ args: [String: Any] = [:]) async throws -> Data {
         let bytes = try JSONSerialization.data(withJSONObject: args)
@@ -240,6 +238,7 @@ final class PersonalEntrypointTests: XCTestCase, @unchecked Sendable {
                 root: URL(fileURLWithPath: config.storePath), accounts: accounts,
                 initialAccessConfiguration: policy())
         }
+        let accountID = try nativeFixtureAccountID(URL(fileURLWithPath: config.storePath))
         var daemon: SharedDaemon? = try await SharedDaemon.startForTesting(
             configuration: config, makeAccountDirectory: { accounts })
         let gate = Gate()
@@ -265,7 +264,8 @@ final class PersonalEntrypointTests: XCTestCase, @unchecked Sendable {
                         ]),
                     ], operationID: "role"))
             let resolveRequest = try request(
-                "TractandaItem/resolve", ["itemID": role.revision.itemID, "path": "holder.mobilePhone"])
+                "TractandaItem/resolve", ["itemID": role.revision.itemID, "path": "holder.mobilePhone"],
+                accountID: accountID)
             let denied = try NativeMethodResult.unwrap(
                 await coordinator.handle(resolveRequest, forUID: accounts.bob),
                 method: "TractandaItem/resolve")
@@ -282,7 +282,8 @@ final class PersonalEntrypointTests: XCTestCase, @unchecked Sendable {
                     action: .revise, itemID: initial.revision.itemID,
                     expectedRevisionID: initial.revision.revisionID,
                     changes: ["permissions": permissions(0o600)], operationID: "acl-revoke"))
-            let history = try request("TractandaItem/history", ["itemID": initial.revision.itemID])
+            let history = try request(
+                "TractandaItem/history", ["itemID": initial.revision.itemID], accountID: accountID)
             let deniedHistory = try await coordinator.handle(history, forUID: accounts.bob)
             XCTAssertThrowsError(
                 try NativeMethodResult.unwrap(deniedHistory, method: "TractandaItem/history")
@@ -290,7 +291,8 @@ final class PersonalEntrypointTests: XCTestCase, @unchecked Sendable {
                 XCTAssertEqual(($0 as? TractandaError)?.code, "forbidden")
             }
             let newPolicy = try JSONSerialization.jsonObject(with: JSON.encode(policy(["owner"])))
-            let configure = try request("TractandaStore/configureAccess", ["configuration": newPolicy])
+            let configure = try request(
+                "TractandaStore/configureAccess", ["configuration": newPolicy], accountID: accountID)
             let nonadmin = try await coordinator.handle(configure, forUID: accounts.bob)
             XCTAssertThrowsError(
                 try NativeMethodResult.unwrap(nonadmin, method: "TractandaStore/configureAccess")
@@ -298,7 +300,8 @@ final class PersonalEntrypointTests: XCTestCase, @unchecked Sendable {
                 XCTAssertEqual(($0 as? TractandaError)?.code, "forbidden")
             }
             await coordinator.setPooledReadBeforeFinishHookForTesting { await gate.pause() }
-            let query = try request("TractandaItem/query", ["expression": "classID == \"RoleItem\""])
+            let query = try request(
+                "TractandaItem/query", ["expression": "classID == \"RoleItem\""], accountID: accountID)
             let pending = Task {
                 do {
                     let response = try await coordinator.handle(query, forUID: accounts.bob)

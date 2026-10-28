@@ -1,11 +1,13 @@
 import CTractandaPlatform
 import Foundation
+import TractandaClient
 import XCTest
 
 @testable import TractandaCore
 @testable import TractandaServer
 
 final class DaemonApplicationTests: XCTestCase {
+    private var nativeAccountID: String?
     private struct Authenticator: PasswordAuthenticating {
         let uid: UInt32
         func authenticate(username: String, password: String) throws -> UInt32 { uid }
@@ -17,6 +19,7 @@ final class DaemonApplicationTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
             "daemon-app-\(UUID().uuidString)")
         _ = try ItemStore.initializeFresh(root: root)
+        nativeAccountID = try nativeFixtureAccountID(root)
         let coordinator = try await ServiceCoordinator(opening: root)
         let uid = try await coordinator.accountIdentity(forUID: tractanda_uid()).uid
         let sessions = SessionAuthority(coordinator: coordinator, authenticator: Authenticator(uid: uid))
@@ -41,9 +44,8 @@ final class DaemonApplicationTests: XCTestCase {
         return DaemonHTTPRequest(method: method, uri: uri, headers: final, body: body, localPort: 48730)
     }
     private func native(_ method: String, _ args: [String: Any] = [:], id: String = "x") throws -> Data {
-        try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability], "methodCalls": [[method, args, id]],
-        ])
+        try nativeFixtureRequest(
+            method: method, arguments: args, accountID: XCTUnwrap(nativeAccountID), callID: id)
     }
 
     func testNativeSessionIssuesOnlyForPeerAndHTTPUsesIt() async throws {
@@ -65,7 +67,7 @@ final class DaemonApplicationTests: XCTestCase {
                 try native("TractandaAuth/createSession", ["uid": uid &+ 1]), forUID: uid)
             XCTAssertFalse(String(data: forged, encoding: .utf8)!.contains("token"))
             let mixed = try JSONSerialization.data(withJSONObject: [
-                "using": [ItemService.capability],
+                "using": TractandaJMAP.using,
                 "methodCalls": [
                     ["TractandaAuth/createSession", [:], "a"], ["TractandaAuth/createSession", [:], "b"],
                 ],

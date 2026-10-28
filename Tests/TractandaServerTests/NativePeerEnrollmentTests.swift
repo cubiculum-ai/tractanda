@@ -99,12 +99,12 @@ private actor EnrollmentOutputGate {
 }
 
 final class NativePeerEnrollmentTests: XCTestCase {
-    private func personalAdminRequest(_ request: PeerExchangeRequest, id: String = "admin") throws -> Data {
+    private func personalAdminRequest(_ request: PeerExchangeRequest, accountID: String, id: String = "admin")
+        throws -> Data
+    {
         let arguments = try JSONSerialization.jsonObject(with: JSON.encode(request)) as! [String: Any]
-        return try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability],
-            "methodCalls": [[PersonalPeerAdminCall.method, arguments, id]],
-        ])
+        return try nativeFixtureRequest(
+            method: PersonalPeerAdminCall.method, arguments: arguments, accountID: accountID, callID: id)
     }
 
     private func methodResult(_ data: Data, method: String = PersonalPeerAdminCall.method) throws
@@ -139,7 +139,7 @@ final class NativePeerEnrollmentTests: XCTestCase {
                 [
                     "configuration": .bytes(try JSON.encode(f.configuration)),
                     "nonce": .text(try PeerServiceFixture.id()),
-                ]))
+                ]), accountID: f.configuration.storeID)
         let prepared = try methodResult(await app.native(preparedRequest, forUID: accounts.base.human))
         XCTAssertNotNil(prepared["configuration"])
 
@@ -149,7 +149,7 @@ final class NativePeerEnrollmentTests: XCTestCase {
                 [
                     "configuration": .bytes(try JSON.encode(f.configuration)),
                     "paths": .list(f.credentialPaths.map(ItemValue.text)),
-                ]), id: "register")
+                ]), accountID: f.configuration.storeID, id: "register")
         let registeredData = try await app.native(registrationRequest, forUID: accounts.base.human)
         let registered = try methodResult(registeredData)
         XCTAssertEqual(registered["registered"] as? Int, f.credentialPaths.count)

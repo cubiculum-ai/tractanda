@@ -104,10 +104,9 @@ final class DocumentCoordinatorIntegrationTests: XCTestCase {
                 ])
             _ = try ItemStore.initializeFresh(
                 root: root, accounts: selectedAccounts, initialAccessConfiguration: initialAccess)
-            let store = try ItemStore(
+            let store = try ItemStore.openInitialized(
                 root: root, accounts: selectedAccounts,
-                attachmentUploadPolicy: .init(minimumFreeBytes: AttachmentFixtureCapacity.reserveBytes),
-                revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+                attachmentUploadPolicy: .init(minimumFreeBytes: AttachmentFixtureCapacity.reserveBytes))
             try store.setAttachmentReserveForTesting(AttachmentFixtureCapacity.reserveBytes)
             var changes: [String: ItemValue] = [:]
             if accounts != nil {
@@ -138,10 +137,9 @@ final class DocumentCoordinatorIntegrationTests: XCTestCase {
             attached: attached, descriptor: descriptor)
     }
 
-    private func request(_ method: String, _ arguments: [String: Any]) throws -> Data {
-        try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability], "methodCalls": [[method, arguments, "test"]],
-        ])
+    private func request(_ method: String, _ arguments: [String: Any], fixture: Fixture) throws -> Data {
+        try nativeFixtureRequest(
+            method: method, arguments: arguments, accountID: nativeFixtureAccountID(fixture.storeRoot))
     }
 
     private func extraction(_ fixture: Fixture, operation: String = "extract") throws -> Data {
@@ -151,7 +149,7 @@ final class DocumentCoordinatorIntegrationTests: XCTestCase {
                 "itemID": fixture.attached.itemID,
                 "expectedRevisionID": fixture.attached.revisionID,
                 "attachmentID": fixture.descriptor.attachmentID, "operationID": operation,
-            ])
+            ], fixture: fixture)
     }
 
     private func started(_ fixture: Fixture) async throws {
@@ -181,7 +179,8 @@ final class DocumentCoordinatorIntegrationTests: XCTestCase {
         XCTAssertFalse(
             FileManager.default.fileExists(atPath: fixture.model.appendingPathComponent("started").path))
         let get = try await coordinator.handle(
-            request("TractandaItem/get", ["ids": [fixture.attached.itemID]]), forUID: getuid())
+            request("TractandaItem/get", ["ids": [fixture.attached.itemID]], fixture: fixture),
+            forUID: getuid())
         XCTAssertFalse(String(decoding: get, as: UTF8.self).contains("attachmentDocument"))
         await coordinator.close()
     }

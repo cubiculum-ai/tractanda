@@ -85,19 +85,15 @@ final class PeerSyncMeshTests: XCTestCase {
             try? await group.shutdownGracefully()
         }
         func call(_ node: String, _ method: String, _ arguments: [String: Any]) async throws -> Data {
-            let bytes = try JSONSerialization.data(withJSONObject: [
-                "using": [ItemService.capability],
-                "methodCalls": [[method, arguments, "mesh"]],
-            ])
-            let response = try await XCTUnwrap(services[node]).handle(
-                bytes,
-                forUID: fixture.accountDirectory(for: node).human)
+            let response = try await nativeFixtureResponse(
+                XCTUnwrap(services[node]), forUID: fixture.accountDirectory(for: node).human,
+                method: method, arguments: arguments, callID: "mesh")
             return try NativeMethodResult.unwrap(response, method: method, callID: "mesh")
         }
         func current(_ node: String, _ itemID: String) async throws -> Revision? {
             let result = try JSON.decode(
-                ItemGetResult.self, await call(node, "TractandaItem/get", ["ids": [itemID]]))
-            return result.list.first
+                JMAPItemGetResponse.self, await call(node, "TractandaItem/get", ["ids": [itemID]]))
+            return try result.list.first?.canonicalRevision()
         }
         func commit(_ node: String, _ request: CommitRequest) async throws -> Revision {
             let arguments = try XCTUnwrap(
@@ -105,8 +101,12 @@ final class PeerSyncMeshTests: XCTestCase {
             let receipt = try JSON.decode(
                 MutationReceipt.self, await call(node, "TractandaItem/commit", arguments))
             let pinned = try await call(
-                node, "TractandaRevision/get", ["itemID": receipt.itemID, "revisionID": receipt.revisionID])
-            return try JSON.decode(RevisionGetResult.self, pinned).revision
+                node, "TractandaRevision/get", ["ids": [receipt.revisionID]])
+            let result = try JSON.decode(JMAPRevisionGetResponse.self, pinned)
+            let revision = try XCTUnwrap(result.list.first).canonicalRevision()
+            XCTAssertEqual(revision.itemID, receipt.itemID)
+            XCTAssertEqual(revision.revisionID, receipt.revisionID)
+            return revision
         }
         func round(_ nodes: [String] = ["a", "b", "c"]) async throws -> [PeerSyncDriver.Report] {
             var reports: [PeerSyncDriver.Report] = []

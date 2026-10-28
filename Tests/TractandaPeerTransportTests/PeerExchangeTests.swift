@@ -439,18 +439,25 @@ final class PeerExchangeTests: XCTestCase {
     private func nativeCommit(_ owner: ServiceCoordinator, _ request: CommitRequest, uid: UInt32) async throws
         -> Revision
     {
-        let arguments = try JSONSerialization.jsonObject(with: JSON.encode(request))
-        let envelope: [String: Any] = [
-            "using": [ItemService.capability],
-            "methodCalls": [["TractandaItem/commit", arguments, "fixture"]],
-        ]
-        let data = try JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys])
-        let response = try await owner.handle(data, forUID: uid)
-        return try JSON.decode(
-            CommitResult.self,
-            NativeMethodResult.unwrap(response, method: "TractandaItem/commit", callID: "fixture")
-        ).revision
+        let context = NativeAsyncClientContext { bytes in try await owner.handle(bytes, forUID: uid) }
+        let response = try await context.send(
+            method: "TractandaItem/commit", arguments: JSON.encode(request), callID: "fixture")
+        let receipt = try JSON.decode(
+            MutationReceipt.self,
+            NativeMethodResult.unwrap(response, method: "TractandaItem/commit", callID: "fixture"))
+        let fetched = try await context.send(
+            method: "TractandaRevision/get",
+            arguments: JSONSerialization.data(withJSONObject: ["ids": [receipt.revisionID]]), callID: "pinned"
+        )
+        let result = try JSON.decode(
+            JMAPRevisionGetResponse.self,
+            NativeMethodResult.unwrap(fetched, method: "TractandaRevision/get", callID: "pinned"))
+        let revision = try XCTUnwrap(result.list.first).canonicalRevision()
+        XCTAssertEqual(revision.itemID, receipt.itemID)
+        XCTAssertEqual(revision.revisionID, receipt.revisionID)
+        return revision
     }
+
     private func stage(
         _ packet: PeerTransportStoreFixtures.Packet, pair: ExchangePair,
         importer: PeerExchangeConnection, fixture: Fixture

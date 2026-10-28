@@ -51,11 +51,8 @@ final class PeerServiceRuntimeTests: XCTestCase {
         _ service: ServiceCoordinator, _ uid: UInt32, _ method: String,
         _ arguments: [String: Any] = [:]
     ) async throws -> [Any] {
-        let request = try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability],
-            "methodCalls": [[method, arguments, "r"]],
-        ])
-        let bytes = try await service.handle(request, forUID: uid)
+        let bytes = try await nativeFixtureResponse(
+            service, forUID: uid, method: method, arguments: arguments, callID: "r")
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
         return try XCTUnwrap((object["methodResponses"] as? [[Any]])?.first)
     }

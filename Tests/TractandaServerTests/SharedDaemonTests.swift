@@ -1,6 +1,7 @@
 import Foundation
 import NIOCore
 import NIOPosix
+import TractandaClient
 import TractandaPeerTransport
 import XCTest
 
@@ -171,18 +172,11 @@ final class SharedDaemonTests: XCTestCase {
     }
 
     private func nativeInfo(_ socket: String) async throws -> Data {
-        let request = try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability],
-            "methodCalls": [["TractandaStore/info", [:], "info"]],
-        ])
-        return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global().async {
-                continuation.resume(
-                    with: Result {
-                        try LocalTransport.call(socket: socket, request: request)
-                    })
-            }
+        let context = NativeAsyncClientContext { request in
+            try await Task.detached { try LocalTransport.call(socket: socket, request: request) }.value
         }
+        return try await context.send(
+            method: "TractandaStore/info", arguments: Data("{}".utf8), callID: "info")
     }
 
     private func canonicalPath(_ url: URL) -> String {
@@ -274,10 +268,9 @@ final class SharedDaemonTests: XCTestCase {
             }
         }
         func request(_ method: String, _ arguments: [String: String] = [:]) throws -> Data {
-            try JSONSerialization.data(withJSONObject: [
-                "using": [ItemService.capability],
-                "methodCalls": [[method, arguments, "r"]],
-            ])
+            try nativeFixtureRequest(
+                method: method, arguments: arguments, accountID: nativeFixtureAccountID(storeRoot),
+                callID: "r")
         }
         _ = try await coordinator.handle(
             request("TractandaStore/rebuild", ["operationID": "close"]), forUID: getuid())
