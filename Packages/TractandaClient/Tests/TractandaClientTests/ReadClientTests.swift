@@ -108,8 +108,15 @@ private let readAccount = "00112233-4455-6677-8899-aabbccddeeff"
 }
 
 @Test func zeroLimitNegativePositionAndAnchorStayValidInQueryConvenience() async throws {
-    let transport = ReadTranscript { _ in
-        .object([
+    let transport = ReadTranscript { call in
+        if call.name == "TractandaItem/get" {
+            #expect(call.arguments["ids"]?.elements?.isEmpty == true)
+            return .object([
+                .init("accountId", .string(readAccount)), .init("state", .string("item-state")),
+                .init("list", .array([])), .init("notFound", .array([])),
+            ])
+        }
+        return .object([
             .init("accountId", .string(readAccount)), .init("queryState", .string("items")),
             .init("canCalculateChanges", .bool(false)), .init("position", .number(try JMAPNumber("4"))),
             .init("ids", .array([])), .init("total", .number(try JMAPNumber("5"))),
@@ -122,7 +129,9 @@ private let readAccount = "00112233-4455-6677-8899-aabbccddeeff"
     #expect(page.total == 5)
     let anchor = Identifier.make()
     _ = try await client.page(matching: ItemQuery(position: 99, limit: 0, anchor: anchor, anchorOffset: -1))
-    let args = try #require(try await transport.calls().last?.arguments)
+    let calls = try await transport.calls()
+    #expect(calls.filter { $0.name == "TractandaItem/get" }.count == 4)
+    let args = try #require(calls.last { $0.name == "TractandaItem/query" }?.arguments)
     #expect(args["anchor"]?.text == anchor)
     #expect(args["position"] == nil)
     #expect(args["anchorOffset"] == .number(try JMAPNumber("-1")))

@@ -7,13 +7,26 @@ private actor ScriptedTransport: ItemTransport {
     var responses: [Data]
     var requests: [Data] = []
     var discoveryRequests: [Data] = []
-    init(_ responses: [Data]) { self.responses = responses }
+    var stateRequests: [Data] = []
+    let itemState: String?
+    init(_ responses: [Data], itemState: String? = nil) {
+        self.responses = responses
+        self.itemState = itemState
+    }
     func send(_ request: Data) async throws -> Data {
         let envelope = try JSONSerialization.jsonObject(with: request) as! [String: Any]
         let call = (envelope["methodCalls"] as! [[Any]])[0]
         if call[0] as? String == "TractandaSession/get" {
             discoveryRequests.append(request)
             return try discoveryReply(callID: call[2] as! String)
+        }
+        if let itemState, call[0] as? String == "TractandaItem/get",
+            let args = call[1] as? [String: Any], let ids = args["ids"] as? [String], ids.isEmpty
+        {
+            stateRequests.append(request)
+            return try reply(
+                "TractandaItem/get", object(ItemGetResult(list: [], notFound: [], state: itemState)),
+                tag: call[2] as! String)
         }
         requests.append(request)
         return responses.removeFirst()
@@ -166,18 +179,21 @@ func revision(_ subject: String, itemID: String? = nil) throws -> Revision {
 @Test func queryPageCarriesDispositionFromItsGetHydration() async throws {
     let historical = try revision("Demoted query result")
     let result = ItemGetResult(
-        list: [historical], notFound: [], state: "query-token",
+        list: [historical], notFound: [], state: "items-token",
         historicalDispositions: [historical.revisionID: .demoted])
-    let transport = try ScriptedTransport([
-        reply(
-            "TractandaItem/query",
-            [
-                "ids": [historical.itemID], "position": 0, "total": 1, "queryState": "query-token",
-            ]),
-        reply("TractandaItem/getBounded", object(result)),
-    ])
+    let transport = try ScriptedTransport(
+        [
+            reply(
+                "TractandaItem/query",
+                [
+                    "ids": [historical.itemID], "position": 0, "total": 1, "queryState": "query-token",
+                ]),
+            reply("TractandaItem/getBounded", object(result)),
+        ], itemState: "items-token")
     let page = try await ItemClient(transport: transport).page(matching: ItemQuery(limit: 1))
     #expect(page.items == [historical])
+    #expect(page.state == "query-token")
+    #expect(await transport.stateRequests.count == 2)
     #expect(page.historicalDispositions == [historical.revisionID: .demoted])
 }
 
@@ -200,24 +216,25 @@ func revision(_ subject: String, itemID: String? = nil) throws -> Revision {
     let resolved = try (0..<63).map { try revision("Resolved \($0)", itemID: ids[$0]) }
     let unresolved = ItemUnresolvedState(
         itemID: ids[63], status: .conflicted, stateToken: "item-token")
-    let transport = try ScriptedTransport([
-        reply(
-            "TractandaItem/query",
-            [
-                "ids": ids, "position": 7, "total": 100, "queryState": "query-token",
-                "completeness": "unresolvedItems", "conflictsAvailable": true,
-            ]),
-        reply(
-            "TractandaItem/getBounded",
-            object(
-                ItemGetResult(
-                    list: resolved, notFound: [], unresolved: [unresolved], state: "query-token"))),
-        reply(
-            "TractandaItem/getBounded",
-            object(
-                ItemGetResult(
-                    list: [], notFound: [ids[64]], state: "query-token"))),
-    ])
+    let transport = try ScriptedTransport(
+        [
+            reply(
+                "TractandaItem/query",
+                [
+                    "ids": ids, "position": 7, "total": 100, "queryState": "query-token",
+                    "completeness": "unresolvedItems", "conflictsAvailable": true,
+                ]),
+            reply(
+                "TractandaItem/getBounded",
+                object(
+                    ItemGetResult(
+                        list: resolved, notFound: [], unresolved: [unresolved], state: "items-token"))),
+            reply(
+                "TractandaItem/getBounded",
+                object(
+                    ItemGetResult(
+                        list: [], notFound: [ids[64]], state: "items-token"))),
+        ], itemState: "items-token")
 
     let page = try await ItemClient(transport: transport).page(matching: ItemQuery(position: 7, limit: 256))
 
@@ -231,6 +248,8 @@ func revision(_ subject: String, itemID: String? = nil) throws -> Revision {
     #expect(page.conflictsAvailable)
     let requests = await transport.requests
     #expect(requests.count == 3)
+    #expect(await transport.stateRequests.count == 2)
+    #expect(page.state == "query-token")
     let firstGet = try JSONSerialization.jsonObject(with: requests[1]) as! [String: Any]
     let secondGet = try JSONSerialization.jsonObject(with: requests[2]) as! [String: Any]
     let firstCall = firstGet["methodCalls"] as! [[Any]]
@@ -320,33 +339,37 @@ func object(_ value: some Encodable) throws -> Any {
 @Test func pagesPreserveServerOrderAndIntegerPrecision() async throws {
     let first = try revision("First")
     let second = try revision("Second")
-    let transport = try ScriptedTransport([
-        reply(
-            "TractandaItem/query",
-            [
-                "ids": [first.itemID, second.itemID], "position": 0, "total": 3, "queryState": "state-1",
-            ]),
-        reply(
-            "TractandaItem/getBounded",
-            ["list": object([second, first]), "notFound": [], "state": "state-1"]),
-    ])
+    let transport = try ScriptedTransport(
+        [
+            reply(
+                "TractandaItem/query",
+                [
+                    "ids": [first.itemID, second.itemID], "position": 0, "total": 3, "queryState": "state-1",
+                ]),
+            reply(
+                "TractandaItem/getBounded",
+                ["list": object([second, first]), "notFound": [], "state": "item-state-1"]),
+        ], itemState: "item-state-1")
     let page = try await ItemClient(transport: transport).page(matching: ItemQuery(limit: 2))
     #expect(page.items == [first, second])
     #expect(page.hasNextPage)
     #expect(page.items[0].fields["arbitrary.key"] == .integer(9_007_199_254_740_993))
     #expect(await transport.requests.count == 2)
+    #expect(await transport.stateRequests.count == 2)
+    #expect(page.state == "state-1")
 }
 
 @Test func changingOrIncompletePagesAreRejected() async throws {
     let item = try revision("Shared")
-    let transport = try ScriptedTransport([
-        reply(
-            "TractandaItem/query",
-            [
-                "ids": [item.itemID], "position": 0, "total": 1, "queryState": "before",
-            ]),
-        reply("TractandaItem/getBounded", ["list": [], "notFound": [item.itemID], "state": "after"]),
-    ])
+    let transport = try ScriptedTransport(
+        [
+            reply(
+                "TractandaItem/query",
+                [
+                    "ids": [item.itemID], "position": 0, "total": 1, "queryState": "before",
+                ]),
+            reply("TractandaItem/getBounded", ["list": [], "notFound": [item.itemID], "state": "after"]),
+        ], itemState: "before")
     await #expect(throws: TractandaError("stateChanged", "Items changed while loading; refresh the view.")) {
         try await ItemClient(transport: transport).page(matching: ItemQuery())
     }
