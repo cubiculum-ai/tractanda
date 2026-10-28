@@ -86,9 +86,11 @@ final class ItemSearchTests: XCTestCase {
             let call = (decoded["methodCalls"] as! [[Any]])[0]
             let method = call[0] as! String
             let args = call[1] as! [String: Any]
+            let callID = call[2] as! String
+            if method == TractandaJMAP.discoveryMethod { return try tuiFixtureSession(callID: callID) }
             var result: [String: Any]
             var returned = method
-            if method == "TractandaItem/get" {
+            if method == "TractandaItem/get" || method == "TractandaItem/getBounded" {
                 getCount += 1
                 if behavior == "gatedValidation", getCount > 1, !gateReleased {
                     await withCheckedContinuation { gate = $0 }
@@ -104,17 +106,14 @@ final class ItemSearchTests: XCTestCase {
                     $0.itemID != unresolvedID && !blockedIDs.contains($0.itemID)
                 }
                 result = [
-                    "state": "stable",
+                    "accountId": tuiFixtureAccountID, "state": "stable",
                     "notFound": ids.filter { id in !available.contains { $0.itemID == id } },
                     "remainingIDs": behavior == "continuation" && ids.count > 1
                         ? Array(ids.dropFirst()) : behavior == "unhydrated" ? blockedIDs : [],
                     "oversizedIDs": behavior == "oversized" ? blockedIDs : [],
-                    "unresolved": unresolvedID.map {
-                        [["itemID": $0, "status": "conflicted", "stateToken": "token"]]
-                    } ?? [],
-                    "list": try readable.map {
-                        try JSONSerialization.jsonObject(with: TractandaCore.JSON.encode($0))
-                    },
+                    "list": try readable.map { try tuiFixtureItem($0) }
+                        + (try unresolvedID.map { [try tuiFixtureUnresolved($0, stateToken: "token")] } ?? [])
+                        ,
                 ]
             } else if behavior == "unavailable" {
                 returned = "error"
@@ -139,9 +138,7 @@ final class ItemSearchTests: XCTestCase {
                     },
                 ]
             }
-            return try JSONSerialization.data(withJSONObject: [
-                "methodResponses": [[returned, result, "client"]]
-            ])
+            return try tuiFixtureReply(method: returned, result: result, callID: callID)
         }
     }
 

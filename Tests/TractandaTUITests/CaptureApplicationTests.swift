@@ -25,7 +25,11 @@ final class CaptureApplicationTests: XCTestCase {
             let envelope = try JSONSerialization.jsonObject(with: data) as! [String: Any]
             let call = (envelope["methodCalls"] as! [[Any]])[0]
             let method = call[0] as! String
-            let args = try JSONSerialization.data(withJSONObject: call[1])
+            let callID = call[2] as! String
+            if method == TractandaJMAP.discoveryMethod { return try tuiFixtureSession(callID: callID) }
+            let wire = try JMAPValue.decode(JSONSerialization.data(withJSONObject: call[1]))
+            let canonical = try TractandaJMAPCodec.argumentsFromWire(method: method, arguments: wire)
+            let args = try canonical.encoded()
             guard method == "TractandaItem/prepareCapture" else {
                 throw TractandaCore.TractandaError("testUnexpectedWrite", "Read-only tests must not commit")
             }
@@ -42,9 +46,7 @@ final class CaptureApplicationTests: XCTestCase {
                         token: "#unknown", code: "unknown", message: "Correct before saving")
                 ])
             let result = try JSONSerialization.jsonObject(with: TractandaCore.JSON.encode(plan))
-            return try JSONSerialization.data(withJSONObject: [
-                "methodResponses": [[method, result, "client"]]
-            ])
+            return try tuiFixtureReply(method: method, result: result as! [String: Any], callID: callID)
         }
     }
     private final class Fixture {

@@ -104,7 +104,10 @@ final class ChildCategoryTests: XCTestCase {
         XCTAssertEqual(workspace.items.map(\.itemID), Array(expected.prefix(64)))
         XCTAssertNil(workspace.categoryNavigation)
         XCTAssertEqual(calls.filter { $0.0 == "TractandaItem/query" }.count, 1)
-        XCTAssertFalse(calls.contains { $0.1["expression"] as? String == "selection == *" })
+        XCTAssertFalse(
+            calls.contains {
+                ($0.1["filter"] as? [String: Any])?["expression"] as? String == "selection == *"
+            })
         let firstPageEnvelope = try XCTUnwrap(
             envelopes.first {
                 $0.first?.0 == "TractandaItem/query"
@@ -119,9 +122,15 @@ final class ChildCategoryTests: XCTestCase {
         XCTAssertEqual(workspace.items.map(\.itemID), Array(expected.dropFirst(64)))
         XCTAssertEqual(workspace.sections[0].position, 64)
         XCTAssertEqual(calls.filter { $0.0 == "TractandaItem/query" }.count, 2)
-        XCTAssertFalse(calls.contains { $0.1["expression"] as? String == "selection == *" })
+        XCTAssertFalse(
+            calls.contains {
+                ($0.1["filter"] as? [String: Any])?["expression"] as? String == "selection == *"
+            })
         XCTAssertEqual(try workspace.childCategories(at: nil, expectedPath: []).count, 1)
-        XCTAssertTrue(calls.contains { $0.1["expression"] as? String == "selection == *" })
+        XCTAssertTrue(
+            calls.contains {
+                ($0.1["filter"] as? [String: Any])?["expression"] as? String == "selection == *"
+            })
     }
 
     func testAllItemsDropdownOpensOnlyRootsAndThenTheirChildren() throws {
