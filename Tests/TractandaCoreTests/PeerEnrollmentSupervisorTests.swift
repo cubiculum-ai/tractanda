@@ -132,30 +132,32 @@ final class PeerEnrollmentSupervisorTests: XCTestCase {
         // No native request or secret frame is ever written by this probe.
     }
     func testSourceChunkAndHelperReplyRejectShortOffsetDescriptorAndOldVersion() throws {
-        let f = try PeerTargetEnrollmentTests.Fixture(
-            test: name, proofSource: "PeerEnrollmentSupervisorTests")
-        let object = f.material.baseline.root
-        let actual = try f.source.readPeerEnrollment(
-            .init(operationID: f.operation), object: object, offset: 0,
-            maximumBytes: min(64, object.length), forUID: f.uid)
-        let encoded = try JSON.encode(
-            PeerEnrollmentNativeChunk(object: object, offset: 0, bytes: actual.bytes))
+        // Pure retained private-helper codec coverage, independent of retired source admission.
+        let bytes = Data(repeating: 0x71, count: 80)
+        let object = PeerPackage.Object(
+            kind: .item, id: try UUID.makeVersion1().uuidString.lowercased(), length: bytes.count,
+            sha256: AuthorityRecordCodec.sha256(bytes))
+        let chunk = Data(bytes.prefix(64))
+        let encoded = try JSON.encode(PeerEnrollmentNativeChunk(object: object, offset: 0, bytes: chunk))
         XCTAssertEqual(
             try NativePeerEnrollment.checkedChunk(
-                encoded, object: object, offset: 0, maximumBytes: min(64, object.length)
-            ).bytes, actual.bytes)
+                encoded, object: object, offset: 0, maximumBytes: 64
+            ).bytes, chunk)
+        let different = PeerPackage.Object(
+            kind: object.kind, id: try UUID.makeVersion1().uuidString.lowercased(), length: object.length,
+            sha256: object.sha256)
         for data in [
-            try JSON.encode(PeerEnrollmentNativeChunk(object: object, offset: 1, bytes: actual.bytes)),
-            try JSON.encode(
-                PeerEnrollmentNativeChunk(object: object, offset: 0, bytes: actual.bytes.dropLast())),
+            try JSON.encode(PeerEnrollmentNativeChunk(object: object, offset: 1, bytes: chunk)),
+            try JSON.encode(PeerEnrollmentNativeChunk(object: object, offset: 0, bytes: chunk.dropLast())),
+            try JSON.encode(PeerEnrollmentNativeChunk(object: different, offset: 0, bytes: chunk)),
         ] {
             XCTAssertThrowsError(
-                try NativePeerEnrollment.checkedChunk(
-                    data, object: object, offset: 0, maximumBytes: min(64, object.length)))
+                try NativePeerEnrollment.checkedChunk(data, object: object, offset: 0, maximumBytes: 64))
         }
+        let packageID = try UUID.makeVersion1().uuidString.lowercased()
         let requests: [PeerTargetEnrollment.Request] = [
-            .init(operation: "resume", packageID: f.material.baseline.packageID, advance: false),
-            .init(operation: "append", packageID: f.material.baseline.packageID, ordinal: 0, offset: 0),
+            .init(operation: "resume", packageID: packageID, advance: false),
+            .init(operation: "append", packageID: packageID, ordinal: 0, offset: 0),
             .init(operation: "finish"), .init(operation: "close"),
         ]
         for request in requests {
@@ -183,70 +185,5 @@ final class PeerEnrollmentSupervisorTests: XCTestCase {
         {
             XCTAssertEqual(($0 as? TractandaError)?.code, "invalidHelperReply")
         }
-        let record = try PeerEnrollmentTargetOutput.decode(f.bytes).0
-        let ackData = try f.source.nativeEnrollmentCall(
-            .init(action: "register", operationID: f.operation), forUID: f.uid)
-        let ack = try JSON.decode(PeerEnrollmentOperatorStatus.self, ackData)
-        XCTAssertEqual(ack.phase, "registered")
-        XCTAssertNil(ack.baselineManifest)
-        let sequence = try AuthorityStore.configurationSequence(root: f.sourceRoot)
-        let files = InitialAuthorityBootstrap.files(f.sourceRoot)
-        let marker = [PeerEnrollmentActivation.sourceDirectory, f.operation, "registered.json"]
-        let intent = [PeerEnrollmentActivation.sourceDirectory, f.operation, "configuration.json"]
-        let markerBefore = try files.read(path: marker, maximumBytes: PeerEnrollmentActivation.maximumBytes)
-        let intentBefore = try files.read(path: intent, maximumBytes: PeerEnrollmentActivation.maximumBytes)
-        var phase = "readonlyStatus"
-        do {
-            let inspection = try f.source.nativeEnrollmentStatus(f.operation, forUID: f.uid)
-            XCTAssertEqual(inspection.phase, "accepted")
-            phase = "registerAgain"
-            let repeated = try f.source.nativeEnrollmentCall(
-                .init(action: "register", operationID: f.operation), forUID: f.uid)
-            XCTAssertEqual(repeated, ackData)
-        } catch {
-            let code = (error as? TractandaError)?.code ?? "untyped"
-            let safeCode =
-                code.utf8.count <= 64
-                    && code.utf8.allSatisfy({
-                        (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0)
-                    }) ? code : "unclassified"
-            print("B1-CORE-REPLAY phase=\(phase) code=\(safeCode) parentCancelled=\(Task.isCancelled)")
-            throw error
-        }
-        XCTAssertEqual(try AuthorityStore.configurationSequence(root: f.sourceRoot), sequence)
-        XCTAssertEqual(
-            try files.read(path: marker, maximumBytes: PeerEnrollmentActivation.maximumBytes), markerBefore)
-        XCTAssertEqual(
-            try files.read(path: intent, maximumBytes: PeerEnrollmentActivation.maximumBytes), intentBefore)
-        let markerURL = marker.reduce(f.sourceRoot) { $0.appendingPathComponent($1) }
-        let conflicting = Data("conflicting isolated registration acknowledgement".utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: markerURL.path)
-        try conflicting.write(to: markerURL)
-        try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: markerURL.path)
-        XCTAssertThrowsError(
-            try f.source.nativeEnrollmentCall(
-                .init(action: "register", operationID: f.operation), forUID: f.uid)
-        ) {
-            XCTAssertEqual(($0 as? TractandaError)?.code, "enrollmentActivationRequired")
-        }
-        XCTAssertEqual(
-            try files.read(path: marker, maximumBytes: PeerEnrollmentActivation.maximumBytes), conflicting)
-        XCTAssertEqual(
-            try files.read(path: intent, maximumBytes: PeerEnrollmentActivation.maximumBytes), intentBefore)
-        XCTAssertEqual(try AuthorityStore.configurationSequence(root: f.sourceRoot), sequence)
-        XCTAssertNoThrow(
-            try PeerEnrollmentSupervisor.validate(
-                ack, operationID: f.operation, record: record, registered: true))
-        XCTAssertThrowsError(
-            try PeerEnrollmentSupervisor.validate(ack, operationID: f.operation, record: record))
-        let wrong = PeerEnrollmentOperatorStatus(
-            operationID: ack.operationID, phase: ack.phase, storeID: ack.storeID,
-            sourceReplicaID: ack.sourceReplicaID,
-            targetReplicaID: try UUID.makeVersion1().uuidString.lowercased(),
-            bootstrap: ack.bootstrap, approval: ack.approval, baselineManifest: nil)
-        XCTAssertThrowsError(
-            try PeerEnrollmentSupervisor.validate(
-                wrong, operationID: f.operation, record: record, registered: true))
-        try f.capacity()
     }
 }
