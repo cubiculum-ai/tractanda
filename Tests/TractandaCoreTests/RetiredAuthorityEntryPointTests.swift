@@ -45,13 +45,16 @@ final class RetiredAuthorityEntryPointTests: XCTestCase {
         /// Include SQLite, retry/configuration files, canonical records and every other regular
         /// file. These refused APIs must not even change disposable bookkeeping.
         func fingerprint() throws -> [String: String] {
+            try Self.fingerprint(storeRoot)
+        }
+        static func fingerprint(_ root: URL) throws -> [String: String] {
             var result: [String: String] = [:]
             var bytes: UInt64 = 0
             let entries = try XCTUnwrap(
-                FileManager.default.enumerator(at: storeRoot, includingPropertiesForKeys: nil))
+                FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil))
             for case let path as URL in entries {
                 let metadata = try FileMetadata.read(at: path)
-                let relative = String(path.path.dropFirst(storeRoot.path.count + 1))
+                let relative = String(path.path.dropFirst(root.path.count + 1))
                 if metadata.type == .directory {
                     result[relative + "/"] = String(metadata.mode)
                     continue
@@ -105,5 +108,17 @@ final class RetiredAuthorityEntryPointTests: XCTestCase {
                 peerID: "retired-peer", replacement: $0.context(),
                 operationID: UUID.makeVersion1().uuidString.lowercased())
         }
+    }
+
+    func testPersonalStoreRejectsLegacyEnrollmentBeforeChangingSourceOrPreparedTarget() throws {
+        let f = try PeerEnrollmentApprovalTests.Fixture()
+        let identity = try f.source.personalSyncIdentity()
+        let before = try Fixture.fingerprint(f.root)
+        XCTAssertThrowsError(try f.begin()) {
+            XCTAssertEqual(($0 as? TractandaError)?.code, "peerIntakeDisabled")
+        }
+        XCTAssertEqual(try Fixture.fingerprint(f.root), before)
+        XCTAssertEqual(try f.source.personalSyncIdentity(), identity)
+        XCTAssertFalse(try f.source.verificationSnapshot().authorityEnforced)
     }
 }
