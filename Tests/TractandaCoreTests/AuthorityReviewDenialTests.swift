@@ -148,7 +148,7 @@ final class AuthorityReviewDenialTests: XCTestCase {
         // Default current support would require a separate atomic transition before the tested denial.
         f.base.receiver = try ItemStore(
             root: f.base.receiverRoot, accounts: directory,
-            revisionProjectionEnabled: true, authorityIntakeEnabled: true,
+            revisionProjectionEnabled: true, authorityIntakeEnabled: true, firstSourceOperation: nil,
             canonicalFormatSupport: PeerIntakeStoreTests.Fixture.historical14Support)
         _ = try f.base.receiver.configureAccess(
             .object([
@@ -190,7 +190,7 @@ final class AuthorityReviewDenialTests: XCTestCase {
         // Default current support would require a separate atomic transition before the tested denial.
         f.base.receiver = try ItemStore(
             root: f.base.receiverRoot, accounts: directory,
-            revisionProjectionEnabled: true, authorityIntakeEnabled: true,
+            revisionProjectionEnabled: true, authorityIntakeEnabled: true, firstSourceOperation: nil,
             canonicalFormatSupport: PeerIntakeStoreTests.Fixture.historical14Support)
         _ = try f.base.receiver.configureAccess(
             .object([
