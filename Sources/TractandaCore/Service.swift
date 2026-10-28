@@ -2747,6 +2747,21 @@ public final class ItemService {
             try check(args, allowed: ["uploadID"])
             try store.preflightAttachmentFinish(uploadID: string(args, "uploadID"))
         }
+        if requiresAsyncDocumentJobs,
+            ["TractandaDocumentJob/resume", "TractandaDocumentJob/rebase"].contains(call.method)
+        {
+            let args = try call.dictionary()
+            try check(
+                args,
+                allowed: call.method == "TractandaDocumentJob/rebase"
+                    ? ["jobID", "expectedRevisionID"] : ["jobID"])
+            _ = try store.documentJobStatus(string(args, "jobID"))
+            guard try documentJobRuntime() != nil else {
+                throw TractandaError(
+                    "documentConverterUnavailable",
+                    "Configure the native document producer before resuming.")
+            }
+        }
         if call.method == "TractandaAttachment/upload" {
             let args = try call.dictionary()
             try check(args, allowed: ["uploadID", "offset", "data"])

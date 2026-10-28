@@ -404,3 +404,31 @@ private actor JMAPEffectCounter {
         jmapKernel(limits: .init(maximumJSONDepth: 1)),
         ##"{"using":[],"methodCalls":[["x",{},"x"]]}"##, code: "limit", limit: "tractanda.maxJSONDepth")
 }
+
+@Test func jmapJSONStringPreservesBOMContentAndDistinctMemberNames() throws {
+    for original in ["\u{FEFF}", "\u{FEFF}payload", "payload\u{FEFF}"] {
+        let encoded = try JSONEncoder().encode(original)
+        let decoded = try #require(JMAPValue.decode(encoded).text)
+        #expect(Array(decoded.utf8) == Array(original.utf8))
+        let roundTrip = try #require(JMAPValue.decode(JMAPValue.string(original).encoded()).text)
+        #expect(Array(roundTrip.utf8) == Array(original.utf8))
+    }
+    let escaped = try JMAPValue.decode(
+        Data(##"{"\uFEFFmethodCalls":1,"methodCalls":2,"value":"\uFEFF"}"##.utf8))
+    #expect(escaped.members?.count == 3)
+    #expect(escaped["\u{FEFF}methodCalls"] == .number(try JMAPNumber("1")))
+    #expect(escaped["methodCalls"] == .number(try JMAPNumber("2")))
+    #expect(Array(try #require(escaped["value"]?.text).utf8) == [0xEF, 0xBB, 0xBF])
+}
+
+@Test func jmapBOMContentFixKeepsStrictUTF8AndDocumentSyntaxValidation() throws {
+    #expect(throws: JMAPJSONError.invalidUnicode) {
+        try JMAPValue.decode(Data([34, 0xC0, 0xAF, 34]))
+    }
+    #expect(throws: JMAPJSONError.invalidJSON) {
+        try JMAPValue.decode(Data([0xEF, 0xBB, 0xBF]) + Data("{}".utf8))
+    }
+    #expect(throws: JMAPJSONError.invalidUnicode) {
+        try JMAPValue.decode(Data(##""\uFFFF""##.utf8))
+    }
+}

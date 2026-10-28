@@ -40,13 +40,11 @@ final class ContentCommandTests: XCTestCase {
         try body(root)
     }
     private func run(_ arguments: [String]) throws -> (Int32, Data, Data) {
-        guard let executable = ProcessInfo.processInfo.environment["TRACTANDA_TEST_CLI"] else {
-            throw TractandaError("fixture", "Native owner must supply the current built CLI explicitly")
-        }
+        let executable = try currentBuiltTestCLI(anchor: Self.self)
         let process = Process()
         let output = Pipe()
         let error = Pipe()
-        process.executableURL = URL(fileURLWithPath: executable)
+        process.executableURL = executable
         process.arguments = arguments
         process.standardOutput = output
         process.standardError = error

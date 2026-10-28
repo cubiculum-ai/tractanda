@@ -995,10 +995,15 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         let listed = try await client.documentJobs()
         XCTAssertEqual(retained.jobID, id)
         XCTAssertEqual(listed.jobs.count, 1)
+        let recordURL = fixture.store.appendingPathComponent("document-jobs/\(id)/record.json")
+        let beforeRecord = try Data(contentsOf: recordURL)
+        let beforeMetadata = try FileMetadata.read(at: recordURL)
         do {
             _ = try await client.resumeDocumentJob(id)
             XCTFail("Unconfigured producer must not resume")
         } catch { XCTAssertEqual((error as? TractandaError)?.code, "documentConverterUnavailable") }
+        XCTAssertEqual(try Data(contentsOf: recordURL), beforeRecord)
+        XCTAssertEqual(try FileMetadata.read(at: recordURL), beforeMetadata)
         let cancelled = try await client.cancelDocumentJob(id)
         let discarded = try await client.discardDocumentJob(id)
         XCTAssertEqual(cancelled.state, "cancelled")

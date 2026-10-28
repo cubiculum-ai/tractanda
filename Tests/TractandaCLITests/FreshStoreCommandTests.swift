@@ -23,8 +23,7 @@ final class FreshStoreCommandTests: XCTestCase {
         let process = Process()
         let output = Pipe()
         let error = Pipe()
-        let executable = ProcessInfo.processInfo.environment["TRACTANDA_TEST_CLI"] ?? ".build/debug/tractanda"
-        process.executableURL = URL(fileURLWithPath: executable).standardizedFileURL
+        process.executableURL = try currentBuiltTestCLI(anchor: Self.self)
         process.arguments = args
         process.standardOutput = output
         process.standardError = error

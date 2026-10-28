@@ -121,7 +121,10 @@ final class ItemTextContentTests: XCTestCase {
                 try JSON.decode(
                     Page.self,
                     client.call(
-                        "TractandaItem/query", arguments: ["viewID": activeView.itemID, "limit": 10]))
+                        "TractandaItem/query",
+                        arguments: [
+                            "filter": ["viewID": activeView.itemID], "calculateTotal": true, "limit": 10,
+                        ]))
             }
             XCTAssertEqual(try activePage().total, 0)
 

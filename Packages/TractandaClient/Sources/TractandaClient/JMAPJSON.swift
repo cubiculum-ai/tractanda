@@ -213,9 +213,15 @@ private struct JMAPJSONParser {
             let byte = bytes[position]
             position += 1
             if byte == 34 {
-                guard let text = String(bytes: output, encoding: .utf8),
-                    text.unicodeScalars.allSatisfy({ !Self.isNoncharacter($0.value) })
-                else { throw JMAPJSONError.invalidUnicode }
+                guard String(bytes: output, encoding: .utf8) != nil else {
+                    throw JMAPJSONError.invalidUnicode
+                }
+                // Foundation's encoding initializer consumes a leading/sole UTF8 BOM. JSON
+                // string contents and member names must retain that legitimate Unicode scalar.
+                let text = String(decoding: output, as: UTF8.self)
+                guard text.unicodeScalars.allSatisfy({ !Self.isNoncharacter($0.value) }) else {
+                    throw JMAPJSONError.invalidUnicode
+                }
                 return text
             }
             guard byte >= 32 else { throw JMAPJSONError.invalidJSON }

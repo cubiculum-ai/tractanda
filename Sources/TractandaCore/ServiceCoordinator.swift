@@ -298,9 +298,10 @@ public actor ServiceCoordinator {
         {
             throw TractandaError("serviceBusy", "An exclusive rebuild is in progress.")
         }
-        if ["TractandaStore/rebuild", "TractandaAttachment/finish", "TractandaAttachment/upload"].contains(
-            request.method)
-        {
+        if [
+            "TractandaStore/rebuild", "TractandaAttachment/finish", "TractandaAttachment/upload",
+            "TractandaDocumentJob/resume", "TractandaDocumentJob/rebase",
+        ].contains(request.method) {
             try await submit(principal: principal) { service in
                 try service.store.withAccess(forUID: uid, recoverPublication: false) {
                     try service.preflightNativeMutationAdmission(request)

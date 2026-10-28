@@ -253,9 +253,11 @@ final class CategoryHierarchyTests: XCTestCase {
                 client.call(
                     "TractandaItem/query",
                     arguments: [
-                        "categoryPath": [ids["when.deadlines.today"]!], "at": at,
+                        "filter": ["categoryPath": [ids["when.deadlines.today"]!], "at": at]
                     ]))
-            XCTAssertEqual(result.queryState, oldState)
+            XCTAssertFalse(result.queryState.isEmpty)
+            XCTAssertNotEqual(result.queryState, oldState)
+            XCTAssertEqual(store!.state, oldState)
             XCTAssertEqual(Timestamp.parse(result.evaluatedAt), Timestamp.parse(at))
             return result.ids
         }

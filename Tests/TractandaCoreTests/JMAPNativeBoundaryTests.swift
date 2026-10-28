@@ -72,6 +72,17 @@ final class JMAPNativeBoundaryTests: XCTestCase {
         body.merge(extra) { _, value in value }
         return try JSONSerialization.data(withJSONObject: body)
     }
+    private func authorizedRequest(
+        _ store: ItemStore, _ calls: [[Any]],
+        using: [String] = [JMAPKernel.core, ItemService.capability], extra: [String: Any] = [:]
+    ) throws -> Data {
+        let data = try nativeFixtureEnvelope(
+            calls: calls, accountID: store.nativeProtocolSessionBasis.identity)
+        var body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        body["using"] = using
+        body.merge(extra) { _, value in value }
+        return try JSONSerialization.data(withJSONObject: body)
+    }
     private func envelope(_ data: Data) throws -> [String: Any] {
         try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
     }
@@ -150,7 +161,8 @@ final class JMAPNativeBoundaryTests: XCTestCase {
         spoofed["actor"] = "uid:0"
         try assertError(
             service.handle(
-                try request([["TractandaItem/commit", spoofed, "save"]]), peerUID: accounts.alice),
+                try authorizedRequest(store, [["TractandaItem/commit", spoofed, "save"]]),
+                peerUID: accounts.alice),
             "invalidArguments")
         XCTAssertTrue(try store.candidates().isEmpty)
     }
@@ -159,34 +171,46 @@ final class JMAPNativeBoundaryTests: XCTestCase {
         let root = try root()
         let accounts = Accounts()
         defer { try? FileManager.default.removeItem(at: root) }
-        let service = ItemService(store: try makeStore(root, accounts))
+        let store = try makeStore(root, accounts)
+        let service = ItemService(store: store)
         let text = String(repeating: "x", count: 600_000)
         let write = try object(
             CommitRequest(classID: "Item", changes: ["body": .text(text)], operationID: "large-save"))
         let response = service.handle(
-            try request([
-                ["TractandaItem/commit", write, "save"],
+            try authorizedRequest(
+                store,
                 [
-                    "TractandaRevision/get",
+                    ["TractandaItem/commit", write, "save"],
                     [
-                        "#itemID": ["resultOf": "save", "name": "TractandaItem/commit", "path": "/itemId"],
-                        "#revisionID": [
-                            "resultOf": "save", "name": "TractandaItem/commit", "path": "/revisionId",
+                        "TractandaItem/history",
+                        [
+                            "#itemID": [
+                                "resultOf": "save", "name": "TractandaItem/commit", "path": "/itemId",
+                            ],
+                            "limit": 1, "properties": ["id"],
+                        ], "history",
+                    ],
+                    [
+                        "TractandaRevision/get",
+                        [
+                            "#ids": [
+                                "resultOf": "history", "name": "TractandaItem/history", "path": "/list/*/id",
+                            ]
                         ],
-                    ], "read",
-                ],
-            ]), peerUID: tractanda_uid())
+                        "read",
+                    ],
+                ]), peerUID: tractanda_uid())
         let replies = try calls(response)
         let saved = try XCTUnwrap(replies[0][1] as? [String: Any])
         XCTAssertLessThan(try JSONSerialization.data(withJSONObject: saved).count, 4096)
         XCTAssertNil(saved["revision"])
         XCTAssertNil(saved["requestIdentity"])
         XCTAssertNil(saved["itemState"])
-        let pinned = try XCTUnwrap((replies[1][1] as? [String: Any])?["revision"] as? [String: Any])
-        let fields = try XCTUnwrap(pinned["fields"] as? [String: Any])
-        XCTAssertEqual(
-            (fields["revisionID"] as? [String: Any])?["value"] as? String, saved["revisionId"] as? String)
-        XCTAssertEqual((fields["body"] as? [String: Any])?["value"] as? String, text)
+        let records = try XCTUnwrap((replies[2][1] as? [String: Any])?["list"] as? [[String: Any]])
+        let pinnedData = try JSONSerialization.data(withJSONObject: XCTUnwrap(records.first))
+        let pinned = try JSON.decode(JMAPRevisionRecord.self, pinnedData).canonicalRevision()
+        XCTAssertEqual(pinned.revisionID, saved["revisionId"] as? String)
+        XCTAssertEqual(pinned.fields["body"], .text(text))
     }
 
     func testSessionMetadataStateIsSeparateFromContentState() throws {
@@ -195,13 +219,15 @@ final class JMAPNativeBoundaryTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let store = try makeStore(root, accounts)
         let service = ItemService(store: store)
-        let echo = try request([["Core/echo", [:], "echo"]], using: [JMAPKernel.core])
+        let echo = try authorizedRequest(store, [["Core/echo", [:], "echo"]], using: [JMAPKernel.core])
         let before = try envelope(service.handle(echo, peerUID: tractanda_uid()))["sessionState"] as? String
         let contentBefore = store.state
         let input = try object(
             CommitRequest(classID: "Item", changes: ["subject": .text("edit")], operationID: "metadata-save"))
         _ = try receipt(
-            service.handle(try request([["TractandaItem/commit", input, "save"]]), peerUID: tractanda_uid()))
+            service.handle(
+                try authorizedRequest(store, [["TractandaItem/commit", input, "save"]]),
+                peerUID: tractanda_uid()))
         let after = try envelope(service.handle(echo, peerUID: tractanda_uid()))["sessionState"] as? String
         XCTAssertNotNil(before)
         XCTAssertEqual(before, after)
@@ -219,18 +245,20 @@ final class JMAPNativeBoundaryTests: XCTestCase {
             CommitRequest(
                 classID: "Item", changes: ["subject": .text("saved")], operationID: "revoke-after-save"))
         let response = service.handle(
-            try request([
-                ["TractandaItem/commit", input, "save"],
+            try authorizedRequest(
+                store,
                 [
-                    "TractandaRevision/get",
+                    ["TractandaItem/commit", input, "save"],
                     [
-                        "#itemID": ["resultOf": "save", "name": "TractandaItem/commit", "path": "/itemId"],
-                        "#revisionID": [
-                            "resultOf": "save", "name": "TractandaItem/commit", "path": "/revisionId",
-                        ],
-                    ], "read",
-                ],
-            ]), peerUID: accounts.alice)
+                        "TractandaItem/history",
+                        [
+                            "#itemID": [
+                                "resultOf": "save", "name": "TractandaItem/commit", "path": "/itemId",
+                            ],
+                            "limit": 1, "properties": ["id"],
+                        ], "read",
+                    ],
+                ]), peerUID: accounts.alice)
         let replies = try calls(response)
         XCTAssertEqual(replies[0][0] as? String, "TractandaItem/commit")
         XCTAssertEqual((replies[0][1] as? [String: Any])?["operationId"] as? String, "revoke-after-save")
@@ -253,7 +281,7 @@ final class JMAPNativeBoundaryTests: XCTestCase {
             CommitRequest(
                 classID: "Item", changes: ["subject": .text("durably published")], operationID: "late-failure"
             ))
-        let bytes = try request([["TractandaItem/commit", input, "save"]])
+        let bytes = try authorizedRequest(store, [["TractandaItem/commit", input, "save"]])
         try assertError(service.handle(bytes, peerUID: tractanda_uid()), "serverPartialFail")
         store.beforePersonalDurableAcknowledgementForTesting = nil
         try store.rebuildIndex()
@@ -290,7 +318,7 @@ final class JMAPNativeBoundaryTests: XCTestCase {
             "itemID": target.itemID, "categoryID": category.itemID,
             "expectedRevisionID": target.revisionID, "action": "negative", "operationID": "feedback-late",
         ]
-        let bytes = try request([["TractandaLearning/feedback", input, "feedback"]])
+        let bytes = try authorizedRequest(store, [["TractandaLearning/feedback", input, "feedback"]])
         try assertError(service.handle(bytes, peerUID: tractanda_uid()), "serverPartialFail")
         store.beforePersonalDurableAcknowledgementForTesting = nil
         try store.rebuildIndex()
