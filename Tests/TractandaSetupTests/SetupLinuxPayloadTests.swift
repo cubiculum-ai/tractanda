@@ -44,7 +44,8 @@ final class SetupLinuxPayloadTests: XCTestCase {
         #else
             let arch = "x86_64"
         #endif
-        let manifest = BundleManifest(version: "0.1.0-poc.15", platform: "linux", arch: arch, files: files)
+        let manifest = BundleManifest(
+            version: "0.1.0-poc.15", platform: "linux", arch: arch, files: files, canonicalFormats: .current)
         let bytes = try JSONEncoder().encode(manifest)
         try bytes.write(to: payload.appendingPathComponent("bundle-manifest.json"))
         let options = SetupOptions(name: "production", owner: "fixture-owner", bundle: payload)

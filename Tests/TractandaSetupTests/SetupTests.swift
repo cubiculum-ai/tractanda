@@ -141,7 +141,9 @@ final class SetupTests: XCTestCase {
             let arch = "x86_64"
         #endif
         try JSONEncoder().encode(
-            BundleManifest(version: "0.1.0-preview.1", platform: "macos", arch: arch, files: files)
+            BundleManifest(
+                version: "0.1.0-preview.1", platform: "macos", arch: arch, files: files,
+                canonicalFormats: .current)
         )
         .write(to: bundle.appendingPathComponent("bundle-manifest.json"))
         let owner = try SystemAccountDirectory().user(forUID: tractanda_uid()).name

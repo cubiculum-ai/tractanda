@@ -21,28 +21,30 @@ final class ModelProvisioningSetupTests: XCTestCase {
     func testDigestBoundCatalogAllowsSlimBundleAndRejectsIncompleteDescriptor() throws {
         let files = inventory()
         let valid = BundleManifest(
-            version: "test", platform: "linux", arch: "x86_64", files: files,
+            version: "test", platform: "linux", arch: "x86_64", files: files, canonicalFormats: .current,
             modelProvisioningManifestPath: "models/manifest.json",
             modelProvisioningManifestSHA256: String(repeating: "1", count: 64))
         XCTAssertNoThrow(try valid.validate())
+        XCTAssertEqual(valid.canonicalFormats, .current)
         let roundtrip = try JSONDecoder().decode(BundleManifest.self, from: JSONEncoder().encode(valid))
         XCTAssertEqual(roundtrip, valid)
         for path in ["../models/manifest.json", "models/other.json"] {
             XCTAssertThrowsError(
                 try BundleManifest(
                     version: "test", platform: "linux", arch: "x86_64", files: files,
+                    canonicalFormats: .current,
                     modelProvisioningManifestPath: path,
                     modelProvisioningManifestSHA256: String(repeating: "1", count: 64)
                 ).validate())
         }
         XCTAssertThrowsError(
             try BundleManifest(
-                version: "test", platform: "linux", arch: "x86_64", files: files,
+                version: "test", platform: "linux", arch: "x86_64", files: files, canonicalFormats: .current,
                 modelProvisioningManifestPath: "models/manifest.json"
             ).validate())
         XCTAssertThrowsError(
             try BundleManifest(
-                version: "test", platform: "linux", arch: "x86_64", files: files,
+                version: "test", platform: "linux", arch: "x86_64", files: files, canonicalFormats: .current,
                 modelProvisioningManifestPath: "models/manifest.json",
                 modelProvisioningManifestSHA256: String(repeating: "2", count: 64)
             ).validate())
