@@ -53,10 +53,11 @@ final class MCPHTTPServiceTests: XCTestCase {
                 throw TractandaError("unauthorized", "bad")
             },
             dispatch: { data, _ in
+                if let discovery = try mcpFixtureDiscoveryReply(data) { return discovery }
                 let request = try JSONSerialization.jsonObject(with: data) as! [String: Any]
                 let call = (request["methodCalls"] as! [[Any]])[0]
                 return try JSONSerialization.data(withJSONObject: [
-                    "methodResponses": [[call[0], ["ok": true], "client"]]
+                    "methodResponses": [[call[0], ["ok": true], call[2]]]
                 ])
             })
     }
@@ -95,6 +96,7 @@ final class MCPHTTPServiceTests: XCTestCase {
                 return alice
             },
             dispatch: { data, _ in
+                if let discovery = try mcpFixtureDiscoveryReply(data) { return discovery }
                 let request = try JSONSerialization.jsonObject(with: data) as! [String: Any]
                 let call = (request["methodCalls"] as! [[Any]])[0]
                 let result: [String: Any] = [
@@ -187,10 +189,11 @@ final class MCPHTTPServiceTests: XCTestCase {
         let service = MCPHTTPService(
             authorize: { try await tokens.identity($0, alice: alice, bob: bob) },
             dispatch: { data, _ in
+                if let discovery = try mcpFixtureDiscoveryReply(data) { return discovery }
                 let request = try JSONSerialization.jsonObject(with: data) as! [String: Any]
                 let call = (request["methodCalls"] as! [[Any]])[0]
                 return try JSONSerialization.data(withJSONObject: [
-                    "methodResponses": [[call[0], ["ok": true], "client"]]
+                    "methodResponses": [[call[0], ["ok": true], call[2]]]
                 ])
             })
         let initialize = try body(

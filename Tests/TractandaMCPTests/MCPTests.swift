@@ -156,6 +156,7 @@ final class MCPTests: XCTestCase {
             "indexReady": .bool(false), "diagnostics": .array([.string("indexDelayed")]),
         ])
         let gateway = NativeGateway(backend: { request in
+            if let discovery = try mcpFixtureDiscoveryReply(request) { return discovery }
             let envelope = try JSONDecoder().decode(Value.self, from: request)
             let call = envelope.objectValue!["methodCalls"]!.arrayValue![0].arrayValue!
             XCTAssertTrue(
@@ -176,6 +177,7 @@ final class MCPTests: XCTestCase {
         let revisionID = "22222222-2222-1222-8222-222222222222"
         let frontierID = "33333333-3333-1333-8333-333333333333"
         let backend = NativeGateway(backend: { requestData in
+            if let discovery = try mcpFixtureDiscoveryReply(requestData) { return discovery }
             let envelope = try JSONSerialization.jsonObject(with: requestData) as! [String: Any]
             let calls = envelope["methodCalls"] as! [[Any]]
             let method = calls[0][0] as! String
@@ -190,7 +192,7 @@ final class MCPTests: XCTestCase {
 
             }
             return try JSONSerialization.data(withJSONObject: [
-                "methodResponses": [[method, result, "client"]]
+                "methodResponses": [[method, result, calls[0][2]]]
             ])
         })
         let definition = try XCTUnwrap(
@@ -400,6 +402,7 @@ final class MCPTests: XCTestCase {
         let offsets = [1_073_741_825, 1_099_511_627_776]
         let capture = NativeCallCapture()
         let gateway = NativeGateway(backend: { envelope in
+            if let discovery = try mcpFixtureDiscoveryReply(envelope) { return discovery }
             let request = try JSONSerialization.jsonObject(with: envelope) as! [String: Any]
             let call = (request["methodCalls"] as! [[Any]])[0]
             let method = call[0] as! String
@@ -416,7 +419,7 @@ final class MCPTests: XCTestCase {
                     ]
                 ])
             }
-            let offset = (args["offset"] as! NSNumber).intValue
+            let offset = try XCTUnwrap(args["offset"] as? NSNumber).intValue
             await capture.append(
                 CapturedNativeCall(
                     method: method, itemID: args["itemID"] as? String,
@@ -459,6 +462,7 @@ final class MCPTests: XCTestCase {
         let capture = NativeCallCapture()
         let original = Data((0..<9_000).map { UInt8(($0 * 73) % 256) })
         let gateway = NativeGateway(backend: { envelope in
+            if let discovery = try mcpFixtureDiscoveryReply(envelope) { return discovery }
             let request = try JSONSerialization.jsonObject(with: envelope) as! [String: Any]
             let call = (request["methodCalls"] as! [[Any]])[0]
             let method = call[0] as! String
@@ -474,8 +478,8 @@ final class MCPTests: XCTestCase {
             if method == "TractandaStore/info" {
                 result = ["features": [ServerFeature.attachmentLifecycle.rawValue]]
             } else {
-                let offset = (args["offset"] as! NSNumber).intValue
-                let limit = (args["limit"] as! NSNumber).intValue
+                let offset = try XCTUnwrap(args["offset"] as? NSNumber).intValue
+                let limit = try XCTUnwrap(args["limit"] as? NSNumber).intValue
                 let end = min(original.count, offset + limit)
                 let bytes = original.subdata(in: offset..<end)
                 result = [
@@ -813,6 +817,7 @@ final class MCPTests: XCTestCase {
         let jobID = "6ba7b813-9dad-11d1-80b4-00c04fd430c8"
         let capture = NativeCallCapture()
         let gateway = NativeGateway(backend: { envelope in
+            if let discovery = try mcpFixtureDiscoveryReply(envelope) { return discovery }
             let request = try JSONSerialization.jsonObject(with: envelope) as! [String: Any]
             let call = (request["methodCalls"] as! [[Any]])[0]
             let method = call[0] as! String
@@ -922,6 +927,7 @@ final class MCPTests: XCTestCase {
         let jobID = "6ba7b813-9dad-11d1-80b4-00c04fd430c8"
         let calls = NativeCallCapture()
         let unsupported = NativeGateway(backend: { envelope in
+            if let discovery = try mcpFixtureDiscoveryReply(envelope) { return discovery }
             let request = try JSONSerialization.jsonObject(with: envelope) as! [String: Any]
             let call = (request["methodCalls"] as! [[Any]])[0]
             let method = call[0] as! String

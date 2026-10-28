@@ -167,6 +167,13 @@ final class DocumentPackagingTests: XCTestCase {
         try FileManager.default.createDirectory(
             at: converter.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("tiny fixture converter".utf8).write(to: converter)
+        // Service-definition tests inspect the same release manifest as real installation.
+        // Inventory validation has separate tests; this fixture never starts the marker executable.
+        try JSONEncoder().encode(
+            BundleManifest(
+                version: "0.1.0-package-test", platform: "macos", arch: "arm64",
+                files: try inventory(), documentExtraction: .pinned)
+        ).write(to: release.appendingPathComponent("bundle-manifest.json"))
         var receipt = try InstallationReceipt(
             options: SetupOptions(name: "preview", bundle: release), roots: roots,
             owner: "owner", release: release, manifestSHA256: String(repeating: "1", count: 64))
@@ -264,9 +271,12 @@ final class DocumentPackagingTests: XCTestCase {
         {
             if let bootstrap = arguments.firstIndex(of: "--bootstrap-store") {
                 do {
-                    _ = try ItemStore(
-                        root: URL(fileURLWithPath: arguments[bootstrap + 1]),
-                        indexDirectory: URL(fileURLWithPath: arguments[bootstrap + 2]))
+                    let identity = try StoreBootstrap.initialize(
+                        store: URL(fileURLWithPath: arguments[bootstrap + 1]),
+                        indexDirectory: URL(fileURLWithPath: arguments[bootstrap + 2]),
+                        owner: arguments[bootstrap + 3], instance: arguments[bootstrap + 4],
+                        commonStoreID: arguments.count > bootstrap + 5 ? arguments[bootstrap + 5] : nil)
+                    return ProcessResult(status: 0, output: identity.map { $0.replicaID + "\n" } ?? "")
                 }
             }
             guard executable == "/bin/launchctl" else { return ProcessResult(status: 0) }

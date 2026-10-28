@@ -63,11 +63,15 @@ final class ExtractedTextUnitToolTests: XCTestCase, @unchecked Sendable {
                     ]),
                     "sessionState": .string("state"),
                 ]))
-            let client = ItemClient(transport: { _ in envelope })
+            let client = ItemClient(transport: { request in
+                if let discovery = try mcpFixtureDiscoveryReply(request) { return discovery }
+                return envelope
+            })
             let native = try client.call("TractandaItem/extractedTextUnit")
             let nativeValue = try JSONDecoder().decode(Value.self, from: native)
             XCTAssertEqual(nativeValue.objectValue?["unit"]?.objectValue?["text"]?.stringValue, text)
             let gateway = NativeGateway(backend: { request in
+                if let discovery = try mcpFixtureDiscoveryReply(request) { return discovery }
                 let object = try JSONDecoder().decode(Value.self, from: request)
                 let method = object.objectValue?["methodCalls"]?.arrayValue?.first?.arrayValue?.first?
                     .stringValue
@@ -137,8 +141,7 @@ final class ExtractedTextUnitToolTests: XCTestCase, @unchecked Sendable {
         private var unitCalls = 0
         init(root: URL) throws {
             service = ItemService(
-                store: try ItemStore(
-                    root: root, revisionProjectionEnabled: true, authorityIntakeEnabled: true))
+                store: try ItemStore.openInitialized(root: root))
         }
         func send(_ data: Data) throws -> Data {
             guard let service else { throw TractandaError("serviceClosed", "Fixture closed") }
@@ -165,9 +168,8 @@ final class ExtractedTextUnitToolTests: XCTestCase, @unchecked Sendable {
         let uid: UInt32
         do {
             _ = try ItemStore.initializeFresh(root: root)
-            let store = try ItemStore(
-                root: root, attachmentUploadPolicy: .init(maximumStagedBytes: cap, minimumFreeBytes: reserve),
-                revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            let store = try ItemStore.openInitialized(
+                root: root, attachmentUploadPolicy: .init(maximumStagedBytes: cap, minimumFreeBytes: reserve))
             uid = store.ownerUID
             revision = try store.commit(
                 .init(classID: "Item", changes: ["body": .text("gated source")], operationID: "source")

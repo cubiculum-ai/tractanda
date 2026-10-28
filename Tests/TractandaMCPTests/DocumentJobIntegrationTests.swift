@@ -311,9 +311,7 @@ final class DocumentJobIntegrationTests: XCTestCase {
                     "profile": .text(AccessConfiguration.profile),
                     "users": .list([.text("alice")]),
                 ]))
-            let store = try ItemStore(
-                root: storeURL, accounts: accounts,
-                revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            let store = try ItemStore.openInitialized(root: storeURL, accounts: accounts)
             try store.setAttachmentReserveForTesting(10 * 1024 * 1024 * 1024)
             let initial = try store.commit(
                 CommitRequest(
@@ -513,9 +511,7 @@ final class DocumentJobIntegrationTests: XCTestCase {
         }
 
         do {
-            let store = try ItemStore(
-                root: fixture.store, accounts: fixture.accounts,
-                revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            let store = try ItemStore.openInitialized(root: fixture.store, accounts: fixture.accounts)
             _ = try store.commit(
                 CommitRequest(
                     action: .revise, itemID: fixture.itemID,
@@ -596,9 +592,7 @@ final class DocumentJobIntegrationTests: XCTestCase {
             XCTFail("Expected the injected held-gate error.")
         } catch InjectedFailure.heldGate {
             // Reopening acquires the exclusive writer lease: shutdown finished before cleanup.
-            let store = try ItemStore(
-                root: fixture.store, accounts: fixture.accounts,
-                revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            let store = try ItemStore.openInitialized(root: fixture.store, accounts: fixture.accounts)
             XCTAssertEqual(try store.get(fixture.itemID).itemID, fixture.itemID)
         }
         try checkCapacity(at: fixture.root)
