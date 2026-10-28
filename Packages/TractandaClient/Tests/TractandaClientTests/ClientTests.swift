@@ -25,7 +25,7 @@ private actor ScriptedTransport: ItemTransport {
         {
             stateRequests.append(request)
             return try reply(
-                "TractandaItem/get", object(ItemGetResult(list: [], notFound: [], state: itemState)),
+                "TractandaItem/get", ["list": [], "notFound": [], "state": itemState],
                 tag: call[2] as! String)
         }
         requests.append(request)
