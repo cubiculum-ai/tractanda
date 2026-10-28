@@ -6,7 +6,7 @@ import XCTest
 
 final class AtomicAuthorityActivationTests: XCTestCase {
     private var legacy14: CanonicalFormatSupport {
-        let capabilities = CanonicalFormatSupport.current.capabilities.filter {
+        let capabilities = AtomicAuthorityCompatibility.support.capabilities.filter {
             $0 != AtomicAuthorityFormat.profile
         }
         return .init(
@@ -164,39 +164,25 @@ final class AtomicAuthorityActivationTests: XCTestCase {
         XCTAssertEqual(try f.source.get(result.revision.itemID), revised.revision)
         try f.capacity()
     }
-    func testFreshPolicyHandoffDoesNotInventServiceOwnerAdmissionForBackgroundGenesis() throws {
+    func testCurrentPersonalPolicyDoesNotAdmitServiceAccountBeforeOrAfterReopen() throws {
         let f = try PeerEnrollmentApprovalTests.Fixture()
-        let origin = try XCTUnwrap(f.source.replicaID)
-        let index = try ItemIndex(
-            path: f.sourceRoot.appendingPathComponent("index/items.sqlite").path, create: false)
-        let head = try XCTUnwrap(index.authorityControlHead(originID: origin))
-        let raw = try XCTUnwrap(index.retainedAuthorityObject(id: head.recordID))
-        let coordinator = PeerIntakeCoordinator(
-            root: f.sourceRoot, ownerUID: tractanda_uid(), storeID: f.request.sourceContext.storeID)
-        let accepted = try XCTUnwrap(
-            coordinator.journal.atomicAcceptance(packageID: raw.packageID, root: head))
-        XCTAssertEqual(accepted.receipt.context.validationPurpose, .backgroundSourceCut)
-        XCTAssertEqual(accepted.receipt.context.requestPrincipal, "replica:" + origin)
-        XCTAssertEqual(try coordinator.logicalControlHeader(head, index: index).actor, "replica:" + origin)
-        index.close()
-        XCTAssertThrowsError(
-            try f.source.withAccess(forUID: tractanda_uid()) {
-                try f.source.requirePeerCredentialAdministrator()
-            }
-        ) {
-            XCTAssertEqual(($0 as? TractandaError)?.code, "forbidden")
+        XCTAssertFalse(try f.source.verificationSnapshot().authorityEnforced)
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: f.sourceRoot.appendingPathComponent("authority").path))
+        func checkCurrentAdmission() throws {
+            XCTAssertThrowsError(
+                try f.source.withAccess(forUID: tractanda_uid()) {
+                    try f.source.requirePeerCredentialAdministrator()
+                }
+            ) { XCTAssertEqual(($0 as? TractandaError)?.code, "forbidden") }
+            try f.source.withAccess(forUID: f.uid) { try f.source.requirePeerCredentialAdministrator() }
         }
+        try checkCurrentAdmission()
         let before = try canonical(f.sourceRoot)
         try f.reopen(removeIndex: true)
         XCTAssertEqual(try canonical(f.sourceRoot), before)
-        XCTAssertThrowsError(
-            try f.source.withAccess(forUID: tractanda_uid()) {
-                try f.source.requirePeerCredentialAdministrator()
-            }
-        ) {
-            XCTAssertEqual(($0 as? TractandaError)?.code, "forbidden")
-        }
-        try f.source.withAccess(forUID: f.uid) { try f.source.requirePeerCredentialAdministrator() }
+        XCTAssertFalse(try f.source.verificationSnapshot().authorityEnforced)
+        try checkCurrentAdmission()
         try f.capacity()
     }
 

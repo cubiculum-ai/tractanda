@@ -89,37 +89,6 @@ final class AtomicAuthorityContextSnapshotTests: XCTestCase {
         try f.capacity()
     }
 
-    func testRealCanonicalAdmissionAndRetirementRootsAreCapturedWithoutCredentialExport() throws {
-        let f = try PeerEnrollmentApprovalTests.Fixture()
-        let handle = try f.begin()
-        _ = try f.ready(handle)
-        let accepted = try f.source.acceptPeerEnrollment(handle, forUID: f.uid)
-        let approval = try XCTUnwrap(accepted.approval)
-        let target = f.request.sourceCredential.binding.remoteReplicaID
-        try f.source.withAccess(forUID: f.uid) {
-            try f.source.configurePeerIntake(peers: [f.request.sourceContext])
-            try f.source.removePeerIntake(
-                peerID: f.request.sourceContext.peerID, retiredOriginIDs: [target], operationID: Fixture.id())
-        }
-        let storeID = f.request.sourceContext.storeID
-        let coordinator = PeerIntakeCoordinator(
-            root: f.sourceRoot, ownerUID: tractanda_uid(), storeID: storeID)
-        let index = try ItemIndex(
-            path: f.sourceRoot.appendingPathComponent("index/items.sqlite").path, create: false)
-        defer { index.close() }
-        let packageID = try XCTUnwrap(index.retainedAuthorityObject(id: approval.recordID)).packageID
-        let rootID = try Fixture.id()
-        let directory = try privateRoot(f.root)
-        let context = try capture(index, coordinator, packageID, directory, rootID: rootID)
-        let values = try originals(context, coordinator: coordinator, packageID: packageID, rootID: rootID)
-        XCTAssertTrue(values.contains { $0.id == approval.recordID && $0.sha256 == approval.sha256 })
-        let retirement = try XCTUnwrap(coordinator.configuration()?.lifecycle?.retirements.last?.root)
-        XCTAssertTrue(values.contains { $0.id == retirement.recordID && $0.sha256 == retirement.sha256 })
-        XCTAssertTrue(values.allSatisfy { $0.kind == .authority && $0.part == nil })
-        XCTAssertEqual(try walkCount(index), 0)
-        try f.capacity()
-    }
-
     func testConflictingCanonicalAdmissionHashFailsAndCleansOwnedWalk() throws {
         let f = try Fixture()
         let (index, coordinator, packageID) = try setup(f)

@@ -21,7 +21,7 @@ final class AtomicAuthorityCompatibilityTests: XCTestCase {
         let prior: CanonicalReaderRequirement
         let writer: Int32
         init(
-            capabilities: [String] = CanonicalFormatSupport.current.capabilities.filter {
+            capabilities: [String] = AtomicAuthorityCompatibility.support.capabilities.filter {
                 $0 != AtomicAuthorityFormat.profile
             }, floor: Int = 14
         ) throws {
@@ -67,8 +67,8 @@ final class AtomicAuthorityCompatibilityTests: XCTestCase {
     }
 
     func testDeclaredSupportStillRequiresExplicitFloor15Activation() throws {
-        XCTAssertEqual(CanonicalFormatSupport.current.readerLevel, 15)
-        XCTAssertEqual(CanonicalFormatSupport.current.writerLevel, 15)
+        XCTAssertEqual(CanonicalFormatSupport.current.readerLevel, 18)
+        XCTAssertEqual(CanonicalFormatSupport.current.writerLevel, 18)
         XCTAssertTrue(
             CanonicalFormatSupport.current.capabilities.contains(AtomicAuthorityCompatibility.capability))
         let support = AtomicAuthorityCompatibility.support
@@ -77,7 +77,7 @@ final class AtomicAuthorityCompatibilityTests: XCTestCase {
         XCTAssertEqual(support.read, [1, 2])
         XCTAssertEqual(support.write, [2])
         XCTAssertTrue(support.capabilities.contains(AtomicAuthorityFormat.profile))
-        XCTAssertTrue(Set(CanonicalFormatSupport.current.capabilities).isSubset(of: support.capabilities))
+        XCTAssertTrue(Set(support.capabilities).isSubset(of: CanonicalFormatSupport.current.capabilities))
         XCTAssertNoThrow(try support.validate())
         XCTAssertThrowsError(
             try CanonicalFormatSupport(
@@ -92,7 +92,7 @@ final class AtomicAuthorityCompatibilityTests: XCTestCase {
         let readOnly = CanonicalFormatSupport(
             readerLevel: 15, writerLevel: 14, read: [1, 2], write: [2],
             capabilities: support.capabilities,
-            writeCapabilities: CanonicalFormatSupport.current.writeCapabilities.filter {
+            writeCapabilities: support.writeCapabilities.filter {
                 $0 != AtomicAuthorityFormat.profile
             })
         XCTAssertNoThrow(try readOnly.validate())
@@ -141,7 +141,7 @@ final class AtomicAuthorityCompatibilityTests: XCTestCase {
 
     func testExactPriorDigestValueAndWholeTargetSupportAreRequired() throws {
         let f = try Fixture(
-            capabilities: CanonicalFormatSupport.current.capabilities.filter {
+            capabilities: AtomicAuthorityCompatibility.support.capabilities.filter {
                 $0 != AtomicAuthorityFormat.profile
             } + ["tractanda.future-test.v1"])
         let before = try Data(contentsOf: f.marker)
