@@ -43,7 +43,7 @@ final class PersonalEnrollmentCapacityTests: XCTestCase {
     }
     func testSixteenMemberBinaryKeyRegistryFitsAndReopensAll480ExactRoles() throws {
         try AttachmentFixtureCapacity.requireFree()
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+        let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent(
             "enrollment-key-capacity-" + Identifier.make())
         try PrivateConfiguration.makeDirectory(root)
         defer { try? FileManager.default.removeItem(at: root) }
