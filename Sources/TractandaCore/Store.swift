@@ -5373,9 +5373,52 @@ public final class ItemStore {
     }
     /// Read-only identity admission. In particular, do not expire or renew any upload here.
     /// The real operation must still perform attachmentUpload's current ACL and expiry checks.
-    func requireAttachmentUploadIdentity(_ id: String) throws {
+    @discardableResult
+    func requireAttachmentUploadIdentity(_ id: String) throws -> AttachmentUploadState {
         guard let uid = accessContext?.uid, let upload = attachmentUploads[id], upload.uid == uid else {
             throw TractandaError("uploadExpired", "Upload is unavailable; begin again with the same intent.")
+        }
+        return upload
+    }
+    private func attachmentUploadReadAdmission(_ id: String) throws -> AttachmentUploadState {
+        let upload = try requireAttachmentUploadIdentity(id)
+        let current = try get(upload.request.itemID)
+        try requireEdit(current, changesPermissions: false)
+        return upload
+    }
+    func requireAttachmentUploadEditAccess(_ id: String) throws {
+        _ = try attachmentUploadReadAdmission(id)
+    }
+    private var hasExpiredAttachmentUploads: Bool {
+        let now = attachmentClockForTesting()
+        return attachmentUploads.values.contains { $0.expiresAt <= now && $0.phase != "verifying" }
+    }
+    func preflightAttachmentAppend(uploadID: String, offset: Int64, byteCount: Int) throws {
+        let upload = try attachmentUploadReadAdmission(uploadID)
+        // Cleanup could free quota or change the selected upload. Leave that to the tracked operation.
+        guard !hasExpiredAttachmentUploads else { return }
+        try validateAttachmentAppend(upload, offset: offset, byteCount: byteCount)
+        let currentSize = try attachmentPayloads.stagedSize(id: uploadID)
+        if offset == currentSize { try requireAttachmentStagingCapacity(additionalBytes: Int64(byteCount)) }
+    }
+    func preflightAttachmentFinish(uploadID: String) throws {
+        let upload = try attachmentUploadReadAdmission(uploadID)
+        guard !hasExpiredAttachmentUploads else { return }
+        if let code = upload.failureCode {
+            throw TractandaError(code, "Upload integrity verification failed; abort and begin again.")
+        }
+    }
+    private func validateAttachmentAppend(
+        _ upload: AttachmentUploadState, offset: Int64, byteCount: Int
+    ) throws {
+        guard offset >= 0, offset <= upload.descriptor.byteCount,
+            byteCount >= 0, byteCount <= 262_144, Int64(byteCount) <= upload.descriptor.byteCount - offset
+        else {
+            throw TractandaError(
+                "invalidArguments", "Chunk exceeds the declared original or 256 KiB ceiling.")
+        }
+        guard upload.phase == "uploading" || upload.phase == "paused" else {
+            throw TractandaError("uploadBusy", "Upload is being finalized or has already been published.")
         }
     }
 
@@ -5500,15 +5543,7 @@ public final class ItemStore {
             }
         }
         let upload = try attachmentUpload(uploadID)
-        guard offset >= 0, offset <= upload.descriptor.byteCount,
-            data.count <= 262_144, Int64(data.count) <= upload.descriptor.byteCount - offset
-        else {
-            throw TractandaError(
-                "invalidArguments", "Chunk exceeds the declared original or 256 KiB ceiling.")
-        }
-        guard upload.phase == "uploading" || upload.phase == "paused" else {
-            throw TractandaError("uploadBusy", "Upload is being finalized or has already been published.")
-        }
+        try validateAttachmentAppend(upload, offset: offset, byteCount: data.count)
         let currentSize = try attachmentPayloads.stagedSize(id: uploadID)
         if offset == currentSize { try requireAttachmentStagingCapacity(additionalBytes: Int64(data.count)) }
         let next = try attachmentPayloads.append(id: uploadID, offset: offset, data: data)

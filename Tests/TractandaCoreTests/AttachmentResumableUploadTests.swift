@@ -131,6 +131,12 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(
             try client.appendAttachment(uploadID: id, offset: 0, data: Data(repeating: 1, count: amount)),
             Int64(amount))
+        let checkpointURL = directory.appendingPathComponent("attachments/.uploads/" + id + ".json")
+        let stageURL = directory.appendingPathComponent("attachments/.staging/" + id + ".stage")
+        let beforeCheckpoint = try Data(contentsOf: checkpointURL)
+        let beforeCheckpointMetadata = try FileMetadata.read(at: checkpointURL)
+        let beforeStage = try Data(contentsOf: stageURL)
+        let beforeStageMetadata = try FileMetadata.read(at: stageURL)
         XCTAssertThrowsError(
             try client.appendAttachment(uploadID: id, offset: Int64(amount), data: Data([5]))
         ) {
@@ -139,11 +145,62 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
         XCTAssertThrowsError(try client.appendAttachment(uploadID: id, offset: .max, data: Data([5]))) {
             XCTAssertEqual(($0 as? TractandaError)?.code, "invalidArguments")
         }
-        XCTAssertEqual(
-            try FileMetadata.read(
-                at: directory.appendingPathComponent("attachments/.staging/" + id + ".stage")
-            ).size, UInt64(amount))
+        XCTAssertEqual(try Data(contentsOf: checkpointURL), beforeCheckpoint)
+        XCTAssertEqual(try FileMetadata.read(at: checkpointURL), beforeCheckpointMetadata)
+        XCTAssertEqual(try Data(contentsOf: stageURL), beforeStage)
+        XCTAssertEqual(try FileMetadata.read(at: stageURL), beforeStageMetadata)
+        XCTAssertEqual(try FileMetadata.read(at: stageURL).size, UInt64(amount))
     }
+    func testAppendDefersStaleQuotaUntilExpiredCleanupAndPreservesPartialFailure() throws {
+        for failAfterCleanup in [false, true] {
+            let directory = try root()
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let store = try fixtureStore(
+                directory,
+                policy: .init(
+                    maximumStagedBytes: 40 * 1024, minimumFreeBytes: AttachmentFixtureCapacity.reserveBytes))
+            let base = try create(store)
+            let start = Date()
+            store.attachmentClockForTesting = { start }
+            let expiredBytes = Data(repeating: 1, count: 4 * 1024)
+            let expired = try store.beginAttachment(
+                AttachmentUploadRequest(
+                    itemID: base.itemID, expectedRevisionID: base.revisionID, operationID: "expires",
+                    filename: "expired.pdf", mediaType: "application/pdf",
+                    byteCount: Int64(expiredBytes.count),
+                    sha256: SHA256.hash(data: expiredBytes).map { String(format: "%02x", $0) }.joined()))
+            _ = try store.appendAttachment(
+                uploadID: XCTUnwrap(expired.uploadID), offset: 0, data: expiredBytes)
+            store.attachmentClockForTesting = { start.addingTimeInterval(1_800) }
+            let allBytes = Data(repeating: 2, count: 6 * 1024)
+            let retained = try store.beginAttachment(intent(base, bytes: allBytes))
+            let id = try XCTUnwrap(retained.uploadID)
+            let initial = Data(allBytes.prefix(1024))
+            _ = try store.appendAttachment(uploadID: id, offset: 0, data: initial)
+            store.attachmentClockForTesting = { start.addingTimeInterval(3_601) }
+            var cleanups = 0
+            store.afterAttachmentStageDiscardForTesting = {
+                cleanups += 1
+                if failAfterCleanup { throw TractandaError("injectedCrash", "after expired stage discard") }
+            }
+            let service = ItemService(store: store)
+            let client = TractandaCore.ItemClient(transport: { service.handle($0, peerUID: getuid()) })
+            let chunk = Data(repeating: 2, count: 4 * 1024)
+            if failAfterCleanup {
+                XCTAssertThrowsError(try client.appendAttachment(uploadID: id, offset: 1024, data: chunk)) {
+                    XCTAssertEqual(($0 as? TractandaError)?.code, "serverPartialFail")
+                }
+                XCTAssertEqual(
+                    try Data(
+                        contentsOf: directory.appendingPathComponent(
+                            "attachments/.staging/" + id + ".stage")), initial)
+            } else {
+                XCTAssertEqual(try client.appendAttachment(uploadID: id, offset: 1024, data: chunk), 5 * 1024)
+            }
+            XCTAssertEqual(cleanups, 1)
+        }
+    }
+
     func testHashTaskJoinsDoesNotBlockQueriesAndRestartsAfterControlledCancellation() async throws {
         let directory = try root()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -345,13 +402,25 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
         try await gate.awaitArrival()
         accounts.revoke()
         let statusRequest = try request(directory, "TractandaAttachment/uploadStatus", ["uploadID": id])
-        let denied = try await coordinator.handle(statusRequest, forUID: accounts.alice)
-        let error = try JSON.decode(TractandaError.self, denied)
-        XCTAssertEqual(error.code, "forbidden")
-        XCTAssertFalse(String(decoding: denied, as: UTF8.self).contains(upload.attachment.sha256))
+        func denied(_ request: Data, method: String) async {
+            do {
+                let response = try await coordinator.handle(request, forUID: accounts.alice)
+                XCTAssertFalse(String(decoding: response, as: UTF8.self).contains(upload.attachment.sha256))
+                XCTAssertThrowsError(try NativeMethodResult.unwrap(response, method: method, callID: "test"))
+                {
+                    XCTAssertEqual(($0 as? TractandaError)?.code, "forbidden")
+                }
+            } catch let error as TractandaError {
+                // Admission can fail before a JMAP method begins, so this direct API throws.
+                XCTAssertEqual(error.code, "forbidden")
+                XCTAssertFalse(error.message.contains(upload.attachment.sha256))
+            } catch {
+                XCTFail("Unexpected denial error: \(error)")
+            }
+        }
+        await denied(statusRequest, method: "TractandaAttachment/uploadStatus")
         await gate.release()
-        let finishDenied = try await coordinator.handle(finish, forUID: accounts.alice)
-        XCTAssertEqual(try JSON.decode(TractandaError.self, finishDenied).code, "forbidden")
+        await denied(finish, method: "TractandaAttachment/finish")
         await coordinator.close()
         let storage = try AttachmentPayloadStore(root: directory, ownerUID: getuid())
         // Reconstruct from files too: a denied publication must leave no indexed original or
@@ -420,6 +489,7 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
             _ = try store.appendAttachment(uploadID: id, offset: 0, data: Data([1]))
         }
         let coordinator = try await ServiceCoordinator(opening: directory)
+        defer { await coordinator.close() }
         let finish = try request(directory, "TractandaAttachment/finish", ["uploadID": id])
         let pending = try await coordinator.handle(finish, forUID: getuid())
         XCTAssertEqual(try payload(pending)["type"] as? String, "attachmentVerifying")
@@ -431,11 +501,27 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
             }
             try await Task.sleep(for: .milliseconds(5))
         }
+        while await coordinator.attachmentIntegrityTaskCountForTesting() != 0 {
+            guard ContinuousClock.now < deadline else {
+                throw TractandaError("testTimeout", "Completed integrity task did not drain.")
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let checkpointURL = directory.appendingPathComponent("attachments/.uploads/" + id + ".json")
+        let stageURL = directory.appendingPathComponent("attachments/.staging/" + id + ".stage")
+        let beforeCheckpoint = try Data(contentsOf: checkpointURL)
+        let beforeCheckpointMetadata = try FileMetadata.read(at: checkpointURL)
+        let beforeStageMetadata = try FileMetadata.read(at: stageURL)
+        let beforeTasks = await coordinator.attachmentIntegrityTaskCountForTesting()
         do {
             _ = try await client.finishAttachment(uploadID: id)
             XCTFail("Checksum mismatch must fail")
         } catch let error as TractandaError { XCTAssertEqual(error.code, "attachmentIntegrity") }
-        await coordinator.close()
+        XCTAssertEqual(try Data(contentsOf: checkpointURL), beforeCheckpoint)
+        XCTAssertEqual(try FileMetadata.read(at: checkpointURL), beforeCheckpointMetadata)
+        XCTAssertEqual(try FileMetadata.read(at: stageURL), beforeStageMetadata)
+        let afterTasks = await coordinator.attachmentIntegrityTaskCountForTesting()
+        XCTAssertEqual(afterTasks, beforeTasks)
     }
     func testTemporaryCopyGuardPreservesCommittedReplayAndLegacyNetworkRejectsHeavyCalls() throws {
         let directory = try root()

@@ -298,10 +298,12 @@ public actor ServiceCoordinator {
         {
             throw TractandaError("serviceBusy", "An exclusive rebuild is in progress.")
         }
-        if ["TractandaStore/rebuild", "TractandaAttachment/finish"].contains(request.method) {
+        if ["TractandaStore/rebuild", "TractandaAttachment/finish", "TractandaAttachment/upload"].contains(
+            request.method)
+        {
             try await submit(principal: principal) { service in
                 try service.store.withAccess(forUID: uid, recoverPublication: false) {
-                    try service.preflightNativeMutationIdentity(request)
+                    try service.preflightNativeMutationAdmission(request)
                 }
             }
         }
@@ -1420,6 +1422,7 @@ public actor ServiceCoordinator {
         }
     }
 
+    func attachmentIntegrityTaskCountForTesting() -> Int { attachmentIntegrityTasks.count }
     func setAttachmentIntegrityHookForTesting(_ hook: (@Sendable () async throws -> Void)?) {
         attachmentIntegrityHookForTesting = hook
     }

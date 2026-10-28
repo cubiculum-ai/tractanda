@@ -10,10 +10,10 @@ final class ProjectionServiceTests: XCTestCase {
         return FileManager.default.temporaryDirectory.appendingPathComponent(
             "tractanda-projection-api-" + Identifier.make())
     }
-    private func request(_ method: String, _ args: [String: Any]) throws -> Data {
-        try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability], "methodCalls": [[method, args, "c"]],
-        ])
+    private func request(_ store: ItemStore, _ method: String, _ args: [String: Any]) throws -> Data {
+        try nativeFixtureRequest(
+            method: method, arguments: args, accountID: store.nativeProtocolSessionBasis.identity, callID: "c"
+        )
     }
     private func payload(_ data: Data) throws -> (String, [String: Any]) {
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -168,7 +168,7 @@ final class ProjectionServiceTests: XCTestCase {
             .init(classID: "Item", changes: ["subject": .text("ready")], operationID: Identifier.make())
         ).revision
         let service = ItemService(store: store)
-        let data = try request("TractandaItem/get", ["ids": [other.itemID, base.itemID]])
+        let data = try request(store, "TractandaItem/get", ["ids": [other.itemID, base.itemID]])
         let prepared = try XCTUnwrap(
             service.preparePooledGet(nativeFixtureInvocation(data), peerUID: tractanda_uid()))
         let pool = try SQLiteReadPool(
@@ -199,7 +199,8 @@ final class ProjectionServiceTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let store = try ItemStore(root: root, revisionProjectionEnabled: true)
         let service = ItemService(store: store)
-        let data = try request("TractandaItem/history", ["itemID": base.itemID, "position": 0, "limit": 10])
+        let data = try request(
+            store, "TractandaItem/history", ["itemID": base.itemID, "position": 0, "limit": 10])
         let prepared = try XCTUnwrap(
             service.preparePooledHistory(nativeFixtureInvocation(data), peerUID: tractanda_uid()))
         let pool = try SQLiteReadPool(
@@ -270,7 +271,7 @@ final class ProjectionServiceTests: XCTestCase {
         ).revision
         let token = try store.itemState(item.itemID).stateToken
         let service = ItemService(store: store)
-        let data = try request("TractandaItem/get", ["ids": [item.itemID]])
+        let data = try request(store, "TractandaItem/get", ["ids": [item.itemID]])
         let prepared = try XCTUnwrap(
             service.preparePooledGet(nativeFixtureInvocation(data), peerUID: accounts.bob))
         let pool = try SQLiteReadPool(

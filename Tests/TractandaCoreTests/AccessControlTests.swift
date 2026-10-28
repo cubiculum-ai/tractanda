@@ -624,14 +624,28 @@ final class AccessControlTests: XCTestCase {
         ]
         // Account discovery happens before measuring the query's per-item ACL work.
         let accountID = try store!.nativeProtocolSessionBasis.identity
+        // Use the identical account/query path with no materialized rows, after warming caches.
+        var setupArguments = args
+        setupArguments["limit"] = 0
+        _ = try response(
+            service!, uid: accounts.bob, method: "TractandaItem/query", args: setupArguments,
+            accountID: accountID)
         let envelopeBefore = store!.aclSwiftReadCheckCount
-        _ = try response(service!, uid: accounts.bob, method: "Core/echo", accountID: accountID)
+        let empty = try response(
+            service!, uid: accounts.bob, method: "TractandaItem/query", args: setupArguments,
+            accountID: accountID)
+        XCTAssertEqual((empty["ids"] as? [String])?.count, 0)
+        XCTAssertEqual(empty["total"] as? Int, 2)
         let envelopeChecks = store!.aclSwiftReadCheckCount - envelopeBefore
+        XCTAssertLessThanOrEqual(envelopeChecks, 1, "Fixed query authorization must remain bounded.")
         let before = store!.aclSwiftReadCheckCount
         let withGroups = try response(
             service!, uid: accounts.bob, method: "TractandaItem/query", args: args, accountID: accountID)
         XCTAssertEqual(withGroups["total"] as? Int, 2)
         let queryChecks = store!.aclSwiftReadCheckCount - before
+        print(
+            "ACL_INDEXED_QUERY fixedQueryChecks=\(envelopeChecks) totalChecks=\(queryChecks) queryChecks=\(queryChecks - envelopeChecks)"
+        )
         XCTAssertGreaterThanOrEqual(queryChecks, envelopeChecks)
         XCTAssertLessThanOrEqual(queryChecks - envelopeChecks, 2)
 

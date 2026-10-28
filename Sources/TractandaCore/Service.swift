@@ -508,7 +508,7 @@ public final class ItemService {
                 try check(args, allowed: ["uploadID"])
                 let id = try string(args, "uploadID")
                 if method == "TractandaAttachment/finish" {
-                    try store.requireAttachmentUploadIdentity(id)
+                    try store.preflightAttachmentFinish(uploadID: id)
                 }
                 _ = try store.attachmentUploadStatus(uploadID: id)
                 let work =
@@ -2740,12 +2740,25 @@ public final class ItemService {
 
     /// These denials are proven read-only, before generic mutation observation begins.
     /// Keep the actual Store operation's authorization and expiry defenses in place.
-    func preflightNativeMutationIdentity(_ call: NativeMethodInvocation) throws {
+    func preflightNativeMutationAdmission(_ call: NativeMethodInvocation) throws {
         if call.method == "TractandaStore/rebuild" { try store.requireAdministrator() }
         if call.method == "TractandaAttachment/finish", call.callCount == 1 {
             let args = try call.dictionary()
             try check(args, allowed: ["uploadID"])
-            try store.requireAttachmentUploadIdentity(string(args, "uploadID"))
+            try store.preflightAttachmentFinish(uploadID: string(args, "uploadID"))
+        }
+        if call.method == "TractandaAttachment/upload" {
+            let args = try call.dictionary()
+            try check(args, allowed: ["uploadID", "offset", "data"])
+            let id = try string(args, "uploadID")
+            try store.requireAttachmentUploadEditAccess(id)
+            let offset = try integer(args, "offset", default: 0, range: 0...Int.max)
+            guard let encoded = args["data"] as? String, encoded.utf8.count <= 349_528,
+                let bytes = Data(base64Encoded: encoded), bytes.count <= 262_144
+            else {
+                throw TractandaError("invalidArguments", "data must be base64 encoding at most 256 KiB.")
+            }
+            try store.preflightAttachmentAppend(uploadID: id, offset: Int64(offset), byteCount: bytes.count)
         }
     }
 
@@ -2787,7 +2800,7 @@ public final class ItemService {
                         throw TractandaError(
                             "singleCallRequired", "Source-unit reads require one invocation.")
                     }
-                    try preflightNativeMutationIdentity(call)
+                    try preflightNativeMutationAdmission(call)
                     try reserveNativeMutationReply(call)
                     if store.isPersonalWorkgroup, NativeMethodCatalog.completelyObserved.contains(call.method)
                     {

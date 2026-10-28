@@ -16,8 +16,17 @@ func nativeFixtureInvocation(_ data: Data) throws -> NativeMethodInvocation {
             .failure(.init("serverFail"), effects: .none)
         }
     }
-    var execution = try JMAPKernel(methods: definitions, sessionState: { try! .init("fixture") }).begin(
-        request)
+    var accountIDs: Set<String> = []
+    for call in request.methodCalls {
+        if let id = call.arguments["accountId"]?.text { accountIDs.insert(id) }
+    }
+    let accounts = try accountIDs.sorted().map { id in
+        try TractandaClient.JMAPAccountAccess(
+            accountID: id, capabilities: [ItemService.capability], isReadOnly: false)
+    }
+    var execution = try JMAPKernel(
+        methods: definitions, accounts: accounts, sessionState: { try! .init("fixture") }
+    ).begin(request)
     guard let call = try execution.next() else {
         throw TractandaError("invalidArguments", "Fixture needs one yielded invocation.")
     }
