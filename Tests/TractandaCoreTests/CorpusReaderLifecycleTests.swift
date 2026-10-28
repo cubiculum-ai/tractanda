@@ -144,11 +144,19 @@ final class CorpusReaderLifecycleTests: XCTestCase {
         try check(root)
     }
 
-    func testStartupReclaimsOnlyFencedReadersAndKeepsStageDiscardAndCurrentGenerations() throws {
+    func testPersonalReopenRebuildsDisposableWorkAndPreservesCurrentCanonicalGeneration() throws {
         let root = try root()
         defer { try? FileManager.default.removeItem(at: root) }
         let revision: Revision
         let stale: IndexedCorpusSnapshot
+        let canonicalBefore: [String: Data]
+        func canonical(_ store: ItemStore) throws -> [String: Data] {
+            var result: [String: Data] = [:]
+            for row in try store.exportCatalogueForVerification() {
+                result[row.path] = try Data(contentsOf: store.root.appendingPathComponent(row.path))
+            }
+            return result
+        }
         let stageID = try UUID.makeVersion1().uuidString.lowercased()
         let discardID = try UUID.makeVersion1().uuidString.lowercased()
         do {
@@ -181,15 +189,21 @@ final class CorpusReaderLifecycleTests: XCTestCase {
                 input: input, prepared: orphan, workID: discardID, writeBoundary: { _ in }, boundary: {})
             try index(root).releaseCorpusWork(discardID)
             stale = try XCTUnwrap(store.captureIndexedCorpus(itemID: revision.itemID))
+            canonicalBefore = try canonical(store)
         }
         let store = try store(root)
         let index = try index(root)
         XCTAssertTrue(try index.corpusReadWorkPage().isEmpty)
         XCTAssertEqual(try store.corpusReadStateForTesting().charge, 0)
         let kinds = Dictionary(uniqueKeysWithValues: try index.corpusWorkPage().map { ($0.workID, $0.kind) })
-        XCTAssertEqual(kinds[stageID], "stage")
-        XCTAssertEqual(kinds[discardID], "discard")
-        XCTAssertGreaterThan(try index.corpusRetainedBytes(discardID), 0)
+        // These rows were inserted directly, without a document-job or peer-transfer journal.
+        // Personal startup rebuilds disposable indexes; it must not invent ownership for them.
+        XCTAssertNil(kinds[stageID])
+        XCTAssertNil(kinds[discardID])
+        XCTAssertEqual(try index.corpusRetainedBytes(discardID), 0)
+        XCTAssertEqual(try canonical(store), canonicalBefore)
+        // Journal-owned staging/restart is covered by DocumentJobCoordinatorTests'
+        // restart/resume and rebuild-fences-producer cases, not these orphan index rows.
         XCTAssertTrue(try index.corpusMatches(store.get(revision.itemID)))
         XCTAssertThrowsError(try store.revalidateIndexedCorpus(stale))
         let live = try XCTUnwrap(store.captureIndexedCorpus(itemID: revision.itemID))
