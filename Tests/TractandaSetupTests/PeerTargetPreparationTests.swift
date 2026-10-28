@@ -163,7 +163,7 @@ final class PeerTargetPreparationTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: target.appendingPathComponent("index").path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: target.appendingPathComponent("items").path))
         XCTAssertThrowsError(try ItemStore.requireInitializedRoot(target)) {
-            XCTAssertEqual(($0 as? TractandaError)?.code, "enrollmentPending")
+            XCTAssertEqual(($0 as? TractandaError)?.code, "personalMigrationRequired")
         }
         XCTAssertFalse(FileManager.default.fileExists(atPath: target.appendingPathComponent("index").path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: target.appendingPathComponent("items").path))
@@ -261,7 +261,7 @@ final class PeerTargetPreparationTests: XCTestCase {
         XCTAssertEqual(Set([storeID, sourceID, prep.targetReplicaID, prep.operationID]).count, 4)
         XCTAssertEqual(try FileMetadata.read(at: target).uid, tractanda_uid())
         XCTAssertThrowsError(try ItemStore.requireInitializedRoot(target)) {
-            XCTAssertEqual(($0 as? TractandaError)?.code, "enrollmentPending")
+            XCTAssertEqual(($0 as? TractandaError)?.code, "personalMigrationRequired")
         }
         XCTAssertFalse(FileManager.default.fileExists(atPath: target.appendingPathComponent("index").path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: target.appendingPathComponent("items").path))
