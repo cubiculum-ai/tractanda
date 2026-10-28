@@ -56,7 +56,13 @@ class ReleaseTests(unittest.TestCase):
                     "assert callable(m['format_guard'].require_owned_reader)"],
                     cwd=stage, check=True, capture_output=True, text=True)
 
-            with patch.object(pipeline, 'verify_notarization') as notarization, \
+            temporary_directory = tempfile.TemporaryDirectory
+            def portable_stage(*args, **kwargs):
+                self.assertEqual(kwargs['dir'], '/private/var/tmp')
+                return temporary_directory(prefix='activation-stage-', dir=temporary)
+
+            with patch.object(release.tempfile, 'TemporaryDirectory', side_effect=portable_stage), \
+                    patch.object(pipeline, 'verify_notarization') as notarization, \
                     patch.object(release.delivery, 'active', return_value=True), \
                     patch.object(release.delivery, 'verify_install', return_value={'fixture': 'authorized'}), \
                     patch.object(pipeline, 'run_command', side_effect=run_command):

@@ -919,7 +919,7 @@ class Pipeline:
             raise RuntimeError('Explicit candidate-bound allow-install is required before managed installation.')
         # Root authorization does not bypass macOS privacy protection for Documents.
         # Give the administrator process a private, verified temporary payload and cwd.
-        with tempfile.TemporaryDirectory(prefix='tractanda-release-', dir='/private/tmp') as staging:
+        with tempfile.TemporaryDirectory(prefix='tractanda-release-', dir='/private/var/tmp') as staging:
             staging = Path(staging)
             shutil.copyfile(self.source / 'scripts/activate-release.py', staging / 'activate.py')
             shutil.copyfile(self.source / 'scripts/canonical-format-guard.py', staging / 'canonical-format-guard.py')
