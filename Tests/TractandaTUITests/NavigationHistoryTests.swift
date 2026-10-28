@@ -142,8 +142,16 @@ final class NavigationHistoryTests: XCTestCase {
                         result["list"] = readable
                     }
                     result.removeValue(forKey: "unresolved")
-                    result["remainingIDs"] = remaining ? [b.itemID] : []
-                    result["oversizedIDs"] = oversized ? [a.itemID] : []
+                    if remaining {
+                        result["remainingIDs"] = [b.itemID]
+                    } else {
+                        result.removeValue(forKey: "remainingIDs")
+                    }
+                    if oversized {
+                        result["oversizedIDs"] = [a.itemID]
+                    } else {
+                        result.removeValue(forKey: "oversizedIDs")
+                    }
                 }
                 response[1] = result
                 responses[index] = response
