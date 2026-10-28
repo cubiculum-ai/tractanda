@@ -34,18 +34,26 @@ final class StoreRebuildTests: XCTestCase, @unchecked Sendable {
             lock.unlock()
         }
         func user(forUID uid: UInt32) throws -> AccountIdentity {
-            guard [getuid(), admin, reader].contains(uid) else {
+            guard [0, getuid(), admin, reader].contains(uid) else {
                 throw TractandaError("unresolvedPrincipal", "Unknown test user")
             }
             lock.lock()
             let enabled = admitted
             lock.unlock()
             return AccountIdentity(
-                uid: uid, name: uid == admin ? "admin" : "reader", primaryGroupName: "staff",
-                groupIDs: uid == getuid() || (uid == admin && enabled) ? [71996] : [71997])
+                uid: uid,
+                name: uid == 0 ? "root" : uid == getuid() ? "service" : uid == admin ? "admin" : "reader",
+                primaryGroupName: "staff",
+                groupIDs: uid == 0 || uid == getuid() || (uid == admin && enabled) ? [71996] : [71997])
         }
         func user(named name: String) throws -> AccountIdentity {
-            try user(forUID: name == "admin" ? admin : reader)
+            switch name {
+            case "root": try user(forUID: 0)
+            case "service": try user(forUID: getuid())
+            case "admin": try user(forUID: admin)
+            case "reader": try user(forUID: reader)
+            default: throw TractandaError("unresolvedPrincipal", "Unknown test user")
+            }
         }
         func groupID(named name: String) throws -> UInt32 {
             guard ["admins", "staff"].contains(name) else {
@@ -109,10 +117,11 @@ final class StoreRebuildTests: XCTestCase, @unchecked Sendable {
         try await gate.awaitEntry()
         let repeated = try status(await coordinator.handle(begin, forUID: accounts.admin))
         XCTAssertEqual(repeated.jobID, started.jobID)
-        do {
-            _ = try await coordinator.handle(request(root, "TractandaStore/info"), forUID: accounts.admin)
-            XCTFail("Ordinary requests must be busy during exclusive rebuild")
-        } catch { XCTAssertEqual((error as? TractandaError)?.code, "serviceBusy") }
+        let busy = try await coordinator.handle(
+            request(root, "TractandaStore/info"), forUID: accounts.admin)
+        XCTAssertThrowsError(
+            try NativeMethodResult.unwrap(busy, method: "TractandaStore/info", callID: "r")
+        ) { XCTAssertEqual(($0 as? TractandaError)?.code, "serviceBusy") }
         let denied = try body(
             await coordinator.handle(request(root, "TractandaStore/rebuildStatus"), forUID: accounts.reader))
         XCTAssertEqual(denied.0, "error")
