@@ -213,6 +213,63 @@ final class JMAPNativeBoundaryTests: XCTestCase {
         XCTAssertEqual(pinned.fields["body"], .text(text))
     }
 
+    func testPersonalRevisionGetKeepsImmutableHistoryAndAppliesCurrentItemACL() throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let accounts = Accounts()
+        let store = try makeStore(root, accounts)
+        let service = ItemService(store: store)
+        func permissions(_ mode: Int64) -> ItemValue {
+            .object([
+                "profile": .text(ItemPermissions.profile), "owner": .text("owner"),
+                "group": .text("staff"), "mode": .integer(mode), "acl": .object([:]),
+            ])
+        }
+        let first = try store.commit(
+            .init(
+                classID: "Item", changes: ["body": .text("before"), "permissions": permissions(0o640)],
+                operationID: "personal-history-first")
+        ).revision
+        let second = try store.commit(
+            .init(
+                action: .revise, itemID: first.itemID, expectedRevisionID: first.revisionID,
+                changes: ["body": .text("after")], operationID: "personal-history-second")
+        ).revision
+        func read(_ ids: [String], uid: UInt32) throws -> JMAPRevisionGetResponse {
+            let data = service.handle(
+                try authorizedRequest(store, [["TractandaRevision/get", ["ids": ids], "read"]]),
+                peerUID: uid)
+            return try JSONDecoder().decode(
+                JMAPRevisionGetResponse.self,
+                from: NativeMethodResult.unwrap(data, method: "TractandaRevision/get", callID: "read"))
+        }
+        let beforeIDs = [first.revisionID, second.revisionID]
+        let before = try read(beforeIDs, uid: accounts.alice)
+        XCTAssertEqual(before.list.map(\.id), beforeIDs)
+        XCTAssertTrue(before.notFound.isEmpty)
+        for (record, original) in zip(before.list, [first, second]) {
+            XCTAssertEqual(
+                try RecordCodec.encode(record.canonicalRevision()), try RecordCodec.encode(original))
+        }
+        let restricted = try store.commit(
+            .init(
+                action: .revise, itemID: first.itemID, expectedRevisionID: second.revisionID,
+                changes: ["permissions": permissions(0o600)], operationID: "personal-history-restrict")
+        )
+        .revision
+        let ids = beforeIDs + [restricted.revisionID]
+        let denied = try read(ids, uid: accounts.alice)
+        XCTAssertTrue(denied.list.isEmpty, "Current item permissions protect every historical version.")
+        XCTAssertEqual(denied.notFound, ids, "Denied history must not disclose its existence or content.")
+        let owner = try read(ids, uid: tractanda_uid())
+        XCTAssertTrue(owner.notFound.isEmpty)
+        XCTAssertEqual(owner.list.map(\.id), ids)
+        for (record, original) in zip(owner.list, [first, second, restricted]) {
+            XCTAssertEqual(
+                try RecordCodec.encode(record.canonicalRevision()), try RecordCodec.encode(original))
+        }
+    }
+
     func testSessionMetadataStateIsSeparateFromContentState() throws {
         let root = try root()
         let accounts = Accounts()

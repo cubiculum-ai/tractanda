@@ -2,6 +2,8 @@ import CTractandaPlatform
 import Foundation
 import XCTest
 
+import struct TractandaClient.JMAPRevisionRecord
+
 @testable import TractandaCore
 
 final class AuthorityCausalStoreTests: XCTestCase {
@@ -129,10 +131,14 @@ final class AuthorityCausalStoreTests: XCTestCase {
             f.receiver, "TractandaItem/history",
             ["itemID": b.itemID, "position": 0, "limit": 20])
         XCTAssertEqual((history["historicalDispositions"] as? [String: String])?[b.revisionID], "demoted")
-        let exactResponse = try response(
-            f.receiver, "TractandaRevision/get", ["ids": [b.revisionID]])
-        XCTAssertEqual(
-            (exactResponse["historicalDispositions"] as? [String: String])?[b.revisionID], "demoted")
+        let historicalRecords = try JSONDecoder().decode(
+            [JMAPRevisionRecord].self,
+            from: JSONSerialization.data(withJSONObject: XCTUnwrap(history["list"])))
+        let historicalOriginal = try XCTUnwrap(historicalRecords.first { $0.id == b.revisionID })
+            .canonicalRevision()
+        XCTAssertEqual(try RecordCodec.encode(historicalOriginal), original)
+        // Current personal Revision/get and its historical current-ACL boundary are covered by
+        // JMAPNativeBoundaryTests.testPersonalRevisionGetKeepsImmutableHistoryAndAppliesCurrentItemACL.
         try f.receiver.rebuildIndex()
         XCTAssertEqual(try f.receiver.get(b.itemID).revisionID, d.revisionID)
         f.receiver = nil
