@@ -310,7 +310,9 @@ def exercise(binary, adapter, root, checks):
             client.tool("tractanda_query", query_arguments({"limit": -1}), error="invalidArguments")
             client.tool("tractanda_query", query_arguments({"limit": True}), error="invalidArguments")
             client.tool("tractanda_get", {"ids": [str(uuid.uuid4())] * 65}, error="invalidArguments")
-            client.tool("tractanda_query", query_arguments({"expression": "NOT subject == 'x'"}), error="unsupportedFilter")
+            client.tool("tractanda_query", query_arguments({"expression": "NOT subject == 'x'"}), error="unsupportedQuery")
+            client.tool("tractanda_query", {"filter": {"operator": "OR", "conditions": [
+                {"expression": 'subject == "x"'}, {"expression": 'subject == "y"'}]}}, error="unsupportedFilter")
             request = wire.intent("create", "mcp-create", class_id="Item", changes={
                 "subject": wire.text("MCP task"), "body": wire.text("Line one\nLine two ☃"),
                 "max": tagged("integer", 9223372036854775807), "min": tagged("integer", -9223372036854775808),

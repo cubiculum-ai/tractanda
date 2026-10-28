@@ -87,6 +87,7 @@ def main():
                                expectedRevisionID=ipc.revision_id(candidate),operationID='accept-suggestion',
                                action='accept',modelID=model['modelID'])
                 accepted = client.hydrate_mutation(call('feedback',**request))['revision']
+                accepted = client.call('TractandaRevision/get', {'ids': [ipc.revision_id(accepted)], 'projection': 'full'})['list'][0]
                 check(accepted['fields']['categoryOverrides']['value'][category] == ipc.text('include'), 'Acceptance uses the existing versioned manual assignment')
                 check(call('status',categoryID=category)['status'] == 'staleModel', 'Feedback invalidates an affected training model')
                 check(call('feedback',**request)['replayed'], 'Lost-response retry returns the existing feedback receipt')
