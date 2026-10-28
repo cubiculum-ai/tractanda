@@ -1,0 +1,14 @@
+[
+  "verify",
+  "release-build",
+  "bundle",
+  "package",
+  "notarization",
+  "artifacts",
+  "install",
+  "health",
+  "push",
+  "ci",
+  "publish",
+  "cleanup"
+]

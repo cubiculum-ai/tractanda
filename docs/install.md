@@ -1,6 +1,6 @@
 # macOS and Debian preview installation
 
-The current checkout contains macOS and Debian installer sources; build and release availability depends on the selected artifact. Older public releases may not include the current installer behavior or layout. Raven, Stash, and Starlet now have live three-node membership on the layouts below. After exactly one managed Starlet restart, independent status checks showed all three nodes ready with the same membership digest; each observed two connected data-capable peers, and normal content/history checks passed before and after restart. No public release of the current layout migration is claimed.
+The current checkout contains macOS and Debian installer sources; build and release availability depends on the selected artifact. Older public releases may not include the current installer behavior or layout. Raven, Stash, and Starlet now have live three-node membership on the layouts below. After exactly one managed Starlet restart, independent status checks showed all three nodes ready with the same membership digest; each observed two connected data-capable peers, and normal content/history checks passed before and after restart. Select the published release and its version-pinned instructions when installing.
 
 See [system requirements](system-requirements.md) for the macOS version/architecture floor and provisional RAM and disk planning guidance.
 
@@ -20,7 +20,7 @@ The preview reuses the existing `daemon` OS account and creates no users or grou
 
 The installer registers system LaunchDaemons for the server and included local model workers. The core service starts after its identity, admission policy and HTTP endpoint checks pass; it does not wait for model downloads. Standard packages include pinned model metadata but omit bulky weights; configured workers retrieve missing files from their fixed model revisions and verify file sizes and SHA-256 values. This first-use step needs network access. For offline installation, provide complete verified model artifacts or use a full package built with `--include-model-weights` on the Mac packager or Linux producer and packager. Package assembly itself never downloads weights. See [model status, prefetch and offline import](embedding-runtime.md) for the `Models` paths and vector catch-up behavior.
 
-The following is the **approved managed server layout**, now installed on Raven and Stash. Starlet has not yet been installed or enrolled. Keep one directory per store, including its separate rebuildable index.
+The following is the **approved managed server layout**, used by current macOS and Debian packages. Keep one directory per store, including its separate rebuildable index.
 
 | Purpose | macOS target | Debian target |
 | --- | --- | --- |
@@ -36,19 +36,19 @@ The following is the **approved managed server layout**, now installed on Raven 
 | Temporary installer payloads | `/private/var/tmp/tractanda-install-<id>` | system temporary directory, scoped to the installer transaction |
 | CLI entrypoints | `/usr/local/bin` links | `/usr/bin` wrappers |
 
-The macOS service uses `/Library/LaunchDaemons`. No server data or cache is placed in Application Support or Caches. Debian keeps persistent content outside the dpkg-owned software tree; its existing protected `/run/tractanda-auth-<instance>` helper path remains distinct. Raven and Stash's live paths were verified after migration; these docs do not establish Starlet migration or enrollment. Back up the complete canonical store, including its durable identity and owned payloads. Rebuildable indexes can be regenerated.
+The macOS service uses `/Library/LaunchDaemons`. No server data or cache is placed in Application Support or Caches. Debian keeps persistent content outside the dpkg-owned software tree; its existing protected `/run/tractanda-auth-<instance>` helper path remains distinct. Software, durable data and derived indexes remain separate across compatible upgrades. Back up the complete canonical store, including its durable identity and owned payloads. Rebuildable indexes can be regenerated.
 
 For the first migration from the legacy layout to per-instance ephemeral runtime preparation, the old helper cannot truthfully roll back a failed new-layout startup. If candidate startup fails, keep that host stopped in its preparing state and retry only the exact candidate; the other verified node remains available. Once the new layout is installed, a later qualified rollback regenerates the matching root-preparer from the restored release receipt. Each instance selects its helper release from its own receipt, independently of `Software/current`; boot-time checks cover the bounded manifest and helper entry, not model payloads.
 
 ## Install a Debian package
 
-For an available Debian release, use its published package and checksum for the host architecture; release assets and behavior vary, and there is no Tractanda APT repository or automatic-update channel. The `poc.15` filenames below document that older package version and do not indicate availability of a current-layout release. Install a local package through APT so Debian can satisfy its declared dependencies from the host's configured repositories:
+Use the [signed preview APT repository](apt.md) for ordinary installation and updates. Direct `.deb` assets are also attached to each release; check the selected architecture against that release's `SHA256SUMS`. APT can install a downloaded local package and satisfy its dependencies from configured Debian repositories:
 
 ~~~sh
-sudo apt install ./tractanda_0.1.0~poc.15-1_amd64.deb
+sudo apt install ./tractanda_0.1.0~poc.16-1_amd64.deb
 ~~~
 
-On arm64, use `tractanda_0.1.0~poc.15-1_arm64.deb`. That package requires Debian 13 with systemd and the existing `daemon` account; Setup does not create users or groups. Dpkg owns its active files in `/opt/tractanda/current`. Installing a package does not enroll a node or establish synchronization. Follow [cluster architecture and operations](clustering.md) for peer setup.
+On arm64, use `tractanda_0.1.0~poc.16-1_arm64.deb`. That package requires Debian 13 with systemd and the existing `daemon` account; Setup does not create users or groups. Dpkg owns its active files in `/opt/tractanda/current`. Installing a package does not enroll a node or establish synchronization. Follow [cluster architecture and operations](clustering.md) for peer setup.
 
 After the package is installed, initialize a fresh standalone store and sample content by naming an existing human OS account:
 

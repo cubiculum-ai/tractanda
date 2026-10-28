@@ -14,6 +14,7 @@ import uuid
 from datetime import datetime, timezone
 
 PROFILE = 'tractanda.release-delivery.v2'
+PUBLIC_PROFILE = 'tractanda.release-delivery.v3-publish-before-update'
 ARCHES = {'amd64': 'x86_64', 'arm64': 'arm64'}
 INSTALL_CHECKS = ('candidate-compatibility-and-maintenance', 'current-installation-identity')
 CHECKS = ('raven-candidate-runtime', 'stash-candidate-runtime',
@@ -72,8 +73,16 @@ def fresh():
     return {'profile': PROFILE, 'linuxAssets': []}
 
 
+def public_fresh():
+    return {'profile': PUBLIC_PROFILE, 'linuxAssets': []}
+
+
+def public(state):
+    return isinstance(state.get('delivery'), dict) and state['delivery'].get('profile') == PUBLIC_PROFILE
+
+
 def active(state):
-    return isinstance(state.get('delivery'), dict) and state['delivery'].get('profile') == PROFILE
+    return isinstance(state.get('delivery'), dict) and state['delivery'].get('profile') in (PROFILE, PUBLIC_PROFILE)
 
 
 def inspect_asset(entry, version, context):
@@ -108,9 +117,14 @@ def inspect_asset(entry, version, context):
         actual = inventory.get(prefix + name, {})
         require(all(actual.get(k) == row.get(k) for k in ('sha256', 'size', 'mode')), 'D3 file commitment differs from actual bundle manifest')
     core = ('tractanda', 'tractanda-tui', 'tractanda-mcp', 'tractanda-setup', 'tractanda-auth-helper', 'tractanda-embeddings', 'tractanda-document-converter')
-    require(all('bin/' + n in files for n in core)
-            and all(any(p.startswith('models/' + model + '/') for p in files) for model in
-                    ('granite-embedding-311m-multilingual-r2', 'granite-docling-258m-mlx')), 'Complete Linux feature inventory required')
+    require(all('bin/' + n in files for n in core), 'Complete Linux executable inventory required')
+    if manifest.get('modelProvisioningManifestPath') == 'models/manifest.json':
+        require(files.get('models/manifest.json', {}).get('sha256') == manifest.get('modelProvisioningManifestSHA256')
+                and not any(p.endswith(('.safetensors', '.gguf')) for p in files),
+                'Slim Linux artifact catalogue or weight exclusion differs')
+    else:
+        require(all(any(p.startswith('models/' + model + '/') for p in files) for model in
+                    ('granite-embedding-311m-multilingual-r2', 'granite-docling-258m-mlx')), 'Complete legacy Linux model inventory required')
     require(files['lib/tractanda/linux-bundle-build.json']['sha256'] == bp['sha256'], 'Bundle-build receipt is not in the committed manifest')
     spec = build['input']
     require(build.get('profile') == 'tractanda.linux-bundle-build.v1' and build['baseline']['arch'] == arch

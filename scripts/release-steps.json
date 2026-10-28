@@ -4,11 +4,14 @@
   "bundle",
   "package",
   "notarization",
+  "apt",
   "artifacts",
-  "install",
-  "health",
   "push",
   "ci",
   "publish",
+  "published-source",
+  "pages",
+  "install",
+  "health",
   "cleanup"
 ]

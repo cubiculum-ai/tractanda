@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tarfile
 import time
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
@@ -29,7 +30,8 @@ ROOT = Path(__file__).resolve().parents[1]
 _delivery_spec = importlib.util.spec_from_file_location('release_delivery', Path(__file__).with_name('release-delivery.py'))
 delivery = importlib.util.module_from_spec(_delivery_spec)
 _delivery_spec.loader.exec_module(delivery)
-RELEASE_STEPS = tuple(json.loads(Path(__file__).with_name('release-steps.json').read_text()))
+RELEASE_STEPS = tuple(json.loads(Path(__file__).with_name('release-steps-legacy-v2.json').read_text()))
+PUBLIC_STEPS = tuple(json.loads(Path(__file__).with_name('release-steps.json').read_text()))
 CONTROL = ROOT / 'work/release-pipeline'
 DEFAULT_CONFIG = CONTROL / 'config.json'
 VERSION_FILES = ['plugins/tractanda/.codex-plugin/plugin.json',
@@ -186,13 +188,18 @@ def is_verified_published(state):
             rows = state['delivery']['linuxAssets']
             if (len(rows) != 2 or {r['arch'] for r in rows} != set(delivery.ARCHES)
                     or any(hashes.get(r['name']) != r['sha256'] for r in rows)
-                    or state['delivery']['acceptance']['candidateID'] != delivery.digest(delivery.canonical(delivery.binding(state)))
+                    or not delivery.public(state) and (state['delivery']['acceptance']['candidateID'] != delivery.digest(delivery.canonical(delivery.binding(state)))
                     or state['delivery']['installAuthorization']['candidateID'] != state['delivery']['acceptance']['candidateID']
                     or steps.get('install-authorization', {}).get('result') != state['delivery']['installAuthorization']
-                    or steps.get('cluster-acceptance', {}).get('result') != state['delivery']['acceptance']):
+                    or steps.get('cluster-acceptance', {}).get('result') != state['delivery']['acceptance'])):
                 return False
         except (KeyError, TypeError, RuntimeError):
             return False
+    if delivery.public(state) and (hashes.get('apt-site.tar.gz') is None
+            or steps.get('published-source', {}).get('result', {}).get('commit') != state['commit']
+            or steps.get('published-source', {}).get('result', {}).get('tree') != state.get('tree')
+            or not steps.get('pages', {}).get('result', {}).get('runID')):
+        return False
     return (isinstance(hashes, dict) and expected.issubset(hashes)
             and all(isinstance(name, str) and Path(name).name == name
                     and isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value)
@@ -352,8 +359,8 @@ def prepare(settings, notes):
     git('worktree', 'add', '--detach', str(source), commit)
     state = {'version': version, 'commit': commit, 'tree': git('rev-parse', 'HEAD^{tree}'),
              'status': 'ready', 'createdAt': now(), 'steps': {}, 'directory': str(destination),
-             'notes': notes, 'configuration': settings, 'delivery': delivery.fresh(),
-             'plannedSteps': delivery.release_plan(RELEASE_STEPS)}
+             'notes': notes, 'configuration': settings, 'delivery': delivery.public_fresh(),
+             'plannedSteps': list(PUBLIC_STEPS)}
     write(destination / 'state.json', state)
     write(current_path, state)
     return state
@@ -671,8 +678,10 @@ def revise(state, notes):
         'unpublishedClusterDescendantRepair': repair_proof if (repair_proof or {}).get('gate') == 'cluster-acceptance-descendant' else None,
         'delivery': state.get('delivery')})
     state['previousCandidates'][-1]['deliveryEvidence'] = delivery.archive_for_revision(state)
+    was_public = delivery.public(state)
     state.update(commit=commit, tree=git('rev-parse', 'HEAD^{tree}'), steps={}, status='ready',
-                 plannedSteps=delivery.release_plan(RELEASE_STEPS), notes=notes, delivery=delivery.fresh())
+                 plannedSteps=list(PUBLIC_STEPS) if was_public else delivery.release_plan(RELEASE_STEPS),
+                 notes=notes, delivery=delivery.public_fresh() if was_public else delivery.fresh())
     state.pop('error', None)
     state.pop('pauseReason', None)
     state.pop('activeStep', None)
@@ -805,6 +814,7 @@ class Pipeline:
         if (bundle_manifest.get('modelProvisioningManifestPath') != 'models/manifest.json'
                 or bundle_manifest.get('modelProvisioningManifestSHA256') != sha(catalog)):
             raise RuntimeError('Slim release bundle does not bind the pinned model artifact catalog.')
+        self.run_command('bundle-skills', [sys.executable, 'scripts/verify-release-skills.py', '--bundle', self.bundle])
         return {'manifestSHA256': sha(self.bundle / 'bundle-manifest.json')}
 
     def build_package(self):
@@ -841,6 +851,8 @@ class Pipeline:
         checksums = {p.name: sha(p) for p in (self.archive, self.package)}
         if delivery.active(self.state):
             checksums.update(delivery.verify_linux(self.state, self.linux_context()))
+        if delivery.public(self.state):
+            checksums['apt-site.tar.gz'] = sha(self.directory / 'apt-site.tar.gz')
         (self.directory / 'SHA256SUMS').write_text(''.join(f'{digest}  {name}\n' for name, digest in checksums.items()))
         return checksums
 
@@ -872,7 +884,9 @@ class Pipeline:
         if not delivery.active(self.state):
             raise RuntimeError('Revise the pending legacy candidate explicitly to the current delivery contract.')
         self.verify_notarization()
-        if delivery.verify_install(self.state) is None:
+        if delivery.public(self.state):
+            self.verify_published_package()
+        elif delivery.verify_install(self.state) is None:
             raise RuntimeError('Explicit candidate-bound allow-install is required before managed installation.')
         # Root authorization does not bypass macOS privacy protection for Documents.
         # Give the administrator process a private, verified temporary payload and cwd.
@@ -959,7 +973,7 @@ class Pipeline:
             raise RuntimeError('Revise the pending legacy candidate explicitly to the current delivery contract.')
         self.verify_artifacts()
         self.verify_notarization()
-        if delivery.verify_acceptance(self.state) is None:
+        if not delivery.public(self.state) and delivery.verify_acceptance(self.state) is None:
             raise RuntimeError('Explicit candidate-bound cluster acceptance is required before publication.')
         repo, version = self.settings['repository'], self.state['version']
         tag = 'v' + version
@@ -1013,6 +1027,83 @@ class Pipeline:
             raise RuntimeError('Published asset verification failed.')
         return {'url': remote['html_url'], 'sha256': expected}
 
+    def build_apt(self):
+        fingerprint = (self.source / 'docs/apt/fingerprint.txt').read_text().strip()
+        output = self.directory / 'apt-site/apt'
+        args = [sys.executable, 'scripts/apt-repository.py', 'build', '--root', output,
+                '--fingerprint', fingerprint, '--gpg', self.settings.get('aptGPG', 'gpg')]
+        for row in self.state['delivery']['linuxAssets']:
+            args += ['--package', self.directory / row['name']]
+        previous = self.directory / 'previous-pages'
+        if not previous.exists():
+            self.run_command('apt-previous', [sys.executable, 'scripts/assemble-pages.py', '--output', previous,
+                                            '--repository', self.settings['repository']])
+        if (previous / 'apt/repository.json').is_file():
+            record = json.loads(command([sys.executable, 'scripts/apt-repository.py', 'verify',
+                '--root', previous / 'apt', '--public-key', self.source / 'docs/apt/tractanda-archive-keyring.asc',
+                '--fingerprint', fingerprint, '--gpg', self.settings.get('aptGPG', 'gpg')],
+                cwd=self.source, env=self.environment))
+            version = record['packages'][0]['Version']
+            prior = [r for r in record['packages'] if r['Version'] == version]
+            if len(prior) != 2 or {r['Architecture'] for r in prior} != set(delivery.ARCHES):
+                raise RuntimeError('Previous signed APT snapshot has an ambiguous current architecture pair.')
+            for row in prior:
+                args += ['--previous-package', previous / 'apt' / row['Filename']]
+        # The key lives outside the checkout. GNUPGHOME is inherited or explicitly
+        # configured locally; no private key or passphrase enters release state.
+        if self.settings.get('aptGNUPGHome'):
+            self.environment['GNUPGHOME'] = self.settings['aptGNUPGHome']
+        if output.exists():
+            # Retain interrupted output as evidence; never publish a partial tree.
+            output.rename(output.with_name('apt.incomplete-' + str(time.time_ns())))
+        self.run_command('apt', args)
+        if (output / 'tractanda-archive-keyring.asc').read_bytes() != (self.source / 'docs/apt/tractanda-archive-keyring.asc').read_bytes():
+            raise RuntimeError('APT signing public key differs from the reviewed source key.')
+        with tarfile.open(self.directory / 'apt-site.tar.gz', 'w:gz') as archive:
+            archive.add(output, arcname='apt', recursive=True)
+        return read(output / 'repository.json')
+
+    def verify_published_source(self):
+        # Fetch the actual public tag into a new ref, independently of local HEAD.
+        tag = 'v' + self.state['version']
+        ref = 'refs/tractanda-published/' + tag
+        self.run_command('published-source', ['git', 'fetch', '--no-tags', 'origin',
+                         'refs/tags/' + tag + ':' + ref], self.source)
+        if (git('rev-parse', ref + '^{commit}', cwd=self.source) != self.state['commit']
+                or git('rev-parse', ref + '^{tree}', cwd=self.source) != self.state['tree']):
+            raise RuntimeError('Published GitHub source differs from the sealed source/skill snapshot.')
+        self.run_command('published-source', [sys.executable, 'scripts/verify-release-skills.py'], self.source)
+        return {'commit': self.state['commit'], 'tree': self.state['tree'], 'tag': tag,
+                'skills': 'actual public tag equals sealed source tree'}
+
+    def published_pages(self):
+        # A release-published workflow run deploys one combined site, preserving
+        # the manual and the authenticated APT metadata in the same Pages artifact.
+        runs = json.loads(command(['gh', 'run', 'list', '--repo', self.settings['repository'],
+            '--workflow', 'manual.yml', '--event', 'release', '--json', 'databaseId,status,conclusion,headSha']))
+        runs = [r for r in runs if r['headSha'] == self.state['commit']]
+        if not runs:
+            raise RuntimeError('Published Pages run is not visible yet; resume without rebuilding.')
+        self.run_command('pages', ['gh', 'run', 'watch', str(runs[0]['databaseId']), '--repo',
+                                  self.settings['repository'], '--exit-status'], ROOT)
+        return {'runID': runs[0]['databaseId'], 'url': 'https://cubiculum-ai.github.io/tractanda/apt/'}
+
+    def verify_published_package(self):
+        published = self.state['steps'].get('publish', {}).get('result', {})
+        if ('published-source' not in self.state['steps'] or 'pages' not in self.state['steps']
+                or published.get('sha256', {}).get(self.package.name) != sha(self.package)):
+            raise RuntimeError('Published source, Pages and exact package must be verified before update.')
+        target = self.directory / 'published-download'
+        target.mkdir(exist_ok=True)
+        downloaded = target / self.package.name
+        if not downloaded.exists():
+            self.run_command('download-published-package', ['gh', 'release', 'download', 'v' + self.state['version'],
+                '--repo', self.settings['repository'], '--pattern', self.package.name, '--dir', target], ROOT)
+        if sha(downloaded) != published['sha256'][self.package.name]:
+            raise RuntimeError('Downloaded published package differs from sealed release.')
+        # install() stages this downloaded artifact, rather than a private package.
+        self.package = downloaded
+
     def cleanup(self):
         removed = []
         stale = list(self.directory.glob('*.incomplete-*'))
@@ -1034,6 +1125,8 @@ class Pipeline:
             return
         if not delivery.active(self.state):
             raise RuntimeError('Revise the pending legacy candidate explicitly to the current Linux/cluster delivery contract.')
+        if delivery.public(self.state):
+            return self.run_public(ci_timeout)
         self.state.pop('error', None)
         self.state.pop('pauseReason', None)
         if git('rev-parse', 'HEAD', cwd=self.source) != self.state['commit'] or git('status', '--porcelain', cwd=self.source):
@@ -1070,6 +1163,36 @@ class Pipeline:
         # Publication is durably complete before any sealed checkout is removed.
         if getattr(self, 'directory', None) is not None:
             record_release_retention(self)
+
+    def run_public(self, ci_timeout):
+        self.state.pop('error', None)
+        if git('rev-parse', 'HEAD', cwd=self.source) != self.state['commit'] or git('status', '--porcelain', cwd=self.source):
+            raise RuntimeError('Public release source changed after sealing.')
+        self.state['plannedSteps'] = list(PUBLIC_STEPS)
+        self.save()
+        self.step('verify', lambda: self.run_command('verify', ['sh', 'scripts/test.sh']))
+        self.step('release-build', self.build)
+        self.step('bundle', self.assemble)
+        self.step('package', self.build_package)
+        self.step('notarization', self.notarize_package)
+        self.step('apt', self.build_apt)
+        self.step('artifacts', self.package_artifacts)
+        self.verify_artifacts()
+        self.step('push', self.push)
+        if 'ci' not in self.state['steps']: self.wait_for_ci(ci_timeout)
+        self.step('publish', self.publish)
+        self.step('published-source', self.verify_published_source)
+        self.step('pages', self.published_pages)
+        self.step('install', self.install)
+        self.state['steps']['health'] = {'completedAt': now(), 'result': self.health()}
+        self.save()
+        self.step('cleanup', self.cleanup)
+        if set(self.state['steps']) != set(PUBLIC_STEPS):
+            raise RuntimeError('Public release stages differ from the declared publication-before-update plan.')
+        self.state.update(status='complete')
+        for key in ('activeStep', 'activeStepStartedAt', 'error'): self.state.pop(key, None)
+        self.save()
+        record_release_retention(self)
 
 
 
