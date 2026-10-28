@@ -1,5 +1,8 @@
+import CTractandaPlatform
 import Foundation
+import NIOCore
 import NIOPosix
+import Synchronization
 import XCTest
 
 @testable import TractandaCore
@@ -62,6 +65,157 @@ private actor PeerSyncSchedulerCloseProbe {
     func isClosed() -> Bool { closed }
 }
 
+private final class CurrentSchedulerAccounts: AccountDirectory, @unchecked Sendable {
+    func user(forUID uid: UInt32) throws -> AccountIdentity {
+        guard uid == tractanda_uid() else { throw PersonalEnrollmentError.invalid() }
+        return .init(uid: uid, name: "owner", primaryGroupName: "staff", groupIDs: [72001])
+    }
+    func user(named name: String) throws -> AccountIdentity {
+        guard name == "owner" else { throw PersonalEnrollmentError.invalid() }
+        return try user(forUID: tractanda_uid())
+    }
+    func groupID(named name: String) throws -> UInt32 { 72001 }
+}
+
+private struct CurrentSchedulerFixture {
+    let roots: [URL]
+    let replicas: [String]
+    let credentials: [[PeerCredential]]
+    let accounts: CurrentSchedulerAccounts
+    init(root: URL) throws {
+        // Four tiny current stores/full mesh credentials; no owned payloads or history scale.
+        let policy: ItemValue = .object([
+            "profile": .text(AccessConfiguration.profile), "users": .list([.text("owner")]),
+        ])
+        let accounts = CurrentSchedulerAccounts()
+        let roots = (0..<4).map { root.appendingPathComponent("n\($0)") }
+        var stores: [ItemStore] = [
+            try ItemStore.initializePersonalWorkgroup(
+                root: roots[0], accounts: accounts, accessConfiguration: policy)
+        ]
+        let identity = try stores[0].personalSyncIdentity()
+        for path in roots.dropFirst() {
+            stores.append(
+                try ItemStore.createPersonalSyncReplica(
+                    root: path, storeID: identity.storeID, accessConfiguration: policy, accounts: accounts))
+        }
+        let replicas = try stores.map { try $0.personalSyncIdentity().replicaID }
+        let config = try PersonalMembershipConfiguration(
+            storeID: identity.storeID, configurationID: UUID.makeVersion1().uuidString.lowercased(),
+            members: replicas.enumerated().map {
+                .init(replicaID: $0.element, hostname: "n\($0.offset).fixture")
+            })
+        let nonce = try UUID.makeVersion1().uuidString.lowercased()
+        let preparations = try stores.map {
+            try $0.preparePersonalMembershipChange(configuration: config, expectedDigest: nil, nonce: nonce)
+        }
+        let digest = try config.digest
+        var keys = [[PeerCredential]](repeating: [], count: 4)
+        for first in 0..<4 {
+            for second in (first + 1)..<4 {
+                let pairing = try UUID.makeVersion1().uuidString.lowercased()
+                for (local, remote) in [(first, second), (second, first)] {
+                    let binding = try PeerExchangeBinding(
+                        peerID: replicas[remote] + "-dial", storeID: identity.storeID,
+                        localReplicaID: replicas[local], remoteReplicaID: replicas[remote],
+                        pairingID: pairing, localIsInitiator: local > remote, configurationDigest: digest)
+                    keys[local].append(
+                        try PeerCredential(
+                            binding: binding,
+                            secret: [UInt8](repeating: UInt8(first * 4 + second + 1), count: 32)))
+                }
+            }
+        }
+        for index in 0..<4 {
+            try stores[index].registerPersonalPeerCredentials(keys[index], configuration: config)
+        }
+        for index in 0..<4 {
+            var acks: [PersonalMembershipOnlineAcknowledgement] = []
+            for remote in 0..<4 where remote != index {
+                let localKey = try XCTUnwrap(
+                    keys[index].first { $0.binding.remoteReplicaID == replicas[remote] })
+                let remoteKey = try XCTUnwrap(
+                    keys[remote].first { $0.binding.remoteReplicaID == replicas[index] })
+                let ready = try stores[remote].personalMembershipReady(
+                    session: remoteKey.binding, preparation: preparations[index])
+                acks.append(
+                    try .init(binding: localKey.binding, response: ready, control: .commitCompletion()))
+            }
+            _ = try stores[index].commitPersonalMembershipChange(
+                preparation: preparations[index], acknowledgements: acks)
+            if index > 0 {
+                _ = try stores[index].withAccess(forUID: tractanda_uid()) {
+                    try stores[index].commit(
+                        .init(
+                            classID: "Item", changes: ["subject": .text("source-\(index)")],
+                            operationID: "scheduler-source-\(index)"))
+                }
+            }
+        }
+        self.accounts = accounts
+        self.roots = roots
+        self.replicas = replicas
+        credentials = keys
+        try Self.capacity(root)
+    }
+    static func capacity(_ root: URL) throws {
+        try PeerFixtureCapacity.requireFree(at: root)
+        let scan = try XCTUnwrap(FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil))
+        var bytes: UInt64 = 0
+        var entries = 0
+        for case let file as URL in scan {
+            entries += 1
+            let info = try FileMetadata.read(at: file)
+            guard entries <= 8192 else {
+                throw TractandaError("resourceLimit", "Current scheduler fixture entry cap")
+            }
+            if info.type == .regular {
+                let cap = PeerFixtureCapacity.fixtureCapBytes
+                guard info.size <= cap - min(bytes, cap) else {
+                    throw TractandaError("resourceLimit", "Current scheduler fixture byte cap")
+                }
+                bytes += info.size
+            }
+        }
+    }
+}
+
+private actor CurrentSchedulerCuts {
+    struct Entry: Sendable {
+        let id: UUID
+        let replica: String
+        let revisions: Int
+    }
+    private var entries: [Entry] = []
+    private var pending: [UUID: CheckedContinuation<Void, Never>] = [:]
+    private var holdEvery = false
+    private var draining = false
+    func completed(_ binding: PeerExchangeBinding, report: PersonalSyncReport) async {
+        let hold = !draining && (entries.count < 2 || holdEvery)
+        let entry = Entry(id: UUID(), replica: binding.remoteReplicaID, revisions: report.revisions)
+        entries.append(entry)
+        if hold {
+            await withCheckedContinuation { pending[entry.id] = $0 }
+        }
+    }
+    func log() -> [Entry] { entries }
+    func held() -> Int { pending.count }
+    func holdSubsequent() { holdEvery = true }
+    func release(_ id: UUID) { pending.removeValue(forKey: id)?.resume() }
+    func releaseAll() {
+        draining = true
+        let values = Array(pending.values)
+        pending = [:]
+        for value in values { value.resume() }
+    }
+}
+
+private final class CurrentSchedulerConnections: Sendable {
+    let values = Mutex<[PersonalPeerConnection]>([])
+    func add(_ connection: PersonalPeerConnection) { values.withLock { $0.append(connection) } }
+    var snapshot: [PersonalPeerConnection] { values.withLock { $0 } }
+}
+
 final class PeerSyncSchedulerTests: XCTestCase {
     private func waitUntil(
         attempts: Int = 250,
@@ -90,272 +244,159 @@ final class PeerSyncSchedulerTests: XCTestCase {
             "Expected scheduler call at bounded index \(index).", file: file, line: line)
     }
 
-    func testMissingOutcomeThenYieldResumesPromptlyWithoutBypassingRepair() async throws {
+    func testCurrentPersonalRuntimeBoundsHeldPullsDrainsCloseAndRejectsOldCompletion() async throws {
         try PeerFixtureCapacity.requireFree()
+        XCTAssertLessThanOrEqual(64 * 1024 * 1024, PeerFixtureCapacity.fixtureCapBytes)
         let root = try GuardedFixtureDirectory.create(
-            prefix: "q", source: "PeerSyncSchedulerTests", test: name)
+            prefix: "pq", source: "PeerSyncSchedulerTests", test: name)
         defer { try? FileManager.default.removeItem(at: root) }
-        let fixture = try PeerServiceFixture(root: root)
-        fixture.releaseWriter()
+        let fixture = try CurrentSchedulerFixture(root: root)
         let accounts = fixture.accounts
-        let coordinator = try await ServiceCoordinator(
-            opening: fixture.sourceRoot, embeddingProviderForTesting: nil,
-            requireInitializedStore: true, makeAccountDirectory: { accounts })
-        defer { await coordinator.close() }
+        var owners: [ServiceCoordinator] = []
+        defer { for owner in owners { await owner.close() } }
+        for path in fixture.roots {
+            owners.append(
+                try await ServiceCoordinator(
+                    opening: path, embeddingProviderForTesting: nil, requireInitializedStore: true,
+                    makeAccountDirectory: { accounts }))
+        }
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { try? await group.shutdownGracefully() }
-        let peer = fixture.request.sourceCredential.binding.peerID
-        let configuration = try PeerRuntimeConfiguration(
-            peers: [.init(alias: peer, host: "127.0.0.1", port: 1)],
+        let settings = try PeerRuntimeConfiguration(
             synchronization: .init(enabled: true, intervalSeconds: 300))
-        let network = try PeerServiceRuntime(
-            configuration: configuration, coordinator: coordinator, group: group)
-        defer { await network.close() }
-        let gate = PeerSyncSchedulerGate()
-        let runtime = try PeerSyncRuntime(
-            configuration: configuration, coordinator: coordinator, network: network,
-            synchronizeForTesting: { peerID, snapshot in
-                try await gate.hold(peerID: peerID, snapshot: snapshot)
-            })
+        let runtime = try PersonalPeerRuntime(
+            configuration: settings, configurationPath: root.appendingPathComponent("runtime.json").path,
+            coordinator: owners[0], group: group)
+        let cuts = CurrentSchedulerCuts()
         defer {
-            await gate.shutdown()
+            await cuts.releaseAll()
             await runtime.close()
         }
-        let base = ProcessInfo.processInfo.systemUptime + 1
+        await runtime.setEnrollmentBridge(
+            material: { .init() }, validate: { _, _ in }, handle: { _, _, _ in Data("{}".utf8) },
+            completedCut: { binding, report in await cuts.completed(binding, report: report) })
+        await runtime.refreshNow()
         await runtime.activate()
-        await runtime.tick(now: base)
-        let firstStarted = await waitUntil { await gate.callLog().count == 1 }
-        XCTAssertTrue(firstStarted)
-        let first = try call(at: 0, in: await gate.callLog())
-        var partial = PeerSyncDriver.Report()
-        partial.packagesCommitted = 1
-        partial.note(.held)
-        partial.note(.rejected)
-        partial.note(.missing)
-        XCTAssertEqual(partial.status, .missing)
-        partial.note(.yielded)  // The same job then exhausts its chunk/time window.
-        await gate.release(first.id, with: partial)
-        let firstFinished = await waitUntil { await runtime.activeJobsForTesting() == 0 }
-        XCTAssertTrue(firstFinished)
-        let fastState = await runtime.schedulingForTesting(peerID: peer)
-        let fast = try XCTUnwrap(fastState)
-        XCTAssertEqual(fast.next, base + 0.25, accuracy: 0.000_001)
-        await runtime.tick(now: base + 0.24)
-        let beforeFast = await gate.callLog().count
-        XCTAssertEqual(beforeFast, 1)
-        await runtime.tick(now: base + 0.25)
-        let secondStarted = await waitUntil { await gate.callLog().count == 2 }
-        XCTAssertTrue(secondStarted)
-        let second = try call(at: 1, in: await gate.callLog())
-        var completedMissing = PeerSyncDriver.Report()
-        completedMissing.note(.missing)
-        await gate.release(second.id, with: completedMissing)
-        let secondFinished = await waitUntil { await runtime.activeJobsForTesting() == 0 }
-        XCTAssertTrue(secondFinished)
-        let regularState = await runtime.schedulingForTesting(peerID: peer)
-        let regular = try XCTUnwrap(regularState)
-        XCTAssertGreaterThanOrEqual(regular.next, base + 0.25 + 300)
-        XCTAssertLessThanOrEqual(regular.next, base + 0.25 + 360)
-        await runtime.tick(now: base + 100)
-        let beforeRegular = await gate.callLog().count
-        XCTAssertEqual(beforeRegular, 2)
-        await runtime.tick(now: regular.next)
-        let thirdStarted = await waitUntil { await gate.callLog().count == 3 }
-        XCTAssertTrue(thirdStarted)
-        let third = try call(at: 2, in: await gate.callLog())
-        var repair = partial
-        repair.note(.repairRequired)
-        repair.note(.yielded)
-        await gate.release(third.id, with: repair)
-        let thirdFinished = await waitUntil { await runtime.activeJobsForTesting() == 0 }
-        XCTAssertTrue(thirdFinished)
-        await runtime.tick(now: base + 10_000)
-        let afterRepair = await gate.callLog().count
-        XCTAssertEqual(afterRepair, 3, "Yield must not bypass a genuine repair barrier.")
-        var unsupported = partial
-        unsupported.note(.unsupported)
-        unsupported.note(.yielded)
-        XCTAssertEqual(unsupported.status, .unsupported)
-        try fixture.capacity()
-    }
-
-    func testBoundedFairSchedulingReplacementAndDrainedClose() async throws {
-        try PeerFixtureCapacity.requireFree()
-        let root = try GuardedFixtureDirectory.create(
-            prefix: "q", source: "PeerSyncSchedulerTests", test: name)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let fixture = try PeerServiceFixture(root: root)
-        defer { fixture.releaseWriter() }
-        let original = fixture.request.sourceCredential.binding
-
-        // Register three distinct source-initiator pairings to the already admitted target.
-        // The scheduler test never opens a socket or fabricates a snapshot or trust record.
-        try fixture.source.withAccess(forUID: fixture.accounts.human) {
-            for (index, alias) in ["edge-a", "edge-b", "edge-c"].enumerated() {
-                let digest = AuthorityRecordCodec.sha256(Data(("scheduler-" + alias).utf8))
-                let binding = try PeerExchangeBinding(
-                    peerID: alias, storeID: original.storeID,
-                    localReplicaID: original.localReplicaID, remoteReplicaID: original.remoteReplicaID,
-                    pairingID: PeerServiceFixture.id(), localIsInitiator: true,
-                    configurationDigest: digest)
-                let credential = try PeerCredential(
-                    binding: binding,
-                    secret: [UInt8](repeating: UInt8(index + 1), count: 32))
-                let context = try PeerPackage.Context(
-                    peerID: alias, storeID: binding.storeID,
-                    configurationDigest: digest, permittedOrigins: [binding.remoteReplicaID])
-                try fixture.source.registerPeerCredential(
-                    credential, context: context,
-                    expectedContextToken: fixture.source.peerIntakeContextToken(),
-                    operationID: PeerServiceFixture.id())
-            }
-        }
-        fixture.releaseWriter()
-
-        let accounts = fixture.accounts
-        let coordinator = try await ServiceCoordinator(
-            opening: fixture.sourceRoot,
-            embeddingProviderForTesting: nil, requireInitializedStore: true,
-            makeAccountDirectory: { accounts })
-        defer { await coordinator.close() }
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { try? await group.shutdownGracefully() }
-        let gate = PeerSyncSchedulerGate()
-        let peers = try ["edge-a", "edge-b", "edge-c"].map {
-            try PeerRuntimeConfiguration.Peer(alias: $0, host: "127.0.0.1", port: 1)
-        }
-        let synchronization = try PeerRuntimeConfiguration.Synchronization(enabled: true, intervalSeconds: 15)
-        let configuration = try PeerRuntimeConfiguration(peers: peers, synchronization: synchronization)
-        let network = try PeerServiceRuntime(
-            configuration: configuration, coordinator: coordinator, group: group)
-        defer { await network.close() }
-        let runtime = try PeerSyncRuntime(
-            configuration: configuration, coordinator: coordinator, network: network,
-            synchronizeForTesting: { peerID, snapshot in
-                try await gate.hold(peerID: peerID, snapshot: snapshot)
-            })
+        let listener = try await ServerBootstrap(group: group).childChannelInitializer { channel in
+            runtime.install(on: channel)
+        }.bind(host: "127.0.0.1", port: 0).get()
+        let clients = CurrentSchedulerConnections()
         defer {
-            await gate.shutdown()
-            await runtime.close()
+            try? await listener.close().get()
+            for connection in clients.snapshot { try? await connection.close().get() }
         }
+        let port = try XCTUnwrap(listener.localAddress?.port)
+        let currentOwners = owners
+        let credentials = fixture.credentials
+        let replicas = fixture.replicas
+        @Sendable func connect(_ index: Int) async throws -> PersonalPeerConnection {
+            let credential = try XCTUnwrap(
+                credentials[index].first {
+                    $0.binding.remoteReplicaID == replicas[0]
+                })
+            let pairing = try PeerPairing(credential: credential)
+            let owner = currentOwners[index]
+            let operations = PersonalPeerOperations(
+                validate: { try await owner.personalPeerValidate($0) },
+                handle: { try await owner.personalPeerRequest($0, request: $1) })
+            let installed = CurrentSchedulerConnections()
+            _ = try await ClientBootstrap(group: group).connectTimeout(.seconds(3))
+                .channelInitializer { channel in
+                    PersonalPeerConnection.install(on: channel, pairing: pairing, operations: operations)
+                        .map {
+                            installed.add($0)
+                            clients.add($0)
+                        }
+                }.connect(host: "127.0.0.1", port: port).get()
+            let connection = try XCTUnwrap(installed.snapshot.first)
+            _ = try await connection.ready.get()
+            return connection
+        }
+        let first = try await connect(1)
+        let firstHeld = await waitUntil { await cuts.held() == 1 }
+        XCTAssertTrue(firstHeld)
+        _ = try await connect(2)
+        let bothHeld = await waitUntil { await cuts.held() == 2 }
+        XCTAssertTrue(bothHeld)
+        _ = try await connect(3)
+        let allConnected = await waitUntil {
+            await runtime.hasConnectionForTesting(remoteReplicaID: replicas[3])
+        }
+        XCTAssertTrue(allConnected)
+        for _ in 0..<3 { await runtime.tick() }
+        let full = try await runtime.operatorStatus()
+        XCTAssertEqual(full.synchronization.activeJobCount, 2)
+        XCTAssertEqual(full.synchronization.eligibleEdgeCount, 3)
+        let initial = await cuts.log()
+        XCTAssertEqual(initial.count, 2, "Third eligible peer cannot bypass held lifetime owners")
+        XCTAssertEqual(Set(initial.map(\.replica)), Set([replicas[1], replicas[2]]))
+        let oldFirst = try XCTUnwrap(initial.first { $0.replica == replicas[1] })
+        let oldSecond = try XCTUnwrap(initial.first { $0.replica == replicas[2] })
+        XCTAssertEqual(oldFirst.revisions, 1)
+        try await first.close().get()
+        let removed = await waitUntil {
+            !(await runtime.hasConnectionForTesting(remoteReplicaID: replicas[1]))
+        }
+        XCTAssertTrue(removed)
+        await cuts.release(oldSecond.id)
+        let oneHeld = await waitUntil {
+            (try? await runtime.operatorStatus().synchronization.activeJobCount) == 1
+        }
+        XCTAssertTrue(oneHeld)
+        _ = try await connect(1)
+        let replacementFinished = await waitUntil {
+            await runtime.completedCutsForTesting(remoteReplicaID: replicas[1]) == 2
+        }
+        XCTAssertTrue(replacementFinished)
+        let replacementValue = await runtime.lastReportForTesting(remoteReplicaID: replicas[1])
+        let replacement = try XCTUnwrap(replacementValue)
+        XCTAssertEqual(replacement.revisions, 0, "Replacement resumes the exact already consumed finite cut")
+        let replacementBytes = try JSON.encode(replacement)
+        await cuts.release(oldFirst.id)
+        let oldDrained = await waitUntil {
+            (try? await runtime.operatorStatus().synchronization.activeJobCount) == 0
+        }
+        XCTAssertTrue(oldDrained)
+        let afterOldValue = await runtime.lastReportForTesting(remoteReplicaID: replicas[1])
+        let afterOld = try XCTUnwrap(afterOldValue)
+        XCTAssertEqual(
+            try JSON.encode(afterOld), replacementBytes,
+            "Old suspended completion cannot publish its report over the replacement")
+        let completed = await runtime.completedCutsForTesting(remoteReplicaID: replicas[1])
+        XCTAssertEqual(completed, 2)
+        let stillConnected = await runtime.hasConnectionForTesting(remoteReplicaID: replicas[1])
+        XCTAssertTrue(stillConnected)
+        // Hold two new actual completed cuts and prove close retains both lifetime slots
+        // until the synchronous/callback owners return, even after cancellation/transport close.
+        await cuts.holdSubsequent()
+        for replica in replicas.dropFirst() { await runtime.requestPullForTesting(remoteReplicaID: replica) }
+        await runtime.tick()
+        let closingHeld = await waitUntil { await cuts.held() == 2 }
+        XCTAssertTrue(closingHeld)
+        let beforeClose = try await runtime.operatorStatus()
+        XCTAssertEqual(beforeClose.synchronization.activeJobCount, 2)
         let closeProbe = PeerSyncSchedulerCloseProbe()
-
-        let base = ProcessInfo.processInfo.systemUptime + 1
-        await runtime.activate()
-        await runtime.tick(now: base)
-
-        let firstTwoStarted = await waitUntil {
-            await gate.callLog().count == 2
-        }
-        XCTAssertTrue(firstTwoStarted, "Two finite jobs should start after the real snapshot refresh.")
-        var calls = await gate.callLog()
-        XCTAssertEqual(Set(calls.map(\.peerID)), Set(["edge-a", "edge-b"]))
-        let firstCall = try XCTUnwrap(calls.first { $0.peerID == "edge-a" })
-        let secondCall = try XCTUnwrap(calls.first { $0.peerID == "edge-b" })
-        let initialActiveJobs = await runtime.activeJobsForTesting()
-        let initialMaximumJobs = await runtime.maximumObservedJobs
-        XCTAssertEqual(initialActiveJobs, 2)
-        XCTAssertEqual(initialMaximumJobs, 2)
-
-        for offset in 1...4 { await runtime.tick(now: base + Double(offset)) }
-        try await Task.sleep(for: .milliseconds(40))
-        let heldCallCount = await gate.callLog().count
-        XCTAssertEqual(
-            heldCallCount, 2,
-            "Held jobs occupy both slots; repeated ticks cannot start the third edge.")
-
-        await gate.release(firstCall.id, with: yieldedReport(marker: 41))
-        let thirdStarted = await waitUntil { await gate.callLog().count == 3 }
-        XCTAssertTrue(thirdStarted, "The unserved edge should use the freed slot before edge-a repeats.")
-        calls = await gate.callLog()
-        XCTAssertEqual(Set(calls.prefix(2).map(\.peerID)), Set(["edge-a", "edge-b"]))
-        XCTAssertEqual(calls.last?.peerID, "edge-c")
-
-        let thirdCall = try call(at: 2, in: calls)
-        await gate.release(thirdCall.id, with: PeerSyncDriver.Report())
-        let oneJobRemains = await waitUntil {
-            await runtime.activeJobsForTesting() == 1
-        }
-        XCTAssertTrue(oneJobRemains)
-        await runtime.tick(now: base + 5)
-        let edgeARescheduled = await waitUntil { await gate.callLog().count == 4 }
-        XCTAssertTrue(edgeARescheduled)
-        calls = await gate.callLog()
-        let fourthCall = try call(at: 3, in: calls)
-        XCTAssertEqual(fourthCall.peerID, "edge-a")
-
-        // Replacing one real credential changes the current snapshot and retires the old edge set.
-        let oldA = try await coordinator.loadPeerCredential(peerID: "edge-a")
-        let oldBinding = oldA.binding
-        let rotatedDigest = AuthorityRecordCodec.sha256(Data("scheduler-edge-a-rotated".utf8))
-        let rotatedBinding = try PeerExchangeBinding(
-            peerID: oldBinding.peerID, storeID: oldBinding.storeID,
-            localReplicaID: oldBinding.localReplicaID, remoteReplicaID: oldBinding.remoteReplicaID,
-            pairingID: oldBinding.pairingID, localIsInitiator: true,
-            configurationDigest: rotatedDigest)
-        let rotated = try PeerCredential(binding: rotatedBinding, secret: [UInt8](repeating: 9, count: 32))
-        let registrationContext = try await coordinator.peerCredentialRegistrationContext(
-            forUID: fixture.accounts.human)
-        try await coordinator.registerPeerCredential(
-            rotated, permittedOrigins: [rotatedBinding.remoteReplicaID],
-            expectedContextToken: registrationContext, operationID: PeerServiceFixture.id(),
-            forUID: fixture.accounts.human)
-
-        await runtime.tick(now: base + 6)
-        let oldJobsCancelled = await waitUntil {
-            await gate.cancellationCount() == 2
-        }
-        XCTAssertTrue(oldJobsCancelled, "Snapshot replacement cancels both outstanding old jobs.")
-        let cancelledJobsStillOccupySlots = await runtime.activeJobsForTesting()
-        let callsBeforeOldReturn = await gate.callLog().count
-        XCTAssertEqual(
-            cancelledJobsStillOccupySlots, 2,
-            "A cancelled job retains its slot until its synchronization call actually returns.")
-        XCTAssertEqual(
-            callsBeforeOldReturn, 4,
-            "Replacement edges cannot start while cancelled old calls still occupy both slots.")
-
-        // Return stale success-shaped results. Edge identity and cancellation must prevent publication.
-        await gate.release(secondCall.id, with: yieldedReport(marker: 82))
-        await gate.release(fourthCall.id, with: yieldedReport(marker: 83))
-        let replacementCallsStarted = await waitUntil { await gate.callLog().count == 6 }
-        XCTAssertTrue(replacementCallsStarted)
-        let replacementReports = await runtime.reportsForTesting()
-        XCTAssertTrue(
-            replacementReports.isEmpty,
-            "Neither stale completion may populate a report on a replacement edge.")
-        calls = await gate.callLog()
-        let replacementCall = try call(at: 4, in: calls)
-        XCTAssertNotEqual(replacementCall.securityToken, firstCall.securityToken)
-        let replacementActiveJobs = await runtime.activeJobsForTesting()
-        XCTAssertEqual(replacementActiveJobs, 2)
-
-        let closeTask = Task {
+        let closing = Task {
             await runtime.close()
             await closeProbe.markClosed()
         }
-        let replacementsCancelled = await waitUntil { await gate.cancellationCount() == 4 }
-        XCTAssertTrue(replacementsCancelled)
-        let closedBeforeRelease = await closeProbe.isClosed()
-        let activeWhileClosing = await runtime.activeJobsForTesting()
-        XCTAssertFalse(closedBeforeRelease, "Close must wait for held synchronization calls to finish.")
-        XCTAssertEqual(activeWhileClosing, 2)
-        let startCountAtClose = (await gate.callLog()).count
-        await gate.releaseAll()
-        await closeTask.value
+        let stopped = await waitUntil { (try? await runtime.operatorStatus().state) == .stopped }
+        XCTAssertTrue(stopped)
+        let closedWhileHeld = await closeProbe.isClosed()
+        XCTAssertFalse(closedWhileHeld, "Close returned while actual cut owners were still held")
+        let duringClose = try await runtime.operatorStatus()
+        XCTAssertEqual(duringClose.synchronization.activeJobCount, 2)
+        await cuts.releaseAll()
+        await closing.value
         let didClose = await closeProbe.isClosed()
-        let activeAfterClose = await runtime.activeJobsForTesting()
         XCTAssertTrue(didClose)
-        XCTAssertEqual(activeAfterClose, 0)
-        await runtime.tick(now: base + 10_000)
-        let startsAfterClose = await gate.callLog().count
-        XCTAssertEqual(
-            startsAfterClose, startCountAtClose,
-            "A closed scheduler starts no later work.")
-        let maximumObservedJobs = await runtime.maximumObservedJobs
-        XCTAssertEqual(maximumObservedJobs, 2)
-        let gateOverflows = await gate.overflows()
-        XCTAssertEqual(gateOverflows, 0)
-        try fixture.capacity()
+        let closed = try await runtime.operatorStatus()
+        XCTAssertEqual(closed.synchronization.activeJobCount, 0)
+        let finalCount = await cuts.log().count
+        await runtime.tick(now: ProcessInfo.processInfo.systemUptime + 10_000)
+        let afterTickCount = await cuts.log().count
+        XCTAssertEqual(afterTickCount, finalCount, "Closed runtime cannot start later work")
+        try CurrentSchedulerFixture.capacity(root)
     }
+
 }

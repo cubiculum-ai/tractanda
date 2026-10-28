@@ -281,3 +281,51 @@ Current invariant mapping:
 Old demoted historical-author acknowledgement, retained approval-receipt prerequisites, helper CLOSED/SSH-reap registration and fixed proof-package read geometry are retired semantics. Current administrator checks, exact invitation/continuation recovery, private-status redaction, baseline gates, payload-prefix resume and cancellation/drain remain covered by the named current tests. Current pairing does not execute the retired SSH helper; independent exact public-command quoting checks are retained without claiming actual SSH/KEX or remote process lifecycle validation.
 
 The retained `PeerEnrollmentSupervisorTests.testSourceChunkAndHelperReplyRejectShortOffsetDescriptorAndOldVersion` now constructs its exact chunk descriptor and bytes directly. Its offset, short-body, descriptor, helper-version, request-shape and error-reply checks remain, including an explicit mismatched-descriptor rejection. Only its subsequent obsolete `nativeEnrollmentCall(register)`/authority-registration receipt replay tail was retired under the same explicit review. Current exact continuation/publication retry and private client trust are covered by the current enrollment and socket cases mapped above; the original tail remains reachable in Git at `d520f9979f7b0d2887d8df48d6275ef0a77d910e`.
+
+## Legacy scheduler/responder remainder and current ports
+
+The following seven old bodies required metadata admission, authority genesis or legacy wire/lease semantics. Originals remain reachable at `50bea21b830b5f3d2acb4e86b2b59afe1dbcdc84`. The six Runtime/Scheduler bodies are retired; the responder method retains its name and its two-client, bidirectional and unpaired/wrong-key security checks while using the actual current Personal TCP transport. Independent helpers remain.
+
+- `PeerResponderLoopbackTests.testTwoDistinctReplicasShareLoopbackResponderAndRejectUnpairedOrWrongKeyClients`
+- `PeerSyncRuntimeTests.testCancelledOlderServerFactoryDoesNotDiscardReplacementContext`
+- `PeerSyncRuntimeTests.testFiniteJobsReconnectAcrossMorePagesThanOneSocketAndQuiesceWithoutNewPackages`
+- `PeerSyncRuntimeTests.testOverlappingTakeoverCannotInvalidateNewLeaseOrLoseUnacknowledgedPage`
+- `PeerSyncRuntimeTests.testRealFailureAfterJobQuantumIsNotReportedAsYield`
+- `PeerSyncSchedulerTests.testBoundedFairSchedulingReplacementAndDrainedClose`
+- `PeerSyncSchedulerTests.testMissingOutcomeThenYieldResumesPromptlyWithoutBypassingRepair`
+
+`PeerSyncSchedulerTests.testCurrentPersonalRuntimeBoundsHeldPullsDrainsCloseAndRejectsOldCompletion` uses four tiny current stores, legitimate current membership readiness/credential APIs and actual TCP current Personal connections. Existing completed-cut callbacks deliberately hold two current jobs while a third authenticated peer waits. An old held completion is released after a replacement session publishes its newer zero-revision report; that report/session and completed-cut count must remain intact. Shutdown must retain both held lifetime owners, await their release, drain to zero jobs and start no later work. No production seam, old .25-second scheduling policy, audit-package quantum or default healthy-operation deadline is added.
+
+`PeerResponderLoopbackTests.testTwoDistinctReplicasShareLoopbackResponderAndRejectUnpairedOrWrongKeyClients` uses two distinct replica identities/PSKs on one actual current TCP responder. Both directions must exchange replies, unknown pairing ID and wrong PSK must fail before readiness with zero additional application calls, and both accepted valid clients must survive the rejected handshakes. This transport proof does not claim canonical store admission.
+
+Current finite cuts/reconnect, physical payload-prefix resume, unchanged-row watermark, real failed-cut readiness, current revocation and late progress protections remain mapped to `PersonalPeerDaemonTests` actual-pair, compact-status and hot-enrollment cases; `PersonalSyncTests` finite-cut, original-prefix, lost-cursor and reply-after-removal cases; `PersonalPeerRoutingConnectionTests` cancellation and alias-race cases; and independent TLS wrong-secret tests. Qualification of these new ports is pending; old receipts are not aggregated into a final passing run.
+
+## Historical runtime snapshot and target helper tail
+
+The following exact11 observed failures are retired by the native snapshot owner; originals remain reachable at `4054bad4be1aa32aba50098c3090aae96df36673`. RuntimeSnapshot's other six methods and TargetEnrollment's two pure schema/pipe methods remain. Index rebuilding does not need to alter current personal membership, and ordinary content/recovery no longer requires old authority admission receipts.
+
+- `PeerRuntimeSnapshotTests.testActivatedCredentialsLoadWhenServiceOwnerIsNotAdministrator`
+- `PeerRuntimeSnapshotTests.testCanonicalAdmissionFencesSnapshotWithoutPairingConfigurationChange`
+- `PeerRuntimeSnapshotTests.testRebuildFencesCapturedAndPreviouslyIssuedSnapshots`
+- `PeerRuntimeSnapshotTests.testRotationWhileSnapshotDeliveryWaitsRejectsStaleRefresh`
+- `PeerTargetEnrollmentTests.testActualBuiltHelperResumesPartialOriginalAndLostFinishReply`
+- `PeerTargetEnrollmentTests.testHeldAppendCancellationKeepsWriterUntilSynchronousOwnerDrains`
+- `PeerTargetEnrollmentTests.testMalformedHeadersWrongPinsAndAbsoluteDeadlineFailBeforeOpening`
+- `PeerTargetEnrollmentTests.testOpeningCancellationRetainsWriterAndDrainsBeforeReturning`
+- `PeerTargetEnrollmentTests.testPageAdvanceForgedSelectionAndWriterContentionStayClosed`
+- `PeerTargetEnrollmentTests.testScopedControlRestoresAfterThrowCancellationAndRejectsNestedOwner`
+- `PeerTargetEnrollmentTests.testStrongClosedReleasesWriterBeforeAcknowledgement`
+
+Current replacement coverage (separate current contracts, no claim of old helper wire compatibility):
+
+- `TractandaPeerTransportTests.CurrentPersonalTransportInvariantTests.testCurrentSuspendedReplyRechecksMembershipAndDisconnectNeverReturnsSuccess`
+- `TractandaPeerTransportTests.CurrentPersonalTransportInvariantTests.testCurrentIncrementalHeadersOrderingAndUnsolicitedRepliesCloseTheActualHandler`
+- `TractandaCoreTests.PersonalSyncTests.testReplyCapturedBeforeRemovalCannotAppendFinishOrApplyAfterCurrentMembershipChanges`
+- `TractandaCoreTests.PersonalEnrollmentTargetTests.testAcceptedPlanPersistsBeforePolicyAdoptionAndResumesExactly`
+- `TractandaCoreTests.PersonalEnrollmentTargetTests.testUnacknowledgedClaimCannotAdoptSourcePlan`
+- `TractandaCoreTests.PersonalEnrollmentJoiningTests.testUnjoinedFenceSurvivesEveryPreIdentityActivationBoundaryAndReopen`
+- `TractandaServerTests.PersonalEnrollmentDaemonTests.testDaemonCloseCancelsPrivateSessionWaitingForBody`
+- `TractandaServerTests.NativePeerEnrollmentSupervisorTests.testCurrentPersonalPrivateClientRefusesWrongKernelUIDAndUnsupportedReadyBeforeBody`
+- `TractandaCoreTests.PersonalSyncTests.testOriginalChunksResumeFromPhysicalPrefixAndStayUnreferencedUntilRevisionApply`
+
+The current tests retain membership rechecks and private-output refusal, persisted plan/reopen, unacknowledged target fences, baseline readiness, cancellation/drain, partial payload privacy and exact retry. Current socket UID/READY, supervisor codec/custody and schema/pipe assertions remain independent. Native qualification is still required.
