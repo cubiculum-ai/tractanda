@@ -91,3 +91,15 @@ func nativeFixtureAccountID(_ root: URL) throws -> String {
     try PersonalWorkgroupProfile.load(root, ownerUID: tractanda_uid())?.storeID
         ?? CanonicalReaderRequirement.storeIdentity(root: root, ownerUID: tractanda_uid())
 }
+
+/// Positive low-level client fixtures use the same real wire/account builder as envelopes.
+func nativeFixtureArguments(method: String, arguments: [String: Any], accountID: String) throws
+    -> [String: Any]
+{
+    let data = try nativeFixtureEnvelope(calls: [[method, arguments, "fixture"]], accountID: accountID)
+    let request = try JMAPRequest.decode(data)
+    guard let call = request.methodCalls.first,
+        let object = try JSONSerialization.jsonObject(with: call.arguments.encoded()) as? [String: Any]
+    else { throw TractandaError("testFixture", "Missing positive fixture arguments.") }
+    return object
+}

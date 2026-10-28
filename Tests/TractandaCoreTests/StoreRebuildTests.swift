@@ -98,9 +98,7 @@ final class StoreRebuildTests: XCTestCase, @unchecked Sendable {
                 "groups": .list([.text("staff")]),
             ]))
         do {
-            _ = try ItemStore(
-                root: root, accounts: accounts,
-                revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            _ = try ItemStore.openInitialized(root: root, accounts: accounts)
         }
         let coordinator = try await ServiceCoordinator(opening: root, makeAccountDirectory: { accounts })
         let gate = Gate()
@@ -141,8 +139,7 @@ final class StoreRebuildTests: XCTestCase, @unchecked Sendable {
         defer { try? FileManager.default.removeItem(at: root) }
         _ = try ItemStore.initializeFresh(root: root)
         do {
-            let store = try ItemStore(
-                root: root, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            let store = try ItemStore.openInitialized(root: root)
             _ = try store.commit(
                 CommitRequest(classID: "Item", changes: ["subject": .text("saved")], operationID: "item"))
         }
@@ -197,8 +194,7 @@ final class StoreRebuildTests: XCTestCase, @unchecked Sendable {
         var attachment: AttachmentDescriptor!
         _ = try ItemStore.initializeFresh(root: root)
         do {
-            let store = try ItemStore(
-                root: root, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            let store = try ItemStore.openInitialized(root: root)
             let base = try store.commit(CommitRequest(classID: "Item", operationID: "item")).revision
             let bytes = Data("tiny original".utf8)
             let upload = try store.beginAttachment(
@@ -281,8 +277,7 @@ final class StoreRebuildTests: XCTestCase, @unchecked Sendable {
         defer { try? FileManager.default.removeItem(at: root) }
         _ = try ItemStore.initializeFresh(root: root)
         do {
-            let store = try ItemStore(
-                root: root, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            let store = try ItemStore.openInitialized(root: root)
             _ = try store.commit(CommitRequest(classID: "Item", operationID: "item"))
         }
         let coordinator = try await ServiceCoordinator(opening: root)
@@ -366,8 +361,7 @@ final class StoreRebuildTests: XCTestCase, @unchecked Sendable {
         defer { try? FileManager.default.removeItem(at: root) }
         _ = try ItemStore.initializeFresh(root: root)
         do {
-            let store = try ItemStore(
-                root: root, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            let store = try ItemStore.openInitialized(root: root)
             _ = try store.commit(CommitRequest(classID: "Item", operationID: "graph-item"))
         }
         let coordinator = try await ServiceCoordinator(opening: root)

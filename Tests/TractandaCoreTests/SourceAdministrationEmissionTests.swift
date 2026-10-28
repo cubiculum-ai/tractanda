@@ -60,11 +60,15 @@ final class SourceAdministrationEmissionTests: XCTestCase {
             fixture.source = nil
             fixture.source = try ItemStore(
                 root: fixture.sourceRoot, accounts: accounts,
-                revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+                revisionProjectionEnabled: true, authorityIntakeEnabled: true,
+                firstSourceOperation: nil,
+                canonicalFormatSupport: PeerIntakeStoreTests.Fixture.historical14Support)
             fixture.receiver = nil
             fixture.receiver = try ItemStore(
                 root: fixture.receiverRoot, accounts: accounts,
-                revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+                revisionProjectionEnabled: true, authorityIntakeEnabled: true,
+                firstSourceOperation: nil,
+                canonicalFormatSupport: PeerIntakeStoreTests.Fixture.historical14Support)
             policy = Self.policy(users: ["admin", "alice", "bob"])
         }
 

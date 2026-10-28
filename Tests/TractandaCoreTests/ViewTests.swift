@@ -41,6 +41,16 @@ private final class ViewAccounts: AccountDirectory {
 }
 
 final class ViewTests: XCTestCase {
+    private func nativeQuery(_ client: ItemClient, store: ItemStore, arguments: [String: Any]) throws
+        -> Data
+    {
+        try client.call(
+            "TractandaItem/query",
+            arguments: nativeFixtureArguments(
+                method: "TractandaItem/query", arguments: arguments,
+                accountID: store.nativeProtocolSessionBasis.identity))
+    }
+
     private func create(_ store: ItemStore, _ fields: [String: ItemValue]) throws -> Revision {
         try store.commit(CommitRequest(classID: "Item", changes: fields, operationID: Identifier.make()))
             .revision
@@ -600,7 +610,7 @@ final class ViewTests: XCTestCase {
             let total: Int
         }
         func query(_ arguments: [String: Any]) throws -> Page {
-            try JSON.decode(Page.self, client.call("TractandaItem/query", arguments: arguments))
+            try JSON.decode(Page.self, nativeQuery(client, store: store, arguments: arguments))
         }
         let base: [String: Any] = ["expression": "sortFixture == \"yes\"", "limit": 64]
         XCTAssertEqual(try query(base).ids, Array(expected.prefix(64)))
@@ -824,7 +834,7 @@ final class ViewTests: XCTestCase {
         func page() throws -> Page {
             try JSON.decode(
                 Page.self,
-                client.call("TractandaItem/query", arguments: ["viewID": view.itemID, "limit": 1]))
+                nativeQuery(client, store: store, arguments: ["viewID": view.itemID, "limit": 1]))
         }
         XCTAssertEqual(try page().ids, [first.itemID])
         let selectionKey = String(
@@ -1260,8 +1270,8 @@ final class ViewTests: XCTestCase {
         func page(_ section: String) throws -> Page {
             try JSON.decode(
                 Page.self,
-                client.call(
-                    "TractandaItem/query",
+                nativeQuery(
+                    client, store: store,
                     arguments: [
                         "viewID": view.itemID, "sectionID": section, "limit": 1,
                     ]))
@@ -1348,8 +1358,8 @@ final class ViewTests: XCTestCase {
         func query(_ position: Int) throws -> Page {
             try JSON.decode(
                 Page.self,
-                client.call(
-                    "TractandaItem/query",
+                nativeQuery(
+                    client, store: store,
                     arguments: [
                         "viewID": view.itemID, "position": position, "limit": 64,
                     ]))
@@ -1360,8 +1370,8 @@ final class ViewTests: XCTestCase {
         XCTAssertEqual(try query(64).total, 70)
         let descending = try JSON.decode(
             Page.self,
-            client.call(
-                "TractandaItem/query",
+            nativeQuery(
+                client, store: store,
                 arguments: [
                     "expression": "rank == *", "sort": [["property": "rank", "isAscending": false]],
                     "limit": 3,
@@ -1372,8 +1382,10 @@ final class ViewTests: XCTestCase {
         for arguments: [String: Any] in [
             ["sort": [["property": "rank", "isAscending": "no"]]],
             ["sort": [["property": ""]]], ["sort": [["property": "rank"], ["property": "rank"]]],
-            ["sort": NSNull()], ["viewID": view.itemID, "sort": []], ["sectionID": view.itemID],
+            ["sort": NSNull()], ["filter": ["viewID": view.itemID], "sort": []],
+            ["filter": ["sectionID": view.itemID]],
         ] {
+            // Keep malformed query inputs raw so the actual server must reject them.
             XCTAssertThrowsError(try client.call("TractandaItem/query", arguments: arguments))
         }
     }
