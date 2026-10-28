@@ -329,3 +329,11 @@ Current replacement coverage (separate current contracts, no claim of old helper
 - `TractandaCoreTests.PersonalSyncTests.testOriginalChunksResumeFromPhysicalPrefixAndStayUnreferencedUntilRevisionApply`
 
 The current tests retain membership rechecks and private-output refusal, persisted plan/reopen, unacknowledged target fences, baseline readiness, cancellation/drain, partial payload privacy and exact retry. Current socket UID/READY, supervisor codec/custody and schema/pipe assertions remain independent. Native qualification is still required.
+
+Current package adoption replaces the following three obsolete authority-era lifecycle bodies. Originals remain reachable at `d520f9979f7b0d2887d8df48d6275ef0a77d910e`.
+
+- `SetupPackageLifecycleTests.testActivatedPreparedAdoptionValidatesRealAuthorityAndPreservesIdentityKeysAndPolicy` is ported to `testPersonalPreparedAdoptionPreservesIdentityProfileItemsKeysAndPolicyWithoutBootstrap`, checking actual current adoption with unchanged identities, profile, item permissions and pending credentials, and no authority bootstrap.
+- `SetupPackageLifecycleTests.testPreparedAdoptionRejectsLostActivationProofWithoutRepairingIt` is ported to `testPersonalPreparedAdoptionRejectsDamagedCurrentProfileWithoutRepairOrBootstrap`, preserving refusal, no repair, no receipt and no bootstrap checks for a damaged current profile.
+- `SetupPackageLifecycleTests.testPreparedAdoptionRejectsActualCanonicalTargetDisposalAndPreservesEvidence` required permanent historical disposal. Current omission and credential rejection are covered by `PersonalSyncTests.testRemovalNeedsRetainedMembersOnlyAndOmittedPeerCannotUseOldCredentials` and `testReplyCapturedBeforeRemovalCannotAppendFinishOrApplyAfterCurrentMembershipChanges`; explicit administrator-controlled readmission remains allowed.
+
+Independent pending-target, mismatched-identity, custody, capture, rollback, no-bootstrap, no-account, no-data-loss and incompatible-manifest checks remain. Current rollback fixtures advance the real personal reader floor from16 to18 through personal-sync publication and retain rejection of the captured older reader.
