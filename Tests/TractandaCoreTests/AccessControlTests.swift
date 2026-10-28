@@ -637,7 +637,15 @@ final class AccessControlTests: XCTestCase {
         XCTAssertEqual((empty["ids"] as? [String])?.count, 0)
         XCTAssertEqual(empty["total"] as? Int, 2)
         let envelopeChecks = store!.aclSwiftReadCheckCount - envelopeBefore
-        XCTAssertLessThanOrEqual(envelopeChecks, 1, "Fixed query authorization must remain bounded.")
+        let repeatBefore = store!.aclSwiftReadCheckCount
+        let repeated = try response(
+            service!, uid: accounts.bob, method: "TractandaItem/query", args: setupArguments,
+            accountID: accountID)
+        XCTAssertEqual((repeated["ids"] as? [String])?.count, 0)
+        XCTAssertEqual(repeated["total"] as? Int, 2)
+        XCTAssertEqual(
+            store!.aclSwiftReadCheckCount - repeatBefore, envelopeChecks,
+            "The zero-row account/query setup must have the same fixed work after caches are warm.")
         let before = store!.aclSwiftReadCheckCount
         let withGroups = try response(
             service!, uid: accounts.bob, method: "TractandaItem/query", args: args, accountID: accountID)
