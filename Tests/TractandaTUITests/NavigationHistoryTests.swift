@@ -14,7 +14,7 @@ final class NavigationHistoryTests: XCTestCase {
             ItemClient(transport: { self.service.handle($0, peerUID: self.store.ownerUID) })
         }
         init() throws {
-            store = try ItemStore(root: root.appendingPathComponent("store"))
+            store = try ItemStore.initializeFresh(root: root.appendingPathComponent("store"))
             service = ItemService(store: store)
         }
         deinit { try? FileManager.default.removeItem(at: root) }
@@ -171,17 +171,14 @@ final class NavigationHistoryTests: XCTestCase {
         XCTAssertTrue(workspace.items.isEmpty)
         XCTAssertNotNil(workspace.projectionNotice)
 
-        mode = 4
-        try workspace.refresh(position: 0)
-        XCTAssertTrue(workspace.items.isEmpty)
-        XCTAssertEqual(workspace.sections.flatMap(\.unhydratedIDs), [b.itemID])
-        XCTAssertTrue(workspace.projectionNotice?.contains("could not be loaded") == true)
-
-        mode = 5
-        try workspace.refresh(position: 0)
-        XCTAssertTrue(workspace.items.isEmpty)
-        XCTAssertEqual(workspace.sections.flatMap(\.unhydratedIDs), [a.itemID])
-        XCTAssertTrue(workspace.projectionNotice?.contains("could not be loaded") == true)
+        for invalidStandardPartial in [4, 5] {
+            mode = invalidStandardPartial
+            XCTAssertThrowsError(try workspace.refresh(position: 0)) {
+                XCTAssertEqual(($0 as? TractandaError)?.code, "protocolError")
+            }
+            XCTAssertTrue(workspace.items.isEmpty, "A standard get cannot return partial continuation fields")
+            XCTAssertTrue(workspace.sections.isEmpty)
+        }
     }
 
     func testRestoreRequeriesPagesSectionsAndRenamedCategories() throws {
@@ -331,7 +328,9 @@ final class NavigationHistoryTests: XCTestCase {
         let firstQuery =
             try JSONSerialization.jsonObject(
                 with: f.client.call(
-                    "TractandaItem/query", arguments: ["viewID": views[0].itemID])) as! [String: Any]
+                    "TractandaItem/query",
+                    arguments: ["filter": ["viewID": views[0].itemID], "calculateTotal": true]))
+            as! [String: Any]
         XCTAssertTrue((firstQuery["ids"] as? [String])?.contains(firstResult.itemID) == true)
         let app = try f.app()
         let before = f.store.state
@@ -456,8 +455,10 @@ final class NavigationHistoryTests: XCTestCase {
         try workspace.loadPage(in: 0, forward: false)
         XCTAssertEqual(workspace.sections[0].position, 0)
         XCTAssertEqual(workspace.sections[0].items.count, 64)
-        XCTAssertTrue(queryArguments.allSatisfy { $0["timeZone"] as? String == "UTC" })
-        XCTAssertEqual(Set(queryArguments.compactMap { $0["at"] as? String }).count, 1)
+        XCTAssertTrue(
+            queryArguments.allSatisfy { ($0["filter"] as? [String: Any])?["timeZone"] as? String == "UTC" })
+        XCTAssertEqual(
+            Set(queryArguments.compactMap { ($0["filter"] as? [String: Any])?["at"] as? String }).count, 1)
     }
 
     func testLiveCursorSurvivesChunkedTUIPageAndNavigatesBack() throws {
@@ -493,8 +494,10 @@ final class NavigationHistoryTests: XCTestCase {
         XCTAssertEqual(workspace.sections[0].items.count, 64)
         XCTAssertEqual(workspace.sections[0].items.map { $0.fields["subject"]?.string }, firstPageSubjects)
         XCTAssertTrue(queryArguments.contains(where: { $0["cursor"] is String && $0["position"] == nil }))
-        XCTAssertTrue(queryArguments.allSatisfy { $0["timeZone"] as? String == "UTC" })
-        XCTAssertEqual(Set(queryArguments.compactMap { $0["at"] as? String }).count, 1)
+        XCTAssertTrue(
+            queryArguments.allSatisfy { ($0["filter"] as? [String: Any])?["timeZone"] as? String == "UTC" })
+        XCTAssertEqual(
+            Set(queryArguments.compactMap { ($0["filter"] as? [String: Any])?["at"] as? String }).count, 1)
     }
 
     func testInvalidatedTUICursorFallsBackAtSamePositionAndState() throws {

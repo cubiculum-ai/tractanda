@@ -50,7 +50,7 @@ final class LearningWorkflowTests: XCTestCase {
         init(seed: Bool = true) throws {
             root = FileManager.default.temporaryDirectory.appendingPathComponent(
                 "trac-tui-learning-" + Identifier.make())
-            store = try ItemStore(root: root.appendingPathComponent("store"))
+            store = try ItemStore.initializeFresh(root: root.appendingPathComponent("store"))
             service = ItemService(store: store)
             var settings = CategoryLearningSettings()
             settings.configuration.dimensions = 3
@@ -422,12 +422,12 @@ final class LearningWorkflowTests: XCTestCase {
             "trac-learning-acl-" + Identifier.make())
         defer { try? FileManager.default.removeItem(at: root) }
         let accounts = Accounts()
-        let store = try ItemStore(root: root.appendingPathComponent("store"), accounts: accounts)
-        _ = try store.configureAccess(
-            .object([
+        let store = try ItemStore.initializeFresh(
+            root: root.appendingPathComponent("store"), accounts: accounts,
+            initialAccessConfiguration: .object([
                 "profile": .text(AccessConfiguration.profile),
                 "users": .list([.text("alice"), .text("bob")]),
-            ]), operationID: Identifier.make())
+            ]))
         let service = ItemService(store: store)
         func permissions(_ mode: Int64) -> ItemValue {
             .object([

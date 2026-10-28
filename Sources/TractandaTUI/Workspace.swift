@@ -122,7 +122,7 @@ final class Workspace {
                 viewChanged = head.revisionID != reference.revisionID
                 try restored.openView(head)
                 if !viewChanged {
-                    try restored.loadSections(positions: location.positions, requiring: initialState)
+                    try restored.loadSections(positions: location.positions)
                 }
             } else {
                 restored.expression = location.expression
@@ -141,9 +141,9 @@ final class Workspace {
                     }
                     restored.viewToUpdate = base
                 }
-                try restored.loadSections(positions: location.positions, requiring: initialState)
+                try restored.loadSections(positions: location.positions)
             }
-            guard restored.queryState == initialState, try client.state() == initialState else {
+            guard try client.state() == initialState else {
                 throw TractandaError("stateChanged", "Items changed while returning. Try again.")
             }
             expression = restored.expression

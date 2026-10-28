@@ -14,7 +14,7 @@ final class NavigationAndGroupTests: XCTestCase {
             root = FileManager.default.temporaryDirectory.appendingPathComponent(Identifier.make())
             try FileManager.default.createDirectory(
                 at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            store = try ItemStore(root: root.appendingPathComponent("store"))
+            store = try ItemStore.initializeFresh(root: root.appendingPathComponent("store"))
             service = ItemService(store: store)
             let service = service
             let uid = store.ownerUID
@@ -215,8 +215,8 @@ final class NavigationAndGroupTests: XCTestCase {
             hydrating = true
             let expected = [
                 "state": "stateChanged", "duplicate": "protocolError", "missing": "protocolError",
-                "unexpected": "protocolError", "unresolved": "itemUnresolved", "remaining": "limit",
-                "oversized": "limit", "notFound": "stateChanged", "forbidden": "forbidden",
+                "unexpected": "protocolError", "unresolved": "itemUnresolved", "remaining": "protocolError",
+                "oversized": "protocolError", "notFound": "stateChanged", "forbidden": "forbidden",
             ]
             XCTAssertThrowsError(try marks.toggle(workspace.items(inSectionAt: 0)), mode) {
                 XCTAssertEqual(($0 as? TractandaError)?.code, expected[mode], mode)
