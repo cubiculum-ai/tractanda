@@ -20,6 +20,13 @@ final class SetupDaemonParserContractTests: XCTestCase {
                 commands: root.appendingPathComponent("commands"))
             let engine = SetupEngine(roots: roots, rootCheck: { true }, trustedOwnership: false)
             let release = roots.software.appendingPathComponent("current")
+            try FileManager.default.createDirectory(at: release, withIntermediateDirectories: true)
+            try JSONEncoder().encode(
+                BundleManifest(
+                    version: "fixture", platform: platform.rawValue, arch: "arm64", files: [],
+                    canonicalFormats: .current
+                )
+            ).write(to: release.appendingPathComponent("bundle-manifest.json"))
             for configured in [false, true] {
                 var receipt = try InstallationReceipt(
                     options: .init(name: "preview", bundle: release), roots: roots,
@@ -27,7 +34,7 @@ final class SetupDaemonParserContractTests: XCTestCase {
                 if configured {
                     receipt.peerRuntimeConfiguration = try ManagedPeerConfiguration(
                         path: engine.peerConfigurationURL("preview").path,
-                        bytes: PeerRuntimeConfiguration().encoded())
+                        bytes: PersonalPeerRuntimeConfiguration(settings: .init()).encoded())
                     receipt.documentExtraction = .pinned
                     receipt.documentScratchDirectory =
                         roots.configuration

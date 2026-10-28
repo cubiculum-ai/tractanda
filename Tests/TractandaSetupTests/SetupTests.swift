@@ -613,14 +613,26 @@ final class SetupTests: XCTestCase {
         let records = try FileManager.default.subpathsOfDirectory(atPath: store.path).filter {
             $0.hasSuffix(".tractanda")
         }
-        XCTAssertEqual(records.count, 1)
-        let bytes = try Data(contentsOf: store.appendingPathComponent(records[0]))
+        XCTAssertTrue(records.isEmpty, "Fresh personal policy is local configuration, not a canonical item")
+        let profile = try XCTUnwrap(PersonalWorkgroupProfile.load(store))
+        XCTAssertEqual(
+            profile.accessConfiguration,
+            .object([
+                "profile": .text(AccessConfiguration.profile), "users": .list([.text(f.owner)]),
+                "groups": .list([]), "administration": .text("system"),
+                "administratorGroup": .text(SetupPlatform.host == .macos ? "admin" : "sudo"),
+            ]))
+        let paths = [
+            PersonalWorkgroupProfile.name, ReplicaIdentity.name,
+            ".tractanda-store-identity.json", CanonicalReaderRequirement.fileName,
+        ]
+        let captured = try paths.map { try Data(contentsOf: store.appendingPathComponent($0)) }
         try StoreBootstrap.initialize(store: store, indexDirectory: index, owner: f.owner, instance: "test")
-        XCTAssertEqual(try Data(contentsOf: store.appendingPathComponent(records[0])), bytes)
+        XCTAssertEqual(try paths.map { try Data(contentsOf: store.appendingPathComponent($0)) }, captured)
         XCTAssertThrowsError(
             try StoreBootstrap.initialize(
                 store: store, indexDirectory: index, owner: "root", instance: "test"))
-        XCTAssertEqual(try Data(contentsOf: store.appendingPathComponent(records[0])), bytes)
+        XCTAssertEqual(try paths.map { try Data(contentsOf: store.appendingPathComponent($0)) }, captured)
         XCTAssertTrue(
             FileManager.default.fileExists(atPath: index.appendingPathComponent("items.sqlite").path))
     }
@@ -1077,10 +1089,10 @@ final class SetupTests: XCTestCase {
         let fresh = try XCTUnwrap(initial.readReceipt("preview"))
         let root = URL(fileURLWithPath: fresh.store).resolvingSymlinksInPath()
         let before = try XCTUnwrap(CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid()))
-        XCTAssertEqual(before.minimumReaderLevel, CanonicalFormatSupport.personalWorkgroup.readerLevel)
+        XCTAssertEqual(before.minimumReaderLevel, PersonalWorkgroupProfile.readerLevel)
         XCTAssertFalse(
-            before.capabilities.contains(PeerEnrollmentApproval.capability),
-            "The captured personal baseline has not published historical enrollment semantics")
+            before.capabilities.contains(PersonalSyncValidation.capability),
+            "The captured personal baseline has not published current personal sync semantics")
         let previousSupport = capturedSupport(before)
         XCTAssertNoThrow(try previousSupport.require(before))
         try rewriteCanonicalSupport(f, support: previousSupport)
@@ -1094,7 +1106,7 @@ final class SetupTests: XCTestCase {
             peerStatusCall: { _, _ in try .init(state: .disabled, synchronization: .init(state: .disabled)) },
             readinessCheck: { _, _, _ in
                 try CanonicalReaderRequirement.withWriterLock(root: root, ownerUID: tractanda_uid()) {
-                    try CanonicalReaderRequirement.beforeEnrollmentApprovalPublication(
+                    try CanonicalReaderRequirement.beforePersonalSyncPublication(
                         root: root, ownerUID: tractanda_uid())
                 }
                 raised = try CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid())
@@ -1111,9 +1123,9 @@ final class SetupTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: canonical.0), canonical.1)
         let persisted = try XCTUnwrap(CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid()))
         XCTAssertEqual(persisted, raised)
-        XCTAssertEqual(persisted.minimumReaderLevel, max(before.minimumReaderLevel, 12))
+        XCTAssertEqual(persisted.minimumReaderLevel, max(before.minimumReaderLevel, 18))
         XCTAssertTrue(Set(before.capabilities).isSubset(of: Set(persisted.capabilities)))
-        XCTAssertTrue(persisted.capabilities.contains(PeerEnrollmentApproval.capability))
+        XCTAssertTrue(persisted.capabilities.contains(PersonalSyncValidation.capability))
         XCTAssertNotEqual(
             persisted, before, "A real additional required capability must durably advance the guard")
         XCTAssertEqual(persisted.storeID, before.storeID)
@@ -1189,8 +1201,20 @@ final class SetupTests: XCTestCase {
         XCTAssertEqual(try installer.currentClientRelease(), current.release)
         XCTAssertThrowsError(try installer.verifyCanonicalReadiness(current, info: [:]))
         let matching = try JSONSerialization.jsonObject(with: JSON.encode(CanonicalFormatSupport.current))
-        XCTAssertNoThrow(
-            try installer.verifyCanonicalReadiness(current, info: ["canonicalFormats": matching]))
+        let active = try JSONSerialization.jsonObject(
+            with: JSON.encode(CanonicalFormatSupport.personalWorkgroup))
+        let runtimeInfo: [String: Any] = [
+            "canonicalFormats": matching, "activeCanonicalFormats": active,
+            "persistenceProfile": "personal-workgroup",
+            "clustering": ["state": "standalone", "profile": "tractanda.personal-sync.v1"],
+        ]
+        XCTAssertNoThrow(try installer.verifyCanonicalReadiness(current, info: runtimeInfo))
+        var missingProfile = runtimeInfo
+        missingProfile.removeValue(forKey: "persistenceProfile")
+        XCTAssertThrowsError(try installer.verifyCanonicalReadiness(current, info: missingProfile))
+        var wrongActive = runtimeInfo
+        wrongActive["activeCanonicalFormats"] = matching
+        XCTAssertThrowsError(try installer.verifyCanonicalReadiness(current, info: wrongActive))
     }
 
 }
@@ -1211,7 +1235,9 @@ extension SetupTests {
             let argv = try XCTUnwrap(plist["ProgramArguments"] as? [String])
             if let index = argv.firstIndex(of: "--peer-runtime-config") {
                 let path = argv[index + 1]
-                let config = try PeerRuntimeConfiguration.decode(Data(contentsOf: URL(fileURLWithPath: path)))
+                let config = try PersonalPeerRuntimeConfiguration.decode(
+                    Data(contentsOf: URL(fileURLWithPath: path))
+                ).settings
                 loaded.value = try .init(
                     state: .active, configurationPath: path, settingsDigest: config.settingsDigest,
                     synchronizationEnabled: config.synchronization.enabled,
@@ -1230,8 +1256,9 @@ extension SetupTests {
     }
     private func peerInput(_ f: Fixture, listen: Bool = false) throws -> URL {
         let input = f.root.appendingPathComponent("operator-input.json")
-        try PeerRuntimeConfiguration(listen: listen ? .init(host: "127.0.0.1", port: 48730) : nil).encoded()
-            .write(to: input)
+        try PersonalPeerRuntimeConfiguration(
+            settings: PeerRuntimeConfiguration(listen: listen ? .init(host: "127.0.0.1", port: 48730) : nil)
+        ).encoded().write(to: input)
         return input
     }
     func testManagedPeerFreshDisabledReplacePreserveDisableAndOmittedUpgrade() throws {
@@ -1385,10 +1412,10 @@ extension SetupTests {
         let first = try XCTUnwrap(initial.readReceipt("preview"))
         let store = URL(fileURLWithPath: first.store).resolvingSymlinksInPath()
         let before = try XCTUnwrap(CanonicalReaderRequirement.load(root: store, ownerUID: tractanda_uid()))
-        XCTAssertEqual(before.minimumReaderLevel, CanonicalFormatSupport.personalWorkgroup.readerLevel)
+        XCTAssertEqual(before.minimumReaderLevel, PersonalWorkgroupProfile.readerLevel)
         XCTAssertFalse(
-            before.capabilities.contains(PeerEnrollmentApproval.capability),
-            "The captured personal baseline has not published historical enrollment semantics")
+            before.capabilities.contains(PersonalSyncValidation.capability),
+            "The captured personal baseline has not published current personal sync semantics")
         let older = CanonicalFormatSupport(
             readerLevel: before.minimumReaderLevel, writerLevel: before.minimumReaderLevel,
             read: before.recordFormats, write: before.recordFormats,
@@ -1404,7 +1431,7 @@ extension SetupTests {
         var raised: CanonicalReaderRequirement?
         let candidate = peerInstaller(f, runner: runner, loaded: loaded) {
             try CanonicalReaderRequirement.withWriterLock(root: store, ownerUID: tractanda_uid()) {
-                try CanonicalReaderRequirement.beforeEnrollmentApprovalPublication(
+                try CanonicalReaderRequirement.beforePersonalSyncPublication(
                     root: store, ownerUID: tractanda_uid())
             }
             raised = try CanonicalReaderRequirement.load(root: store, ownerUID: tractanda_uid())
@@ -1421,13 +1448,12 @@ extension SetupTests {
             persisted.capabilities,
             Set(
                 before.capabilities + [
-                    AuthorityStore.capability, "tractanda.shared-authority.v1",
-                    AuthorityStore.causalCapability, PeerEnrollmentApproval.capability,
+                    PersonalSyncValidation.capability
                 ]
             ).sorted())
-        XCTAssertEqual(persisted.minimumReaderLevel, max(before.minimumReaderLevel, 12))
+        XCTAssertEqual(persisted.minimumReaderLevel, max(before.minimumReaderLevel, 18))
         XCTAssertTrue(Set(before.capabilities).isSubset(of: Set(persisted.capabilities)))
-        XCTAssertTrue(persisted.capabilities.contains(PeerEnrollmentApproval.capability))
+        XCTAssertTrue(persisted.capabilities.contains(PersonalSyncValidation.capability))
         XCTAssertNotEqual(
             persisted, before, "A real additional required capability must durably advance the guard")
         XCTAssertThrowsError(try older.require(persisted)) {

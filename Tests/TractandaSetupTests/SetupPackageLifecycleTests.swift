@@ -326,11 +326,53 @@ final class SetupPackageLifecycleTests: XCTestCase {
 
         func verifyAdoptionAsFixtureCustodian() {
             engine.packagePreparedVerification = { receipt, storeID, replicaID in
-                try ItemStore.verifyPreparedReplicaForSetup(
+                try ItemStore.verifyPersonalSyncReplicaForSetup(
                     root: URL(fileURLWithPath: receipt.store),
                     indexDirectory: URL(fileURLWithPath: receipt.indexDirectory),
                     expectedStoreID: storeID, expectedReplicaID: replicaID)
             }
+        }
+
+        func personalReplica() throws -> (PersonalSyncIdentity, Revision, PeerCredential) {
+            try requireTinyCapacity()
+            let account = try SystemAccountDirectory().user(forUID: getuid())
+            let target = engine.roots.data.appendingPathComponent("a")
+            let store = try ItemStore.createPersonalSyncReplica(
+                root: target, storeID: UUID.makeVersion1().uuidString.lowercased(),
+                accessConfiguration: .object([
+                    "profile": .text(AccessConfiguration.profile), "users": .list([.text(account.name)]),
+                    "administration": .text("system"), "administratorGroup": .text(account.primaryGroupName),
+                ]))
+            let identity = try store.personalSyncIdentity()
+            let item = try store.withAccess(forUID: getuid()) {
+                try store.commit(
+                    .init(
+                        classID: "Item",
+                        changes: [
+                            "subject": .text("preserved personal replica"),
+                            "permissions": .object([
+                                "profile": .text(ItemPermissions.profile), "owner": .text(account.name),
+                                "group": .text(account.primaryGroupName), "mode": .integer(0o640),
+                                "acl": .object([:]),
+                            ]),
+                        ], operationID: "personal-adoption-content"))
+            }.revision
+            let remote = try UUID.makeVersion1().uuidString.lowercased()
+            let config = try PersonalMembershipConfiguration(
+                storeID: identity.storeID, configurationID: UUID.makeVersion1().uuidString.lowercased(),
+                members: [
+                    .init(replicaID: identity.replicaID, hostname: "target.fixture"),
+                    .init(replicaID: remote, hostname: "source.fixture"),
+                ])
+            _ = try store.preparePersonalMembershipChange(configuration: config, expectedDigest: nil)
+            let credential = try PeerCredential(
+                binding: .init(
+                    peerID: "source", storeID: identity.storeID,
+                    localReplicaID: identity.replicaID, remoteReplicaID: remote,
+                    pairingID: UUID.makeVersion1().uuidString.lowercased(), localIsInitiator: true,
+                    configurationDigest: config.digest), secret: Array(repeating: 0x61, count: 32))
+            try store.registerPersonalPeerCredentials([credential], configuration: config)
+            return (identity, item, credential)
         }
 
         /// Real canonical retirement/control intake; no forged disposed flag or replacement ID.
@@ -670,7 +712,8 @@ final class SetupPackageLifecycleTests: XCTestCase {
         let receipt = try XCTUnwrap(f.engine.readReceipt("a"))
         let store = URL(fileURLWithPath: receipt.store)
         let before = try XCTUnwrap(CanonicalReaderRequirement.load(root: store, ownerUID: getuid()))
-        XCTAssertLessThan(before.minimumReaderLevel, 12)
+        XCTAssertEqual(before.minimumReaderLevel, PersonalWorkgroupProfile.readerLevel)
+        XCTAssertLessThan(before.minimumReaderLevel, CanonicalFormatSupport.personalWorkgroup.readerLevel)
         let olderSupport = CanonicalFormatSupport(
             readerLevel: before.minimumReaderLevel, writerLevel: before.minimumReaderLevel,
             read: before.recordFormats, write: before.recordFormats,
@@ -692,11 +735,15 @@ final class SetupPackageLifecycleTests: XCTestCase {
         failed.phase = .failed
         try f.engine.writePackageState(failed)
         try CanonicalReaderRequirement.withWriterLock(root: store, ownerUID: getuid()) {
-            try CanonicalReaderRequirement.beforeEnrollmentApprovalPublication(
+            try CanonicalReaderRequirement.beforePersonalSyncPublication(
                 root: store, ownerUID: getuid())
         }
         let raised = try XCTUnwrap(CanonicalReaderRequirement.load(root: store, ownerUID: getuid()))
-        XCTAssertEqual(raised.minimumReaderLevel, 12)
+        XCTAssertEqual(raised.minimumReaderLevel, CanonicalFormatSupport.personalWorkgroup.readerLevel)
+        XCTAssertGreaterThan(raised.minimumReaderLevel, before.minimumReaderLevel)
+        XCTAssertEqual(raised.storeID, before.storeID)
+        XCTAssertTrue(Set(before.capabilities).isSubset(of: Set(raised.capabilities)))
+        XCTAssertTrue(raised.capabilities.contains(PersonalSyncValidation.capability))
         XCTAssertThrowsError(try olderSupport.require(raised))
         let canonical = try f.canonicalBytes()
         XCTAssertThrowsError(try f.hook(.preinst, older))
@@ -797,50 +844,46 @@ final class SetupPackageLifecycleTests: XCTestCase {
         XCTAssertEqual(try f.canonicalBytes(), canonical)
     }
 
-    func testActivatedPreparedAdoptionValidatesRealAuthorityAndPreservesIdentityKeysAndPolicy() throws {
+    func testPersonalPreparedAdoptionPreservesIdentityProfileItemsKeysAndPolicyWithoutBootstrap() throws {
         let f = try fixture()
         try f.configureFresh()
-        let enrollment = try f.preparedTarget(activate: true)
+        let (identity, item, credential) = try f.personalReplica()
         f.verifyAdoptionAsFixtureCustodian()
-        let prep = enrollment.preparation
         let target = f.engine.roots.data.appendingPathComponent("a")
         let key = try PeerCredentialStore.path(
-            peerID: enrollment.request.targetContext.peerID,
-            configurationDigest: enrollment.request.targetContext.configurationDigest
+            peerID: credential.binding.peerID, configurationDigest: credential.binding.configurationDigest
         ).joined(separator: "/")
         let paths = [
-            ReplicaIdentity.name, ".tractanda-store-identity.json", PeerEnrollment.intentName,
-            PeerEnrollmentActivation.directory + "/request.json",
-            PeerEnrollmentActivation.directory + "/activated.json", key,
+            ReplicaIdentity.name, ".tractanda-store-identity.json", PersonalWorkgroupProfile.name,
+            PersonalSyncConfiguration.pendingName, key,
         ]
         let preserved = try paths.map { try Data(contentsOf: target.appendingPathComponent($0)) }
-        let sequence = try AuthorityStore.configurationSequence(root: target)
-        let configuration = try AuthorityStore.configuration(
-            root: target,
-            files: DocumentContentFiles(root: target, ownerUID: getuid(), minimumFreeBytes: 0))
+        let canonical = try f.canonicalBytes().filter { $0.key.contains("/items/") }
+        XCTAssertFalse(canonical.isEmpty)
         let wrong = try UUID.makeVersion1().uuidString.lowercased()
-        for pins in [(wrong, prep.targetReplicaID), (prep.commonStoreID, wrong)] {
+        for pins in [(wrong, identity.replicaID), (identity.storeID, wrong)] {
             XCTAssertThrowsError(
-                try f.engine.install(f.options(selection: .prepared(storeID: pins.0, replicaID: pins.1))))
+                try f.engine.install(
+                    f.options(selection: .prepared(storeID: pins.0, replicaID: pins.1))))
             XCTAssertNil(try f.engine.readReceipt("a"))
         }
         try f.engine.install(
-            f.options(selection: .prepared(storeID: prep.commonStoreID, replicaID: prep.targetReplicaID)))
+            f.options(
+                selection: .prepared(
+                    storeID: identity.storeID, replicaID: identity.replicaID)))
         XCTAssertEqual(f.runner.bootstraps, 0)
         let receipt = try XCTUnwrap(f.engine.readReceipt("a"))
         XCTAssertEqual(receipt.state, .active)
-        XCTAssertEqual(receipt.preparedStoreID, prep.commonStoreID)
-        XCTAssertEqual(receipt.preparedReplicaID, prep.targetReplicaID)
+        XCTAssertEqual(receipt.preparedStoreID, identity.storeID)
+        XCTAssertEqual(receipt.preparedReplicaID, identity.replicaID)
         try f.engine.packageRuntimeGuard("a")
-        for (path, bytes) in zip(paths, preserved) {
-            XCTAssertEqual(try Data(contentsOf: target.appendingPathComponent(path)), bytes)
-        }
-        XCTAssertEqual(try AuthorityStore.configurationSequence(root: target), sequence)
-        XCTAssertEqual(
-            try AuthorityStore.configuration(
-                root: target,
-                files: DocumentContentFiles(root: target, ownerUID: getuid(), minimumFreeBytes: 0)),
-            configuration)
+        XCTAssertEqual(try paths.map { try Data(contentsOf: target.appendingPathComponent($0)) }, preserved)
+        XCTAssertEqual(try f.canonicalBytes().filter { $0.key.contains("/items/") }, canonical)
+        let reopened = try ItemStore.openInitialized(
+            root: target, indexDirectory: URL(fileURLWithPath: receipt.indexDirectory))
+        let current = try reopened.withAccess(forUID: getuid()) { try reopened.get(item.itemID) }
+        XCTAssertEqual(current, item)
+        XCTAssertEqual(current.fields["permissions"], item.fields["permissions"])
         try f.requireTinyCapacity()
     }
 
@@ -861,43 +904,26 @@ final class SetupPackageLifecycleTests: XCTestCase {
         XCTAssertTrue(f.runner.running.isEmpty)
     }
 
-    func testPreparedAdoptionRejectsLostActivationProofWithoutRepairingIt() throws {
+    func testPersonalPreparedAdoptionRejectsDamagedCurrentProfileWithoutRepairOrBootstrap() throws {
         let f = try fixture()
         try f.configureFresh()
-        let enrollment = try f.preparedTarget(activate: true)
+        let (identity, _, _) = try f.personalReplica()
         f.verifyAdoptionAsFixtureCustodian()
-        let prep = enrollment.preparation
-        let proof = f.engine.roots.data.appendingPathComponent("a").appendingPathComponent(
-            PeerEnrollmentActivation.directory + "/activated.json")
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: proof.path)
+        let profile = f.engine.roots.data.appendingPathComponent("a")
+            .appendingPathComponent(PersonalWorkgroupProfile.name)
         let invalid = Data("{}".utf8)
-        try invalid.write(to: proof)
-        try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: proof.path)
+        try invalid.write(to: profile)
+        let before = try f.canonicalBytes()
         XCTAssertThrowsError(
             try f.engine.install(
-                f.options(selection: .prepared(storeID: prep.commonStoreID, replicaID: prep.targetReplicaID)))
-        )
-        XCTAssertEqual(try Data(contentsOf: proof), invalid)
+                f.options(
+                    selection: .prepared(
+                        storeID: identity.storeID, replicaID: identity.replicaID))))
+        XCTAssertEqual(try Data(contentsOf: profile), invalid)
+        XCTAssertEqual(try f.canonicalBytes(), before)
         XCTAssertNil(try f.engine.readReceipt("a"))
         XCTAssertEqual(f.runner.bootstraps, 0)
+        XCTAssertTrue(f.runner.running.isEmpty)
     }
 
-    func testPreparedAdoptionRejectsActualCanonicalTargetDisposalAndPreservesEvidence() throws {
-        let f = try fixture()
-        try f.configureFresh()
-        let enrollment = try f.preparedTarget(activate: true)
-        try f.disposePreparedTarget(enrollment)
-        f.verifyAdoptionAsFixtureCustodian()
-        let before = try f.canonicalBytes()
-        let prep = enrollment.preparation
-        XCTAssertThrowsError(
-            try f.engine.install(
-                f.options(selection: .prepared(storeID: prep.commonStoreID, replicaID: prep.targetReplicaID)))
-        ) {
-            XCTAssertEqual(($0 as? TractandaError)?.code, "localReplicaRetired")
-        }
-        XCTAssertEqual(f.runner.bootstraps, 0)
-        XCTAssertNil(try f.engine.readReceipt("a"))
-        XCTAssertEqual(try f.canonicalBytes(), before)
-    }
 }

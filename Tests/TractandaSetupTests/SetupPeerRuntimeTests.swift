@@ -44,7 +44,14 @@ final class SetupPeerRuntimeTests: XCTestCase {
         ).encoded()
     }
     private func receipt(_ root: URL, _ engine: SetupEngine) throws -> InstallationReceipt {
-        try InstallationReceipt(
+        let release = root.appendingPathComponent("release")
+        try FileManager.default.createDirectory(at: release, withIntermediateDirectories: true)
+        try JSONEncoder().encode(
+            BundleManifest(
+                version: "fixture", platform: "macos", arch: "arm64", files: [], canonicalFormats: .current
+            )
+        ).write(to: release.appendingPathComponent("bundle-manifest.json"))
+        return try InstallationReceipt(
             options: .init(name: "preview", bundle: root), roots: engine.roots,
             owner: "owner", release: root.appendingPathComponent("release"),
             manifestSHA256: String(repeating: "a", count: 64))
