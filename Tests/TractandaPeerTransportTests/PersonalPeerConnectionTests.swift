@@ -93,9 +93,10 @@ final class PersonalPeerConnectionTests: XCTestCase {
         XCTAssertEqual(admission.requests.withLock { $0 }, 2)
     }
 
-    func testPersonalBudgetsAreGenerousConfigurableAndRejectInvalidOverrides() throws {
+    func testPersonalOperationDeadlineIsOptInAndOtherBudgetsRemainConfigurable() throws {
         XCTAssertEqual(try PersonalPeerLimits.configured(environment: [:]).handshakeSeconds, 86_400)
-        XCTAssertEqual(try PersonalPeerLimits.configured(environment: [:]).operationSeconds, 86_400)
+        XCTAssertNil(try PersonalPeerLimits.configured(environment: [:]).operationSeconds)
+        XCTAssertEqual(try PersonalPeerLimits.configured(environment: [:]).partialFrameSeconds, 86_400)
         let configured = try PersonalPeerLimits.configured(environment: [
             "TRACTANDA_PERSONAL_PEER_HANDSHAKE_SECONDS": "172800",
             "TRACTANDA_PERSONAL_PEER_OPERATION_SECONDS": "259200",
@@ -106,6 +107,10 @@ final class PersonalPeerConnectionTests: XCTestCase {
             XCTAssertThrowsError(
                 try PersonalPeerLimits.configured(environment: [
                     "TRACTANDA_PERSONAL_PEER_HANDSHAKE_SECONDS": value
+                ]))
+            XCTAssertThrowsError(
+                try PersonalPeerLimits.configured(environment: [
+                    "TRACTANDA_PERSONAL_PEER_OPERATION_SECONDS": value
                 ]))
         }
     }

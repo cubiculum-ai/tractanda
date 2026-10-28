@@ -40,8 +40,10 @@ package struct PersonalPeerOperations: Sendable {
 
 package struct PersonalPeerLimits: Sendable {
     package var handshakeSeconds: Double = 86_400
-    /// A finite single-operation/partial-frame budget, not an overall transfer deadline.
-    package var operationSeconds: Double = 86_400
+    /// Healthy dispatched work has no implicit wall-clock deadline. Administrators may opt in.
+    package var operationSeconds: Double? = nil
+    /// Preserve the existing partial-frame idle bound independently of dispatched work.
+    package var partialFrameSeconds: Double { operationSeconds ?? 86_400 }
     package init() {}
     package static func configured(environment: [String: String] = ProcessInfo.processInfo.environment) throws
         -> Self
@@ -64,7 +66,7 @@ package struct PersonalPeerLimits: Sendable {
     }
     package func validate() throws {
         guard handshakeSeconds.isFinite, handshakeSeconds > 0, handshakeSeconds <= 604_800,
-            operationSeconds.isFinite, operationSeconds > 0, operationSeconds <= 604_800
+            operationSeconds.map({ $0.isFinite && $0 > 0 && $0 <= 604_800 }) ?? true
         else { throw TractandaError("resourceLimit", "Invalid personal peer budgets.") }
     }
 }
@@ -273,7 +275,7 @@ private final class PersonalPeerHandler: ChannelDuplexHandler {
                 if input == nil {
                     let bound = NIOLoopBound(self, eventLoop: context.eventLoop)
                     frameTimer = context.eventLoop.scheduleTask(
-                        in: .nanoseconds(Int64(limits.operationSeconds * 1_000_000_000))
+                        in: .nanoseconds(Int64(limits.partialFrameSeconds * 1_000_000_000))
                     ) {
                         bound.value.fail(
                             TractandaError("deadlineExceeded", "Personal partial frame expired."))
@@ -523,10 +525,11 @@ private final class PersonalPeerHandler: ChannelDuplexHandler {
         }
         return promise.futureResult
     }
-    private func timer(_ context: ChannelHandlerContext) -> Scheduled<Void> {
+    private func timer(_ context: ChannelHandlerContext) -> Scheduled<Void>? {
+        guard let seconds = limits.operationSeconds else { return nil }
         let bound = NIOLoopBound(self, eventLoop: context.eventLoop)
         return context.eventLoop.scheduleTask(
-            in: .nanoseconds(Int64(limits.operationSeconds * 1_000_000_000))
+            in: .nanoseconds(Int64(seconds * 1_000_000_000))
         ) {
             bound.value.fail(TractandaError("deadlineExceeded", "Personal peer operation expired."))
         }
