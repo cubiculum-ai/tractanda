@@ -1086,4 +1086,43 @@ final class PersonalSyncTests: XCTestCase {
         }
     }
 
+    func testReplyCapturedBeforeRemovalCannotAppendFinishOrApplyAfterCurrentMembershipChanges() throws {
+        try fixture { pair, accounts in
+            let staged = try create(
+                pair.b, accounts: accounts, subject: "staged before removal", operation: "late-staged")
+            let stagedObject = try descriptor(pair.b, revision: staged)
+            try transfer(
+                stagedObject, from: pair.b, to: pair.a, sourceBinding: pair.bindingB,
+                targetBinding: pair.bindingA)
+            let delayed = try create(
+                pair.b, accounts: accounts, subject: "delayed reply bytes", operation: "late-reply")
+            let delayedObject = try descriptor(pair.b, revision: delayed)
+            _ = try pair.a.preparePersonalObject(session: pair.bindingA, descriptor: delayedObject)
+            let capturedReply = try pair.b.readPersonalObject(
+                session: pair.bindingB, descriptor: delayedObject, offset: 0)
+            XCTAssertEqual(Int64(capturedReply.count), delayedObject.byteCount)
+            let next = try PersonalMembershipConfiguration(
+                storeID: pair.configuration.storeID, configurationID: id(),
+                members: pair.configuration.members.filter { $0.replicaID == pair.bindingA.localReplicaID })
+            let removal = try pair.a.preparePersonalMembershipChange(
+                configuration: next, expectedDigest: pair.configuration.digest)
+            _ = try pair.a.commitPersonalMembershipChange(preparation: removal, acknowledgements: [])
+            let before = try RetiredAuthorityEntryPointTests.Fixture.fingerprint(pair.first.root)
+            assertCode("untrustedPeer") {
+                _ = try pair.a.appendPersonalObject(
+                    session: pair.bindingA, descriptor: delayedObject, offset: 0, data: capturedReply)
+            }
+            assertCode("untrustedPeer") {
+                _ = try pair.a.finishPersonalObject(session: pair.bindingA, descriptor: stagedObject)
+            }
+            assertCode("untrustedPeer") {
+                _ = try pair.a.applyPersonalRevision(session: pair.bindingA, descriptor: stagedObject)
+            }
+            XCTAssertEqual(try RetiredAuthorityEntryPointTests.Fixture.fingerprint(pair.first.root), before)
+            assertCode("notFound") { _ = try pair.a.get(staged.itemID) }
+            assertCode("notFound") { _ = try pair.a.get(delayed.itemID) }
+            XCTAssertEqual(try pair.a.personalSyncIdentity().membership, next)
+        }
+    }
+
 }
