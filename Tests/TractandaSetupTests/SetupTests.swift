@@ -1030,7 +1030,7 @@ final class SetupTests: XCTestCase {
             try mac.plan(SetupOptions(name: String(repeating: "x", count: 48), bundle: f.bundle)))
         let normal = try mac.plan(SetupOptions(bundle: f.bundle))
         XCTAssertTrue(
-            normal.executable.hasPrefix("/Users/Shared/Library/Application Support/Tractanda/releases/"))
+            normal.executable.hasPrefix("/Library/Tractanda/Software/releases/"))
     }
     private func rewriteCanonicalSupport(_ fixture: Fixture, support: CanonicalFormatSupport) throws {
         let path = fixture.bundle.appendingPathComponent("bundle-manifest.json")
@@ -1077,7 +1077,10 @@ final class SetupTests: XCTestCase {
         let fresh = try XCTUnwrap(initial.readReceipt("preview"))
         let root = URL(fileURLWithPath: fresh.store).resolvingSymlinksInPath()
         let before = try XCTUnwrap(CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid()))
-        XCTAssertLessThan(before.minimumReaderLevel, 12)
+        XCTAssertEqual(before.minimumReaderLevel, CanonicalFormatSupport.personalWorkgroup.readerLevel)
+        XCTAssertFalse(
+            before.capabilities.contains(PeerEnrollmentApproval.capability),
+            "The captured personal baseline has not published historical enrollment semantics")
         let previousSupport = capturedSupport(before)
         XCTAssertNoThrow(try previousSupport.require(before))
         try rewriteCanonicalSupport(f, support: previousSupport)
@@ -1108,7 +1111,11 @@ final class SetupTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: canonical.0), canonical.1)
         let persisted = try XCTUnwrap(CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid()))
         XCTAssertEqual(persisted, raised)
-        XCTAssertEqual(persisted.minimumReaderLevel, 12)
+        XCTAssertEqual(persisted.minimumReaderLevel, max(before.minimumReaderLevel, 12))
+        XCTAssertTrue(Set(before.capabilities).isSubset(of: Set(persisted.capabilities)))
+        XCTAssertTrue(persisted.capabilities.contains(PeerEnrollmentApproval.capability))
+        XCTAssertNotEqual(
+            persisted, before, "A real additional required capability must durably advance the guard")
         XCTAssertEqual(persisted.storeID, before.storeID)
         XCTAssertThrowsError(try previousSupport.require(persisted)) {
             XCTAssertEqual(($0 as? TractandaError)?.code, "incompatibleCanonicalReader")
@@ -1378,7 +1385,10 @@ extension SetupTests {
         let first = try XCTUnwrap(initial.readReceipt("preview"))
         let store = URL(fileURLWithPath: first.store).resolvingSymlinksInPath()
         let before = try XCTUnwrap(CanonicalReaderRequirement.load(root: store, ownerUID: tractanda_uid()))
-        XCTAssertLessThan(before.minimumReaderLevel, 12)
+        XCTAssertEqual(before.minimumReaderLevel, CanonicalFormatSupport.personalWorkgroup.readerLevel)
+        XCTAssertFalse(
+            before.capabilities.contains(PeerEnrollmentApproval.capability),
+            "The captured personal baseline has not published historical enrollment semantics")
         let older = CanonicalFormatSupport(
             readerLevel: before.minimumReaderLevel, writerLevel: before.minimumReaderLevel,
             read: before.recordFormats, write: before.recordFormats,
@@ -1415,7 +1425,11 @@ extension SetupTests {
                     AuthorityStore.causalCapability, PeerEnrollmentApproval.capability,
                 ]
             ).sorted())
-        XCTAssertEqual(persisted.minimumReaderLevel, 12)
+        XCTAssertEqual(persisted.minimumReaderLevel, max(before.minimumReaderLevel, 12))
+        XCTAssertTrue(Set(before.capabilities).isSubset(of: Set(persisted.capabilities)))
+        XCTAssertTrue(persisted.capabilities.contains(PeerEnrollmentApproval.capability))
+        XCTAssertNotEqual(
+            persisted, before, "A real additional required capability must durably advance the guard")
         XCTAssertThrowsError(try older.require(persisted)) {
             XCTAssertEqual(($0 as? TractandaError)?.code, "incompatibleCanonicalReader")
         }
