@@ -9,8 +9,11 @@ struct NativePersonalEnrollmentSession: Sendable {
 }
 
 extension DaemonApplication {
-    func beginPrivatePersonalEnrollment(_ data: Data, forUID uid: UInt32, control: PeerExchangeControl) async throws
-        -> NativePersonalEnrollmentSession {
-        try await makePrivatePersonalEnrollmentSession(NativePersonalEnrollment.Begin.parse(data), forUID: uid, control: control)
+    func beginPrivatePersonalEnrollment(_ data: Data, forUID uid: UInt32, control: PeerExchangeControl)
+        async throws
+        -> NativePersonalEnrollmentSession
+    {
+        try await makePrivatePersonalEnrollmentSession(
+            NativePersonalEnrollment.Begin.parse(data), forUID: uid, control: control)
     }
 }

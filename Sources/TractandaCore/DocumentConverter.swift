@@ -80,16 +80,21 @@ public struct DocumentConverterConfiguration: Codable, Sendable {
         if let modelArtifact, let modelStorageDirectory {
             try modelArtifact.validate()
             guard modelStorageDirectory.hasPrefix("/"), modelStorageDirectory != "/",
-                modelArtifact.directory(in: URL(fileURLWithPath: modelStorageDirectory)).path == modelDirectory else {
-                throw TractandaError("invalidDocumentConfiguration", "Document artifact path differs from its pin.")
+                modelArtifact.directory(in: URL(fileURLWithPath: modelStorageDirectory)).path
+                    == modelDirectory
+            else {
+                throw TractandaError(
+                    "invalidDocumentConfiguration", "Document artifact path differs from its pin.")
             }
         } else {
             guard modelArtifact == nil, modelStorageDirectory == nil else {
-                throw TractandaError("invalidDocumentConfiguration", "Document artifact configuration is incomplete.")
+                throw TractandaError(
+                    "invalidDocumentConfiguration", "Document artifact configuration is incomplete.")
             }
             var model = stat()
             guard lstat(modelDirectory, &model) == 0, model.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else {
-                throw TractandaError("invalidDocumentConfiguration", "Document model directory is unavailable.")
+                throw TractandaError(
+                    "invalidDocumentConfiguration", "Document model directory is unavailable.")
             }
         }
         try FileManager.default.createDirectory(

@@ -10,15 +10,21 @@ private struct PersonalProgressPublisher {
     let observer: PersonalSyncProgressObserver?
     var phase: PersonalPullProgress.Phase = .inventory
     var lastProgressAt: String?
-    mutating func emit(_ next: PersonalPullProgress.Phase, _ report: PersonalSyncReport, completed: Bool = false) {
+    mutating func emit(
+        _ next: PersonalPullProgress.Phase, _ report: PersonalSyncReport, completed: Bool = false
+    ) {
         guard observer != nil else { return }
         let changed = phase != next
         phase = next
         if completed { lastProgressAt = ISO8601DateFormatter().string(from: Date()) }
         guard changed || completed else { return }
         // Local counters were already checked by the transfer; observation cannot throw into it.
-        if let value = try? PersonalPullProgress(phase: phase, revisionCount: report.revisions,
-            transferredBytes: report.transferredBytes, lastProgressAt: lastProgressAt) { observer?(value) }
+        if let value = try? PersonalPullProgress(
+            phase: phase, revisionCount: report.revisions,
+            transferredBytes: report.transferredBytes, lastProgressAt: lastProgressAt)
+        {
+            observer?(value)
+        }
     }
 }
 
@@ -85,7 +91,8 @@ package enum PersonalSyncDriver {
                     _ = try await coordinator.personalPeerWork(work, .push(.init(descriptor: descriptor)))
                     try await transfer(
                         work, connection: connection, coordinator: coordinator,
-                        binding: binding, report: &report, observation: &observation, afterChunkForTesting: afterChunkForTesting)
+                        binding: binding, report: &report, observation: &observation,
+                        afterChunkForTesting: afterChunkForTesting)
                 }
                 if page.complete { break }
                 offset = page.nextOffset!
@@ -118,7 +125,8 @@ package enum PersonalSyncDriver {
     private static func transfer(
         _ work: PersonalDependencyWorkStack, connection: PersonalPeerConnection,
         coordinator: ServiceCoordinator, binding: PeerExchangeBinding,
-        report: inout PersonalSyncReport, observation: inout PersonalProgressPublisher, afterChunkForTesting: PersonalChunkObserver?
+        report: inout PersonalSyncReport, observation: inout PersonalProgressPublisher,
+        afterChunkForTesting: PersonalChunkObserver?
     ) async throws {
         while var frame = try await coordinator.personalPeerWork(work, .peek) {
             try Task.checkCancellation()

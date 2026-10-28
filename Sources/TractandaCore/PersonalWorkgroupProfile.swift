@@ -47,7 +47,8 @@ enum PersonalWorkgroupProfile {
             UUID(uuidString: record.storeID)?.version1Components != nil,
             UUID(uuidString: record.replicaID)?.version1Components != nil,
             record.storeID != record.replicaID,
-            ["fresh", "freshReplica", "freshReplicaJoining", "selectedContent"].contains(record.initialization)
+            ["fresh", "freshReplica", "freshReplicaJoining", "selectedContent"].contains(
+                record.initialization)
         else { throw TractandaError("invalidPersonalProfile", "Invalid local personal/workgroup profile.") }
         _ = try AccessConfiguration(record.accessConfiguration)
         return record
@@ -122,7 +123,8 @@ enum PersonalWorkgroupProfile {
             if pending.initialization == "freshReplica" {
                 intended = .freshReplica(storeID: pending.storeID, configuration: pending.accessConfiguration)
             } else if pending.initialization == "freshReplicaJoining" {
-                intended = .joiningReplica(storeID: pending.storeID, configuration: pending.accessConfiguration)
+                intended = .joiningReplica(
+                    storeID: pending.storeID, configuration: pending.accessConfiguration)
             } else {
                 intended =
                     pending.initialization == "fresh"
@@ -162,7 +164,9 @@ enum PersonalWorkgroupProfile {
             if let pending = try load(root, pending: true) {
                 guard pending.accessConfiguration == policy,
                     pending.initialization
-                        == (joining ? "freshReplicaJoining" : commonStoreID != nil ? "freshReplica" : fresh ? "fresh" : "selectedContent"),
+                        == (joining
+                            ? "freshReplicaJoining"
+                            : commonStoreID != nil ? "freshReplica" : fresh ? "fresh" : "selectedContent"),
                     commonStoreID == nil || pending.storeID == commonStoreID
                 else {
                     throw TractandaError("invalidPersonalProfile", "Retry the same local activation policy.")
@@ -219,7 +223,9 @@ enum PersonalWorkgroupProfile {
                 profile: "tractanda.personal-workgroup.v1",
                 storeID: commonStoreID ?? UUID.makeVersion1().uuidString.lowercased(),
                 replicaID: UUID.makeVersion1().uuidString.lowercased(), accessConfiguration: policy,
-                initialization: joining ? "freshReplicaJoining" : commonStoreID != nil ? "freshReplica" : fresh ? "fresh" : "selectedContent")
+                initialization: joining
+                    ? "freshReplicaJoining"
+                    : commonStoreID != nil ? "freshReplica" : fresh ? "fresh" : "selectedContent")
             try persist(record, root: root, name: pendingName)
             try boundary("pendingPublished")
             try installIdentities(record, root: root, boundary: boundary)

@@ -31,7 +31,8 @@ extension SetupEngine {
     }
     func requireTrustedAncestry(of url: URL) throws {
         if usesAnchoredMacRuntime, url.path == roots.runtime.path {
-            try withAnchoredMacRuntime { _ in }; return
+            try withAnchoredMacRuntime { _ in }
+            return
         }
         var current = URL(fileURLWithPath: "/", isDirectory: true)
         for component in url.standardizedFileURL.path.split(separator: "/") {
@@ -54,7 +55,8 @@ extension SetupEngine {
     }
     func ensureRootDirectory(_ url: URL) throws {
         if usesAnchoredMacRuntime, url.path == roots.runtime.path {
-            try withAnchoredMacRuntime { _ in }; return
+            try withAnchoredMacRuntime { _ in }
+            return
         }
         if trustedOwnership { try requireTrustedAncestry(of: url) }
         if exists(url) {
@@ -71,7 +73,8 @@ extension SetupEngine {
     func ensureServiceDirectory(_ url: URL, uid: UInt32, mode: Int) throws {
         if usesAnchoredMacRuntime, url.deletingLastPathComponent().path == roots.runtime.path {
             guard mode == 0o711 else { throw SetupError("Unexpected managed runtime mode.") }
-            try prepareAnchoredMacRuntime(instance: url.lastPathComponent, uid: uid); return
+            try prepareAnchoredMacRuntime(instance: url.lastPathComponent, uid: uid)
+            return
         }
         if exists(url) {
             try requireServiceDirectory(url, uid: uid)
@@ -118,7 +121,9 @@ extension SetupEngine {
         if usesAnchoredMacRuntime {
             try withAnchoredMacRuntime { context in
                 let descriptor = tractanda_setup_runtime_lock(context)
-                guard descriptor >= 0 else { throw SetupError("Another installer may hold the protected runtime lock.") }
+                guard descriptor >= 0 else {
+                    throw SetupError("Another installer may hold the protected runtime lock.")
+                }
                 defer { tractanda_unlock(descriptor) }
                 try body()
             }
@@ -163,14 +168,19 @@ extension SetupEngine {
         }
         if let storeID = receipt.freshTargetStoreID {
             guard receipt.preparedStoreID == nil, !receipt.sample,
-                !receipt.initialized || receipt.freshTargetReplicaID != nil else {
+                !receipt.initialized || receipt.freshTargetReplicaID != nil
+            else {
                 throw SetupError("Invalid fresh target receipt.")
             }
-            try SetupOptions(name: name, bundle: packagePayload,
-                storeSelection: .freshPersonalTarget(storeID: storeID)).validate()
+            try SetupOptions(
+                name: name, bundle: packagePayload,
+                storeSelection: .freshPersonalTarget(storeID: storeID)
+            ).validate()
             if let replicaID = receipt.freshTargetReplicaID {
-                try SetupOptions(name: name, bundle: packagePayload,
-                    storeSelection: .prepared(storeID: storeID, replicaID: replicaID)).validate()
+                try SetupOptions(
+                    name: name, bundle: packagePayload,
+                    storeSelection: .prepared(storeID: storeID, replicaID: replicaID)
+                ).validate()
             }
         } else if receipt.freshTargetReplicaID != nil {
             throw SetupError("Fresh target replica has no store pin.")

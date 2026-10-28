@@ -12,7 +12,8 @@ enum RecoveredOperation: Codable, Sendable {
     init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         if container.contains(.confirmed) {
-            guard !container.contains(.capture), !container.contains(.batch), !container.contains(.learning) else {
+            guard !container.contains(.capture), !container.contains(.batch), !container.contains(.learning)
+            else {
                 throw TractandaError("invalidRecovery", "Ambiguous confirmed recovery operation.")
             }
             self = .confirmed(try container.decode(MutationReceipt.self, forKey: .confirmed))

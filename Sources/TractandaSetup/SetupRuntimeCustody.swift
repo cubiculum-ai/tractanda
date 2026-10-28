@@ -8,7 +8,8 @@ extension SetupEngine {
     }
     func withAnchoredMacRuntime<T>(_ body: (UnsafeMutableRawPointer) throws -> T) throws -> T {
         guard usesAnchoredMacRuntime, rootCheck(),
-            let context = tractanda_setup_runtime_open("/private/var/run", 0, 1) else {
+            let context = tractanda_setup_runtime_open("/private/var/run", 0, 1)
+        else {
             throw SetupError("Cannot establish protected macOS runtime custody.")
         }
         defer { tractanda_setup_runtime_close(context) }

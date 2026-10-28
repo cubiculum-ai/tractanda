@@ -286,7 +286,9 @@ final class InlineCaptureTests: XCTestCase {
             let plan = try client.prepareCapture(preparation)
             XCTAssertTrue(plan.canCommit)
             let receipt = try client.commitCapture(plan)
-            XCTAssertEqual(try client.revision(itemID: receipt.itemID, revisionID: receipt.revisionID).fields["customDate"], .text("2026-03-29"))
+            XCTAssertEqual(
+                try client.revision(itemID: receipt.itemID, revisionID: receipt.revisionID).fields[
+                    "customDate"], .text("2026-03-29"))
             XCTAssertTrue(try client.commitCapture(plan).wasReplayed)
         }
     }

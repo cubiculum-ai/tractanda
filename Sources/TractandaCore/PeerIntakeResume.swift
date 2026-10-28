@@ -442,9 +442,11 @@ extension PeerIntakeJournal {
         let manifest = AuthorityRecordCodec.sha256(try JSON.encode(begin.manifest))
         let namespace = AuthorityRecordCodec.sha256(
             Data("tractanda.private-atomic-metadata.v1".utf8) + (try JSON.encode(context)))
-        var next = cursor ?? .init(
-            packageID: packageID, manifestDigest: manifest, contextDigest: namespace,
-            frames: [.init(descriptor: begin.manifest.root)])
+        var next =
+            cursor
+            ?? .init(
+                packageID: packageID, manifestDigest: manifest, contextDigest: namespace,
+                frames: [.init(descriptor: begin.manifest.root)])
         let depth = min(64, limits.maximumDepth)
         guard next.packageID == packageID, next.manifestDigest == manifest,
             next.contextDigest == namespace, next.document == nil,
@@ -465,8 +467,9 @@ extension PeerIntakeJournal {
             if let saved = pages[frame.descriptor.id] {
                 page = saved
             } else {
-                guard let bytes = try object(
-                    frame.descriptor, packageID: packageID, readBudget: readBudget)
+                guard
+                    let bytes = try object(
+                        frame.descriptor, packageID: packageID, readBudget: readBudget)
                 else {
                     throw TractandaError("missingDependencies", "Atomic metadata index is incomplete.")
                 }

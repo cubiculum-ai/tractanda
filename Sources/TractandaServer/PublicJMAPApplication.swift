@@ -175,12 +175,13 @@ actor PublicJMAPApplication {
                 types: types, closeAfterState: closeAfter == "state", pingSeconds: ping, lastEventID: last,
                 authentication: authentication)
             return CollectedJMAPRequest(
-                maximum: 0, authentication: authentication, cancel: { await subscription.cancel() }
-            ) { _ in
-                .init(
-                    status: 200, headers: Self.headers(type: "text/event-stream"), body: .events(subscription)
-                )
-            }
+                maximum: 0, authentication: authentication, cancel: { await subscription.cancel() },
+                complete: { _ in
+                    .init(
+                        status: 200, headers: Self.headers(type: "text/event-stream"),
+                        body: .events(subscription)
+                    )
+                })
         default:
             let parts = route.path.split(separator: "/", omittingEmptySubsequences: false)
             if parts.count == 4, parts[1] == "jmap", parts[2] == "upload", head.method == "POST" {
@@ -235,10 +236,10 @@ actor PublicJMAPApplication {
                     "attachment; filename=\"download\"; filename*=UTF-8''" + escaped
                 let responseHeaders = headers
                 return CollectedJMAPRequest(
-                    maximum: 0, authentication: authentication, cancel: { await source.close() }
-                ) { _ in
-                    .init(status: 200, headers: responseHeaders, body: .download(source))
-                }
+                    maximum: 0, authentication: authentication, cancel: { await source.close() },
+                    complete: { _ in
+                        .init(status: 200, headers: responseHeaders, body: .download(source))
+                    })
             }
             let allowedMethods = Self.allowedMethods(for: route.path)
             throw PublicJMAPHTTPError(

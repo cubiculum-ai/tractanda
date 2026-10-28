@@ -7,7 +7,9 @@ import TractandaPeerTransport
 struct PersonalEnrollmentRuntimeBridge: Sendable {
     let material: @Sendable () async throws -> PersonalEnrollmentRuntimeMaterial
     let validate: @Sendable (PeerExchangeBinding, PersonalEnrollmentTransportPurpose) async throws -> Void
-    let handle: @Sendable (PeerExchangeBinding, PersonalEnrollmentTransportPurpose, PeerExchangeRequest) async throws -> Data
+    let handle:
+        @Sendable (PeerExchangeBinding, PersonalEnrollmentTransportPurpose, PeerExchangeRequest) async throws
+            -> Data
     let completedCut: @Sendable (PeerExchangeBinding, PersonalSyncReport) async -> Void
 }
 
@@ -20,7 +22,8 @@ final class PersonalEnrollmentRequestCancellation: @unchecked Sendable {
     func add(_ action: @escaping @Sendable () -> Void) {
         let invoke = lock.withLock {
             if cancelled { return true }
-            actions.append(action); return false
+            actions.append(action)
+            return false
         }
         if invoke { action() }
     }
@@ -28,7 +31,9 @@ final class PersonalEnrollmentRequestCancellation: @unchecked Sendable {
     func cancel() {
         let pending = lock.withLock {
             cancelled = true
-            let result = actions; actions = []; return result
+            let result = actions
+            actions = []
+            return result
         }
         for action in pending { action() }
     }

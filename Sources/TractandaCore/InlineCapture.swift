@@ -368,7 +368,8 @@ extension ItemClient {
     }
     public func commitCapture(_ plan: CapturePlan) throws -> MutationReceipt {
         let args = try JSONSerialization.jsonObject(with: JSON.encode(plan)) as! [String: Any]
-        let receipt = try JSON.decode(MutationReceipt.self, call("TractandaItem/commitCapture", arguments: args))
+        let receipt = try JSON.decode(
+            MutationReceipt.self, call("TractandaItem/commitCapture", arguments: args))
         guard receipt.operationID == plan.commitRequest.operationID,
             plan.commitRequest.action == .create || plan.commitRequest.action == .copy
                 || receipt.itemID == plan.commitRequest.itemID

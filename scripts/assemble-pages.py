@@ -17,7 +17,7 @@ apt = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(apt)
 
 
-def assemble(output, repository, tag=None):
+def assemble(output, repository, tag=None, public_key=None, trusted_fingerprint=None):
     apt.require(re.fullmatch(r'[\w.-]+/[\w.-]+', repository), 'Invalid repository identity')
     output = Path(output)
     apt.require(not output.exists(), 'Pages output must be new')
@@ -38,8 +38,9 @@ def assemble(output, repository, tag=None):
         return {'apt': None, 'manual': 'docs/index.html'}
     names = [a['name'] for a in selected['assets']]
     apt.require(len(names) == len(set(names)) and 'SHA256SUMS' in names, 'Ambiguous release assets')
-    fingerprint = (ROOT / 'docs/apt/fingerprint.txt').read_text().strip()
-    key = ROOT / 'docs/apt/tractanda-archive-keyring.asc'
+    apt.require((public_key is None) == (trusted_fingerprint is None), 'Explicit previous public key and fingerprint are a pair')
+    fingerprint = trusted_fingerprint or (ROOT / 'docs/apt/fingerprint.txt').read_text().strip()
+    key = Path(public_key) if public_key else ROOT / 'docs/apt/tractanda-archive-keyring.asc'
     with tempfile.TemporaryDirectory(prefix='tractanda-pages-') as temporary:
         temporary = Path(temporary)
         apt.run(['gh', 'release', 'download', selected['tag_name'], '--repo', repository,
@@ -75,5 +76,7 @@ if __name__ == '__main__':
     parser.add_argument('--output', type=Path, default=Path('_site'))
     parser.add_argument('--repository', required=True)
     parser.add_argument('--tag')
+    parser.add_argument('--public-key', type=Path, help='Explicit reviewed prior public key for a key-rotation preparation')
+    parser.add_argument('--fingerprint', help='Full fingerprint paired with the explicit prior public key')
     args = parser.parse_args()
-    print(json.dumps(assemble(args.output, args.repository, args.tag), indent=2))
+    print(json.dumps(assemble(args.output, args.repository, args.tag, args.public_key, args.fingerprint), indent=2))

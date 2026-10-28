@@ -1,5 +1,5 @@
-import TractandaCore
 import Foundation
+import TractandaCore
 
 extension SetupEngine {
     public func verifyBundle(at suppliedBundle: URL) throws -> BundleManifest {
@@ -60,17 +60,34 @@ extension SetupEngine {
             try ModelProvisioningCatalog.load(bundle.appendingPathComponent($0).path)
         }
         if let catalog {
-            let expectedIDs = [manifest.embedding.map { _ in "granite-embedding-311m-multilingual-r2" },
-                manifest.documentExtraction.map { _ in "granite-docling-258m-mlx" }].compactMap { $0 }
-            guard Set(catalog.artifacts.map(\.identifier)) == Set(expectedIDs) else { throw SetupError("Model catalog differs from configured artifacts.") }
+            let expectedIDs = [
+                manifest.embedding.map { _ in "granite-embedding-311m-multilingual-r2" },
+                manifest.documentExtraction.map { _ in "granite-docling-258m-mlx" },
+            ].compactMap { $0 }
+            guard Set(catalog.artifacts.map(\.identifier)) == Set(expectedIDs) else {
+                throw SetupError("Model catalog differs from configured artifacts.")
+            }
             for artifact in catalog.artifacts {
-                let expectedRevision = artifact.identifier == "granite-docling-258m-mlx"
-                    ? manifest.documentExtraction!.identity.modelRevision : "44399559930365213510b1ee2eb15ded83374f0e"
-                guard artifact.revision == expectedRevision else { throw SetupError("Model revision differs from the configured model.") }
-                let bundled = manifest.files.filter { $0.path.hasPrefix("models/" + artifact.identifier + "/") }
-                guard bundled.isEmpty || bundled.count == artifact.files.count else { throw SetupError("Partial bundled model is unsupported.") }
+                let expectedRevision =
+                    artifact.identifier == "granite-docling-258m-mlx"
+                    ? manifest.documentExtraction!.identity.modelRevision
+                    : "44399559930365213510b1ee2eb15ded83374f0e"
+                guard artifact.revision == expectedRevision else {
+                    throw SetupError("Model revision differs from the configured model.")
+                }
+                let bundled = manifest.files.filter {
+                    $0.path.hasPrefix("models/" + artifact.identifier + "/")
+                }
+                guard bundled.isEmpty || bundled.count == artifact.files.count else {
+                    throw SetupError("Partial bundled model is unsupported.")
+                }
                 for file in bundled {
-                    guard artifact.files.contains(where: { "models/" + artifact.identifier + "/" + $0.path == file.path && UInt64($0.size) == file.size && $0.sha256 == file.sha256 }) else {
+                    guard
+                        artifact.files.contains(where: {
+                            "models/" + artifact.identifier + "/" + $0.path == file.path
+                                && UInt64($0.size) == file.size && $0.sha256 == file.sha256
+                        })
+                    else {
                         throw SetupError("Bundled model differs from its pinned catalog.")
                     }
                 }
@@ -93,8 +110,15 @@ extension SetupEngine {
                 Set(assets.files.map(\.file)) == DocumentExtractionPayload.assetNames
             else { throw SetupError("Pinned document asset manifest differs.") }
             for asset in assets.files {
-                if let artifact = catalog?.artifacts.first(where: { $0.identifier == "granite-docling-258m-mlx" }) {
-                    guard artifact.files.contains(where: { $0.path == asset.file && UInt64($0.size) == asset.bytes && $0.sha256 == asset.sha256 }) else { throw SetupError("Document artifact differs from pinned model assets.") }
+                if let artifact = catalog?.artifacts.first(where: {
+                    $0.identifier == "granite-docling-258m-mlx"
+                }) {
+                    guard
+                        artifact.files.contains(where: {
+                            $0.path == asset.file && UInt64($0.size) == asset.bytes
+                                && $0.sha256 == asset.sha256
+                        })
+                    else { throw SetupError("Document artifact differs from pinned model assets.") }
                     continue
                 }
                 guard

@@ -91,26 +91,29 @@ final class JMAPHTTPStreamHandler: ChannelInboundHandler {
                     $0.map(\.value)
                 })
             let begin = begin
-            run(context, operation: { try await begin(request) }) { handler, context, result in
-                handler.busy = false
-                switch result {
-                case .success(let sink):
-                    guard !handler.inactive else {
-                        handler.cancel(sink, context: context)
-                        return
+            run(
+                context, operation: { try await begin(request) },
+                complete: { handler, context, result in
+                    handler.busy = false
+                    switch result {
+                    case .success(let sink):
+                        guard !handler.inactive else {
+                            handler.cancel(sink, context: context)
+                            return
+                        }
+                        handler.sink = sink
+                        handler.monitorAuthorization(sink, context: context)
+                        if head.headers.first(name: "expect")?.lowercased() == "100-continue" {
+                            context.writeAndFlush(
+                                NIOAny(
+                                    HTTPServerResponsePart.head(
+                                        .init(version: head.version, status: .continue))),
+                                promise: nil)
+                        }
+                        handler.pump(context)
+                    case .failure(let error): handler.fail(context, error)
                     }
-                    handler.sink = sink
-                    handler.monitorAuthorization(sink, context: context)
-                    if head.headers.first(name: "expect")?.lowercased() == "100-continue" {
-                        context.writeAndFlush(
-                            NIOAny(
-                                HTTPServerResponsePart.head(.init(version: head.version, status: .continue))),
-                            promise: nil)
-                    }
-                    handler.pump(context)
-                case .failure(let error): handler.fail(context, error)
-                }
-            }
+                })
         case .body(let body):
             bodyIdle?.cancel()
             guard head != nil, !responding, body.readableBytes <= 262_144,
@@ -152,22 +155,27 @@ final class JMAPHTTPStreamHandler: ChannelInboundHandler {
             let bytes = pending.removeFirst()
             pendingBytes -= bytes.count
             busy = true
-            run(context, operation: { try await sink.append(bytes) }) { handler, context, result in
-                handler.busy = false
-                switch result {
-                case .success: handler.pump(context)
-                case .failure(let error): handler.fail(context, error)
-                }
-            }
+            run(
+                context, operation: { try await sink.append(bytes) },
+                complete: { handler, context, result in
+                    handler.busy = false
+                    switch result {
+                    case .success: handler.pump(context)
+                    case .failure(let error): handler.fail(context, error)
+                    }
+                })
         } else if ended {
             busy = true
-            run(context, operation: { try await sink.finish() }) { handler, context, result in
-                handler.busy = false
-                switch result {
-                case .success(let response): handler.respond(context, response: response, forceClose: false)
-                case .failure(let error): handler.fail(context, error)
-                }
-            }
+            run(
+                context, operation: { try await sink.finish() },
+                complete: { handler, context, result in
+                    handler.busy = false
+                    switch result {
+                    case .success(let response):
+                        handler.respond(context, response: response, forceClose: false)
+                    case .failure(let error): handler.fail(context, error)
+                    }
+                })
         } else {
             let handler = NIOLoopBound(self, eventLoop: context.eventLoop)
             let bound = NIOLoopBound(context, eventLoop: context.eventLoop)
@@ -265,39 +273,40 @@ final class JMAPHTTPStreamHandler: ChannelInboundHandler {
                         throw error
                     }
                 }
-            }
-        ) { handler, context, result in
-            switch result {
-            case .failure: context.close(promise: nil)
-            case .success:
-                let boundHandler = NIOLoopBound(handler, eventLoop: context.eventLoop)
-                let boundContext = NIOLoopBound(context, eventLoop: context.eventLoop)
-                if keepAlive {
-                    // Pipeline assistance can release the next already-buffered request during end.write.
-                    // Retire this request first; do not overwrite a newly admitted head in the completion.
-                    handler.authorizationMonitor?.cancel()
-                    handler.authorizationMonitor = nil
-                    handler.head = nil
-                    handler.sink = nil
-                    handler.ended = false
-                    handler.responding = false
-                    handler.pending.removeAll()
-                    handler.pendingBytes = 0
-                }
-                context.writeAndFlush(NIOAny(HTTPServerResponsePart.end(nil))).whenComplete { completion in
-                    let handler = boundHandler.value
-                    let context = boundContext.value
-                    guard case .success = completion, keepAlive, !handler.inactive else {
-                        context.close(promise: nil)
-                        return
+            },
+            complete: { handler, context, result in
+                switch result {
+                case .failure: context.close(promise: nil)
+                case .success:
+                    let boundHandler = NIOLoopBound(handler, eventLoop: context.eventLoop)
+                    let boundContext = NIOLoopBound(context, eventLoop: context.eventLoop)
+                    if keepAlive {
+                        // Pipeline assistance can release the next already-buffered request during end.write.
+                        // Retire this request first; do not overwrite a newly admitted head in the completion.
+                        handler.authorizationMonitor?.cancel()
+                        handler.authorizationMonitor = nil
+                        handler.head = nil
+                        handler.sink = nil
+                        handler.ended = false
+                        handler.responding = false
+                        handler.pending.removeAll()
+                        handler.pendingBytes = 0
                     }
-                    if handler.head == nil {
-                        handler.armHeaderDeadline(context)
-                        handler.resume(context)
+                    context.writeAndFlush(NIOAny(HTTPServerResponsePart.end(nil))).whenComplete {
+                        completion in
+                        let handler = boundHandler.value
+                        let context = boundContext.value
+                        guard case .success = completion, keepAlive, !handler.inactive else {
+                            context.close(promise: nil)
+                            return
+                        }
+                        if handler.head == nil {
+                            handler.armHeaderDeadline(context)
+                            handler.resume(context)
+                        }
                     }
                 }
-            }
-        }
+            })
     }
     private func monitorAuthorization(_ sink: any PublicJMAPRequestSink, context: ChannelHandlerContext) {
         authorizationMonitor?.cancel()

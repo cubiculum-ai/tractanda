@@ -134,13 +134,13 @@ public actor SessionAuthority {
                     throw TractandaError("invalidSession", "Session authority is unavailable.")
                 }
                 return try await self.inspectHTTP(token, credentialID: grant.credentialID)
-            }
-        ) { [weak self] in
-            guard let self else {
-                throw TractandaError("invalidSession", "Session authority is unavailable.")
-            }
-            return try await self.revalidateHTTP(token, credentialID: grant.credentialID)
-        }
+            },
+            revalidate: { [weak self] in
+                guard let self else {
+                    throw TractandaError("invalidSession", "Session authority is unavailable.")
+                }
+                return try await self.revalidateHTTP(token, credentialID: grant.credentialID)
+            })
     }
     private func inspectHTTP(_ token: String, credentialID: String) async throws -> AccountIdentity {
         let grant = try active(token)

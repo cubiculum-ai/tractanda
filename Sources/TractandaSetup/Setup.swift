@@ -113,7 +113,8 @@ public struct BundleManifest: Codable, Equatable, Sendable {
         }
         if let path = modelProvisioningManifestPath, let hash = modelProvisioningManifestSHA256 {
             guard path == "models/manifest.json", hash.count == 64, hash.utf8.allSatisfy(asciiHex),
-                files.contains(where: { $0.path == path && $0.sha256 == hash && $0.size <= 1024 * 1024 }) else {
+                files.contains(where: { $0.path == path && $0.sha256 == hash && $0.size <= 1024 * 1024 })
+            else {
                 throw SetupError("Model provisioning manifest must be digest-bound release data.")
             }
         }
@@ -201,23 +202,54 @@ public struct SetupRoots: Sendable {
                     isDirectory: true)
         case .linux:
             self.software = software ?? URL(fileURLWithPath: "/opt/tractanda", isDirectory: true)
-            self.configuration = configuration ?? URL(fileURLWithPath: "/opt/tractanda/etc/tractanda", isDirectory: true)
+            self.configuration =
+                configuration ?? URL(fileURLWithPath: "/opt/tractanda/etc/tractanda", isDirectory: true)
             self.launchDefinitions =
                 launchDefinitions ?? URL(fileURLWithPath: "/etc/systemd/system", isDirectory: true)
             self.runtime = runtime ?? URL(fileURLWithPath: "/run/tractanda", isDirectory: true)
-            self.data = data ?? URL(fileURLWithPath: "/opt/tractanda/var/lib/tractanda/Stores", isDirectory: true)
-            self.indexes = indexes ?? URL(fileURLWithPath: "/opt/tractanda/var/lib/tractanda/StoreIndices", isDirectory: true)
+            self.data =
+                data ?? URL(fileURLWithPath: "/opt/tractanda/var/lib/tractanda/Stores", isDirectory: true)
+            self.indexes =
+                indexes
+                ?? URL(fileURLWithPath: "/opt/tractanda/var/lib/tractanda/StoreIndices", isDirectory: true)
         }
         // Injected configuration roots retain isolated fixture state; host defaults use the
         // distinct persistent, working and logging roots selected by the administrator.
-        self.installation = installation ?? (configuration != nil ? self.configuration : URL(fileURLWithPath:
-            platform == .macos ? "/Library/Tractanda/Installation" : "/opt/tractanda/var/lib/tractanda/Installation", isDirectory: true))
-        self.work = work ?? (configuration != nil ? self.configuration.appendingPathComponent("document-state") : URL(fileURLWithPath:
-            platform == .macos ? "/Library/Tractanda/Work" : "/opt/tractanda/var/lib/tractanda/Work", isDirectory: true))
-        self.models = models ?? (configuration != nil ? self.configuration.appendingPathComponent("models") : URL(fileURLWithPath:
-            platform == .macos ? "/Library/Tractanda/Models" : "/opt/tractanda/var/lib/tractanda/Models", isDirectory: true))
-        self.logs = logs ?? (configuration != nil ? self.configuration.appendingPathComponent("logs") : URL(fileURLWithPath:
-            platform == .macos ? "/Library/Logs/Tractanda" : "/var/log/tractanda", isDirectory: true))
+        self.installation =
+            installation
+            ?? (configuration != nil
+                ? self.configuration
+                : URL(
+                    fileURLWithPath:
+                        platform == .macos
+                        ? "/Library/Tractanda/Installation" : "/opt/tractanda/var/lib/tractanda/Installation",
+                    isDirectory: true))
+        self.work =
+            work
+            ?? (configuration != nil
+                ? self.configuration.appendingPathComponent("document-state")
+                : URL(
+                    fileURLWithPath:
+                        platform == .macos
+                        ? "/Library/Tractanda/Work" : "/opt/tractanda/var/lib/tractanda/Work",
+                    isDirectory: true))
+        self.models =
+            models
+            ?? (configuration != nil
+                ? self.configuration.appendingPathComponent("models")
+                : URL(
+                    fileURLWithPath:
+                        platform == .macos
+                        ? "/Library/Tractanda/Models" : "/opt/tractanda/var/lib/tractanda/Models",
+                    isDirectory: true))
+        self.logs =
+            logs
+            ?? (configuration != nil
+                ? self.configuration.appendingPathComponent("logs")
+                : URL(
+                    fileURLWithPath:
+                        platform == .macos ? "/Library/Logs/Tractanda" : "/var/log/tractanda",
+                    isDirectory: true))
     }
 }
 
@@ -293,7 +325,9 @@ public struct SetupOptions: Equatable, Sendable {
         if let owner, !validAccountName(owner) { throw SetupError("Account name is invalid.") }
         if newInstanceOnly {
             guard case .freshPersonalTarget = storeSelection, peerRuntime == .outboundOnly else {
-                throw SetupError("New-instance-only preparation requires a fresh personal target and outbound peer policy.")
+                throw SetupError(
+                    "New-instance-only preparation requires a fresh personal target and outbound peer policy."
+                )
             }
         }
         if peerRuntime == .outboundOnly {
@@ -304,7 +338,10 @@ public struct SetupOptions: Equatable, Sendable {
         if case .freshPersonalTarget(let storeID) = storeSelection {
             guard mode == .empty, let uuid = UUID(uuidString: storeID),
                 uuid.version1Components != nil, uuid.uuidString.lowercased() == storeID
-            else { throw SetupError("Fresh personal target requires a canonical UUIDv1 store pin and empty mode.") }
+            else {
+                throw SetupError(
+                    "Fresh personal target requires a canonical UUIDv1 store pin and empty mode.")
+            }
         }
         if case .prepared(let storeID, let replicaID) = storeSelection {
             guard mode != .sample, storeID != replicaID,

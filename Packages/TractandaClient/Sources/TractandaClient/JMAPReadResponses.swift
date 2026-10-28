@@ -73,7 +73,9 @@ public struct JMAPHistoryResponse: Decodable, Sendable {
     }
     /// Checked full-content conversion shared by synchronous Core and asynchronous SDK
     /// clients. Selected/partial wire DTOs never become fabricated canonical revisions.
-    public func canonicalResult(itemID: String, position: Int = 0, limit: Int = 100) throws -> ItemHistoryResult {
+    public func canonicalResult(itemID: String, position: Int = 0, limit: Int = 100) throws
+        -> ItemHistoryResult
+    {
         try Identifier.validate(itemID)
         guard position >= 0, (1...256).contains(limit) else {
             throw TractandaError("invalidArguments", "Invalid history page or fields selection.")

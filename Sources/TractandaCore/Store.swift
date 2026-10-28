@@ -1433,9 +1433,10 @@ public final class ItemStore {
             let record = try PersonalWorkgroupProfile.prepare(root, opening: opening, accounts: accounts)
             personalProfile = record
             let selectedBaseline = try PersonalSyncConfiguration.read(
-                    PersonalBaselineSelection.self,
-                    root: root, name: PersonalSyncConfiguration.baselineName, ownerUID: ownerUID)
-            personalBaselineImportActive = record.initialization == "freshReplicaJoining" || selectedBaseline != nil
+                PersonalBaselineSelection.self,
+                root: root, name: PersonalSyncConfiguration.baselineName, ownerUID: ownerUID)
+            personalBaselineImportActive =
+                record.initialization == "freshReplicaJoining" || selectedBaseline != nil
             accessConfiguration = try AccessConfiguration(record.accessConfiguration)
             try accessConfiguration!.validate(
                 using: PrincipalResolver(directory: accounts, configuration: accessConfiguration))
@@ -17513,21 +17514,31 @@ extension ItemStore {
         return try PersonalEnrollmentAdmission(configuration: accessConfiguration)
     }
     package func personalEnrollmentValidateRetainedAdmission(_ shared: PersonalEnrollmentAdmission) throws {
-        guard let accessConfiguration, let profile = personalProfile else { throw PersonalEnrollmentError.invalid() }
+        guard let accessConfiguration, let profile = personalProfile else {
+            throw PersonalEnrollmentError.invalid()
+        }
         try shared.requireSameLogicalPolicy(accessConfiguration)
         _ = try shared.applying(to: profile.accessConfiguration, accounts: accounts)
     }
-    private func personalEnrollmentAdoptAdmission(_ shared: PersonalEnrollmentAdmission,
-        expectedLocalDigest: String, forUID uid: UInt32) throws {
+    private func personalEnrollmentAdoptAdmission(
+        _ shared: PersonalEnrollmentAdmission,
+        expectedLocalDigest: String, forUID uid: UInt32
+    ) throws {
         try withAccess(forUID: uid) {
             try requireAdministrator()
             guard let profile = personalProfile, profile.initialization == "freshReplicaJoining",
                 let accessConfiguration,
-                try PersonalEnrollmentAdmission(configuration: accessConfiguration).digest == expectedLocalDigest,
+                try PersonalEnrollmentAdmission(configuration: accessConfiguration).digest
+                    == expectedLocalDigest,
                 try personalConfiguredIdentity().membership == nil, try index?.catalogueCount() == 0,
-                try PersonalSyncConfiguration.read(PersonalBaselineSelection.self, root: root,
+                try PersonalSyncConfiguration.read(
+                    PersonalBaselineSelection.self, root: root,
                     name: PersonalSyncConfiguration.baselineName, ownerUID: ownerUID) == nil
-            else { throw TractandaError("configurationDrift", "Shared admission adoption requires the exact empty provisional target policy.") }
+            else {
+                throw TractandaError(
+                    "configurationDrift",
+                    "Shared admission adoption requires the exact empty provisional target policy.")
+            }
             let next = try shared.applying(to: profile.accessConfiguration, accounts: accounts)
             // The content fence remains active, but this exact empty provisional target's
             // locally authorized configuration is allowed before baseline selection.
@@ -17535,7 +17546,8 @@ extension ItemStore {
         }
     }
     package func personalEnrollmentAuthorizeFreshTarget(forUID uid: UInt32, commonStoreID: String) throws
-        -> PersonalEnrollmentLocalAuthorization {
+        -> PersonalEnrollmentLocalAuthorization
+    {
         let authorization = try PersonalEnrollmentLocalAuthorization.authorize(store: self, forUID: uid)
         try personalEnrollmentRequireEmptyUnjoinedTarget(commonStoreID: commonStoreID)
         return authorization
@@ -17544,98 +17556,141 @@ extension ItemStore {
         let identity = try personalSyncIdentity()
         guard identity.storeID == commonStoreID, identity.membership == nil,
             personalProfile?.initialization == "freshReplicaJoining", try index?.catalogueCount() == 0,
-            try PersonalSyncConfiguration.read(PersonalBaselineSelection.self, root: root,
-                name: PersonalSyncConfiguration.baselineName, ownerUID: ownerUID) == nil else {
-            throw TractandaError("invalidEnrollmentTarget", "Join requires the selected empty unjoined target; existing content was not adopted.")
+            try PersonalSyncConfiguration.read(
+                PersonalBaselineSelection.self, root: root,
+                name: PersonalSyncConfiguration.baselineName, ownerUID: ownerUID) == nil
+        else {
+            throw TractandaError(
+                "invalidEnrollmentTarget",
+                "Join requires the selected empty unjoined target; existing content was not adopted.")
         }
     }
-    package func personalEnrollmentAdoptAcceptedAdmission(_ shared: PersonalEnrollmentAdmission,
-        operationID: String, forUID uid: UInt32) throws {
-        let (target, accepted) = try PersonalEnrollmentTargetRegistry(root: root).acceptedAdmission(operationID: operationID)
+    package func personalEnrollmentAdoptAcceptedAdmission(
+        _ shared: PersonalEnrollmentAdmission,
+        operationID: String, forUID uid: UInt32
+    ) throws {
+        let (target, accepted) = try PersonalEnrollmentTargetRegistry(root: root).acceptedAdmission(
+            operationID: operationID)
         let authorization = try PersonalEnrollmentLocalAuthorization.authorize(store: self, forUID: uid)
         guard shared == accepted, authorization.administrator == target.administrator,
             authorization.identity.storeID == target.invitation.storeID,
             authorization.identity.replicaID == target.claim.targetReplicaID,
-            let accessConfiguration else { throw PersonalEnrollmentError.conflict() }
+            let accessConfiguration
+        else { throw PersonalEnrollmentError.conflict() }
         if try PersonalEnrollmentAdmission(configuration: accessConfiguration) == accepted { return }
-        try personalEnrollmentAdoptAdmission(accepted, expectedLocalDigest: target.provisionalAdmissionDigest, forUID: uid)
+        try personalEnrollmentAdoptAdmission(
+            accepted, expectedLocalDigest: target.provisionalAdmissionDigest, forUID: uid)
     }
-    package func personalEnrollmentAdoptAcceptedAdmission(_ shared: PersonalEnrollmentAdmission,
-        authorization: PersonalEnrollmentMembershipAuthorization) throws {
+    package func personalEnrollmentAdoptAcceptedAdmission(
+        _ shared: PersonalEnrollmentAdmission,
+        authorization: PersonalEnrollmentMembershipAuthorization
+    ) throws {
         try authorization.revalidate(store: self)
         let (target, accepted) = try PersonalEnrollmentTargetRegistry(root: root)
             .acceptedAdmission(operationID: authorization.plan.operationID)
         guard shared == accepted, target.plan == authorization.plan,
-            let profile = personalProfile, let accessConfiguration else { throw PersonalEnrollmentError.conflict() }
+            let profile = personalProfile, let accessConfiguration
+        else { throw PersonalEnrollmentError.conflict() }
         let current = try PersonalEnrollmentAdmission(configuration: accessConfiguration)
         if current == accepted { return }
-        guard profile.initialization == "freshReplicaJoining", try current.digest == target.provisionalAdmissionDigest,
+        guard profile.initialization == "freshReplicaJoining",
+            try current.digest == target.provisionalAdmissionDigest,
             try personalConfiguredIdentity().membership == nil, try index?.catalogueCount() == 0,
-            try PersonalSyncConfiguration.read(PersonalBaselineSelection.self, root: root,
-                name: PersonalSyncConfiguration.baselineName, ownerUID: ownerUID) == nil else { throw PersonalEnrollmentError.conflict() }
+            try PersonalSyncConfiguration.read(
+                PersonalBaselineSelection.self, root: root,
+                name: PersonalSyncConfiguration.baselineName, ownerUID: ownerUID) == nil
+        else { throw PersonalEnrollmentError.conflict() }
         let next = try accepted.applying(to: profile.accessConfiguration, accounts: accounts)
         // This explicit operation-only proof authorizes only the accepted admission set.
         // It does not enter or alter ordinary item access context.
         try personalPersistAccess(next)
     }
-    package func personalEnrollmentValidateOperationBinding(_ binding: PeerExchangeBinding,
-        plan: PersonalEnrollmentPlan) throws {
+    package func personalEnrollmentValidateOperationBinding(
+        _ binding: PeerExchangeBinding,
+        plan: PersonalEnrollmentPlan
+    ) throws {
         let identity = try personalSyncIdentity()
         guard binding.storeID == identity.storeID, binding.localReplicaID == identity.replicaID,
             identity.membership == plan.previousMembership || identity.membership == plan.configuration,
-            let configuration = try [plan.previousMembership, plan.configuration].compactMap({ $0 }).first(where: {
-                try $0.digest == binding.configurationDigest
-            }), configuration.members.contains(where: { $0.replicaID == binding.remoteReplicaID }),
-            try personalEnrollmentCredentials(configuration: configuration).contains(where: { $0.binding == binding }) else {
-            throw TractandaError("untrustedPeer", "No exact current enrollment control credential is retained.")
+            let configuration = try [plan.previousMembership, plan.configuration].compactMap({ $0 }).first(
+                where: {
+                    try $0.digest == binding.configurationDigest
+                }), configuration.members.contains(where: { $0.replicaID == binding.remoteReplicaID }),
+            try personalEnrollmentCredentials(configuration: configuration).contains(where: {
+                $0.binding == binding
+            })
+        else {
+            throw TractandaError(
+                "untrustedPeer", "No exact current enrollment control credential is retained.")
         }
     }
     package func personalEnrollmentPendingConfiguration() throws -> PersonalMembershipConfiguration? {
-        let pending = try PersonalSyncConfiguration.read(PersonalMembershipPreparation.self, root: root,
+        let pending = try PersonalSyncConfiguration.read(
+            PersonalMembershipPreparation.self, root: root,
             name: PersonalSyncConfiguration.pendingName, ownerUID: ownerUID)
         try pending?.configuration.validate()
         return pending?.configuration
     }
     package func personalEnrollmentValidateRetainedControlBinding(_ binding: PeerExchangeBinding) throws {
-        guard let state = try PersonalEnrollmentMemberRegistry(root: root).state(), state.phase != .complete else {
-            throw TractandaError("untrustedPeer", "No current enrollment operation retains this control binding.")
+        guard let state = try PersonalEnrollmentMemberRegistry(root: root).state(), state.phase != .complete
+        else {
+            throw TractandaError(
+                "untrustedPeer", "No current enrollment operation retains this control binding.")
         }
         try personalEnrollmentValidateOperationBinding(binding, plan: state.plan)
     }
     package func personalEnrollmentRetainedCredentials() throws -> [PeerCredential] {
         guard let state = try PersonalEnrollmentMemberRegistry(root: root).state(), state.phase != .complete,
-            let old = state.plan.previousMembership else { return [] }
+            let old = state.plan.previousMembership
+        else { return [] }
         let identity = try personalSyncIdentity()
-        guard identity.membership == old || identity.membership == state.plan.configuration else { throw PersonalEnrollmentError.conflict() }
+        guard identity.membership == old || identity.membership == state.plan.configuration else {
+            throw PersonalEnrollmentError.conflict()
+        }
         return try personalEnrollmentCredentials(configuration: old)
     }
-    private func personalEnrollmentAuthorizesReady(_ preparation: PersonalMembershipPreparation,
-        identity: PersonalSyncIdentity) throws -> Bool {
+    private func personalEnrollmentAuthorizesReady(
+        _ preparation: PersonalMembershipPreparation,
+        identity: PersonalSyncIdentity
+    ) throws -> Bool {
         var plans: [(PersonalEnrollmentPlan, Bool)] = []
         if let member = try PersonalEnrollmentMemberRegistry(root: root).state(), member.phase != .complete {
             plans.append((member.plan, false))
         }
         if let (target, _, _) = try PersonalEnrollmentTargetRegistry(root: root).runtimeMaterial(store: self),
-            target.phase != .complete, let plan = target.plan { plans.append((plan, true)) }
+            target.phase != .complete, let plan = target.plan
+        {
+            plans.append((plan, true))
+        }
         return plans.contains { plan, target in
             plan.configuration == preparation.configuration && plan.nonce == preparation.nonce
                 && plan.administrator == preparation.administrator
                 && plan.configuration.members.contains(where: { $0.replicaID == identity.replicaID })
-                && (identity.membership == plan.configuration || identity.membership == plan.previousMembership
+                && (identity.membership == plan.configuration
+                    || identity.membership == plan.previousMembership
                     || (target && identity.membership == nil))
         }
     }
-    private func personalEnrollmentCredentials(configuration: PersonalMembershipConfiguration) throws -> [PeerCredential] {
+    private func personalEnrollmentCredentials(configuration: PersonalMembershipConfiguration) throws
+        -> [PeerCredential]
+    {
         let digest = try configuration.digest
-        guard let aliases = try PersonalSyncConfiguration.read(PersonalCredentialAliases.self, root: root,
-            name: ".personal-credentials-" + digest + ".json", ownerUID: ownerUID) else { return [] }
+        guard
+            let aliases = try PersonalSyncConfiguration.read(
+                PersonalCredentialAliases.self, root: root,
+                name: ".personal-credentials-" + digest + ".json", ownerUID: ownerUID)
+        else { return [] }
         guard aliases.configurationDigest == digest, aliases.aliases.count <= 512,
-            aliases.aliases == Array(Set(aliases.aliases)).sorted() else { throw PersonalEnrollmentError.invalid() }
-        let registry = PeerCredentialStore(files: DocumentContentFiles(root: root, ownerUID: ownerUID, minimumFreeBytes: 0))
+            aliases.aliases == Array(Set(aliases.aliases)).sorted()
+        else { throw PersonalEnrollmentError.invalid() }
+        let registry = PeerCredentialStore(
+            files: DocumentContentFiles(root: root, ownerUID: ownerUID, minimumFreeBytes: 0))
         return try aliases.aliases.map { alias in
             let credential = try registry.load(peerID: alias, configurationDigest: digest)
-            guard credential.binding.storeID == configuration.storeID, credential.binding.localReplicaID == replicaID,
-                configuration.members.contains(where: { $0.replicaID == credential.binding.remoteReplicaID }) else {
+            guard credential.binding.storeID == configuration.storeID,
+                credential.binding.localReplicaID == replicaID,
+                configuration.members.contains(where: { $0.replicaID == credential.binding.remoteReplicaID })
+            else {
                 throw PersonalEnrollmentError.invalid()
             }
             return credential
@@ -17658,9 +17713,12 @@ extension ItemStore {
         root: URL, indexDirectory: URL? = nil, storeID: String, accessConfiguration: ItemValue,
         accounts: any AccountDirectory = SystemAccountDirectory()
     ) throws -> ItemStore {
-        let store = try ItemStore(personalRoot: root, indexDirectory: indexDirectory,
-            opening: .joiningReplica(storeID: storeID, configuration: accessConfiguration), accounts: accounts)
-        try CanonicalReaderRequirement.beforePersonalSyncPublication(root: store.root, ownerUID: store.ownerUID)
+        let store = try ItemStore(
+            personalRoot: root, indexDirectory: indexDirectory,
+            opening: .joiningReplica(storeID: storeID, configuration: accessConfiguration), accounts: accounts
+        )
+        try CanonicalReaderRequirement.beforePersonalSyncPublication(
+            root: store.root, ownerUID: store.ownerUID)
         return store
     }
     public func personalSyncIdentity() throws -> PersonalSyncIdentity {
@@ -17696,36 +17754,50 @@ extension ItemStore {
         guard let administrator = accessContext?.account?.name else {
             throw TractandaError("membershipConflict", "Current administrator identity changed.")
         }
-        return try personalPrepareMembershipChange(configuration: configuration, expectedDigest: expectedDigest,
+        return try personalPrepareMembershipChange(
+            configuration: configuration, expectedDigest: expectedDigest,
             nonce: nonce, readmission: readmission, administrator: administrator)
     }
     /// This narrow explicit witness is constructed only from an authenticated current
     /// server's scoped administrator decision. It never changes ordinary access context.
     package func preparePersonalMembershipChange(authorization: PersonalEnrollmentScopedAuthorization) throws
-        -> PersonalMembershipPreparation {
+        -> PersonalMembershipPreparation
+    {
         try authorization.revalidate(store: self)
         let decision = authorization.decision
-        return try personalPrepareMembershipChange(configuration: decision.configuration,
+        return try personalPrepareMembershipChange(
+            configuration: decision.configuration,
             expectedDigest: decision.expectedMembershipDigest, nonce: decision.nonce,
             readmission: false, administrator: authorization.localName)
     }
-    package func preparePersonalMembershipChange(authorization: PersonalEnrollmentMembershipAuthorization) throws
-        -> PersonalMembershipPreparation {
+    package func preparePersonalMembershipChange(authorization: PersonalEnrollmentMembershipAuthorization)
+        throws
+        -> PersonalMembershipPreparation
+    {
         try authorization.revalidate(store: self)
         let plan = authorization.plan
         let identity = try personalConfiguredIdentity()
-        let expected = try identity.replicaID == plan.issuerReplicaID || plan.previousMembership?.members.contains(where: { $0.replicaID == identity.replicaID }) == true
+        let expected =
+            try identity.replicaID == plan.issuerReplicaID
+            || plan.previousMembership?.members.contains(where: { $0.replicaID == identity.replicaID })
+                == true
             ? plan.previousMembership?.digest : nil
         if identity.membership == plan.configuration {
-            return .init(configuration: plan.configuration, expectedDigest: expected, nonce: plan.nonce,
-                administrator: plan.administrator, requiredOnlineReplicaIDs: plan.configuration.members.map(\.replicaID), readmission: false)
+            return .init(
+                configuration: plan.configuration, expectedDigest: expected, nonce: plan.nonce,
+                administrator: plan.administrator,
+                requiredOnlineReplicaIDs: plan.configuration.members.map(\.replicaID), readmission: false)
         }
-        return try personalPrepareMembershipChange(configuration: plan.configuration, expectedDigest: expected,
+        return try personalPrepareMembershipChange(
+            configuration: plan.configuration, expectedDigest: expected,
             nonce: plan.nonce, readmission: false, administrator: plan.administrator)
     }
-    private func personalPrepareMembershipChange(configuration: PersonalMembershipConfiguration,
-        expectedDigest: String?, nonce: String?, readmission: Bool, administrator: String) throws
-        -> PersonalMembershipPreparation {
+    private func personalPrepareMembershipChange(
+        configuration: PersonalMembershipConfiguration,
+        expectedDigest: String?, nonce: String?, readmission: Bool, administrator: String
+    ) throws
+        -> PersonalMembershipPreparation
+    {
         let identity = try personalSyncIdentity()
         try configuration.validate()
         guard configuration.storeID == identity.storeID,
@@ -17777,13 +17849,17 @@ extension ItemStore {
         try requireAdministrator()
         try personalRegisterPeerCredentials(credentials, configuration: configuration)
     }
-    package func registerPersonalPeerCredentials(_ credentials: [PeerCredential],
-        authorization: PersonalEnrollmentMembershipAuthorization) throws {
+    package func registerPersonalPeerCredentials(
+        _ credentials: [PeerCredential],
+        authorization: PersonalEnrollmentMembershipAuthorization
+    ) throws {
         try authorization.revalidate(store: self)
         try personalRegisterPeerCredentials(credentials, configuration: authorization.plan.configuration)
     }
-    private func personalRegisterPeerCredentials(_ credentials: [PeerCredential],
-        configuration: PersonalMembershipConfiguration) throws {
+    private func personalRegisterPeerCredentials(
+        _ credentials: [PeerCredential],
+        configuration: PersonalMembershipConfiguration
+    ) throws {
         let identity = try personalSyncIdentity()
         let digest = try configuration.digest
         let pending = try PersonalSyncConfiguration.read(
@@ -17923,22 +17999,31 @@ extension ItemStore {
             }
         }
         try requireAdministrator()
-        guard let administrator = accessContext?.account?.name else { throw PersonalEnrollmentError.conflict() }
-        return try personalCommitMembershipChange(preparation: preparation, acknowledgements: acknowledgements,
+        guard let administrator = accessContext?.account?.name else {
+            throw PersonalEnrollmentError.conflict()
+        }
+        return try personalCommitMembershipChange(
+            preparation: preparation, acknowledgements: acknowledgements,
             administrator: administrator)
     }
-    package func commitPersonalMembershipChange(preparation: PersonalMembershipPreparation,
+    package func commitPersonalMembershipChange(
+        preparation: PersonalMembershipPreparation,
         acknowledgements: [PersonalMembershipOnlineAcknowledgement],
-        authorization: PersonalEnrollmentMembershipAuthorization) throws -> PersonalMembershipConfiguration {
+        authorization: PersonalEnrollmentMembershipAuthorization
+    ) throws -> PersonalMembershipConfiguration {
         try authorization.revalidate(store: self)
         let exact = try preparePersonalMembershipChange(authorization: authorization)
         guard exact == preparation else { throw PersonalEnrollmentError.conflict() }
-        return try personalCommitMembershipChange(preparation: preparation, acknowledgements: acknowledgements,
+        return try personalCommitMembershipChange(
+            preparation: preparation, acknowledgements: acknowledgements,
             administrator: authorization.plan.administrator)
     }
-    private func personalCommitMembershipChange(preparation: PersonalMembershipPreparation,
-        acknowledgements: [PersonalMembershipOnlineAcknowledgement], administrator: String) throws
-        -> PersonalMembershipConfiguration {
+    private func personalCommitMembershipChange(
+        preparation: PersonalMembershipPreparation,
+        acknowledgements: [PersonalMembershipOnlineAcknowledgement], administrator: String
+    ) throws
+        -> PersonalMembershipConfiguration
+    {
         let identity = try personalSyncIdentity()
         let digest = try preparation.configuration.digest
         if identity.membership == preparation.configuration {
@@ -18002,7 +18087,9 @@ extension ItemStore {
         try requireAdministrator()
         return try personalStartBaseline(sourceReplicaID: sourceReplicaID)
     }
-    package func startPersonalBaseline(authorization: PersonalEnrollmentMembershipAuthorization) throws -> String {
+    package func startPersonalBaseline(authorization: PersonalEnrollmentMembershipAuthorization) throws
+        -> String
+    {
         try authorization.revalidate(store: self)
         return try personalStartBaseline(sourceReplicaID: authorization.plan.issuerReplicaID)
     }
@@ -18018,7 +18105,8 @@ extension ItemStore {
             }
             return current.selectionID
         }
-        guard ["freshReplica", "freshReplicaJoining"].contains(personalProfile?.initialization ?? ""), try index?.catalogueCount() == 0,
+        guard ["freshReplica", "freshReplicaJoining"].contains(personalProfile?.initialization ?? ""),
+            try index?.catalogueCount() == 0,
             sourceReplicaID != identity.replicaID
         else {
             throw TractandaError(
@@ -18036,20 +18124,29 @@ extension ItemStore {
     public func finishPersonalBaseline(selectionID: String, actorUID: UInt32? = nil) throws {
         try personalFinishBaseline(selectionID: selectionID, actorUID: actorUID, readiness: nil)
     }
-    package func finishPersonalBaseline(selectionID: String, actorUID: UInt32,
-        readiness: PersonalEnrollmentBaselineReadiness) throws {
+    package func finishPersonalBaseline(
+        selectionID: String, actorUID: UInt32,
+        readiness: PersonalEnrollmentBaselineReadiness
+    ) throws {
         try personalFinishBaseline(selectionID: selectionID, actorUID: actorUID, readiness: readiness)
     }
-    package func finishPersonalBaseline(selectionID: String, readiness: PersonalEnrollmentBaselineReadiness,
-        authorization: PersonalEnrollmentMembershipAuthorization) throws {
+    package func finishPersonalBaseline(
+        selectionID: String, readiness: PersonalEnrollmentBaselineReadiness,
+        authorization: PersonalEnrollmentMembershipAuthorization
+    ) throws {
         try authorization.revalidate(store: self)
         guard authorization.plan.configuration.storeID == readiness.storeID,
             authorization.plan.issuerReplicaID == readiness.sourceReplicaID,
-            try authorization.plan.configuration.digest == readiness.configurationDigest else { throw PersonalEnrollmentError.conflict() }
-        try personalFinishBaseline(selectionID: selectionID, actorUID: nil, readiness: readiness, authorization: authorization)
+            try authorization.plan.configuration.digest == readiness.configurationDigest
+        else { throw PersonalEnrollmentError.conflict() }
+        try personalFinishBaseline(
+            selectionID: selectionID, actorUID: nil, readiness: readiness, authorization: authorization)
     }
-    private func personalFinishBaseline(selectionID: String, actorUID: UInt32?,
-        readiness: PersonalEnrollmentBaselineReadiness?, authorization: PersonalEnrollmentMembershipAuthorization? = nil) throws {
+    private func personalFinishBaseline(
+        selectionID: String, actorUID: UInt32?,
+        readiness: PersonalEnrollmentBaselineReadiness?,
+        authorization: PersonalEnrollmentMembershipAuthorization? = nil
+    ) throws {
         if let authorization { try authorization.revalidate(store: self) }
         if accessContext == nil && authorization == nil {
             return try withAccess(forUID: actorUID ?? ownerUID) {
@@ -18060,13 +18157,21 @@ extension ItemStore {
         if personalProfile?.initialization == "freshReplicaJoining" {
             guard let readiness, let membership = try personalConfiguredIdentity().membership,
                 readiness.selectionID == selectionID, readiness.storeID == membership.storeID,
-                readiness.targetReplicaID == replicaID, try membership.digest == readiness.configurationDigest,
+                readiness.targetReplicaID == replicaID,
+                try membership.digest == readiness.configurationDigest,
                 membership.members.contains(where: { $0.replicaID == readiness.sourceReplicaID }),
-                let selection = try PersonalSyncConfiguration.read(PersonalBaselineSelection.self, root: root,
+                let selection = try PersonalSyncConfiguration.read(
+                    PersonalBaselineSelection.self, root: root,
                     name: PersonalSyncConfiguration.baselineName, ownerUID: ownerUID),
                 selection.selectionID == selectionID, selection.sourceReplicaID == readiness.sourceReplicaID,
-                try personalIncomingReviewRecords().allSatisfy({ $0.sourceReplicaID != readiness.sourceReplicaID })
-            else { throw TractandaError("baselineNotReady", "The joining target requires its exact current runtime baseline cut and rescan.") }
+                try personalIncomingReviewRecords().allSatisfy({
+                    $0.sourceReplicaID != readiness.sourceReplicaID
+                })
+            else {
+                throw TractandaError(
+                    "baselineNotReady",
+                    "The joining target requires its exact current runtime baseline cut and rescan.")
+            }
         }
         if personalBaselineFinalizingSelectionID == selectionID {
             let retained = try PersonalSyncConfiguration.read(
@@ -18112,8 +18217,10 @@ extension ItemStore {
             transactionOpen = false
             try StoreCheckpoint.clear(root: root)
             if let prior = personalProfile, prior.initialization == "freshReplicaJoining" {
-                let next = PersonalWorkgroupProfile.Record(profile: prior.profile, storeID: prior.storeID,
-                    replicaID: prior.replicaID, accessConfiguration: prior.accessConfiguration, initialization: "freshReplica")
+                let next = PersonalWorkgroupProfile.Record(
+                    profile: prior.profile, storeID: prior.storeID,
+                    replicaID: prior.replicaID, accessConfiguration: prior.accessConfiguration,
+                    initialization: "freshReplica")
                 // Profile publication precedes selection removal. Any crash leaves either
                 // the joining profile or retained selection fencing normal content.
                 try PersonalWorkgroupProfile.persist(next, root: root)

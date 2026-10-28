@@ -162,9 +162,13 @@ public final class ItemClient {
         guard position >= 0, (1...256).contains(limit) else {
             throw TractandaError("invalidArguments", "Invalid history page or fields selection.")
         }
-        let wire = try JSON.decode(JMAPHistoryResponse.self, call("TractandaItem/history", arguments: [
-            "itemID": itemID, "position": position, "limit": limit,
-        ]))
+        let wire = try JSON.decode(
+            JMAPHistoryResponse.self,
+            call(
+                "TractandaItem/history",
+                arguments: [
+                    "itemID": itemID, "position": position, "limit": limit,
+                ]))
         return try wire.canonicalResult(itemID: itemID, position: position, limit: limit)
     }
 

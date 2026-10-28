@@ -4,10 +4,12 @@ import TractandaCore
 extension SetupEngine {
     /// Release bytes were verified before registration. No network work is performed by Setup.
     func modelCatalog(_ release: URL) throws -> ModelProvisioningCatalog? {
-        let manifest = try JSONDecoder().decode(BundleManifest.self,
+        let manifest = try JSONDecoder().decode(
+            BundleManifest.self,
             from: Data(contentsOf: release.appendingPathComponent("bundle-manifest.json")))
         guard let path = manifest.modelProvisioningManifestPath,
-            let hash = manifest.modelProvisioningManifestSHA256 else { return nil }
+            let hash = manifest.modelProvisioningManifestSHA256
+        else { return nil }
         guard path == "models/manifest.json", try sha256(release.appendingPathComponent(path)) == hash else {
             throw SetupError("Model provisioning manifest differs from its release.")
         }
@@ -25,7 +27,10 @@ extension SetupEngine {
         else { throw SetupError("Model adoption must use the current owned bundle.") }
         let models = release.appendingPathComponent("models")
         if exists(models.appendingPathComponent("granite-embedding-311m-multilingual-r2/model.safetensors"))
-            || exists(models.appendingPathComponent("granite-docling-258m-mlx/model.safetensors")) { return models.path }
+            || exists(models.appendingPathComponent("granite-docling-258m-mlx/model.safetensors"))
+        {
+            return models.path
+        }
         return nil
     }
     func modelArtifact(_ identifier: String, release: URL) throws -> ModelArtifactManifest? {

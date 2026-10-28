@@ -1411,11 +1411,13 @@ extension DocumentContentFiles {
     /// never canonical content, authorization history or an ordinary JSON response.
     func readPersonalEnrollmentState() throws -> Data? {
         let chain: [Int32]
-        do { chain = try directories([".personal-enrollment"], create: false) }
-        catch let error as TractandaError where error.osError == ENOENT { return nil }
+        do { chain = try directories([".personal-enrollment"], create: false) } catch let error
+            as TractandaError where error.osError == ENOENT
+        { return nil }
         defer { closeAll(chain) }
         guard chain.allSatisfy({ tractanda_secret_file_no_acl($0) == 0 }) else {
-            throw TractandaError("invalidEnrollmentState", "Enrollment secret directories have extended ACLs.")
+            throw TractandaError(
+                "invalidEnrollmentState", "Enrollment secret directories have extended ACLs.")
         }
         let fd = openat(chain.last!, "current.bin", O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
         if fd < 0, errno == ENOENT { return nil }
@@ -1432,7 +1434,8 @@ extension DocumentContentFiles {
         try data.withUnsafeMutableBytes { buffer in
             var offset = 0
             while offset < buffer.count {
-                let count = positionalRead(fd, buffer.baseAddress!.advanced(by: offset), buffer.count - offset, off_t(offset))
+                let count = positionalRead(
+                    fd, buffer.baseAddress!.advanced(by: offset), buffer.count - offset, off_t(offset))
                 if count < 0, errno == EINTR { continue }
                 guard count > 0 else { throw failure("Enrollment state was truncated.") }
                 offset += count
@@ -1447,7 +1450,8 @@ extension DocumentContentFiles {
     }
 
     func replacePersonalEnrollmentState(_ data: Data, expected: Data?) throws {
-        try CanonicalMaintenanceContext.deny(root: root, path: [".personal-enrollment"], operation: "enrollment configuration")
+        try CanonicalMaintenanceContext.deny(
+            root: root, path: [".personal-enrollment"], operation: "enrollment configuration")
         guard !data.isEmpty, data.count <= PersonalEnrollmentPrivateCodec.operationHeaderBytes + 36 else {
             throw TractandaError("resourceLimit", "Enrollment state exceeds its bound.")
         }
@@ -1457,13 +1461,17 @@ extension DocumentContentFiles {
         let chain = try directories([".personal-enrollment"], create: true)
         defer { closeAll(chain) }
         guard chain.allSatisfy({ tractanda_secret_file_no_acl($0) == 0 }) else {
-            throw TractandaError("invalidEnrollmentState", "Enrollment secret directories have extended ACLs.")
+            throw TractandaError(
+                "invalidEnrollmentState", "Enrollment secret directories have extended ACLs.")
         }
         try reserve(data.count, descriptor: chain.last!)
         let temporary = ".state-" + UUID().uuidString.lowercased()
         let fd = openat(chain.last!, temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
         guard fd >= 0 else { throw posixFailure("Cannot create enrollment state.", errorCode: errno) }
-        defer { close(fd); _ = unlinkat(chain.last!, temporary, 0) }
+        defer {
+            close(fd)
+            _ = unlinkat(chain.last!, temporary, 0)
+        }
         guard tractanda_secret_file_no_acl(fd) == 0 else {
             throw TractandaError("invalidEnrollmentState", "Enrollment secret file has an extended ACL.")
         }
@@ -1472,7 +1480,9 @@ extension DocumentContentFiles {
             while offset < buffer.count {
                 let count = write(fd, buffer.baseAddress!.advanced(by: offset), buffer.count - offset)
                 if count < 0, errno == EINTR { continue }
-                guard count > 0 else { throw posixFailure("Cannot write enrollment state.", errorCode: errno) }
+                guard count > 0 else {
+                    throw posixFailure("Cannot write enrollment state.", errorCode: errno)
+                }
                 offset += count
             }
         }

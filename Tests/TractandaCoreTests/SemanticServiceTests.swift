@@ -174,7 +174,8 @@ final class SemanticServiceTests: XCTestCase {
         func append(_ generation: Vec1Generation, chunks: [SemanticChunk], vectors: [[Double]]) throws {}
         func publish(_ generation: Vec1Generation, count: Int64) throws {}
         func discard(_ generation: Vec1Generation) throws {}
-        func prunePage(profileID: String, after: String?, current: (String) throws -> Bool) throws -> String? { nil }
+        func prunePage(profileID: String, after: String?, current: (String) throws -> Bool) throws -> String?
+        { nil }
         func cleanup() throws {}
         func search(
             vector: [Double], profileID: String, limit: Int,
@@ -215,7 +216,8 @@ final class SemanticServiceTests: XCTestCase {
             try backing.publish(generation, count: count)
         }
         func discard(_ generation: Vec1Generation) throws { try backing.discard(generation) }
-        func prunePage(profileID: String, after: String?, current: (String) throws -> Bool) throws -> String? {
+        func prunePage(profileID: String, after: String?, current: (String) throws -> Bool) throws -> String?
+        {
             pruneCalls += 1
             return try backing.prunePage(profileID: profileID, after: after, current: current)
         }
@@ -354,8 +356,10 @@ final class SemanticServiceTests: XCTestCase {
             let profile = try SemanticSource.profileID(config)
             var revisions: [Revision] = []
             for index in 0..<100 {
-                revisions.append(try note(
-                    store, subject: "Item \(index)", body: "body \(index)", operation: "round-item-\(index)"))
+                revisions.append(
+                    try note(
+                        store, subject: "Item \(index)", body: "body \(index)",
+                        operation: "round-item-\(index)"))
             }
             revisions.sort { $0.itemID < $1.itemID }
             let late = try XCTUnwrap(revisions.last)
@@ -365,18 +369,24 @@ final class SemanticServiceTests: XCTestCase {
             _ = try service.configure(config, expectedConfigurationID: nil)
             var early = try XCTUnwrap(revisions.first)
             for index in 0..<20 {
-                early = try store.commit(CommitRequest(
-                    action: .revise, itemID: early.itemID, expectedRevisionID: early.revisionID,
-                    changes: ["dueAt": .date(index.isMultiple(of: 2)
-                        ? "2030-01-01T00:00:00Z" : "2031-01-01T00:00:00Z")],
-                    operationID: "round-write-\(index)")).revision
+                early = try store.commit(
+                    CommitRequest(
+                        action: .revise, itemID: early.itemID, expectedRevisionID: early.revisionID,
+                        changes: [
+                            "dueAt": .date(
+                                index.isMultiple(of: 2)
+                                    ? "2030-01-01T00:00:00Z" : "2031-01-01T00:00:00Z")
+                        ],
+                        operationID: "round-write-\(index)")
+                ).revision
                 service.maintain()
                 usleep(10_000)
                 if try storage.identity(itemID: late.itemID, profileID: profile) != nil { break }
             }
             XCTAssertNotNil(try storage.identity(itemID: late.itemID, profileID: profile))
             drain(service)
-            XCTAssertEqual(try storage.identity(itemID: early.itemID, profileID: profile)?.revisionID,
+            XCTAssertEqual(
+                try storage.identity(itemID: early.itemID, profileID: profile)?.revisionID,
                 early.revisionID)
         }
     }
@@ -393,7 +403,8 @@ final class SemanticServiceTests: XCTestCase {
             }
             let config = configuration(operationID: "catchup-restart")
             let first = try note(store, subject: "old", body: "old content", operation: "catchup-first")
-            let deleted = try note(store, subject: "delete", body: "delete content", operation: "catchup-delete")
+            let deleted = try note(
+                store, subject: "delete", body: "delete content", operation: "catchup-delete")
             let service = SemanticService(store: store, retryDelayForTesting: 0.05, embed: provider)
             _ = try service.configure(config, expectedConfigurationID: nil)
             service.maintain()
@@ -406,12 +417,14 @@ final class SemanticServiceTests: XCTestCase {
             let failedCalls = calls.read()
             for _ in 0..<5 { service.maintain() }
             XCTAssertEqual(calls.read(), failedCalls)
-            _ = try store.commit(CommitRequest(
-                action: .revise, itemID: first.itemID, expectedRevisionID: first.revisionID,
-                changes: ["body": .text("latest content")], operationID: "catchup-revise"))
-            _ = try store.commit(CommitRequest(
-                action: .revise, itemID: deleted.itemID, expectedRevisionID: deleted.revisionID,
-                changes: ["isDeleted": .boolean(true)], operationID: "catchup-deleted"))
+            _ = try store.commit(
+                CommitRequest(
+                    action: .revise, itemID: first.itemID, expectedRevisionID: first.revisionID,
+                    changes: ["body": .text("latest content")], operationID: "catchup-revise"))
+            _ = try store.commit(
+                CommitRequest(
+                    action: .revise, itemID: deleted.itemID, expectedRevisionID: deleted.revisionID,
+                    changes: ["isDeleted": .boolean(true)], operationID: "catchup-deleted"))
             let restarted = SemanticService(store: store, retryDelayForTesting: 0.05, embed: provider)
             restarted.maintain()
             let pending = try store.withAccess(forUID: store.ownerUID) { try restarted.status() }

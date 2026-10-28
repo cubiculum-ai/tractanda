@@ -39,11 +39,13 @@ package final class PeerPairing: Sendable {
         case .invitation: purpose = .enrollmentInvitation
         case .continuation: purpose = .enrollmentContinuation
         }
-        let profile = try PeerTLSProfile(storeID: binding.storeID,
+        let profile = try PeerTLSProfile(
+            storeID: binding.storeID,
             initiatorReplicaID: binding.localIsInitiator ? binding.localReplicaID : binding.remoteReplicaID,
             responderReplicaID: binding.localIsInitiator ? binding.remoteReplicaID : binding.localReplicaID,
             pairingID: binding.pairingID, purpose: purpose)
-        try self.init(peerID: binding.peerID, profile: profile,
+        try self.init(
+            peerID: binding.peerID, profile: profile,
             role: binding.localIsInitiator ? .initiator : .responder,
             configurationDigest: binding.configurationDigest,
             secret: material.secret.withBytes { try PeerTLSSecret(bytes: $0) })
@@ -51,7 +53,9 @@ package final class PeerPairing: Sendable {
     package static func load(peerID: String, coordinator: ServiceCoordinator) async throws -> PeerPairing {
         try PeerPairing(credential: await coordinator.loadPeerCredential(peerID: peerID))
     }
-    func resolve(_ session: PeerTLSSession, expectedPurpose: PeerTLSProfile.Purpose = .peer) throws -> PeerExchangeBinding {
+    func resolve(_ session: PeerTLSSession, expectedPurpose: PeerTLSProfile.Purpose = .peer) throws
+        -> PeerExchangeBinding
+    {
         let profile = tls.profile
         let initiator = tls.role == .initiator
         guard profile.purpose == expectedPurpose, session.profile.purpose == expectedPurpose,

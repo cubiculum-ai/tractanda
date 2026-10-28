@@ -184,16 +184,24 @@ public final class SetupEngine {
                     previous.release == releaseURL(options, manifest: manifest, digest: digest).path,
                     previous.store == roots.data.appendingPathComponent(options.name).path,
                     previous.indexDirectory == roots.indexes.appendingPathComponent(options.name).path,
-                    previous.socket == roots.runtime.appendingPathComponent(options.name).appendingPathComponent("server.sock").path
+                    previous.socket
+                        == roots.runtime.appendingPathComponent(options.name).appendingPathComponent(
+                            "server.sock"
+                        ).path
                 else {
-                    throw SetupError("Only the exact owned, preparing fresh target can resume; no existing instance was adopted.")
+                    throw SetupError(
+                        "Only the exact owned, preparing fresh target can resume; no existing instance was adopted."
+                    )
                 }
-                let configuration = try PersonalPeerRuntimeConfiguration(settings: PeerRuntimeConfiguration(
-                    peers: [], synchronization: .init(enabled: true, intervalSeconds: 15)))
-                let expected = try ManagedPeerConfiguration(path: peerConfigurationURL(options.name).path,
+                let configuration = try PersonalPeerRuntimeConfiguration(
+                    settings: PeerRuntimeConfiguration(
+                        peers: [], synchronization: .init(enabled: true, intervalSeconds: 15)))
+                let expected = try ManagedPeerConfiguration(
+                    path: peerConfigurationURL(options.name).path,
                     bytes: configuration.encoded())
                 guard previous.peerRuntimeConfiguration == expected else {
-                    throw SetupError("The retained outbound peer policy differs from the original preparation.")
+                    throw SetupError(
+                        "The retained outbound peer policy differs from the original preparation.")
                 }
                 // Even an owned preparing receipt must not rerun Setup after a shared profile
                 // was published; the operator can use the ordinary join/resume path.
@@ -353,7 +361,8 @@ public final class SetupEngine {
                         name: receipt.instance, bundle: options.bundle,
                         storeSelection: .prepared(storeID: storeID, replicaID: replicaID)
                     ).validate()
-                    guard receipt.freshTargetReplicaID == nil || receipt.freshTargetReplicaID == replicaID else {
+                    guard receipt.freshTargetReplicaID == nil || receipt.freshTargetReplicaID == replicaID
+                    else {
                         throw SetupError("Fresh target replica identity changed during bootstrap.")
                     }
                     receipt.freshTargetReplicaID = replicaID
@@ -537,14 +546,19 @@ public final class SetupEngine {
         if let previous, previous.state == .active {
             try requireCanonicalReader(previous, quiescent: true)
             if previous.runtimeDefinitionSHA256 == nil, receipt.runtimeDefinitionSHA256 != nil {
-                let serverRemoved = removeOwnedRegistration(definitionURL(receipt.instance), expectedSHA256: receipt.definitionSHA256)
-                let embeddingRemoved = removeOwnedRegistration(embeddingDefinitionURL(receipt.instance), expectedSHA256: receipt.embeddingDefinitionSHA256)
-                let runtimeRemoved = removeOwnedRegistration(runtimeDefinitionURL(receipt.instance), expectedSHA256: receipt.runtimeDefinitionSHA256)
+                let serverRemoved = removeOwnedRegistration(
+                    definitionURL(receipt.instance), expectedSHA256: receipt.definitionSHA256)
+                let embeddingRemoved = removeOwnedRegistration(
+                    embeddingDefinitionURL(receipt.instance),
+                    expectedSHA256: receipt.embeddingDefinitionSHA256)
+                let runtimeRemoved = removeOwnedRegistration(
+                    runtimeDefinitionURL(receipt.instance), expectedSHA256: receipt.runtimeDefinitionSHA256)
                 if serverRemoved { receipt.definitionSHA256 = nil }
                 if embeddingRemoved { receipt.embeddingDefinitionSHA256 = nil }
                 if runtimeRemoved { receipt.runtimeDefinitionSHA256 = nil }
                 receipt.state = .preparing
-                receipt.recoveryReason = "The previous release has no qualified transient-runtime preparer. Services remain stopped; retry the new-layout candidate explicitly."
+                receipt.recoveryReason =
+                    "The previous release has no qualified transient-runtime preparer. Services remain stopped; retry the new-layout candidate explicitly."
                 try writeReceipt(receipt)
                 throw SetupError(receipt.recoveryReason!)
             }
@@ -720,7 +734,9 @@ public final class SetupEngine {
             try removeClientLink(receipt)
             try removeTUICommandIfUnused()
             if receipt.runtimeDefinitionSHA256 != nil {
-                _ = try runner.run("/bin/launchctl", ["bootout", "system/ai.tractanda.runtime." + receipt.instance], environment: [:])
+                _ = try runner.run(
+                    "/bin/launchctl", ["bootout", "system/ai.tractanda.runtime." + receipt.instance],
+                    environment: [:])
                 try FileManager.default.removeItem(at: runtimeDefinitionURL(receipt.instance))
                 receipt.runtimeDefinitionSHA256 = nil
             }
@@ -762,7 +778,10 @@ public final class SetupEngine {
     func validateRoots(data: URL? = nil, indexes: URL? = nil) throws {
         let data = data ?? roots.data
         let indexes = indexes ?? roots.indexes
-        let paths = [data, indexes, roots.software, roots.configuration, roots.runtime, roots.installation, roots.work, roots.logs]
+        let paths = [
+            data, indexes, roots.software, roots.configuration, roots.runtime, roots.installation, roots.work,
+            roots.logs,
+        ]
         guard paths.allSatisfy({ $0.path.hasPrefix("/") && $0.path != "/" && !$0.path.contains("\0") }) else {
             throw SetupError("Installer roots must be absolute non-root directories.")
         }
@@ -859,13 +878,15 @@ public final class SetupEngine {
     func unload(_ name: String) throws {
         try serviceBackend.unload(name)
         if roots.platform == .macos, let receipt = try readReceipt(name),
-            let expected = receipt.runtimeDefinitionSHA256 {
+            let expected = receipt.runtimeDefinitionSHA256
+        {
             let definition = runtimeDefinitionURL(name)
             try requireOwned(definition, uid: 0, directory: false)
             guard try sha256(definition) == expected else {
                 throw SetupError("Runtime preparer differs from the owned receipt.")
             }
-            _ = try runner.run("/bin/launchctl", ["bootout", "system/ai.tractanda.runtime." + name], environment: [:])
+            _ = try runner.run(
+                "/bin/launchctl", ["bootout", "system/ai.tractanda.runtime." + name], environment: [:])
         }
     }
     func replaceRegistration(_ receipt: inout InstallationReceipt) throws {
@@ -894,9 +915,14 @@ public final class SetupEngine {
         }
         let catalog = try modelCatalog(URL(fileURLWithPath: receipt.release))
         if catalog != nil {
-            arguments += ["--model-provisioning-manifest", URL(fileURLWithPath: receipt.release).appendingPathComponent("models/manifest.json").path,
-                "--model-storage-directory", roots.models.path]
-            if let adoption = try modelAdoptionDirectory(receipt) { arguments += ["--model-adoption-directory", adoption] }
+            arguments += [
+                "--model-provisioning-manifest",
+                URL(fileURLWithPath: receipt.release).appendingPathComponent("models/manifest.json").path,
+                "--model-storage-directory", roots.models.path,
+            ]
+            if let adoption = try modelAdoptionDirectory(receipt) {
+                arguments += ["--model-adoption-directory", adoption]
+            }
         }
         if let document = receipt.documentExtraction {
             guard document == .pinned else { throw SetupError("Unsupported document receipt.") }
@@ -904,7 +930,9 @@ public final class SetupEngine {
             let release = URL(fileURLWithPath: receipt.release)
             arguments += [
                 "--document-converter", release.appendingPathComponent(document.converterPath).path,
-                "--document-model-directory", try modelArtifact("granite-docling-258m-mlx", release: release)?.directory(in: roots.models).path ?? release.appendingPathComponent(document.modelDirectory).path,
+                "--document-model-directory",
+                try modelArtifact("granite-docling-258m-mlx", release: release)?.directory(in: roots.models)
+                    .path ?? release.appendingPathComponent(document.modelDirectory).path,
                 "--document-scratch-directory", scratch,
             ]
         }
@@ -958,7 +986,8 @@ public final class SetupEngine {
         }
         let identityBytes = try JSONSerialization.data(withJSONObject: identityObject)
         let identity = try JSONDecoder().decode(DocumentConverterIdentity.self, from: identityBytes)
-        guard ["configured", "awaitingModel"].contains(extraction?["state"] as? String ?? ""), identity == document.identity,
+        guard ["configured", "awaitingModel"].contains(extraction?["state"] as? String ?? ""),
+            identity == document.identity,
             extraction?["executableSHA256"] as? String
                 == (try sha256(release.appendingPathComponent(document.converterPath))),
             extraction?["requiresPreparedInput"] as? Bool == false,

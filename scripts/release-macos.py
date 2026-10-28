@@ -1064,13 +1064,19 @@ class Pipeline:
         for row in self.state['delivery']['linuxAssets']:
             args += ['--package', self.directory / row['name']]
         previous = self.directory / 'previous-pages'
+        previous_key = self.settings.get('aptPreviousPublicKey')
+        previous_fingerprint = self.settings.get('aptPreviousFingerprint')
+        if bool(previous_key) != bool(previous_fingerprint):
+            raise RuntimeError('APT rotation requires both reviewed previous public key and full fingerprint.')
         if not previous.exists():
-            self.run_command('apt-previous', [sys.executable, 'scripts/assemble-pages.py', '--output', previous,
-                                            '--repository', self.settings['repository']])
+            prior_args = [sys.executable, 'scripts/assemble-pages.py', '--output', previous,
+                          '--repository', self.settings['repository']]
+            if previous_key: prior_args += ['--public-key', previous_key, '--fingerprint', previous_fingerprint]
+            self.run_command('apt-previous', prior_args)
         if (previous / 'apt/repository.json').is_file():
             record = json.loads(command([sys.executable, 'scripts/apt-repository.py', 'verify',
-                '--root', previous / 'apt', '--public-key', self.source / 'docs/apt/tractanda-archive-keyring.asc',
-                '--fingerprint', fingerprint, '--gpg', self.settings.get('aptGPG', 'gpg')],
+                '--root', previous / 'apt', '--public-key', previous_key or self.source / 'docs/apt/tractanda-archive-keyring.asc',
+                '--fingerprint', previous_fingerprint or fingerprint, '--gpg', self.settings.get('aptGPG', 'gpg')],
                 cwd=self.source, env=self.environment))
             version = record['packages'][0]['Version']
             prior = [r for r in record['packages'] if r['Version'] == version]

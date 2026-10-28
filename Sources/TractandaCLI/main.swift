@@ -725,7 +725,8 @@ if CommandLine.arguments.dropFirst().first == "models" {
     do { try modelCommand(Array(CommandLine.arguments.dropFirst())) } catch {
         let failure = error as? TractandaError ?? TractandaError("error", String(describing: error))
         FileHandle.standardError.write((try? JSON.encode(failure)) ?? Data(failure.description.utf8))
-        FileHandle.standardError.write(Data([10])); exit(1)
+        FileHandle.standardError.write(Data([10]))
+        exit(1)
     }
 } else if CommandLine.arguments.dropFirst().first == "daemon" {
     do { try await daemonCommand(Array(CommandLine.arguments.dropFirst())) } catch {

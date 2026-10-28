@@ -16,32 +16,44 @@ public actor DaemonApplication {
     private var closed = false
     private var privateEnrollmentControls: [UUID: PeerExchangeControl] = [:]
     private var modelStatusProvider: (@Sendable () -> [ModelProvisioningStatus])?
-    func setModelStatusProvider(_ provider: @escaping @Sendable () -> [ModelProvisioningStatus]) { modelStatusProvider = provider }
+    func setModelStatusProvider(_ provider: @escaping @Sendable () -> [ModelProvisioningStatus]) {
+        modelStatusProvider = provider
+    }
     private var peerStatusProvider: (@Sendable () async throws -> PeerOperatorRuntimeStatus)?
 
     private var personalPeerAdminProvider: (@Sendable (PeerExchangeRequest, UInt32) async throws -> Data)?
-    private var personalEnrollmentProvider: (@Sendable (Data, UInt32, NativePrincipalPin) async throws -> Data)?
-    func setPersonalEnrollmentProvider(_ provider: @escaping @Sendable (Data, UInt32, NativePrincipalPin) async throws -> Data) {
+    private var personalEnrollmentProvider:
+        (@Sendable (Data, UInt32, NativePrincipalPin) async throws -> Data)?
+    func setPersonalEnrollmentProvider(
+        _ provider: @escaping @Sendable (Data, UInt32, NativePrincipalPin) async throws -> Data
+    ) {
         personalEnrollmentProvider = provider
     }
-    func makePrivatePersonalEnrollmentSession(_ request: NativePersonalEnrollment.Begin,
-        forUID uid: UInt32, control: PeerExchangeControl) async throws -> NativePersonalEnrollmentSession {
+    func makePrivatePersonalEnrollmentSession(
+        _ request: NativePersonalEnrollment.Begin,
+        forUID uid: UInt32, control: PeerExchangeControl
+    ) async throws -> NativePersonalEnrollmentSession {
         guard !closed, let provider = personalEnrollmentProvider else {
-            throw TractandaError("peerRuntimeUnavailable", "Explicit peer runtime policy is required before native pairing.")
+            throw TractandaError(
+                "peerRuntimeUnavailable", "Explicit peer runtime policy is required before native pairing.")
         }
         // This actual Unix peer UID is never supplied by the private JMAP body.
         let authentication = try await coordinator.localJMAPAuthentication(forUID: uid)
         let principal = NativePrincipalPin(authentication)
-        _ = try await coordinator.personalPeerLocalRequest(.init("identity"), forUID: uid, principal: principal)
+        _ = try await coordinator.personalPeerLocalRequest(
+            .init("identity"), forUID: uid, principal: principal)
         try control.check()
-        return .init(byteCount: request.byteCount, commit: { data in
-            try control.check()
-            guard data.count == request.byteCount else { throw NativePersonalEnrollment.failure() }
-            _ = try await self.coordinator.personalPeerLocalRequest(.init("identity"), forUID: uid, principal: principal)
-            // Once accepted, the independent daemon job owns its lifetime. Disconnect
-            // cancels delivery, not a successfully persisted join or membership decision.
-            return try await provider(data, uid, principal)
-        }, cancel: { control.cancel() }, control: control)
+        return .init(
+            byteCount: request.byteCount,
+            commit: { data in
+                try control.check()
+                guard data.count == request.byteCount else { throw NativePersonalEnrollment.failure() }
+                _ = try await self.coordinator.personalPeerLocalRequest(
+                    .init("identity"), forUID: uid, principal: principal)
+                // Once accepted, the independent daemon job owns its lifetime. Disconnect
+                // cancels delivery, not a successfully persisted join or membership decision.
+                return try await provider(data, uid, principal)
+            }, cancel: { control.cancel() }, control: control)
     }
     func setPersonalPeerAdminProvider(
         _ provider: @escaping @Sendable (PeerExchangeRequest, UInt32) async throws -> Data
@@ -83,7 +95,8 @@ public actor DaemonApplication {
             ]
             for method in names {
                 let readOnly =
-                    method == "TractandaModel/status" || method == PeerOperatorStatus.nativeMethod || method == "TractandaPeerEnrollment/status"
+                    method == "TractandaModel/status" || method == PeerOperatorStatus.nativeMethod
+                    || method == "TractandaPeerEnrollment/status"
                     || method == "TractandaPeerEnrollment/read"
                 methods[method] = .init(
                     capability: ItemService.capability, effect: readOnly ? .readOnly : .mayMutate,
@@ -113,9 +126,12 @@ public actor DaemonApplication {
                 let invocation = try invocation.normalizedForDomain()
                 guard !closed else { throw TractandaError("serviceClosed", "Native application is closed.") }
                 if invocation.method == "TractandaModel/status" {
-                    guard invocation.arguments.members?.isEmpty == true else { throw TractandaError("invalidArguments", "Model status takes no arguments.") }
+                    guard invocation.arguments.members?.isEmpty == true else {
+                        throw TractandaError("invalidArguments", "Model status takes no arguments.")
+                    }
                     _ = try await coordinator.localJMAPAuthentication(forUID: uid)
-                    let statuses = try JSONSerialization.jsonObject(with: JSONEncoder().encode(modelStatusProvider?() ?? []))
+                    let statuses = try JSONSerialization.jsonObject(
+                        with: JSONEncoder().encode(modelStatusProvider?() ?? []))
                     return try .nativeSuccess(invocation.method, ["artifacts": statuses])
                 }
                 if let call = try PeerOperatorStatusNativeCall.parse(invocation) {

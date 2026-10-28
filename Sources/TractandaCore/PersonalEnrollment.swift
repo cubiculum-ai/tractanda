@@ -17,14 +17,20 @@ public struct PersonalEnrollmentInvitationMetadata: Codable, Equatable, Sendable
     public let unusedFamilyID: String?
     public var familyID: String { unusedFamilyID ?? operationID }
 
-    package init(operationID: String, storeID: String, issuerReplicaID: String,
+    package init(
+        operationID: String, storeID: String, issuerReplicaID: String,
         bootstrapReplicaID: String, pairingID: String,
         endpoints: [PeerRuntimeConfiguration.Endpoint], expiresAt: Int64,
-        expectedMembershipDigest: String?, unusedFamilyID: String? = nil) throws {
+        expectedMembershipDigest: String?, unusedFamilyID: String? = nil
+    ) throws {
         profile = "tractanda.personal-enrollment-invitation.v1"
-        self.operationID = operationID; self.storeID = storeID
-        self.issuerReplicaID = issuerReplicaID; self.bootstrapReplicaID = bootstrapReplicaID
-        self.pairingID = pairingID; self.endpoints = endpoints; self.expiresAt = expiresAt
+        self.operationID = operationID
+        self.storeID = storeID
+        self.issuerReplicaID = issuerReplicaID
+        self.bootstrapReplicaID = bootstrapReplicaID
+        self.pairingID = pairingID
+        self.endpoints = endpoints
+        self.expiresAt = expiresAt
         self.expectedMembershipDigest = expectedMembershipDigest
         self.unusedFamilyID = unusedFamilyID ?? operationID
         try validate()
@@ -60,7 +66,8 @@ package enum PersonalEnrollmentError {
 /// Explicit private-channel material. Like the established PeerCredential, supplied copies
 /// remain caller-owned. No reflection, Codable or ordinary diagnostic reveals these bytes.
 package final class PersonalEnrollmentSecret: Sendable, CustomStringConvertible,
-    CustomDebugStringConvertible, CustomReflectable {
+    CustomDebugStringConvertible, CustomReflectable
+{
     private let bytes: [UInt8]
     package init(bytes: [UInt8]) throws {
         guard bytes.count == 32 else { throw PersonalEnrollmentError.invalid() }
@@ -79,11 +86,14 @@ package final class PersonalEnrollmentSecret: Sendable, CustomStringConvertible,
 /// A code may be read/displayed only through an explicitly private product action.
 /// Setup may parse it but only public metadata is available to its ordinary receipts.
 public final class PersonalEnrollmentInvitation: Sendable, CustomStringConvertible,
-    CustomDebugStringConvertible, CustomReflectable {
+    CustomDebugStringConvertible, CustomReflectable
+{
     public let metadata: PersonalEnrollmentInvitationMetadata
     package let secret: PersonalEnrollmentSecret
     package init(metadata: PersonalEnrollmentInvitationMetadata, secret: PersonalEnrollmentSecret) throws {
-        try metadata.validate(); self.metadata = metadata; self.secret = secret
+        try metadata.validate()
+        self.metadata = metadata
+        self.secret = secret
     }
     public static func parsePrivateCode(_ code: String) throws -> PersonalEnrollmentInvitation {
         guard code.utf8.count <= 12 * 1024, code.hasPrefix("tractanda-pair-v1.") else {
@@ -99,7 +109,8 @@ public final class PersonalEnrollmentInvitation: Sendable, CustomStringConvertib
     }
     /// Never feed this result to ordinary JSON/stdout; only TTY or an owned private file.
     package func privateCode() throws -> String {
-        "tractanda-pair-v1." + (try PersonalEnrollmentPrivateCodec.encode(metadata, secret: secret)).base64EncodedString()
+        "tractanda-pair-v1."
+            + (try PersonalEnrollmentPrivateCodec.encode(metadata, secret: secret)).base64EncodedString()
     }
     public var description: String { "PersonalEnrollmentInvitation(<redacted>)" }
     public var debugDescription: String { description }
@@ -117,7 +128,8 @@ package struct PersonalEnrollmentClaimMetadata: Codable, Equatable, Sendable {
         let member = try PersonalMember(replicaID: targetReplicaID, hostname: targetHostname)
         guard operationID == invitation.operationID,
             targetHostname == member.hostname,
-            ![invitation.storeID, invitation.issuerReplicaID, invitation.bootstrapReplicaID].contains(targetReplicaID),
+            ![invitation.storeID, invitation.issuerReplicaID, invitation.bootstrapReplicaID].contains(
+                targetReplicaID),
             continuationPairingID != invitation.pairingID
         else { throw PersonalEnrollmentError.invalid() }
     }
@@ -127,13 +139,15 @@ package final class PersonalEnrollmentClaim: Sendable, CustomStringConvertible, 
     package let metadata: PersonalEnrollmentClaimMetadata
     package let continuationSecret: PersonalEnrollmentSecret
     package init(metadata: PersonalEnrollmentClaimMetadata, continuationSecret: PersonalEnrollmentSecret) {
-        self.metadata = metadata; self.continuationSecret = continuationSecret
+        self.metadata = metadata
+        self.continuationSecret = continuationSecret
     }
     package func privateEncodedBytes() throws -> Data {
         try PersonalEnrollmentPrivateCodec.encode(metadata, secret: continuationSecret)
     }
     package static func decodePrivate(_ bytes: Data) throws -> PersonalEnrollmentClaim {
-        let (metadata, secret) = try PersonalEnrollmentPrivateCodec.decode(PersonalEnrollmentClaimMetadata.self, bytes: bytes)
+        let (metadata, secret) = try PersonalEnrollmentPrivateCodec.decode(
+            PersonalEnrollmentClaimMetadata.self, bytes: bytes)
         return .init(metadata: metadata, continuationSecret: secret)
     }
     package var description: String { "PersonalEnrollmentClaim(<redacted>)" }
@@ -142,21 +156,31 @@ package final class PersonalEnrollmentClaim: Sendable, CustomStringConvertible, 
 
 package enum PersonalEnrollmentPrivateCodec {
     package static let operationHeaderBytes = 384 * 1024
-    package static func encode<T: Encodable>(_ metadata: T, secret: PersonalEnrollmentSecret?,
-        maximumHeaderBytes: Int = 12 * 1024) throws -> Data {
+    package static func encode<T: Encodable>(
+        _ metadata: T, secret: PersonalEnrollmentSecret?,
+        maximumHeaderBytes: Int = 12 * 1024
+    ) throws -> Data {
         let header = try JSON.encode(metadata)
         guard header.count <= maximumHeaderBytes else { throw PersonalEnrollmentError.invalid() }
         let count = UInt32(header.count)
-        let prefix = Data([UInt8(count >> 24), UInt8((count >> 16) & 255), UInt8((count >> 8) & 255), UInt8(count & 255)])
+        let prefix = Data([
+            UInt8(count >> 24), UInt8((count >> 16) & 255), UInt8((count >> 8) & 255), UInt8(count & 255),
+        ])
         return prefix + header + (secret?.withBytes { Data($0) } ?? Data())
     }
-    package static func decode<T: Codable>(_ type: T.Type, bytes: Data) throws -> (T, PersonalEnrollmentSecret) {
+    package static func decode<T: Codable>(_ type: T.Type, bytes: Data) throws -> (
+        T, PersonalEnrollmentSecret
+    ) {
         let (metadata, suffix) = try decodeHeader(type, bytes: bytes, secretCount: 32)
         return (metadata, try .init(bytes: Array(suffix)))
     }
-    package static func decodeHeader<T: Codable>(_ type: T.Type, bytes: Data, secretCount: Int,
-        maximumHeaderBytes: Int = 12 * 1024) throws -> (T, Data) {
-        guard bytes.count >= 4 + secretCount, bytes.count <= maximumHeaderBytes + 4 + secretCount else { throw PersonalEnrollmentError.invalid() }
+    package static func decodeHeader<T: Codable>(
+        _ type: T.Type, bytes: Data, secretCount: Int,
+        maximumHeaderBytes: Int = 12 * 1024
+    ) throws -> (T, Data) {
+        guard bytes.count >= 4 + secretCount, bytes.count <= maximumHeaderBytes + 4 + secretCount else {
+            throw PersonalEnrollmentError.invalid()
+        }
         let count = bytes.prefix(4).reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
         guard Int(count) == bytes.count - 4 - secretCount else { throw PersonalEnrollmentError.invalid() }
         let header = Data(bytes.dropFirst(4).prefix(Int(count)))
@@ -172,12 +196,15 @@ package struct PersonalEnrollmentLocalAuthorization: Sendable {
     package let identity: PersonalSyncIdentity
     package let administrator: String
     private init(identity: PersonalSyncIdentity, administrator: String) {
-        self.identity = identity; self.administrator = administrator
+        self.identity = identity
+        self.administrator = administrator
     }
     package static func authorize(store: ItemStore, forUID uid: UInt32) throws -> Self {
         try store.withAccess(forUID: uid) {
             try store.requireAdministrator()
-            return try .init(identity: store.personalSyncIdentity(), administrator: store.accountIdentity(forUID: uid).name)
+            return try .init(
+                identity: store.personalSyncIdentity(), administrator: store.accountIdentity(forUID: uid).name
+            )
         }
     }
 }
@@ -189,10 +216,15 @@ package struct PersonalEnrollmentIssuerStatus: Codable, Equatable, Sendable {
     package let administrator: String
     package let claim: PersonalEnrollmentClaimMetadata?
     package let resultingMembership: PersonalMembershipConfiguration?
-    package init(phase: Phase, invitation: PersonalEnrollmentInvitationMetadata, administrator: String,
-        claim: PersonalEnrollmentClaimMetadata?, resultingMembership: PersonalMembershipConfiguration? = nil) {
-        self.phase = phase; self.invitation = invitation; self.administrator = administrator
-        self.claim = claim; self.resultingMembership = resultingMembership
+    package init(
+        phase: Phase, invitation: PersonalEnrollmentInvitationMetadata, administrator: String,
+        claim: PersonalEnrollmentClaimMetadata?, resultingMembership: PersonalMembershipConfiguration? = nil
+    ) {
+        self.phase = phase
+        self.invitation = invitation
+        self.administrator = administrator
+        self.claim = claim
+        self.resultingMembership = resultingMembership
     }
 }
 
@@ -210,10 +242,13 @@ package struct PersonalEnrollmentRegistry {
         guard bytes.count >= 4 else { throw PersonalEnrollmentError.invalid() }
         let count = bytes.prefix(4).reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
         guard Int(count) <= bytes.count - 4 else { throw PersonalEnrollmentError.invalid() }
-        let status = try JSON.decode(PersonalEnrollmentIssuerStatus.self, Data(bytes.dropFirst(4).prefix(Int(count))))
+        let status = try JSON.decode(
+            PersonalEnrollmentIssuerStatus.self, Data(bytes.dropFirst(4).prefix(Int(count))))
         try status.invitation.validate()
         guard !status.administrator.isEmpty, status.administrator.utf8.count <= 255,
-            !status.administrator.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+            !status.administrator.unicodeScalars.contains(where: {
+                CharacterSet.controlCharacters.contains($0)
+            })
         else { throw PersonalEnrollmentError.invalid() }
         let hasSecret = status.phase == .invitation || status.phase == .claimed
         let (checked, suffix) = try PersonalEnrollmentPrivateCodec.decodeHeader(
@@ -226,33 +261,45 @@ package struct PersonalEnrollmentRegistry {
         if let resulting = status.resultingMembership {
             try resulting.validate()
             guard resulting.storeID == status.invitation.storeID, let target = status.claim,
-                resulting.members.contains(where: { $0.replicaID == target.targetReplicaID && $0.hostname == target.targetHostname }),
+                resulting.members.contains(where: {
+                    $0.replicaID == target.targetReplicaID && $0.hostname == target.targetHostname
+                }),
                 resulting.members.contains(where: { $0.replicaID == status.invitation.issuerReplicaID })
             else { throw PersonalEnrollmentError.invalid() }
         }
         return (bytes, status, hasSecret ? try .init(bytes: Array(suffix)) : nil)
     }
-    private func check(_ authorization: PersonalEnrollmentLocalAuthorization,
-        status: PersonalEnrollmentIssuerStatus, allowExactResult: Bool = false) throws {
+    private func check(
+        _ authorization: PersonalEnrollmentLocalAuthorization,
+        status: PersonalEnrollmentIssuerStatus, allowExactResult: Bool = false
+    ) throws {
         let identity = authorization.identity
         let expected = try identity.membership?.digest == status.invitation.expectedMembershipDigest
-        let exactResult = allowExactResult && status.resultingMembership != nil && identity.membership == status.resultingMembership
-        guard identity.storeID == status.invitation.storeID, identity.replicaID == status.invitation.issuerReplicaID,
+        let exactResult =
+            allowExactResult && status.resultingMembership != nil
+            && identity.membership == status.resultingMembership
+        guard identity.storeID == status.invitation.storeID,
+            identity.replicaID == status.invitation.issuerReplicaID,
             expected || exactResult,
             authorization.administrator == status.administrator
         else { throw PersonalEnrollmentError.conflict() }
     }
-    package func issue(authorization: PersonalEnrollmentLocalAuthorization,
-        endpoints: [PeerRuntimeConfiguration.Endpoint], now: Int64, lifetimeSeconds: Int64 = 600) throws -> PersonalEnrollmentInvitation {
+    package func issue(
+        authorization: PersonalEnrollmentLocalAuthorization,
+        endpoints: [PeerRuntimeConfiguration.Endpoint], now: Int64, lifetimeSeconds: Int64 = 600
+    ) throws -> PersonalEnrollmentInvitation {
         guard now > 0, (1...3600).contains(lifetimeSeconds), now <= Int64.max - lifetimeSeconds else {
             throw PersonalEnrollmentError.invalid()
         }
         let old = try load()
-        if let (_, status, _) = old, status.phase == .claimed || (status.phase == .invitation && now < status.invitation.expiresAt) {
+        if let (_, status, _) = old,
+            status.phase == .claimed || (status.phase == .invitation && now < status.invitation.expiresAt)
+        {
             throw PersonalEnrollmentError.conflict()
         }
         func id() throws -> String { try UUID.makeVersion1().uuidString.lowercased() }
-        let metadata = try PersonalEnrollmentInvitationMetadata(operationID: id(),
+        let metadata = try PersonalEnrollmentInvitationMetadata(
+            operationID: id(),
             storeID: authorization.identity.storeID, issuerReplicaID: authorization.identity.replicaID,
             bootstrapReplicaID: id(), pairingID: id(), endpoints: endpoints, expiresAt: now + lifetimeSeconds,
             expectedMembershipDigest: authorization.identity.membership?.digest,
@@ -263,51 +310,65 @@ package struct PersonalEnrollmentRegistry {
                     ? status.invitation.familyID : nil
             })
         let secret = try PersonalEnrollmentSecret.generate()
-        let status = PersonalEnrollmentIssuerStatus(phase: .invitation, invitation: metadata,
+        let status = PersonalEnrollmentIssuerStatus(
+            phase: .invitation, invitation: metadata,
             administrator: authorization.administrator, claim: nil)
         try files.replacePersonalEnrollmentState(
-            PersonalEnrollmentPrivateCodec.encode(status, secret: secret,
+            PersonalEnrollmentPrivateCodec.encode(
+                status, secret: secret,
                 maximumHeaderBytes: PersonalEnrollmentPrivateCodec.operationHeaderBytes), expected: old?.0)
         return try .init(metadata: metadata, secret: secret)
     }
-    package func status(authorization: PersonalEnrollmentLocalAuthorization) throws -> PersonalEnrollmentIssuerStatus? {
+    package func status(authorization: PersonalEnrollmentLocalAuthorization) throws
+        -> PersonalEnrollmentIssuerStatus?
+    {
         guard let (_, status, _) = try load() else { return nil }
         try check(authorization, status: status, allowExactResult: true)
         return status
     }
     package func invitationCredential(now: Int64) throws -> PersonalEnrollmentInvitation? {
         guard let (_, status, secret) = try load(), status.phase == .invitation,
-            now < status.invitation.expiresAt, let secret else { return nil }
+            now < status.invitation.expiresAt, let secret
+        else { return nil }
         return try .init(metadata: status.invitation, secret: secret)
     }
-    package func claim(_ claim: PersonalEnrollmentClaim,
+    package func claim(
+        _ claim: PersonalEnrollmentClaim,
         authenticatedInvitation: PersonalEnrollmentInvitationMetadata,
-        authorization: PersonalEnrollmentLocalAuthorization, now: Int64) throws -> PersonalEnrollmentIssuerStatus {
+        authorization: PersonalEnrollmentLocalAuthorization, now: Int64
+    ) throws -> PersonalEnrollmentIssuerStatus {
         guard now > 0, let (old, status, _) = try load(), status.phase == .invitation,
-            authenticatedInvitation == status.invitation else { throw PersonalEnrollmentError.conflict() }
+            authenticatedInvitation == status.invitation
+        else { throw PersonalEnrollmentError.conflict() }
         try check(authorization, status: status)
         guard now < status.invitation.expiresAt else {
             throw TractandaError("invitationExpired", "The unused pairing invitation expired.")
         }
         try claim.metadata.validate(invitation: status.invitation)
-        let next = PersonalEnrollmentIssuerStatus(phase: .claimed, invitation: status.invitation,
+        let next = PersonalEnrollmentIssuerStatus(
+            phase: .claimed, invitation: status.invitation,
             administrator: status.administrator, claim: claim.metadata)
         try files.replacePersonalEnrollmentState(
-            PersonalEnrollmentPrivateCodec.encode(next, secret: claim.continuationSecret,
+            PersonalEnrollmentPrivateCodec.encode(
+                next, secret: claim.continuationSecret,
                 maximumHeaderBytes: PersonalEnrollmentPrivateCodec.operationHeaderBytes), expected: old)
         return next
     }
     package func continuationCredential() throws -> PersonalEnrollmentClaim? {
         guard let (_, status, secret) = try load(), status.phase == .claimed,
-            let metadata = status.claim, let secret else { return nil }
+            let metadata = status.claim, let secret
+        else { return nil }
         return .init(metadata: metadata, continuationSecret: secret)
     }
     /// Host-private material inspection; no native/HTTP/MCP diagnostic route exposes it.
     package func runtimeStatus() throws -> PersonalEnrollmentIssuerStatus? { try load()?.1 }
-    package func stageMembershipProposal(authorization: PersonalEnrollmentLocalAuthorization,
-        configuration: PersonalMembershipConfiguration) throws {
+    package func stageMembershipProposal(
+        authorization: PersonalEnrollmentLocalAuthorization,
+        configuration: PersonalMembershipConfiguration
+    ) throws {
         guard let (old, status, secret) = try load(), status.phase == .claimed,
-            let claim = status.claim, let secret else { throw PersonalEnrollmentError.conflict() }
+            let claim = status.claim, let secret
+        else { throw PersonalEnrollmentError.conflict() }
         try check(authorization, status: status)
         try configuration.validate()
         let oldMembers = authorization.identity.membership?.members ?? []
@@ -316,15 +377,22 @@ package struct PersonalEnrollmentRegistry {
             Set(configuration.members.map(\.replicaID)) == oldIDs.union([claim.targetReplicaID]),
             !oldIDs.contains(claim.targetReplicaID),
             oldMembers.allSatisfy({ configuration.members.contains($0) }),
-            configuration.members.contains(where: { $0.replicaID == claim.targetReplicaID && $0.hostname == claim.targetHostname }),
+            configuration.members.contains(where: {
+                $0.replicaID == claim.targetReplicaID && $0.hostname == claim.targetHostname
+            }),
             status.resultingMembership == nil || status.resultingMembership == configuration
         else { throw PersonalEnrollmentError.conflict() }
-        let next = PersonalEnrollmentIssuerStatus(phase: .claimed, invitation: status.invitation,
+        let next = PersonalEnrollmentIssuerStatus(
+            phase: .claimed, invitation: status.invitation,
             administrator: status.administrator, claim: claim, resultingMembership: configuration)
-        try files.replacePersonalEnrollmentState(PersonalEnrollmentPrivateCodec.encode(next, secret: secret,
-            maximumHeaderBytes: PersonalEnrollmentPrivateCodec.operationHeaderBytes), expected: old)
+        try files.replacePersonalEnrollmentState(
+            PersonalEnrollmentPrivateCodec.encode(
+                next, secret: secret,
+                maximumHeaderBytes: PersonalEnrollmentPrivateCodec.operationHeaderBytes), expected: old)
     }
-    package func finish(authorization: PersonalEnrollmentLocalAuthorization, operationID: String, cancelled: Bool) throws {
+    package func finish(
+        authorization: PersonalEnrollmentLocalAuthorization, operationID: String, cancelled: Bool
+    ) throws {
         guard let (old, status, _) = try load(), status.invitation.operationID == operationID else {
             throw PersonalEnrollmentError.conflict()
         }
@@ -335,12 +403,16 @@ package struct PersonalEnrollmentRegistry {
             guard status.resultingMembership == nil else { throw PersonalEnrollmentError.conflict() }
         } else {
             guard status.phase == .claimed, let resulting = status.resultingMembership,
-                authorization.identity.membership == resulting else { throw PersonalEnrollmentError.conflict() }
+                authorization.identity.membership == resulting
+            else { throw PersonalEnrollmentError.conflict() }
         }
-        let next = PersonalEnrollmentIssuerStatus(phase: cancelled ? .cancelled : .complete,
+        let next = PersonalEnrollmentIssuerStatus(
+            phase: cancelled ? .cancelled : .complete,
             invitation: status.invitation, administrator: status.administrator, claim: status.claim,
             resultingMembership: status.resultingMembership)
-        try files.replacePersonalEnrollmentState(PersonalEnrollmentPrivateCodec.encode(next, secret: nil,
-            maximumHeaderBytes: PersonalEnrollmentPrivateCodec.operationHeaderBytes), expected: old)
+        try files.replacePersonalEnrollmentState(
+            PersonalEnrollmentPrivateCodec.encode(
+                next, secret: nil,
+                maximumHeaderBytes: PersonalEnrollmentPrivateCodec.operationHeaderBytes), expected: old)
     }
 }

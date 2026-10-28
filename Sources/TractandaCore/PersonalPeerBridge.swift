@@ -378,7 +378,8 @@ extension ItemStore {
             baselineSourceReplicaID: baseline?.sourceReplicaID)
         return .init(
             storeID: profile.storeID, replicaID: profile.replicaID,
-            readiness: !isCanonicalTrusted ? .recoveryRequired
+            readiness: !isCanonicalTrusted
+                ? .recoveryRequired
                 : (baseline != nil || isPersonalBaselinePending) ? .pendingActivation : .ready,
             localDisposed: nil, configuredPairingCount: nil, committedPairingCount: nil,
             personal: personal)
@@ -398,7 +399,8 @@ extension ItemStore {
         }
         try verifyPersonalWorkgroupRoot(root: root, ownerUID: ownerUID)
         guard let profile = try PersonalWorkgroupProfile.load(root, ownerUID: ownerUID),
-            ["freshReplica", "freshReplicaJoining"].contains(profile.initialization), profile.storeID == expectedStoreID,
+            ["freshReplica", "freshReplicaJoining"].contains(profile.initialization),
+            profile.storeID == expectedStoreID,
             profile.replicaID == expectedReplicaID
         else {
             throw TractandaError(
@@ -449,27 +451,40 @@ extension ItemStore {
     package static func verifyUnjoinedPersonalSyncReplicaIdentityForSetup(
         root: URL, ownerUID: UInt32, expectedStoreID: String, expectedReplicaID: String
     ) throws {
-        try verifyPersonalSyncReplicaIdentityForSetup(root: root, ownerUID: ownerUID,
+        try verifyPersonalSyncReplicaIdentityForSetup(
+            root: root, ownerUID: ownerUID,
             expectedStoreID: expectedStoreID, expectedReplicaID: expectedReplicaID)
         guard let profile = try PersonalWorkgroupProfile.load(root, ownerUID: ownerUID),
             profile.initialization == "freshReplicaJoining",
             try PersonalSyncConfiguration.membership(root: root, ownerUID: ownerUID) == nil,
-            try PersonalSyncConfiguration.read(PersonalMembershipPreparation.self, root: root,
+            try PersonalSyncConfiguration.read(
+                PersonalMembershipPreparation.self, root: root,
                 name: PersonalSyncConfiguration.pendingName, ownerUID: ownerUID) == nil,
-            try PersonalSyncConfiguration.read(PersonalBaselineSelection.self, root: root,
-                name: PersonalSyncConfiguration.baselineName, ownerUID: ownerUID) == nil else {
-            throw TractandaError("invalidEnrollmentTarget", "The interrupted target is already selected or enrolled; use its existing join/resume command.")
+            try PersonalSyncConfiguration.read(
+                PersonalBaselineSelection.self, root: root,
+                name: PersonalSyncConfiguration.baselineName, ownerUID: ownerUID) == nil
+        else {
+            throw TractandaError(
+                "invalidEnrollmentTarget",
+                "The interrupted target is already selected or enrolled; use its existing join/resume command."
+            )
         }
         try POSIXDirectory.withEntries(at: root) { name in
             guard name != ".personal-enrollment", name != ".peer-credentials",
-                !name.hasPrefix(".personal-credentials-") else {
-                throw TractandaError("invalidEnrollmentTarget", "The target already has enrollment or credential state; use its existing join/resume command.")
+                !name.hasPrefix(".personal-credentials-")
+            else {
+                throw TractandaError(
+                    "invalidEnrollmentTarget",
+                    "The target already has enrollment or credential state; use its existing join/resume command."
+                )
             }
             return true
         }
         let inventory = try PersonalRecoveryInventory.inspect([.init(root: root, ownerUID: ownerUID)])
         guard inventory.isStructurallyComplete, inventory.records.isEmpty else {
-            throw TractandaError("invalidEnrollmentTarget", "The interrupted target contains history; it was not adopted or changed.")
+            throw TractandaError(
+                "invalidEnrollmentTarget",
+                "The interrupted target contains history; it was not adopted or changed.")
         }
     }
 }

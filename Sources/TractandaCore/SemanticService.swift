@@ -693,7 +693,8 @@ final class SemanticService {
         }
         if pruneActive {
             pruneCursor = try storage.prunePage(profileID: profileID, after: pruneCursor) { itemID in
-                guard let current = try snapshot(id: itemID, configuration: configuration, profileID: profileID)
+                guard
+                    let current = try snapshot(id: itemID, configuration: configuration, profileID: profileID)
                 else { return false }
                 defer { try? store.releaseIndexedCorpus(current.corpus) }
                 return true

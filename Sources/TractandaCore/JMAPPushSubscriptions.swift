@@ -350,7 +350,9 @@ public actor JMAPPushSubscriptions {
                     .init("verificationCode", .string(JMAPWebPushEncryption.base64URL(challenge))),
                 ])
                 _ = try await self.send(record, payload: payload)
-            } catch { /* Deliberately no retry before verification, including unknown outcomes. */  }
+            } catch {
+                // Deliberately no retry before verification, including unknown outcomes.
+            }
             await self.finishedVerification(record.id)
         }
     }
@@ -409,7 +411,9 @@ public actor JMAPPushSubscriptions {
                 return
             }
             response = try await send(current, payload: JMAPEventState.value(state))
-        } catch { /* Observed errors back off; no unbounded retry queue or retained payload. */  }
+        } catch {
+            // Observed errors back off; no unbounded retry queue or retained payload.
+        }
         deliveries.removeValue(forKey: snapshot.id)
         guard var record = records[snapshot.id], !closed else { return }
         if let response, response.status == 404 || response.status == 410 {

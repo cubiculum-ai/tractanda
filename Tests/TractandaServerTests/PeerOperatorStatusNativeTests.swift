@@ -1,8 +1,8 @@
 import CTractandaPlatform
 import Foundation
 import Synchronization
-import XCTest
 import TractandaClient
+import XCTest
 
 @testable import TractandaCore
 @testable import TractandaServer
@@ -61,14 +61,19 @@ final class PeerOperatorStatusNativeTests: XCTestCase {
     private func invocation(_ data: Data) throws -> NativeMethodInvocation {
         let request = try JMAPRequest.decode(data)
         let definitions: [String: JMAPMethodDefinition] = [
-            PeerOperatorStatus.nativeMethod: .init(capability: ItemService.capability,
-                effect: .readOnly, maximumResponseBytes: PeerOperatorStatus.maximumResponseBytes) { _, _ in
-                    .failure(.init("serverFail"), effects: .none)
-                },
+            PeerOperatorStatus.nativeMethod: .init(
+                capability: ItemService.capability,
+                effect: .readOnly, maximumResponseBytes: PeerOperatorStatus.maximumResponseBytes
+            ) { _, _ in
+                .failure(.init("serverFail"), effects: .none)
+            }
         ]
-        var execution = try JMAPKernel(methods: definitions, accounts: [
-            .init(accountID: accountID, capabilities: [ItemService.capability], isReadOnly: false)
-        ], sessionState: { try! .init("fixture") }).begin(request)
+        var execution = try JMAPKernel(
+            methods: definitions,
+            accounts: [
+                .init(accountID: accountID, capabilities: [ItemService.capability], isReadOnly: false)
+            ], sessionState: { try! .init("fixture") }
+        ).begin(request)
         guard let call = try execution.next() else {
             throw TractandaError("invalidArguments", "Fixture needs one yielded account-scoped invocation.")
         }
@@ -145,7 +150,8 @@ final class PeerOperatorStatusNativeTests: XCTestCase {
         let mixed = try JSONSerialization.data(withJSONObject: [
             "using": [ItemService.capability],
             "methodCalls": [
-                [PeerOperatorStatus.nativeMethod, ["accountId": accountID], "a"], ["TractandaStore/info", [:], "b"],
+                [PeerOperatorStatus.nativeMethod, ["accountId": accountID], "a"],
+                ["TractandaStore/info", [:], "b"],
             ],
         ])
         XCTAssertThrowsError(try PeerOperatorStatusNativeCall.parse(invocation(mixed)))

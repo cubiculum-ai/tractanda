@@ -1,18 +1,28 @@
 import Foundation
 import XCTest
+
 @testable import TractandaCore
 @testable import TractandaServer
 
 private actor ProgressMailboxGate {
     private var continuation: CheckedContinuation<Void, Never>?
     private var values: [PersonalPullProgress] = []
-    func receive(_ value: PersonalPullProgress, entered: XCTestExpectation, complete: XCTestExpectation) async {
+    func receive(_ value: PersonalPullProgress, entered: XCTestExpectation, complete: XCTestExpectation) async
+    {
         values.append(value)
         if values.count == 1 {
-            await withCheckedContinuation { continuation = $0; entered.fulfill() }
-        } else { complete.fulfill() }
+            await withCheckedContinuation {
+                continuation = $0
+                entered.fulfill()
+            }
+        } else {
+            complete.fulfill()
+        }
     }
-    func release() { continuation?.resume(); continuation = nil }
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
     func captured() -> [PersonalPullProgress] { values }
 }
 

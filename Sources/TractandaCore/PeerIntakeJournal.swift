@@ -506,7 +506,8 @@ final class PeerIntakeJournal {
                 guard work <= min(limits.maximumWork, limits.maximumObjects) else {
                     throw TractandaError("resourceLimit", "Package index work exceeded.")
                 }
-                let bytes = try hydrate(entry)
+                let bytes =
+                    try hydrate(entry)
                     ? object(entry, packageID: packageID, readBudget: readBudget) : nil
                 try visit(entry, bytes)
             }
@@ -598,24 +599,26 @@ final class PeerIntakeJournal {
                 throw AtomicAuthorityFormat.invalid("Unknown atomic context staging entry.")
             }
             try self.files.withDirectoryEntries(
-                path: self.path(packageID, ["atomic-context", rootID, "pages"])) { id in
-                    try Task.checkCancellation()
-                    _ = try AuthorityRecord.persistentID(.text(id))
-                    work += 1
-                    guard work <= self.limits.maximumObjects else {
-                        throw TractandaError("resourceLimit", "Atomic context page count exhausted.")
-                    }
-                    let bytes = try self.files.read(
-                        path: self.path(packageID, ["atomic-context", rootID, "pages", id]),
-                        maximumBytes: PeerPackage.maximumPageBytes)
-                    let page = try PeerPackage.decode(PeerPackage.Page.self, bytes)
-                    try page.validate()
-                    guard UInt64(bytes.count) <= self.limits.maximumStagedBytes
-                        - min(total, self.limits.maximumStagedBytes)
-                    else { throw TractandaError("resourceLimit", "Atomic context staging exhausted.") }
-                    total += UInt64(bytes.count)
-                    return true
+                path: self.path(packageID, ["atomic-context", rootID, "pages"])
+            ) { id in
+                try Task.checkCancellation()
+                _ = try AuthorityRecord.persistentID(.text(id))
+                work += 1
+                guard work <= self.limits.maximumObjects else {
+                    throw TractandaError("resourceLimit", "Atomic context page count exhausted.")
                 }
+                let bytes = try self.files.read(
+                    path: self.path(packageID, ["atomic-context", rootID, "pages", id]),
+                    maximumBytes: PeerPackage.maximumPageBytes)
+                let page = try PeerPackage.decode(PeerPackage.Page.self, bytes)
+                try page.validate()
+                guard
+                    UInt64(bytes.count) <= self.limits.maximumStagedBytes
+                        - min(total, self.limits.maximumStagedBytes)
+                else { throw TractandaError("resourceLimit", "Atomic context staging exhausted.") }
+                total += UInt64(bytes.count)
+                return true
+            }
             return true
         }
         return total
@@ -644,9 +647,12 @@ final class PeerIntakeJournal {
                     else { throw AtomicAuthorityFormat.invalid("Atomic canonical context lost its seal.") }
                 } else {
                     let pending = try self.atomicContextRootBytes(packageID: packageID, rootID: rootID)
-                    guard pending <= self.limits.maximumStagedBytes
-                        - min(total, self.limits.maximumStagedBytes)
-                    else { throw TractandaError("resourceLimit", "Aggregate atomic proof staging exhausted.") }
+                    guard
+                        pending <= self.limits.maximumStagedBytes
+                            - min(total, self.limits.maximumStagedBytes)
+                    else {
+                        throw TractandaError("resourceLimit", "Aggregate atomic proof staging exhausted.")
+                    }
                     total += pending
                 }
                 return true
@@ -709,7 +715,8 @@ final class PeerIntakeJournal {
             }
             let prior = try files.readIfPresent(path: destination, maximumBytes: PeerPackage.maximumPageBytes)
             let pending = try pendingAtomicContextBytes(receipt.packageID)
-            let rootBytes = prior == nil
+            let rootBytes =
+                prior == nil
                 ? try atomicContextRootBytes(packageID: receipt.packageID, rootID: receipt.root.recordID) : 0
             guard rootBytes <= pending else {
                 throw AtomicAuthorityFormat.invalid("Atomic pending proof accounting regressed.")
@@ -742,9 +749,10 @@ final class PeerIntakeJournal {
         try withStageAccountingMutation(packageID) {
             let destination = try path(packageID, ["atomic-context", rootID, "pages", object.id])
             if try files.readIfPresent(path: destination, maximumBytes: PeerPackage.maximumPageBytes) == nil {
-                guard try files.readIfPresent(
-                    path: path(packageID, ["atomic-accepted", rootID + ".json"]),
-                    maximumBytes: PeerPackage.maximumPageBytes) == nil
+                guard
+                    try files.readIfPresent(
+                        path: path(packageID, ["atomic-accepted", rootID + ".json"]),
+                        maximumBytes: PeerPackage.maximumPageBytes) == nil
                 else { throw AtomicAuthorityFormat.invalid("Accepted context cannot acquire new pages.") }
                 let used = try stagedBytes()
                 guard UInt64(bytes.count) <= limits.maximumStagedBytes - min(used, limits.maximumStagedBytes)

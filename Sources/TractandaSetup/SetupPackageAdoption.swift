@@ -41,7 +41,8 @@ extension SetupEngine {
 
     func verifySelectedReplicaIdentity(_ receipt: InstallationReceipt, requireUnjoined: Bool = false) throws {
         guard let storeID = receipt.freshTargetStoreID ?? receipt.preparedStoreID,
-            let replicaID = receipt.freshTargetReplicaID ?? receipt.preparedReplicaID else { return }
+            let replicaID = receipt.freshTargetReplicaID ?? receipt.preparedReplicaID
+        else { return }
         let root = URL(fileURLWithPath: receipt.store)
         let uid: UInt32
         if trustedOwnership {

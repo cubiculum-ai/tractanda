@@ -51,7 +51,8 @@ let package = Package(
         .executableTarget(
             name: "TractandaSetup",
             dependencies: [
-                "CTractandaPlatform", "CTractandaSetupMetadata", "TractandaCore", .product(name: "Crypto", package: "swift-crypto"),
+                "CTractandaPlatform", "CTractandaSetupMetadata", "TractandaCore",
+                .product(name: "Crypto", package: "swift-crypto"),
             ]),
         .target(name: "CTractandaTerminal"),
         .target(name: "TractandaLearning"),

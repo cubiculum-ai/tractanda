@@ -55,15 +55,19 @@ extension SetupEngine {
         let artifact = try modelArtifact("granite-embedding-311m-multilingual-r2", release: release)
         var arguments: [String] = []
         if artifact != nil {
-            arguments = [release.appendingPathComponent("bin/tractanda").path, "models", "run",
+            arguments = [
+                release.appendingPathComponent("bin/tractanda").path, "models", "run",
                 "--manifest", release.appendingPathComponent("models/manifest.json").path,
-                "--storage", roots.models.path, "--artifact", "granite-embedding-311m-multilingual-r2"]
+                "--storage", roots.models.path, "--artifact", "granite-embedding-311m-multilingual-r2",
+            ]
             if let adoption = try modelAdoptionDirectory(receipt) { arguments += ["--adopt", adoption] }
             arguments += ["--"]
         }
         arguments += [
             release.appendingPathComponent("bin/tractanda-embeddings").path,
-            "--model", artifact?.directory(in: roots.models).path ?? release.appendingPathComponent(payload.modelDirectory).path,
+            "--model",
+            artifact?.directory(in: roots.models).path
+                ?? release.appendingPathComponent(payload.modelDirectory).path,
             "--port", String(receipt.port + 1),
         ]
         let dictionary: [String: Any] = [

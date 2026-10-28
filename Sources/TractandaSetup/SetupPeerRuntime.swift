@@ -378,13 +378,15 @@ extension SetupEngine {
             desired = nil
             bytes = nil
         case .outboundOnly:
-            let configuration = try PersonalPeerRuntimeConfiguration(settings: PeerRuntimeConfiguration(
-                peers: [], synchronization: .init(enabled: true, intervalSeconds: 15)))
+            let configuration = try PersonalPeerRuntimeConfiguration(
+                settings: PeerRuntimeConfiguration(
+                    peers: [], synchronization: .init(enabled: true, intervalSeconds: 15)))
             let encoded = try configuration.encoded()
             let expected = try ManagedPeerConfiguration(path: path, bytes: encoded)
             if let previous {
                 guard options.newInstanceOnly, previous.state == .preparing,
-                    previous.peerRuntimeConfiguration == expected else {
+                    previous.peerRuntimeConfiguration == expected
+                else {
                     throw SetupError("Outbound join policy cannot change an existing instance.")
                 }
             }

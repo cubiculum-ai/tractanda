@@ -407,7 +407,9 @@ public final class ItemService {
             return nil
         }
         guard !requireModelReady || configuration.modelIsReady else {
-            throw TractandaError("modelUnavailable", "The pinned document model is being provisioned; ordinary item access remains available.")
+            throw TractandaError(
+                "modelUnavailable",
+                "The pinned document model is being provisioned; ordinary item access remains available.")
         }
         let identity: [String: Any] = [
             "executableSHA256": executableSHA256,
@@ -455,7 +457,8 @@ public final class ItemService {
             default:
                 try check(args, allowed: action == "rebase" ? ["jobID", "expectedRevisionID"] : ["jobID"])
                 let id = try string(args, "jobID")
-                let runtime = try documentJobRuntime(requireModelReady: ["resume", "rebase"].contains(action))
+                let runtime = try documentJobRuntime(
+                    requireModelReady: ["resume", "rebase"].contains(action))
                 if ["resume", "rebase"].contains(action), runtime == nil {
                     throw TractandaError(
                         "documentConverterUnavailable",
@@ -2158,13 +2161,15 @@ public final class ItemService {
                 "learningProfile": CategoryLearningSettings.profile,
                 "itemTextProfile": ItemTextContent.profile,
                 "documentJobs": [
-                    "state": documentConverter == nil ? "unavailable" : (documentConverter!.modelIsReady ? "configured" : "awaitingModel"),
+                    "state": documentConverter == nil
+                        ? "unavailable" : (documentConverter!.modelIsReady ? "configured" : "awaitingModel"),
                     "protocol": NativeWorkerProtocol.name, "maximumPendingJobs": 64,
                     "maximumPendingJobsPerActor": 8,
                     "pageCounts": "checked Int64; no whole-document page ceiling",
                 ],
                 "documentExtraction": [
-                    "state": documentConverter == nil ? "unavailable" : (documentConverter!.modelIsReady ? "configured" : "awaitingModel"),
+                    "state": documentConverter == nil
+                        ? "unavailable" : (documentConverter!.modelIsReady ? "configured" : "awaitingModel"),
                     "identity": documentConverter == nil ? NSNull() : try object(DocumentConverterIdentity()),
                     "executableSHA256": documentExecutableSHA256 as Any? ?? NSNull(),
                     "requiresPreparedInput": false,

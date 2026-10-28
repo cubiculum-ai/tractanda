@@ -5404,7 +5404,8 @@ public final class TerminalApplication {
             }
             do {
                 if committedViewDefinition {
-                    try workspace.openView(workspace.client.revision(itemID: result.itemID, revisionID: result.revisionID))
+                    try workspace.openView(
+                        workspace.client.revision(itemID: result.itemID, revisionID: result.revisionID))
                     try reloadViewWorkspace()
                     itemIndex = 0
                     columnOffset = 0

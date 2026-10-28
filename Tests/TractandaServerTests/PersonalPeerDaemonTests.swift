@@ -39,10 +39,17 @@ final class PersonalPeerDaemonTests: XCTestCase, @unchecked Sendable {
     private actor ProgressCapture {
         var value: PersonalPullProgress?
         var delivery: (@Sendable (PersonalPullProgress) async -> Void)?
-        func record(_ value: PersonalPullProgress, delivery: (@Sendable (PersonalPullProgress) async -> Void)?) {
-            if self.value == nil { self.value = value; self.delivery = delivery }
+        func record(
+            _ value: PersonalPullProgress, delivery: (@Sendable (PersonalPullProgress) async -> Void)?
+        ) {
+            if self.value == nil {
+                self.value = value
+                self.delivery = delivery
+            }
         }
-        func captured() -> (PersonalPullProgress?, (@Sendable (PersonalPullProgress) async -> Void)?) { (value, delivery) }
+        func captured() -> (PersonalPullProgress?, (@Sendable (PersonalPullProgress) async -> Void)?) {
+            (value, delivery)
+        }
     }
     private actor CutCapture {
         private var values: [PersonalSyncReport] = []
@@ -297,7 +304,9 @@ final class PersonalPeerDaemonTests: XCTestCase, @unchecked Sendable {
     func testHotEnrollmentBridgePreservesCurrentDataButNotRevokedPeersAndReportsRealCuts() async throws {
         try await daemonPairFixture(revisionCount: 8, hotEnrollment: true)
     }
-    private func daemonPairFixture(revisionCount: Int, observeProgress: Bool = false, hotEnrollment: Bool = false) async throws {
+    private func daemonPairFixture(
+        revisionCount: Int, observeProgress: Bool = false, hotEnrollment: Bool = false
+    ) async throws {
         // A 2,209-revision chain, two indexes, disk DFS frames and one600KiB owned
         // payload are conservatively estimated below96MiB. Never enlarge the cap or consume the genuine10GiB reserve.
         XCTAssertLessThanOrEqual(96 * 1024 * 1024, PeerFixtureCapacity.fixtureCapBytes)
@@ -466,20 +475,28 @@ final class PersonalPeerDaemonTests: XCTestCase, @unchecked Sendable {
             let enrollmentCalls = Mutex(0)
             let cutCapture = CutCapture()
             if hotEnrollment {
-                let material = PersonalEnrollmentRuntimeMaterial(routes: .init(operationID: try id(),
-                    configurationDigest: try rightPlan.configuration.digest,
-                    endpoints: [rightID: [try .init(host: "route-only.invalid", port: 65534)]]))
-                await rightNetwork.setEnrollmentBridge(material: {
-                    if brokenEnrollmentProvider.withLock({ $0 }) { throw TractandaError("private-value", "private-value") }
-                    return material
-                }, validate: { _, purpose in XCTAssertEqual(purpose, .memberControl) },
+                let material = PersonalEnrollmentRuntimeMaterial(
+                    routes: .init(
+                        operationID: try id(),
+                        configurationDigest: try rightPlan.configuration.digest,
+                        endpoints: [rightID: [try .init(host: "route-only.invalid", port: 65534)]]))
+                await rightNetwork.setEnrollmentBridge(
+                    material: {
+                        if brokenEnrollmentProvider.withLock({ $0 }) {
+                            throw TractandaError("private-value", "private-value")
+                        }
+                        return material
+                    }, validate: { _, purpose in XCTAssertEqual(purpose, .memberControl) },
                     handle: { _, _, request in
                         XCTAssertEqual(request.operation, "enrollment.member.inspect")
-                        enrollmentCalls.withLock { $0 += 1 }; return Data("{\"supported\":true}".utf8)
+                        enrollmentCalls.withLock { $0 += 1 }
+                        return Data("{\"supported\":true}".utf8)
                     }, completedCut: { _, report in await cutCapture.record(report) })
-                await leftNetwork.setEnrollmentBridge(material: { .init() }, validate: { _, purpose in
-                    XCTAssertEqual(purpose, .memberControl)
-                }, handle: { _, _, _ in Data("{}".utf8) })
+                await leftNetwork.setEnrollmentBridge(
+                    material: { .init() },
+                    validate: { _, purpose in
+                        XCTAssertEqual(purpose, .memberControl)
+                    }, handle: { _, _, _ in Data("{}".utf8) })
             }
             try await eventually("Both actual daemons must authenticate pending control-only pairing") {
                 let leftReady = await leftNetwork.hasConnectionForTesting(remoteReplicaID: rightID)
@@ -537,31 +554,43 @@ final class PersonalPeerDaemonTests: XCTestCase, @unchecked Sendable {
                 let generation = try XCTUnwrap(baselineReport.sourceCatalogueGeneration)
                 let cut = try XCTUnwrap(baselineReport.cutRowID)
                 let between = try await Task.detached {
-                    try ItemClient(socketPath: leftSocket).commitFixture(.init(classID: "Item", changes: [
-                        "subject": .text("source-write-between-cuts"), "permissions": permissions,
-                    ], operationID: "hot-runtime-between-cuts"))
+                    try ItemClient(socketPath: leftSocket).commitFixture(
+                        .init(
+                            classID: "Item",
+                            changes: [
+                                "subject": .text("source-write-between-cuts"), "permissions": permissions,
+                            ], operationID: "hot-runtime-between-cuts"))
                 }.value
                 await rightNetwork.requestPullForTesting(remoteReplicaID: leftID)
-                try await eventually("A new finite cut includes a source write without changing catalogue epoch") {
+                try await eventually(
+                    "A new finite cut includes a source write without changing catalogue epoch"
+                ) {
                     let report = await rightNetwork.lastReportForTesting(remoteReplicaID: leftID)
                     let copied = try? await self.item(rightSocket, between.revision.itemID)
-                    return report?.sourceCatalogueGeneration == generation && (report?.cutRowID ?? -1) > cut && copied != nil
+                    return report?.sourceCatalogueGeneration == generation && (report?.cutRowID ?? -1) > cut
+                        && copied != nil
                 }
                 let cuts = await cutCapture.snapshot()
                 XCTAssertGreaterThanOrEqual(cuts.count, 2)
                 XCTAssertTrue(cuts.allSatisfy { $0.sourceCatalogueGeneration != nil && $0.cutRowID != nil })
                 let selectedDigest = try rightPlan.configuration.digest
-                try await eventually("Actual finished cut permits a finalization fence without starting a third pull") {
+                try await eventually(
+                    "Actual finished cut permits a finalization fence without starting a third pull"
+                ) {
                     do {
-                        try await rightNetwork.withEnrollmentFinalization(remoteReplicaID: leftID,
-                            configurationDigest: selectedDigest) {
+                        try await rightNetwork.withEnrollmentFinalization(
+                            remoteReplicaID: leftID,
+                            configurationDigest: selectedDigest
+                        ) {
                             await rightNetwork.requestPullForTesting(remoteReplicaID: leftID)
                             await rightNetwork.tick()
                             let fenced = try await rightNetwork.operatorStatus()
                             XCTAssertEqual(fenced.synchronization.activeJobCount, 0)
                         }
                         return true
-                    } catch let error as TractandaError where error.code == "baselineNotReady" { return false }
+                    } catch let error as TractandaError where error.code == "baselineNotReady" {
+                        return false
+                    }
                 }
                 await leftNetwork.setDialingSuspendedForTesting(true)
                 await rightNetwork.setDialingSuspendedForTesting(true)
@@ -569,18 +598,26 @@ final class PersonalPeerDaemonTests: XCTestCase, @unchecked Sendable {
                     throw TractandaError("fixtureCutFailure", "An intentionally interrupted later finite cut")
                 }
                 _ = try await Task.detached {
-                    try ItemClient(socketPath: leftSocket).commitFixture(.init(classID: "Item", changes: [
-                        "subject": .text("later-failed-cut"), "permissions": permissions,
-                    ], operationID: "hot-runtime-failed-cut"))
+                    try ItemClient(socketPath: leftSocket).commitFixture(
+                        .init(
+                            classID: "Item",
+                            changes: [
+                                "subject": .text("later-failed-cut"), "permissions": permissions,
+                            ], operationID: "hot-runtime-failed-cut"))
                 }.value
                 await rightNetwork.requestPullForTesting(remoteReplicaID: leftID)
-                try await eventually("A later failed actual cut invalidates previously successful baseline observation") {
+                try await eventually(
+                    "A later failed actual cut invalidates previously successful baseline observation"
+                ) {
                     let status = try await rightNetwork.operatorStatus()
-                    return status.personalPeers?.first(where: { $0.replicaID == leftID })?.lastOutcome == .failed
+                    return status.personalPeers?.first(where: { $0.replicaID == leftID })?.lastOutcome
+                        == .failed
                 }
                 do {
-                    try await rightNetwork.withEnrollmentFinalization(remoteReplicaID: leftID,
-                        configurationDigest: selectedDigest) { XCTFail("Stale successful cut permitted finalization") }
+                    try await rightNetwork.withEnrollmentFinalization(
+                        remoteReplicaID: leftID,
+                        configurationDigest: selectedDigest
+                    ) { XCTFail("Stale successful cut permitted finalization") }
                     XCTFail("A later failed cut did not block finalization")
                 } catch { XCTAssertEqual((error as? TractandaError)?.code, "baselineNotReady") }
                 await rightNetwork.setChunkObserverForTesting(nil)
@@ -589,15 +626,21 @@ final class PersonalPeerDaemonTests: XCTestCase, @unchecked Sendable {
                         try? await rightNetwork.connectForTesting(remoteReplicaID: leftID)
                     }
                     do {
-                        try await rightNetwork.withEnrollmentFinalization(remoteReplicaID: leftID,
-                            configurationDigest: selectedDigest) {}
+                        try await rightNetwork.withEnrollmentFinalization(
+                            remoteReplicaID: leftID,
+                            configurationDigest: selectedDigest
+                        ) {}
                         return true
-                    } catch let error as TractandaError where error.code == "baselineNotReady" { return false }
+                    } catch let error as TractandaError where error.code == "baselineNotReady" {
+                        return false
+                    }
                 }
                 await leftNetwork.setDialingSuspendedForTesting(false)
                 await rightNetwork.setDialingSuspendedForTesting(false)
-                let request = PeerExchangeRequest("enrollment.member.inspect", ["operationID": .text(try id())])
-                _ = try await leftNetwork.controlRequest(remoteReplicaID: rightID,
+                let request = PeerExchangeRequest(
+                    "enrollment.member.inspect", ["operationID": .text(try id())])
+                _ = try await leftNetwork.controlRequest(
+                    remoteReplicaID: rightID,
                     configurationDigest: rightPlan.configuration.digest, request: request)
                 XCTAssertEqual(enrollmentCalls.withLock { $0 }, 1)
                 let ownEndpoints = try await rightNetwork.effectiveOwnEndpoints(hostname: "127.0.0.1")
@@ -609,30 +652,44 @@ final class PersonalPeerDaemonTests: XCTestCase, @unchecked Sendable {
                 XCTAssertEqual(before.settingsDigest, after.settingsDigest)
                 XCTAssertEqual(after.responderPublished, true)
                 XCTAssertEqual(after.lastErrorCode, "enrollmentRuntimeUnavailable")
-                let currentStillConnected = await rightNetwork.hasConnectionForTesting(remoteReplicaID: leftID)
+                let currentStillConnected = await rightNetwork.hasConnectionForTesting(
+                    remoteReplicaID: leftID)
                 XCTAssertTrue(currentStillConnected)
                 let readable = try await item(rightSocket, seed.itemID)
                 XCTAssertEqual(readable.fields["subject"], .text("seed"))
                 do {
-                    _ = try await leftNetwork.controlRequest(remoteReplicaID: rightID,
+                    _ = try await leftNetwork.controlRequest(
+                        remoteReplicaID: rightID,
                         configurationDigest: rightPlan.configuration.digest, request: request)
                     XCTFail("Corrupt enrollment provider still admitted enrollment")
                 } catch { XCTAssertEqual(enrollmentCalls.withLock { $0 }, 1) }
                 // Ordinary current membership is still authoritative under the same bad
                 // overlay. Revoking the peer must remove its data session as usual.
-                let retained = try PersonalMembershipConfiguration(storeID: rightPlan.configuration.storeID,
-                    configurationID: id(), members: [.init(replicaID: rightID, hostname: "target.example.invalid")])
-                let removal = try JSON.decode(PersonalMembershipPreparation.self, await admin(rightSocket,
-                    "membership.prepare", ["configuration": .bytes(JSON.encode(retained)),
-                        "expectedDigest": .text(try rightPlan.configuration.digest), "nonce": .text(id())]))
-                _ = try await admin(rightSocket, "membership.commit", ["preparation": .bytes(JSON.encode(removal))])
+                let retained = try PersonalMembershipConfiguration(
+                    storeID: rightPlan.configuration.storeID,
+                    configurationID: id(),
+                    members: [.init(replicaID: rightID, hostname: "target.example.invalid")])
+                let removal = try JSON.decode(
+                    PersonalMembershipPreparation.self,
+                    await admin(
+                        rightSocket,
+                        "membership.prepare",
+                        [
+                            "configuration": .bytes(JSON.encode(retained)),
+                            "expectedDigest": .text(try rightPlan.configuration.digest), "nonce": .text(id()),
+                        ]))
+                _ = try await admin(
+                    rightSocket, "membership.commit", ["preparation": .bytes(JSON.encode(removal))])
                 await rightNetwork.refreshNow()
-                let revokedStillConnected = await rightNetwork.hasConnectionForTesting(remoteReplicaID: leftID)
+                let revokedStillConnected = await rightNetwork.hasConnectionForTesting(
+                    remoteReplicaID: leftID)
                 XCTAssertFalse(revokedStillConnected)
                 let readableAfterRevocation = try await item(rightSocket, seed.itemID)
                 XCTAssertEqual(readableAfterRevocation.fields["subject"], .text("seed"))
-                await right!.close(); right = nil
-                await left!.close(); left = nil
+                await right!.close()
+                right = nil
+                await left!.close()
+                left = nil
                 return
             }
             let beforeEmptyCut = await rightNetwork.completedCutsForTesting(remoteReplicaID: leftID)
@@ -648,16 +705,24 @@ final class PersonalPeerDaemonTests: XCTestCase, @unchecked Sendable {
             if observeProgress {
                 await rightNetwork.setChunkObserverForTesting { descriptor, _ in
                     guard descriptor.kind == .original, descriptor.byteCount == 600 * 1024 else { return }
-                    try await self.eventually("Active native status must expose acknowledged transfer progress") {
+                    try await self.eventually(
+                        "Active native status must expose acknowledged transfer progress"
+                    ) {
                         let bytes = try await Task.detached {
                             try ItemClient(socketPath: rightSocket).call(PeerOperatorStatus.nativeMethod)
                         }.value
                         let value = try JSON.decode(PeerOperatorStatus.self, bytes)
-                        guard let progress = value.runtime.personalPeers?.first(where: { $0.replicaID == leftID })?.currentPull,
-                            progress.transferredBytes >= 256 * 1024 else { return false }
+                        guard
+                            let progress = value.runtime.personalPeers?.first(where: {
+                                $0.replicaID == leftID
+                            })?.currentPull,
+                            progress.transferredBytes >= 256 * 1024
+                        else { return false }
                         XCTAssertEqual(progress.phase, .transferring)
                         XCTAssertNotNil(progress.lastProgressAt)
-                        await progressCapture.record(progress, delivery: rightNetwork.progressDeliveryForTesting(remoteReplicaID: leftID))
+                        await progressCapture.record(
+                            progress,
+                            delivery: rightNetwork.progressDeliveryForTesting(remoteReplicaID: leftID))
                         return true
                     }
                 }
@@ -685,10 +750,15 @@ final class PersonalPeerDaemonTests: XCTestCase, @unchecked Sendable {
                 let (observed, oldDelivery) = await progressCapture.captured()
                 XCTAssertGreaterThanOrEqual(try XCTUnwrap(observed).transferredBytes, 256 * 1024)
                 let deliver = try XCTUnwrap(oldDelivery)
-                await deliver(try .init(phase: .transferring, revisionCount: Int.max, transferredBytes: Int64.max,
-                    lastProgressAt: "2026-10-26T12:34:56Z"))
-                let current = try await rightNetwork.operatorStatus().personalPeers?.first { $0.replicaID == leftID }
-                XCTAssertNotEqual(current?.currentPull?.transferredBytes, Int64.max,
+                await deliver(
+                    try .init(
+                        phase: .transferring, revisionCount: Int.max, transferredBytes: Int64.max,
+                        lastProgressAt: "2026-10-26T12:34:56Z"))
+                let current = try await rightNetwork.operatorStatus().personalPeers?.first {
+                    $0.replicaID == leftID
+                }
+                XCTAssertNotEqual(
+                    current?.currentPull?.transferredBytes, Int64.max,
                     "A completed job's late callback cannot overwrite an idle or newer pull")
                 await rightNetwork.setChunkObserverForTesting(nil)
             }

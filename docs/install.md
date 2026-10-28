@@ -163,10 +163,10 @@ LaunchDaemon definition bind model and filesystem paths. Configured readiness do
 that weights have loaded or that inference succeeded; actual converted-content validation is a
 separate gate. Document jobs stream originals and process bounded pages without a whole-document
 page ceiling. The current 1024-token/page output budget, quotas and coverage failures remain
-visible; arbitrary original size does not imply unlimited generated text. The poc.15 Debian
+visible; arbitrary original size does not imply unlimited generated text. Current Debian
 packages include the local document runtime and pinned model manifest. Standard packages download
-weights only when needed; full/offline packages may include verified weights. Their
-install/start/restart and live-sync acceptance remains a separate gate. Source edits do not install or activate a release;
+weights only when needed; full/offline packages may include verified weights. Installed-node
+health and live synchronization are verified after updates from published packages. Source edits do not install or activate a release;
 a release/deployment still requires an explicit request.
 
 ## Canonical reader compatibility

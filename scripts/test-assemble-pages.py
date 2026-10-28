@@ -58,5 +58,14 @@ class PagesTests(unittest.TestCase):
                         P.assemble(self.root / defect, 'owner/repo', 'v0.1.0-poc.99' if defect == 'missing' else None)
         self.assertFalse((self.root / 'escape').exists())
 
+    def test_rotation_uses_only_explicit_paired_reviewed_prior_trust(self):
+        self.archive(); key = self.root / 'old-public.asc'; key.write_bytes(b'pinned public key')
+        with patch.object(P, 'ROOT', self.root), patch.object(P.apt, 'run', side_effect=self.tool_run), \
+                patch.object(P.apt, 'verify', return_value={'verified': True}) as verify:
+            P.assemble(self.root / 'rotation', 'owner/repo', public_key=key, trusted_fingerprint='B' * 40)
+            verify.assert_called_once_with(self.root / 'rotation/apt', key, 'B' * 40)
+            with self.assertRaisesRegex(ValueError, 'are a pair'):
+                P.assemble(self.root / 'unpaired', 'owner/repo', public_key=key)
+
 
 if __name__ == '__main__': unittest.main(verbosity=2)

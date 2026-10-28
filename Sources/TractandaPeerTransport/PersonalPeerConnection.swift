@@ -9,14 +9,24 @@ package struct PersonalPeerOperations: Sendable {
     package let handle: @Sendable (PeerExchangeBinding, PeerExchangeRequest) async throws -> Data
     package let beforeReady: @Sendable (PeerExchangeBinding) async throws -> Void
     package let transportValidate: (@Sendable (PeerExchangeBinding) async throws -> Void)?
-    package let enrollmentValidate: (@Sendable (PeerExchangeBinding, PersonalEnrollmentTransportPurpose) async throws -> Void)?
-    package let enrollmentHandle: (@Sendable (PeerExchangeBinding, PersonalEnrollmentTransportPurpose, PeerExchangeRequest) async throws -> Data)?
+    package let enrollmentValidate:
+        (@Sendable (PeerExchangeBinding, PersonalEnrollmentTransportPurpose) async throws -> Void)?
+    package let enrollmentHandle:
+        (
+            @Sendable (PeerExchangeBinding, PersonalEnrollmentTransportPurpose, PeerExchangeRequest)
+                async throws -> Data
+        )?
     package init(
         validate: @escaping @Sendable (PeerExchangeBinding) async throws -> Void,
         handle: @escaping @Sendable (PeerExchangeBinding, PeerExchangeRequest) async throws -> Data,
         beforeReady: @escaping @Sendable (PeerExchangeBinding) async throws -> Void = { _ in },
-        enrollmentValidate: (@Sendable (PeerExchangeBinding, PersonalEnrollmentTransportPurpose) async throws -> Void)? = nil,
-        enrollmentHandle: (@Sendable (PeerExchangeBinding, PersonalEnrollmentTransportPurpose, PeerExchangeRequest) async throws -> Data)? = nil,
+        enrollmentValidate: (
+            @Sendable (PeerExchangeBinding, PersonalEnrollmentTransportPurpose) async throws -> Void
+        )? = nil,
+        enrollmentHandle: (
+            @Sendable (PeerExchangeBinding, PersonalEnrollmentTransportPurpose, PeerExchangeRequest)
+                async throws -> Data
+        )? = nil,
         transportValidate: (@Sendable (PeerExchangeBinding) async throws -> Void)? = nil
     ) {
         self.validate = validate
@@ -128,8 +138,13 @@ private struct PersonalPeerHello: Codable, Equatable {
     let receiverReplicaID: String
     let pairingID: String
     let configurationDigest: String
-    init(_ binding: PeerExchangeBinding, purpose: PersonalEnrollmentTransportPurpose = .memberControl, remote: Bool = false) {
-        capability = purpose == .memberControl ? PersonalPeerJMAP.helloCapability : PersonalEnrollmentJMAP.helloCapability
+    init(
+        _ binding: PeerExchangeBinding, purpose: PersonalEnrollmentTransportPurpose = .memberControl,
+        remote: Bool = false
+    ) {
+        capability =
+            purpose == .memberControl
+            ? PersonalPeerJMAP.helloCapability : PersonalEnrollmentJMAP.helloCapability
         storeID = binding.storeID
         senderReplicaID = remote ? binding.remoteReplicaID : binding.localReplicaID
         receiverReplicaID = remote ? binding.localReplicaID : binding.remoteReplicaID
@@ -223,8 +238,11 @@ private final class PersonalPeerHandler: ChannelDuplexHandler {
             attachTask = Task {
                 let result: Result<Void, Error>
                 do {
-                    if purpose == .memberControl { try await (operations.transportValidate ?? operations.validate)(binding) }
-                    else { try await operations.enrollmentValidate!(binding, purpose) }
+                    if purpose == .memberControl {
+                        try await (operations.transportValidate ?? operations.validate)(binding)
+                    } else {
+                        try await operations.enrollmentValidate!(binding, purpose)
+                    }
                     try Task.checkCancellation()
                     result = .success(())
                 } catch { result = .failure(error) }
@@ -302,7 +320,8 @@ private final class PersonalPeerHandler: ChannelDuplexHandler {
     private func finishHello() throws {
         guard authenticated, let binding, let remoteHello, !established else { return }
         guard remoteHello.count <= 4096,
-            try JSON.decode(PersonalPeerHello.self, remoteHello) == PersonalPeerHello(binding, purpose: purpose, remote: true),
+            try JSON.decode(PersonalPeerHello.self, remoteHello)
+                == PersonalPeerHello(binding, purpose: purpose, remote: true),
             try JSON.encode(JSON.decode(PersonalPeerHello.self, remoteHello)) == remoteHello
         else {
             throw TractandaError("incompatiblePeer", "Personal capability or authenticated identity differs.")
@@ -318,8 +337,11 @@ private final class PersonalPeerHandler: ChannelDuplexHandler {
             readinessTask = Task {
                 let result: Result<Void, Error>
                 do {
-                    if purpose == .memberControl { try await operations.beforeReady(binding) }
-                    else { try await operations.enrollmentValidate!(binding, purpose) }
+                    if purpose == .memberControl {
+                        try await operations.beforeReady(binding)
+                    } else {
+                        try await operations.enrollmentValidate!(binding, purpose)
+                    }
                     try Task.checkCancellation()
                     result = .success(())
                 } catch { result = .failure(error) }
@@ -366,7 +388,8 @@ private final class PersonalPeerHandler: ChannelDuplexHandler {
             }
             inboundID = frame.requestID
             let purpose = purpose
-            let enrollmentRequest = purpose != .memberControl || PersonalEnrollmentJMAP.usesEnrollmentCapability(frame.body)
+            let enrollmentRequest =
+                purpose != .memberControl || PersonalEnrollmentJMAP.usesEnrollmentCapability(frame.body)
             let operations = operations
             let bound = NIOLoopBound(self, eventLoop: context.eventLoop)
             let loop = context.eventLoop
@@ -378,9 +401,14 @@ private final class PersonalPeerHandler: ChannelDuplexHandler {
                     if enrollmentRequest {
                         // Actual TLS purpose selects the allowlist. JSON can request a surface,
                         // but can never change this host-selected authentication binding.
-                        let validator: @Sendable (PeerExchangeBinding, PersonalEnrollmentTransportPurpose) async throws -> Void
-                        if let configured = operations.enrollmentValidate { validator = configured }
-                        else { validator = { binding, _ in try await operations.validate(binding) } }
+                        let validator:
+                            @Sendable (PeerExchangeBinding, PersonalEnrollmentTransportPurpose) async throws
+                                -> Void
+                        if let configured = operations.enrollmentValidate {
+                            validator = configured
+                        } else {
+                            validator = { binding, _ in try await operations.validate(binding) }
+                        }
                         response = try await PersonalEnrollmentJMAP.execute(
                             frame.body, binding: binding, purpose: purpose,
                             validate: validator, perform: operations.enrollmentHandle)
@@ -423,8 +451,12 @@ private final class PersonalPeerHandler: ChannelDuplexHandler {
                                     kind: .failure,
                                     body: JSON.encode(
                                         PersonalPeerFailure(
-                                            code: !enrollmentRequest ? (error?.code ?? "peerOperationFailed") : "enrollmentOperationFailed",
-                                            message: !enrollmentRequest ? (error?.message ?? "Personal peer operation failed.") : "Private enrollment operation failed."))))
+                                            code: !enrollmentRequest
+                                                ? (error?.code ?? "peerOperationFailed")
+                                                : "enrollmentOperationFailed",
+                                            message: !enrollmentRequest
+                                                ? (error?.message ?? "Personal peer operation failed.")
+                                                : "Private enrollment operation failed."))))
                         }
                     } catch { owner.fail(error) }
                 }
@@ -470,7 +502,8 @@ private final class PersonalPeerHandler: ChannelDuplexHandler {
             body = try PersonalEnrollmentJMAP.request(request, binding: binding, purpose: purpose)
         } else {
             guard purpose == .memberControl else {
-                throw TractandaError("unsupportedPeerOperation", "This private pairing permits only enrollment operations.")
+                throw TractandaError(
+                    "unsupportedPeerOperation", "This private pairing permits only enrollment operations.")
             }
             body = try PersonalPeerJMAP.request(
                 request, binding: binding, maximumBodyBytes: PeerExchangeCodec.maximumPersonalBodyBytes())

@@ -25,7 +25,8 @@ public struct DaemonConfiguration: Codable, Sendable {
         managed: Bool = false,
         viewItemID: String? = nil, projectRootID: String? = nil, statusRootID: String? = nil,
         initialProjectID: String? = nil, documentConverter: DocumentConverterConfiguration? = nil,
-        documentJobResources: DocumentJobResources? = nil, modelProvisioning: ModelProvisioningConfiguration? = nil,
+        documentJobResources: DocumentJobResources? = nil,
+        modelProvisioning: ModelProvisioningConfiguration? = nil,
         attachmentUploadPolicy: AttachmentUploadPolicy? = nil,
         rebuildNoProgressTimeoutSeconds: Double? = nil, peerRuntimeConfigurationPath: String? = nil,
         publicJMAP: PublicJMAPConfiguration? = nil

@@ -4,7 +4,10 @@ import Foundation
 public struct JMAPCallbackOrigin: Codable, Equatable, Sendable {
     public let host: String
     public let port: Int
-    public init(host: String, port: Int = 443) { self.host = host.lowercased(); self.port = port }
+    public init(host: String, port: Int = 443) {
+        self.host = host.lowercased()
+        self.port = port
+    }
 }
 public struct JMAPCallbackPolicy: Codable, Equatable, Sendable {
     public let privateOrigins: [JMAPCallbackOrigin]
@@ -36,19 +39,23 @@ public struct JMAPCallbackEndpoint: Sendable, CustomStringConvertible, CustomDeb
         else { throw Self.invalid() }
         // URLComponents decodes percent escapes in host; reject them in the original authority.
         guard let delimiter = value.range(of: "://"),
-            !value[delimiter.upperBound...].prefix(while: { $0 != "/" && $0 != "?" && $0 != "#" }).contains("%")
+            !value[delimiter.upperBound...].prefix(while: { $0 != "/" && $0 != "?" && $0 != "#" }).contains(
+                "%")
         else { throw Self.invalid() }
         var name = parsedHost.lowercased()
         if name.hasPrefix("["), name.hasSuffix("]") { name = String(name.dropFirst().dropLast()) }
         guard !name.hasSuffix("."), !name.contains("%"), !name.contains("@"),
             name.utf8.count <= 253,
-            name.utf8.allSatisfy({ (97...122).contains($0) || (48...57).contains($0) || [45,46,58].contains($0) })
+            name.utf8.allSatisfy({
+                (97...122).contains($0) || (48...57).contains($0) || [45, 46, 58].contains($0)
+            })
         else { throw Self.invalid() }
         let selectedPort = parts.port ?? 443
         guard (1...65535).contains(selectedPort) else { throw Self.invalid() }
         let path = parts.percentEncodedPath.isEmpty ? "/" : parts.percentEncodedPath
         guard path.hasPrefix("/"), !path.hasPrefix("//") else { throw Self.invalid() }
-        host = name; port = selectedPort
+        host = name
+        port = selectedPort
         requestTarget = path + (parts.percentEncodedQuery.map { "?" + $0 } ?? "")
     }
     private static func invalid() -> TractandaError {
@@ -59,7 +66,8 @@ public struct JMAPCallbackResponse: Sendable {
     public let status: Int
     public let retryAfterSeconds: Int?
     public init(status: Int, retryAfterSeconds: Int? = nil) {
-        self.status = status; self.retryAfterSeconds = retryAfterSeconds
+        self.status = status
+        self.retryAfterSeconds = retryAfterSeconds
     }
 }
 public protocol JMAPCallbackTransport: Sendable {

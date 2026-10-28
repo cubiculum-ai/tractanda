@@ -199,7 +199,8 @@ final class DocumentContentIntegrationTests: XCTestCase, @unchecked Sendable {
         await gate.release()
         let client = TractandaClient.ItemClient(transport: Transport(coordinator: coordinator, uid: getuid()))
         let copiedReceipt = try await client.commit(operation)
-        let copied = try await client.revision(itemID: copiedReceipt.itemID, revisionID: copiedReceipt.revisionID)
+        let copied = try await client.revision(
+            itemID: copiedReceipt.itemID, revisionID: copiedReceipt.revisionID)
         let descriptor = try XCTUnwrap(AttachmentDescriptor.descriptors(in: copied.fields).first)
         let document = try XCTUnwrap(
             AttachmentDocumentRepresentation.representations(in: copied.fields).first)

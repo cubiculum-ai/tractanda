@@ -1938,8 +1938,10 @@ public actor ServiceCoordinator {
             control.cancel()
         }
     }
-    package func personalPeerLocalRequest(_ request: PeerExchangeRequest, forUID uid: UInt32,
-        principal: NativePrincipalPin? = nil) async throws
+    package func personalPeerLocalRequest(
+        _ request: PeerExchangeRequest, forUID uid: UInt32,
+        principal: NativePrincipalPin? = nil
+    ) async throws
         -> Data
     {
         let generation = canonicalWorkGeneration
@@ -1988,79 +1990,122 @@ public actor ServiceCoordinator {
         try Task.checkCancellation()
         return result
     }
-    package func personalEnrollmentIdentity(authorization: PersonalEnrollmentMembershipAuthorization) async throws
-        -> PersonalSyncIdentity {
+    package func personalEnrollmentIdentity(authorization: PersonalEnrollmentMembershipAuthorization)
+        async throws
+        -> PersonalSyncIdentity
+    {
         try await personalEnrollmentSubmit { store in
             try authorization.revalidate(store: store)
             return try store.personalSyncIdentity()
         }
     }
-    package func personalEnrollmentCommitMembership(preparation: PersonalMembershipPreparation,
-        acknowledgements: [PersonalMembershipOnlineAcknowledgement], authorization: PersonalEnrollmentMembershipAuthorization
+    package func personalEnrollmentCommitMembership(
+        preparation: PersonalMembershipPreparation,
+        acknowledgements: [PersonalMembershipOnlineAcknowledgement],
+        authorization: PersonalEnrollmentMembershipAuthorization
     ) async throws -> PersonalMembershipConfiguration {
         try await personalEnrollmentSubmit { store in
-            let result = try store.commitPersonalMembershipChange(preparation: preparation, acknowledgements: acknowledgements,
+            let result = try store.commitPersonalMembershipChange(
+                preparation: preparation, acknowledgements: acknowledgements,
                 authorization: authorization)
             try store.personalEnrollmentRecordCommitted(authorization: authorization)
             return result
         }
     }
-    package func personalEnrollmentRuntimeMaterial(now: Int64) async throws -> PersonalEnrollmentRuntimeMaterial {
+    package func personalEnrollmentRuntimeMaterial(now: Int64) async throws
+        -> PersonalEnrollmentRuntimeMaterial
+    {
         try await personalEnrollmentSubmit { try $0.personalEnrollmentRuntimeMaterial(now: now) }
     }
-    package func personalEnrollmentValidateTransport(_ binding: PeerExchangeBinding,
-        purpose: PersonalEnrollmentTransportPurpose, now: Int64) async throws {
-        try await personalEnrollmentSubmit { try $0.personalEnrollmentValidateTransport(binding, purpose: purpose, now: now) }
-    }
-    package func personalEnrollmentIssue(forUID uid: UInt32, endpoints: [PeerRuntimeConfiguration.Endpoint], now: Int64,
-        expectedUnusedOperationID: String? = nil, principal: NativePrincipalPin? = nil) async throws
-        -> PersonalEnrollmentInvitation {
-        try await personalEnrollmentSubmit(principal: principal) { try $0.personalEnrollmentIssue(forUID: uid, endpoints: endpoints, now: now,
-            expectedUnusedOperationID: expectedUnusedOperationID) }
-    }
-    package func personalEnrollmentSourceSnapshot(forUID uid: UInt32, principal: NativePrincipalPin? = nil) async throws -> PersonalEnrollmentSourceSnapshot {
-        try await personalEnrollmentSubmit(principal: principal) { try $0.personalEnrollmentSourceSnapshot(forUID: uid) }
-    }
-    package func personalEnrollmentBeginTarget(forUID uid: UInt32, invitation: PersonalEnrollmentInvitation,
-        hostname: String, principal: NativePrincipalPin? = nil) async throws -> PersonalEnrollmentTargetStatus {
-        try await personalEnrollmentSubmit(principal: principal) {
-            try PersonalEnrollmentTargetRegistry(root: $0.root).begin(store: $0, forUID: uid, invitation: invitation, hostname: hostname)
+    package func personalEnrollmentValidateTransport(
+        _ binding: PeerExchangeBinding,
+        purpose: PersonalEnrollmentTransportPurpose, now: Int64
+    ) async throws {
+        try await personalEnrollmentSubmit {
+            try $0.personalEnrollmentValidateTransport(binding, purpose: purpose, now: now)
         }
     }
-    package func personalEnrollmentBeginReplacement(forUID uid: UInt32, invitation: PersonalEnrollmentInvitation,
-        hostname: String, now: Int64, principal: NativePrincipalPin) async throws -> PersonalEnrollmentTargetStatus {
+    package func personalEnrollmentIssue(
+        forUID uid: UInt32, endpoints: [PeerRuntimeConfiguration.Endpoint], now: Int64,
+        expectedUnusedOperationID: String? = nil, principal: NativePrincipalPin? = nil
+    ) async throws
+        -> PersonalEnrollmentInvitation
+    {
         try await personalEnrollmentSubmit(principal: principal) {
-            try PersonalEnrollmentTargetRegistry(root: $0.root).beginReplacement(store: $0, forUID: uid,
+            try $0.personalEnrollmentIssue(
+                forUID: uid, endpoints: endpoints, now: now,
+                expectedUnusedOperationID: expectedUnusedOperationID)
+        }
+    }
+    package func personalEnrollmentSourceSnapshot(forUID uid: UInt32, principal: NativePrincipalPin? = nil)
+        async throws -> PersonalEnrollmentSourceSnapshot
+    {
+        try await personalEnrollmentSubmit(principal: principal) {
+            try $0.personalEnrollmentSourceSnapshot(forUID: uid)
+        }
+    }
+    package func personalEnrollmentBeginTarget(
+        forUID uid: UInt32, invitation: PersonalEnrollmentInvitation,
+        hostname: String, principal: NativePrincipalPin? = nil
+    ) async throws -> PersonalEnrollmentTargetStatus {
+        try await personalEnrollmentSubmit(principal: principal) {
+            try PersonalEnrollmentTargetRegistry(root: $0.root).begin(
+                store: $0, forUID: uid, invitation: invitation, hostname: hostname)
+        }
+    }
+    package func personalEnrollmentBeginReplacement(
+        forUID uid: UInt32, invitation: PersonalEnrollmentInvitation,
+        hostname: String, now: Int64, principal: NativePrincipalPin
+    ) async throws -> PersonalEnrollmentTargetStatus {
+        try await personalEnrollmentSubmit(principal: principal) {
+            try PersonalEnrollmentTargetRegistry(root: $0.root).beginReplacement(
+                store: $0, forUID: uid,
                 invitation: invitation, hostname: hostname, now: now)
         }
     }
-    package func personalEnrollmentClaim(_ claim: PersonalEnrollmentClaim, binding: PeerExchangeBinding,
-        now: Int64) async throws -> PersonalEnrollmentIssuerStatus {
-        try await personalEnrollmentSubmit { try $0.personalEnrollmentClaim(claim, binding: binding, now: now) }
+    package func personalEnrollmentClaim(
+        _ claim: PersonalEnrollmentClaim, binding: PeerExchangeBinding,
+        now: Int64
+    ) async throws -> PersonalEnrollmentIssuerStatus {
+        try await personalEnrollmentSubmit {
+            try $0.personalEnrollmentClaim(claim, binding: binding, now: now)
+        }
     }
     package func personalEnrollmentHostState() async throws -> PersonalEnrollmentHostState {
         try await personalEnrollmentSubmit { try $0.personalEnrollmentHostState() }
     }
-    package func personalEnrollmentNodeStatus(operationID: String? = nil) async throws -> PersonalEnrollmentNodeStatus {
+    package func personalEnrollmentNodeStatus(operationID: String? = nil) async throws
+        -> PersonalEnrollmentNodeStatus
+    {
         try await personalEnrollmentSubmit { try $0.personalEnrollmentNodeStatus(operationID: operationID) }
     }
-    package func personalEnrollmentSourceAuthorization() async throws -> (UInt32, PersonalEnrollmentSourceSnapshot) {
+    package func personalEnrollmentSourceAuthorization() async throws -> (
+        UInt32, PersonalEnrollmentSourceSnapshot
+    ) {
         try await personalEnrollmentSubmit { try $0.personalEnrollmentSourceAuthorization() }
     }
-    package func personalEnrollmentWriteJob(_ job: PersonalEnrollmentSourceJob,
-        replacing expected: PersonalEnrollmentSourceJob) async throws {
+    package func personalEnrollmentWriteJob(
+        _ job: PersonalEnrollmentSourceJob,
+        replacing expected: PersonalEnrollmentSourceJob
+    ) async throws {
         try await personalEnrollmentSubmit { try $0.personalEnrollmentWriteJob(job, replacing: expected) }
     }
-    package func personalEnrollmentPlanCredentials(_ plan: PersonalEnrollmentPlan) async throws -> [PeerCredential] {
+    package func personalEnrollmentPlanCredentials(_ plan: PersonalEnrollmentPlan) async throws
+        -> [PeerCredential]
+    {
         try await personalEnrollmentSubmit { try $0.personalEnrollmentPlanCredentials(plan) }
     }
-    package func personalEnrollmentPrepareLocal(plan: PersonalEnrollmentPlan, keys: [PeerCredential]) async throws -> PersonalEnrollmentPreparedWork {
+    package func personalEnrollmentPrepareLocal(plan: PersonalEnrollmentPlan, keys: [PeerCredential])
+        async throws -> PersonalEnrollmentPreparedWork
+    {
         try await personalEnrollmentSubmit { try $0.personalEnrollmentPrepareLocal(plan: plan, keys: keys) }
     }
     package func personalEnrollmentTargetAcknowledged(binding: PeerExchangeBinding) async throws {
         try await personalEnrollmentSubmit { try $0.personalEnrollmentTargetAcknowledged(binding: binding) }
     }
-    package func personalEnrollmentTargetClaim(operationID: String? = nil) async throws -> PersonalEnrollmentClaim {
+    package func personalEnrollmentTargetClaim(operationID: String? = nil) async throws
+        -> PersonalEnrollmentClaim
+    {
         try await personalEnrollmentSubmit { try $0.personalEnrollmentTargetClaim(operationID: operationID) }
     }
     package func personalEnrollmentCleanupReplacement() async throws -> Bool {
@@ -2076,36 +2121,68 @@ public actor ServiceCoordinator {
         try await personalEnrollmentSubmit { try $0.personalEnrollmentCleanupSupersededCandidates() }
     }
     package func personalEnrollmentConfirmRetainedContinuation(binding: PeerExchangeBinding) async throws {
-        try await personalEnrollmentSubmit { try $0.personalEnrollmentConfirmRetainedContinuation(binding: binding) }
+        try await personalEnrollmentSubmit {
+            try $0.personalEnrollmentConfirmRetainedContinuation(binding: binding)
+        }
     }
-    package func personalEnrollmentAcceptRenewal(binding: PeerExchangeBinding, control: PeerExchangeControl) async throws {
-        try await personalEnrollmentSubmit { try $0.personalEnrollmentAcceptRenewal(binding: binding, control: control) }
+    package func personalEnrollmentAcceptRenewal(binding: PeerExchangeBinding, control: PeerExchangeControl)
+        async throws
+    {
+        try await personalEnrollmentSubmit {
+            try $0.personalEnrollmentAcceptRenewal(binding: binding, control: control)
+        }
     }
-    package func personalEnrollmentPrepareTarget(_ packet: PersonalEnrollmentStagePacket,
-        binding: PeerExchangeBinding) async throws -> PersonalEnrollmentPreparedWork {
-        try await personalEnrollmentSubmit { try $0.personalEnrollmentPrepareTarget(packet, binding: binding) }
+    package func personalEnrollmentPrepareTarget(
+        _ packet: PersonalEnrollmentStagePacket,
+        binding: PeerExchangeBinding
+    ) async throws -> PersonalEnrollmentPreparedWork {
+        try await personalEnrollmentSubmit {
+            try $0.personalEnrollmentPrepareTarget(packet, binding: binding)
+        }
     }
-    package func personalEnrollmentPrepareMember(_ packet: PersonalEnrollmentStagePacket,
-        decision: PersonalEnrollmentAdminDecision, binding: PeerExchangeBinding) async throws -> PersonalEnrollmentPreparedWork {
-        try await personalEnrollmentSubmit { try $0.personalEnrollmentPrepareMember(packet, decision: decision, binding: binding) }
+    package func personalEnrollmentPrepareMember(
+        _ packet: PersonalEnrollmentStagePacket,
+        decision: PersonalEnrollmentAdminDecision, binding: PeerExchangeBinding
+    ) async throws -> PersonalEnrollmentPreparedWork {
+        try await personalEnrollmentSubmit {
+            try $0.personalEnrollmentPrepareMember(packet, decision: decision, binding: binding)
+        }
     }
-    package func personalEnrollmentMemberPrepared(plan: PersonalEnrollmentPlan,
-        decision: PersonalEnrollmentAdminDecision, binding: PeerExchangeBinding) async throws -> PersonalEnrollmentPreparedWork {
-        try await personalEnrollmentSubmit { try $0.personalEnrollmentMemberPrepared(plan: plan, decision: decision, binding: binding) }
+    package func personalEnrollmentMemberPrepared(
+        plan: PersonalEnrollmentPlan,
+        decision: PersonalEnrollmentAdminDecision, binding: PeerExchangeBinding
+    ) async throws -> PersonalEnrollmentPreparedWork {
+        try await personalEnrollmentSubmit {
+            try $0.personalEnrollmentMemberPrepared(plan: plan, decision: decision, binding: binding)
+        }
     }
-    package func personalEnrollmentCompleteMember(plan: PersonalEnrollmentPlan,
-        decision: PersonalEnrollmentAdminDecision, binding: PeerExchangeBinding) async throws {
-        try await personalEnrollmentSubmit { try $0.personalEnrollmentCompleteMember(plan: plan, decision: decision, binding: binding) }
+    package func personalEnrollmentCompleteMember(
+        plan: PersonalEnrollmentPlan,
+        decision: PersonalEnrollmentAdminDecision, binding: PeerExchangeBinding
+    ) async throws {
+        try await personalEnrollmentSubmit {
+            try $0.personalEnrollmentCompleteMember(plan: plan, decision: decision, binding: binding)
+        }
     }
-    package func personalEnrollmentTargetPrepared(binding: PeerExchangeBinding) async throws -> PersonalEnrollmentPreparedWork {
+    package func personalEnrollmentTargetPrepared(binding: PeerExchangeBinding) async throws
+        -> PersonalEnrollmentPreparedWork
+    {
         try await personalEnrollmentSubmit { try $0.personalEnrollmentTargetPrepared(binding: binding) }
     }
-    package func personalEnrollmentTargetCommitted(authorization: PersonalEnrollmentMembershipAuthorization) async throws {
-        try await personalEnrollmentSubmit { try $0.personalEnrollmentTargetCommitted(authorization: authorization) }
+    package func personalEnrollmentTargetCommitted(authorization: PersonalEnrollmentMembershipAuthorization)
+        async throws
+    {
+        try await personalEnrollmentSubmit {
+            try $0.personalEnrollmentTargetCommitted(authorization: authorization)
+        }
     }
-    package func personalEnrollmentFinishTarget(readiness: PersonalEnrollmentBaselineReadiness?,
-        authorization: PersonalEnrollmentMembershipAuthorization) async throws {
-        try await personalEnrollmentSubmit { try $0.personalEnrollmentFinishTarget(readiness: readiness, authorization: authorization) }
+    package func personalEnrollmentFinishTarget(
+        readiness: PersonalEnrollmentBaselineReadiness?,
+        authorization: PersonalEnrollmentMembershipAuthorization
+    ) async throws {
+        try await personalEnrollmentSubmit {
+            try $0.personalEnrollmentFinishTarget(readiness: readiness, authorization: authorization)
+        }
     }
     package func personalEnrollmentFinishSource() async throws {
         try await personalEnrollmentSubmit { try $0.personalEnrollmentFinishSource() }

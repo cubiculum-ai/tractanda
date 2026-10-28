@@ -191,7 +191,8 @@ do {
         exit(0)
     }
     if internalArguments.first == "--bootstrap-store" {
-        guard (internalArguments.count == 5 || internalArguments.count == 6), getuid() != 0, getuid() == tractanda_uid(),
+        guard internalArguments.count == 5 || internalArguments.count == 6, getuid() != 0,
+            getuid() == tractanda_uid(),
             getuid() == (try SystemAccountDirectory().user(named: SetupPlatform.host.serviceUser)).uid
         else { throw SetupError("Store initialization must run as the service account.") }
         let identity = try StoreBootstrap.initialize(

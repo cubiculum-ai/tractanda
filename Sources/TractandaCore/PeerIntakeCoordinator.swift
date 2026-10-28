@@ -436,30 +436,31 @@ final class PeerIntakeCoordinator {
             }
         }
         try journal.walk(
-            packageID, visitIndex: visit, hydrate: { $0.kind != .authority }
-        ) { object, bytes in
-            try self.progress?()
-            try visit(object)
-            if object.kind == .attachment {
-                try index.peerOriginalPresent(object)
-                return
-            }
-            if object.kind == .document {
-                try index.peerDocumentPresent(object)
-                try journal.admitDocumentAnchor(packageID: packageID, object: object)
-                return
-            }
-            if object.kind == .item {
-                let bytes =
-                    try bytes ?? index.retainedAuthorityObject(id: object.id).map { try self.bytes($0) }
-                guard let bytes else {
-                    throw TractandaError("missingDependencies", "Original witness revision is incomplete.")
+            packageID, visitIndex: visit, hydrate: { $0.kind != .authority },
+            visit: { object, bytes in
+                try self.progress?()
+                try visit(object)
+                if object.kind == .attachment {
+                    try index.peerOriginalPresent(object)
+                    return
                 }
-                let node = try AuthorityRevision(originalBytes: bytes)
-                try ItemSemantics.validate(node.revision)
-                try index.peerOriginalRegister(node.revision)
-            }
-        }
+                if object.kind == .document {
+                    try index.peerDocumentPresent(object)
+                    try journal.admitDocumentAnchor(packageID: packageID, object: object)
+                    return
+                }
+                if object.kind == .item {
+                    let bytes =
+                        try bytes ?? index.retainedAuthorityObject(id: object.id).map { try self.bytes($0) }
+                    guard let bytes else {
+                        throw TractandaError(
+                            "missingDependencies", "Original witness revision is incomplete.")
+                    }
+                    let node = try AuthorityRevision(originalBytes: bytes)
+                    try ItemSemantics.validate(node.revision)
+                    try index.peerOriginalRegister(node.revision)
+                }
+            })
         try index.peerOriginalValidateClosure()
         var cursor = ""
         while true {
@@ -723,7 +724,7 @@ final class PeerIntakeCoordinator {
             guard let publication = try journal.publication(id) else { return }
             if publication.context.peerID == "local" {
                 if try !index.authorityKindPage(kind: "atomicControl", limit: 1, packageID: id).isEmpty {
-                    return // Store reconstructs only exact canonical ACCEPTED logical outcomes.
+                    return  // Store reconstructs only exact canonical ACCEPTED logical outcomes.
                 }
                 var cursor: String?
                 while true {
@@ -956,7 +957,8 @@ final class PeerIntakeCoordinator {
             context: context, contextToken: contextToken, arrivalMinute: arrivalMinute)
         publication.localItemPath = localItemPath
         try journal.prepare(publication)
-        try CanonicalReaderRequirement.beforeControlPublication(root: root, ownerUID: ownerUID, support: canonicalFormatSupport)
+        try CanonicalReaderRequirement.beforeControlPublication(
+            root: root, ownerUID: ownerUID, support: canonicalFormatSupport)
         try StoreCheckpoint.markDirty(root: root)
         try journal.seal(packageID)
         afterSeal?()

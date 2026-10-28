@@ -60,12 +60,13 @@ private func executionKernel(limits: JMAPKernel.Limits = .init()) -> JMAPKernel 
         Data(##"{"using":["urn:ietf:params:jmap:core"],"methodCalls":[["Core/echo",{"n":1e100},""]]}"##.utf8))
     let kernel = executionKernel()
     let asyncResult = try await kernel.execute(request)
-    let syncResult = try kernel.executeSynchronously(request, sessionState: { try! .init("metadata-state") })
-    {
-        _, _ in
-        Issue.record("Core/echo must not yield to the domain executor")
-        return .failure(.init("serverFail"), effects: .none)
-    }
+    let syncResult = try kernel.executeSynchronously(
+        request, sessionState: { try! .init("metadata-state") },
+        handle: {
+            _, _ in
+            Issue.record("Core/echo must not yield to the domain executor")
+            return .failure(.init("serverFail"), effects: .none)
+        })
     #expect(syncResult.value == asyncResult.value)
     #expect(syncResult.methodResponses[0].arguments["n"] == .number(try JMAPNumber("1e100")))
 }
@@ -92,11 +93,11 @@ private func executionKernel(limits: JMAPKernel.Limits = .init()) -> JMAPKernel 
         try executionKernel().executeSynchronously(
             Data(
                 ##"{"using":["https://example.test/jmap/execution","unknown"],"methodCalls":[["Example/create",{},"c"]]}"##
-                    .utf8), sessionState: { try! .init("s") }
-        ) { _, _ in
-            effects += 1
-            return .success([.init("Example/create", .object([]))])
-        }
+                    .utf8), sessionState: { try! .init("s") },
+            handle: { _, _ in
+                effects += 1
+                return .success([.init("Example/create", .object([]))])
+            })
     }
     #expect(effects == 0)
 }
@@ -105,11 +106,11 @@ private func executionKernel(limits: JMAPKernel.Limits = .init()) -> JMAPKernel 
     let result = try executionKernel(limits: .init(maximumResponseBytes: 1536)).executeSynchronously(
         Data(
             ##"{"using":["https://example.test/jmap/execution"],"methodCalls":[["Example/create",{},"c"]]}"##
-                .utf8), sessionState: { try! .init("s") }
-    ) { _, _ in
-        effects += 1
-        return .success([.init("Example/create", .object([]))])
-    }
+                .utf8), sessionState: { try! .init("s") },
+        handle: { _, _ in
+            effects += 1
+            return .success([.init("Example/create", .object([]))])
+        })
     #expect(result.methodResponses[0].arguments["type"]?.text == "responseTooLarge")
     #expect(effects == 0)
 }
@@ -118,11 +119,11 @@ private func executionKernel(limits: JMAPKernel.Limits = .init()) -> JMAPKernel 
     let response = try executionKernel().executeSynchronously(
         Data(
             ##"{"using":["urn:ietf:params:jmap:core","https://example.test/jmap/execution"],"methodCalls":[["Example/create",{},"c"],["Core/echo",{},"e"]]}"##
-                .utf8), sessionState: { try! .init("new-metadata-state") }
-    ) { _, _ in
-        effects += 1
-        throw JMAPMethodError("serverFail")
-    }
+                .utf8), sessionState: { try! .init("new-metadata-state") },
+        handle: { _, _ in
+            effects += 1
+            throw JMAPMethodError("serverFail")
+        })
     #expect(effects == 1)
     #expect(response.methodResponses[0].arguments["type"]?.text == "serverPartialFail")
     #expect(response.methodResponses[1].name == "Core/echo")
@@ -143,11 +144,11 @@ private func executionKernel(limits: JMAPKernel.Limits = .init()) -> JMAPKernel 
     let result = try executionKernel().executeSynchronously(
         Data(
             ##"{"using":["https://example.test/jmap/execution"],"methodCalls":[["Example/create",{"#x":{"resultOf":"future","name":"Example/create","path":""}},"c"],["Example/context",{},"next"]]}"##
-                .utf8), sessionState: { try! .init("s") }
-    ) { call, context in
-        calls += 1
-        return executionOutcome(call, context)
-    }
+                .utf8), sessionState: { try! .init("s") },
+        handle: { call, context in
+            calls += 1
+            return executionOutcome(call, context)
+        })
     #expect(calls == 1)
     #expect(result.methodResponses[0].arguments["type"]?.text == "invalidResultReference")
     #expect(result.methodResponses[1].name == "Example/context")
@@ -175,11 +176,11 @@ private func executionKernel(limits: JMAPKernel.Limits = .init()) -> JMAPKernel 
     let response = try executionKernel().executeSynchronously(
         Data(
             ##"{"using":["https://example.test/jmap/execution"],"methodCalls":[["Example/create",{},"c"]]}"##
-                .utf8), sessionState: { state }
-    ) { call, context in
-        effects += 1
-        return executionOutcome(call, context)
-    }
+                .utf8), sessionState: { state },
+        handle: { call, context in
+            effects += 1
+            return executionOutcome(call, context)
+        })
     #expect(effects == 1)
     #expect(response.sessionState == "catalog-state")
     #expect(response.methodResponses[0].name == "Example/create")
@@ -191,11 +192,11 @@ private func executionKernel(limits: JMAPKernel.Limits = .init()) -> JMAPKernel 
         try executionKernel(limits: .init(maximumResponseBytes: 1024)).executeSynchronously(
             Data(
                 ##"{"using":["https://example.test/jmap/execution"],"methodCalls":[["Example/create",{},"c"]]}"##
-                    .utf8), sessionState: { try! .init("s") }
-        ) { _, _ in
-            effects += 1
-            return .failure(.init("serverFail"), effects: .none)
-        }
+                    .utf8), sessionState: { try! .init("s") },
+            handle: { _, _ in
+                effects += 1
+                return .failure(.init("serverFail"), effects: .none)
+            })
     }
     #expect(effects == 0)
 }
@@ -216,26 +217,26 @@ private func executionKernel(limits: JMAPKernel.Limits = .init()) -> JMAPKernel 
     let result = try kernel.executeSynchronously(
         Data(
             ##"{"using":["https://example.test/jmap/execution"],"methodCalls":[["Example/query",{},"q"],["Example/get",{"#ids":{"resultOf":"q","name":"Example/query","path":"/ids"}},"g"],["Example/write",{},"w"],["Example/largeRead",{},"big"]]}"##
-                .utf8), sessionState: { try! .init("metadata") }
-    ) { call, context in
-        switch call.name {
-        case "Example/query":
-            return .success([.init(call.name, .object([.init("ids", .array([.string("a")]))]))])
-        case "Example/get":
-            #expect(call.arguments["ids"]?.elements == [.string("a")])
-            return .success([
-                .init(call.name, .object([.init("list", .array([.object([.init("id", .string("a"))])]))]))
-            ])
-        case "Example/write":
-            try context.replyBudget.reserveMutationResponse(maximumResponseBytes: 256)
-            published += 1
-            return .success([.init(call.name, .object([.init("revisionId", .string("r"))]))])
-        default:
-            return .success([
-                .init(call.name, .object([.init("large", .string(String(repeating: "x", count: 4096)))]))
-            ])
-        }
-    }
+                .utf8), sessionState: { try! .init("metadata") },
+        handle: { call, context in
+            switch call.name {
+            case "Example/query":
+                return .success([.init(call.name, .object([.init("ids", .array([.string("a")]))]))])
+            case "Example/get":
+                #expect(call.arguments["ids"]?.elements == [.string("a")])
+                return .success([
+                    .init(call.name, .object([.init("list", .array([.object([.init("id", .string("a"))])]))]))
+                ])
+            case "Example/write":
+                try context.replyBudget.reserveMutationResponse(maximumResponseBytes: 256)
+                published += 1
+                return .success([.init(call.name, .object([.init("revisionId", .string("r"))]))])
+            default:
+                return .success([
+                    .init(call.name, .object([.init("large", .string(String(repeating: "x", count: 4096)))]))
+                ])
+            }
+        })
     #expect(published == 1)
     #expect(result.methodResponses.map(\.name) == ["Example/query", "Example/get", "Example/write", "error"])
     #expect(result.methodResponses[3].arguments["type"]?.text == "serverFail")
@@ -255,14 +256,14 @@ private func executionKernel(limits: JMAPKernel.Limits = .init()) -> JMAPKernel 
     let result = try kernel.executeSynchronously(
         Data(
             ##"{"using":["https://example.test/jmap/execution"],"methodCalls":[["Example/write",{},"w"]]}"##
-                .utf8), sessionState: { try! .init("s") }
-    ) { call, context in
-        do { try context.replyBudget.reserveMutationResponse(maximumResponseBytes: 4096) } catch let error
-            as JMAPMethodError
-        { return .failure(error, effects: .none) }
-        published += 1
-        return .success([.init(call.name, .object([]))])
-    }
+                .utf8), sessionState: { try! .init("s") },
+        handle: { call, context in
+            do { try context.replyBudget.reserveMutationResponse(maximumResponseBytes: 4096) } catch let error
+                as JMAPMethodError
+            { return .failure(error, effects: .none) }
+            published += 1
+            return .success([.init(call.name, .object([]))])
+        })
     #expect(published == 0)
     #expect(result.methodResponses[0].arguments["type"]?.text == "responseTooLarge")
 }
@@ -280,11 +281,11 @@ private func executionKernel(limits: JMAPKernel.Limits = .init()) -> JMAPKernel 
     let result = try kernel.executeSynchronously(
         Data(
             ##"{"using":["https://example.test/jmap/execution"],"methodCalls":[["Example/write",{},"w"]]}"##
-                .utf8), sessionState: { try! .init("s") }
-    ) { call, _ in
-        published += 1
-        return .success([.init(call.name, .object([]))])
-    }
+                .utf8), sessionState: { try! .init("s") },
+        handle: { call, _ in
+            published += 1
+            return .success([.init(call.name, .object([]))])
+        })
     #expect(published == 1)
     #expect(result.methodResponses[0].arguments["type"]?.text == "serverPartialFail")
 }
@@ -300,11 +301,11 @@ private func executionKernel(limits: JMAPKernel.Limits = .init()) -> JMAPKernel 
             metadataReads += 1
             #expect(published == 0)
             return try! .init("before-publication")
-        }
-    ) { call, context in
-        published += 1
-        return executionOutcome(call, context)
-    }
+        },
+        handle: { call, context in
+            published += 1
+            return executionOutcome(call, context)
+        })
     #expect(published == 1)
     #expect(metadataReads == 1)
     #expect(result.sessionState == "before-publication")

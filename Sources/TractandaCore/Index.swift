@@ -1568,9 +1568,11 @@ final class ItemIndex {
             // silent renewal of the suspended peer allowance is introduced.
             if atomicAcceptedActivation != nil {
                 do {
-                    return try withCatalogueScanBudget(progress: { try Task.checkCancellation() }) {
-                        catalogueStep(statement)
-                    }
+                    return try withCatalogueScanBudget(
+                        progress: { try Task.checkCancellation() },
+                        {
+                            catalogueStep(statement)
+                        })
                 } catch {
                     atomicAcceptedStepError =
                         error as? TractandaError

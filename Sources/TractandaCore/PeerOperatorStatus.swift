@@ -32,11 +32,18 @@ public struct PeerCanonicalStatus: Codable, Sendable {
     /// Canonical commitments only; status never reads or validates private key bytes.
     public let committedPairingCount: Int?
     public let personal: PersonalClusterCanonicalStatus?
-    public init(storeID: String, replicaID: String?, readiness: Readiness, localDisposed: Bool?,
-        configuredPairingCount: Int?, committedPairingCount: Int?, personal: PersonalClusterCanonicalStatus? = nil) {
-        self.storeID = storeID; self.replicaID = replicaID; self.readiness = readiness
-        self.localDisposed = localDisposed; self.configuredPairingCount = configuredPairingCount
-        self.committedPairingCount = committedPairingCount; self.personal = personal
+    public init(
+        storeID: String, replicaID: String?, readiness: Readiness, localDisposed: Bool?,
+        configuredPairingCount: Int?, committedPairingCount: Int?,
+        personal: PersonalClusterCanonicalStatus? = nil
+    ) {
+        self.storeID = storeID
+        self.replicaID = replicaID
+        self.readiness = readiness
+        self.localDisposed = localDisposed
+        self.configuredPairingCount = configuredPairingCount
+        self.committedPairingCount = committedPairingCount
+        self.personal = personal
     }
 }
 
@@ -75,7 +82,8 @@ public struct PeerSynchronizationStatus: Codable, Sendable {
             "recoveryRequired", "peerLeaseChanged", "peerSessionExhausted", "connectionFailed",
             "deadlineExceeded", "cancelled", "resourceLimit", "peerRepairRequired", "peerSyncWorkInvalid",
             "peerPayloadVerifying", "peerVerificationBusy", "peerExportChanged", "peerSyncUnavailable",
-            "peerRuntimeUnavailable", "enrollmentRuntimeUnavailable", "invalidPeerResponse", "invalidPeerFrame",
+            "peerRuntimeUnavailable", "enrollmentRuntimeUnavailable", "invalidPeerResponse",
+            "invalidPeerFrame",
             "unsupportedAuthorityContext",
             "invalidPeerConfiguration", "invalidOriginAdmission", "documentIntegrity", "invalidPeerPackage",
             "invalidPeerExport", "forbidden", "incompatiblePeer", "peerCompatibilityRequired",
@@ -130,12 +138,16 @@ public struct PeerOperatorRuntimeStatus: Codable, Sendable {
                     && $0.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
             }) ?? true
         else { throw PeerSynchronizationStatus.invalid() }
-        guard configuredPeers.map({ $0.count <= 256 && ((try? JSON.encode($0).count) ?? Int.max) <= 128 * 1024 }) ?? true,
+        guard
+            configuredPeers.map({ $0.count <= 256 && ((try? JSON.encode($0).count) ?? Int.max) <= 128 * 1024 }
+            ) ?? true,
             personalPeers.map({ $0.count <= 512 }) ?? true
         else { throw PeerSynchronizationStatus.invalid() }
-        try personalPeers?.forEach { try $0.validate() }
+        for peer in personalPeers ?? [] { try peer.validate() }
         self.configuredPeers = configuredPeers?.sorted { $0.alias < $1.alias }
-        self.personalPeers = personalPeers?.sorted { ($0.replicaID, $0.configurationDigest) < ($1.replicaID, $1.configurationDigest) }
+        self.personalPeers = personalPeers?.sorted {
+            ($0.replicaID, $0.configurationDigest) < ($1.replicaID, $1.configurationDigest)
+        }
         self.configurationPath = configurationPath
         self.settingsDigest = settingsDigest
         self.synchronizationEnabled = synchronizationEnabled
@@ -167,7 +179,8 @@ public struct PeerOperatorRuntimeStatus: Codable, Sendable {
             pendingConnectionCount: c.decodeIfPresent(Int.self, forKey: .pendingConnectionCount),
             lastErrorCode: c.decodeIfPresent(String.self, forKey: .lastErrorCode),
             synchronization: c.decode(PeerSynchronizationStatus.self, forKey: .synchronization),
-            configuredPeers: c.decodeIfPresent([PeerRuntimeConfiguration.Peer].self, forKey: .configuredPeers),
+            configuredPeers: c.decodeIfPresent(
+                [PeerRuntimeConfiguration.Peer].self, forKey: .configuredPeers),
             personalPeers: c.decodeIfPresent([PersonalPeerObservation].self, forKey: .personalPeers))
     }
     public static var unavailable: Self {

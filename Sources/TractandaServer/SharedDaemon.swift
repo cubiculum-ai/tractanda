@@ -235,11 +235,13 @@ public actor SharedDaemon {
                     }
                     return try await application.beginPrivateEnrollment(
                         request, forUID: uid, control: control)
-                }, personalEnrollmentBegin: { request, uid, control in
+                },
+                personalEnrollmentBegin: { request, uid, control in
                     guard await readiness.isReady() else {
                         throw TractandaError("serviceBusy", "Service is starting or stopping.")
                     }
-                    return try await application.beginPrivatePersonalEnrollment(request, forUID: uid, control: control)
+                    return try await application.beginPrivatePersonalEnrollment(
+                        request, forUID: uid, control: control)
                 })
             if let port = configuration.httpPort {
                 http = try await DaemonListeners.http(
@@ -284,7 +286,8 @@ public actor SharedDaemon {
                     peerHost: peer == nil ? nil : peerConfiguration?.listen?.host,
                     peerPort: peer?.port, processID: getpid()))
             if let provisioning = configuration.modelProvisioning {
-                try await daemon.startModelProvisioning(provisioning, resumeDocumentJobs: configuration.documentConverter?.modelIsReady == false,
+                try await daemon.startModelProvisioning(
+                    provisioning, resumeDocumentJobs: configuration.documentConverter?.modelIsReady == false,
                     originForTesting: modelProvisioningOriginForTesting)
             }
             return daemon
@@ -316,7 +319,8 @@ public actor SharedDaemon {
         publicHTTP: DaemonListener?, publicApplication: PublicJMAPApplication?,
         publicIdentity: HTTPSIdentityContextStore?, publicConfiguration: PublicJMAPConfiguration?,
         peer: DaemonListener?, peerRuntime: PeerServiceRuntime?, synchronization: PeerSyncRuntime?,
-        personalPeerRuntime: PersonalPeerRuntime?, personalEnrollment: PersonalEnrollmentRuntime?, readiness: DaemonReadiness,
+        personalPeerRuntime: PersonalPeerRuntime?, personalEnrollment: PersonalEnrollmentRuntime?,
+        readiness: DaemonReadiness,
         endpoints: DaemonEndpoints
     ) {
         self.coordinator = coordinator
@@ -362,9 +366,13 @@ public actor SharedDaemon {
         }
     }
 
-    private func startModelProvisioning(_ configuration: ModelProvisioningConfiguration, resumeDocumentJobs: Bool, originForTesting: URL?) async throws {
+    private func startModelProvisioning(
+        _ configuration: ModelProvisioningConfiguration, resumeDocumentJobs: Bool, originForTesting: URL?
+    ) async throws {
         let coordinator = self.coordinator
-        let runtime = try ModelProvisioningRuntime(configuration: configuration, testingOrigin: originForTesting) { artifact in
+        let runtime = try ModelProvisioningRuntime(
+            configuration: configuration, testingOrigin: originForTesting
+        ) { artifact in
             if resumeDocumentJobs && artifact.identifier == "granite-docling-258m-mlx" {
                 await coordinator.documentModelDidBecomeReady()
             }

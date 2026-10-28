@@ -42,7 +42,8 @@ enum CommitFailure {
         [
             "revisionConflict", "forbidden", "notFound", "operationMismatch",
             "unsupportedQuery", "notCategory", "notView", "unknownClass", "abstractClass",
-            "notJSON", "notRequest", "unknownCapability", "limit", "invalidArguments", "invalidRecord", "invalidValue", "invalidKey", "invalidID",
+            "notJSON", "notRequest", "unknownCapability", "limit", "invalidArguments", "invalidRecord",
+            "invalidValue", "invalidKey", "invalidID",
             "invalidView", "invalidSelection", "invalidHolder", "invalidPermissions", "invalidRole",
             "invalidPendency",
             "categoryCycle", "invalidCategory",

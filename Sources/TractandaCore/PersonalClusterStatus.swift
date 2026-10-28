@@ -9,9 +9,11 @@ public struct PersonalClusterCanonicalStatus: Codable, Sendable {
     public let pendingMembershipDigest: String?
     public let requiredOnlineReplicaIDs: [String]
     public let baselineSourceReplicaID: String?
-    public init(storeID: String, currentMembership: PersonalMembershipConfiguration?,
+    public init(
+        storeID: String, currentMembership: PersonalMembershipConfiguration?,
         pendingMembership: PersonalMembershipConfiguration?, requiredOnlineReplicaIDs: [String] = [],
-        baselineSourceReplicaID: String? = nil) throws {
+        baselineSourceReplicaID: String? = nil
+    ) throws {
         for membership in [currentMembership, pendingMembership].compactMap({ $0 }) {
             try membership.validate()
             guard membership.storeID == storeID else { throw PeerSynchronizationStatus.invalid() }
@@ -54,7 +56,8 @@ public struct PersonalPeerObservation: Codable, Sendable {
     public let lastRevisionCount: Int?
     public let lastTransferredBytes: Int64?
     public let lastRevisionOutcomes: [String: Int]
-    public init(replicaID: String, configurationDigest: String, connected: Bool,
+    public init(
+        replicaID: String, configurationDigest: String, connected: Bool,
         incomingConnectionCount: Int = 0, outgoingConnectionCount: Int = 0,
         controlOnly: Bool? = nil, pullRunning: Bool = false, completedCuts: Int = 0,
         currentPull: PersonalPullProgress? = nil,
@@ -62,17 +65,27 @@ public struct PersonalPeerObservation: Codable, Sendable {
         lastPullStartedAt: String? = nil, lastPullFinishedAt: String? = nil,
         lastOutcome: Outcome? = nil, lastErrorCode: String? = nil, lastErrorAt: String? = nil,
         lastRevisionCount: Int? = nil, lastTransferredBytes: Int64? = nil,
-        lastRevisionOutcomes: [String: Int] = [:]) throws {
-        self.replicaID = replicaID; self.configurationDigest = configurationDigest
-        self.connected = connected; self.incomingConnectionCount = incomingConnectionCount
-        self.outgoingConnectionCount = outgoingConnectionCount; self.controlOnly = controlOnly
-        self.pullRunning = pullRunning; self.completedCuts = completedCuts
+        lastRevisionOutcomes: [String: Int] = [:]
+    ) throws {
+        self.replicaID = replicaID
+        self.configurationDigest = configurationDigest
+        self.connected = connected
+        self.incomingConnectionCount = incomingConnectionCount
+        self.outgoingConnectionCount = outgoingConnectionCount
+        self.controlOnly = controlOnly
+        self.pullRunning = pullRunning
+        self.completedCuts = completedCuts
         self.currentPull = currentPull
-        self.lastConnectedAt = lastConnectedAt; self.lastDisconnectedAt = lastDisconnectedAt
-        self.lastPullStartedAt = lastPullStartedAt; self.lastPullFinishedAt = lastPullFinishedAt
-        self.lastOutcome = lastOutcome; self.lastErrorCode = PeerSynchronizationStatus.safeCode(lastErrorCode)
-        self.lastErrorAt = lastErrorAt; self.lastRevisionCount = lastRevisionCount
-        self.lastTransferredBytes = lastTransferredBytes; self.lastRevisionOutcomes = lastRevisionOutcomes
+        self.lastConnectedAt = lastConnectedAt
+        self.lastDisconnectedAt = lastDisconnectedAt
+        self.lastPullStartedAt = lastPullStartedAt
+        self.lastPullFinishedAt = lastPullFinishedAt
+        self.lastOutcome = lastOutcome
+        self.lastErrorCode = PeerSynchronizationStatus.safeCode(lastErrorCode)
+        self.lastErrorAt = lastErrorAt
+        self.lastRevisionCount = lastRevisionCount
+        self.lastTransferredBytes = lastTransferredBytes
+        self.lastRevisionOutcomes = lastRevisionOutcomes
         try validate()
     }
     public func validate() throws {
@@ -88,7 +101,9 @@ public struct PersonalPeerObservation: Codable, Sendable {
                     && $0.value >= 0
             }), PeerSynchronizationStatus.safeCode(lastErrorCode) == lastErrorCode
         else { throw PeerSynchronizationStatus.invalid() }
-        for timestamp in [lastConnectedAt, lastDisconnectedAt, lastPullStartedAt, lastPullFinishedAt, lastErrorAt].compactMap({ $0 }) {
+        for timestamp in [
+            lastConnectedAt, lastDisconnectedAt, lastPullStartedAt, lastPullFinishedAt, lastErrorAt,
+        ].compactMap({ $0 }) {
             guard timestamp.utf8.count <= 32, ISO8601DateFormatter().date(from: timestamp) != nil else {
                 throw PeerSynchronizationStatus.invalid()
             }
@@ -106,15 +121,20 @@ public struct PersonalPullProgress: Codable, Sendable, Equatable {
     public let transferredBytes: Int64
     /// Last completed operation/data append, never a periodic timer or status-request time.
     public let lastProgressAt: String?
-    public init(phase: Phase, revisionCount: Int = 0, transferredBytes: Int64 = 0,
-        lastProgressAt: String? = nil) throws {
-        self.phase = phase; self.revisionCount = revisionCount
-        self.transferredBytes = transferredBytes; self.lastProgressAt = lastProgressAt
+    public init(
+        phase: Phase, revisionCount: Int = 0, transferredBytes: Int64 = 0,
+        lastProgressAt: String? = nil
+    ) throws {
+        self.phase = phase
+        self.revisionCount = revisionCount
+        self.transferredBytes = transferredBytes
+        self.lastProgressAt = lastProgressAt
         try validate()
     }
     public func validate() throws {
         guard revisionCount >= 0, transferredBytes >= 0,
-            lastProgressAt.map({ $0.utf8.count <= 32 && ISO8601DateFormatter().date(from: $0) != nil }) ?? true
+            lastProgressAt.map({ $0.utf8.count <= 32 && ISO8601DateFormatter().date(from: $0) != nil })
+                ?? true
         else { throw PeerSynchronizationStatus.invalid() }
     }
 }

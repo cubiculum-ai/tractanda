@@ -48,7 +48,7 @@ Use Python 3.11+ on the signing Mac. Keep machine-specific paths and signing ide
   "repository": "OWNER/REPOSITORY",
   "branch": "main",
   "instance": "production",
-  "softwareRoot": "/Users/Shared/Library/Application Support/Tractanda",
+  "softwareRoot": "/Library/Tractanda/Software",
   "applicationIdentity": "Developer ID Application certificate SHA-1",
   "installerIdentity": "Developer ID Installer certificate SHA-1",
   "developerTeamID": "ABCDEFGHIJ",
@@ -102,7 +102,7 @@ The input JSON uses profile `tractanda.release-linux-input.v1` and an `assets` l
 
 Each package requires its existing adjacent `.deb.inventory.json` from the real Debian builder. Admission checks the package version/architecture/bytes/hash, the actual full bundle identity and manifest/inventory commitments, and the manifest-bound bundle-build receipt. It reconstructs the producer's existing normalized source commitment from `files`, `componentManifests`, `toolchain`, `buildEnvironment` and fixed build flags. Source paths, modes, sizes and hashes must equal the candidate's own existing `source_rows()` capture; component approvals must equal its finite admitted registry entries. Matching a version or an operator statement alone does not establish sealed core source. Component admission and actual native/model/lifecycle evidence remain their existing separate gates.
 
-The controller keeps bound candidate-owned copies and small receipts. The published names are `tractanda_DEBIANVERSION_amd64.deb` and `tractanda_DEBIANVERSION_arm64.deb` (for example `tractanda_0.1.0~poc.15-1_amd64.deb`). Both join the same `SHA256SUMS`, private `/private/tmp` upload snapshot, GitHub asset-digest verification and interrupted-upload resume used by the Mac downloads. No APT host, signing key or second publisher is created. Missing/duplicate architectures, altered inputs, wrong source/manifest commitments and conflicting remote assets fail closed.
+The controller keeps bound candidate-owned copies and small receipts. The published names are `tractanda_DEBIANVERSION_amd64.deb` and `tractanda_DEBIANVERSION_arm64.deb` (for example `tractanda_0.1.0~poc.15-1_amd64.deb`). Both join the same `SHA256SUMS`, private `/private/tmp` upload snapshot, GitHub asset-digest verification and interrupted-upload resume used by the Mac downloads. The current public v3 contract also publishes the signed APT site asset using the dedicated existing archive key; historical v2 candidates did not create an APT channel. Missing/duplicate architectures, altered inputs, wrong source/manifest commitments and conflicting remote assets fail closed.
 
 New candidates use delivery contract v2 with fourteen planned stages. `install-authorization` stops after the sealed/notarized Mac and both Linux artifacts exist, **before** managed Mac installation. Its two checks cover candidate compatibility/maintenance and current installation identity. Existing pending v1 candidates must be explicitly revised and resealed; they cannot run, install or publish through the new contract. Completed historical receipts remain readable.
 

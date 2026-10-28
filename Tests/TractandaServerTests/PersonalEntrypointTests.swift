@@ -177,9 +177,12 @@ final class PersonalEntrypointTests: XCTestCase, @unchecked Sendable {
                 .init(
                     classID: "Item", changes: ["subject": .text("socketneedle")], operationID: "socket-create"
                 ))
-            let query = try object(await Task.detached {
-                try ItemClient(socketPath: config.socketPath).query(criteria: ["expression": "subject == \"socketneedle\""])
-            }.value)
+            let query = try object(
+                await Task.detached {
+                    try ItemClient(socketPath: config.socketPath).query(criteria: [
+                        "expression": "subject == \"socketneedle\""
+                    ])
+                }.value)
             XCTAssertEqual(query["ids"] as? [String], [first.revision.itemID])
             let changed = try await commit(
                 config.socketPath,

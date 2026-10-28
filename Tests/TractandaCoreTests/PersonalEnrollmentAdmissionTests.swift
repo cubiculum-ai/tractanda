@@ -1,4 +1,5 @@
 import XCTest
+
 @testable import TractandaCore
 
 final class PersonalEnrollmentAdmissionTests: XCTestCase {
@@ -45,7 +46,8 @@ final class PersonalEnrollmentAdmissionTests: XCTestCase {
 
     func testLogicalNamesMapAcrossDifferentNumericIDsAndPreserveLocalAuthority() throws {
         let sourcePolicy = try AccessConfiguration(source)
-        try sourcePolicy.validate(using: PrincipalResolver(directory: sourceDirectory, configuration: sourcePolicy))
+        try sourcePolicy.validate(
+            using: PrincipalResolver(directory: sourceDirectory, configuration: sourcePolicy))
         let admission = try PersonalEnrollmentAdmission(configuration: sourcePolicy)
         let result = try admission.applying(to: target, accounts: targetDirectory)
         let adopted = try AccessConfiguration(result)
@@ -65,12 +67,15 @@ final class PersonalEnrollmentAdmissionTests: XCTestCase {
 
     func testMissingAndAmbiguousMappingsFailWithoutChangingEitherPolicy() throws {
         let admission = try PersonalEnrollmentAdmission(configuration: AccessConfiguration(source))
-        let originalSource = source, originalTarget = target
+        let originalSource = source
+        let originalTarget = target
         let candidates = [
             Accounts(users: ["owner": 502], groups: ["family": 601, "targetadmins": 602]),
             Accounts(users: ["alice": 501, "owner": 502], groups: ["targetadmins": 602]),
-            Accounts(users: ["alice": 501, "owner": 502, "al": 503], groups: ["family": 601, "targetadmins": 602]),
-            Accounts(users: ["alice": 501, "owner": 502], groups: ["family": 601, "kin": 603, "targetadmins": 602]),
+            Accounts(
+                users: ["alice": 501, "owner": 502, "al": 503], groups: ["family": 601, "targetadmins": 602]),
+            Accounts(
+                users: ["alice": 501, "owner": 502], groups: ["family": 601, "kin": 603, "targetadmins": 602]),
         ]
         for directory in candidates {
             XCTAssertThrowsError(try admission.applying(to: target, accounts: directory)) { error in

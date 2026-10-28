@@ -69,7 +69,8 @@ extension ItemClient {
         try await call("TractandaItem/prepareCapture", arguments: preparation, returning: CapturePlan.self)
     }
     public func commitCapture(_ plan: CapturePlan) async throws -> MutationReceipt {
-        let receipt = try await call("TractandaItem/commitCapture", arguments: plan, returning: MutationReceipt.self)
+        let receipt = try await call(
+            "TractandaItem/commitCapture", arguments: plan, returning: MutationReceipt.self)
         guard receipt.operationID == plan.commitRequest.operationID,
             plan.commitRequest.action == .create || plan.commitRequest.action == .copy
                 || receipt.itemID == plan.commitRequest.itemID

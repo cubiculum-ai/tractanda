@@ -24,7 +24,8 @@ final class PeerEnrollmentActivationTests: XCTestCase {
             withAttachment: Bool = false, sourcePolicy: ItemValue? = nil,
             basePermissions: ItemValue? = nil
         ) throws {
-            source = try Source(initialPolicy: sourcePolicy)  // Real fresh profilev2, not a converted/importer-special fixture.
+            // Real fresh profilev2, not a converted/importer-special fixture.
+            source = try Source(initialPolicy: sourcePolicy)
             let base: Revision
             if let basePermissions {
                 let fixture = source
@@ -107,6 +108,7 @@ final class PeerEnrollmentActivationTests: XCTestCase {
                     }
                 }
                 // An incomplete index deliberately blocks its continuation until the exact page arrives.
+
                 if !page.blockedOnIndex { cursor = page.nextCursor }
                 if !page.blockedOnIndex && cursor == nil { break }
             } while work <= 4096
@@ -127,6 +129,7 @@ final class PeerEnrollmentActivationTests: XCTestCase {
         func targetFiles() -> DocumentContentFiles { InitialAuthorityBootstrap.files(source.targetRoot) }
         func assertPending(file: StaticString = #filePath, line: UInt = #line) {
             // Initialized-root preflight must reject pending state even while its private owner holds the lock.
+
             XCTAssertThrowsError(
                 try ItemStore.requireInitializedRoot(source.targetRoot), file: file, line: line)
         }
@@ -182,6 +185,7 @@ final class PeerEnrollmentActivationTests: XCTestCase {
             try CanonicalReaderRequirement.load(root: f.source.targetRoot, ownerUID: tractanda_uid())!
                 .capabilities.contains(PeerEnrollmentActivation.targetCapability))
         // Only the operation's own registration transition is normalized for the already sealed finite export.
+
         _ = try f.source.source.readPeerEnrollment(
             f.handle, object: f.material.baseline.root, offset: 0, forUID: f.source.uid)
         XCTAssertEqual(try f.finish(), receipt)

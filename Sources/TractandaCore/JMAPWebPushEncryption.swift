@@ -1,14 +1,18 @@
-import Foundation
 import Crypto
+import Foundation
 
 /// RFC8291 single-record aes128gcm encoding using fresh P-256 and salt per message.
 /// No private key, URL or auth secret is exposed through a service result.
 package enum JMAPWebPushEncryption {
     package static func decodeBase64URL(_ value: String) -> Data? {
-        guard !value.isEmpty, value.utf8.allSatisfy({
-            (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 45 || $0 == 95
-        }) else { return nil }
-        let padded = value.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        guard !value.isEmpty,
+            value.utf8.allSatisfy({
+                (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 45
+                    || $0 == 95
+            })
+        else { return nil }
+        let padded =
+            value.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
             + String(repeating: "=", count: (4 - value.count % 4) % 4)
         guard let bytes = Data(base64Encoded: padded), base64URL(bytes) == value else { return nil }
         return bytes

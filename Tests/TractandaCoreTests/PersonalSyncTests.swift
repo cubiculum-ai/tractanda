@@ -1064,14 +1064,18 @@ final class PersonalSyncTests: XCTestCase {
             }
             XCTAssertNil(before.personal?.currentMembership)
             XCTAssertEqual(before.personal?.pendingMembership, pair.configuration)
-            XCTAssertEqual(before.personal?.requiredOnlineReplicaIDs, pair.preparationB.requiredOnlineReplicaIDs.sorted())
+            XCTAssertEqual(
+                before.personal?.requiredOnlineReplicaIDs, pair.preparationB.requiredOnlineReplicaIDs.sorted()
+            )
             XCTAssertNil(before.personal?.baselineSourceReplicaID)
             try commitPair(pair)
             let source = try XCTUnwrap(pair.a.replicaID)
             _ = try pair.b.startPersonalBaseline(sourceReplicaID: source)
             // No private credential is loaded by diagnostics, even after the key directory is removed.
             let keys = pair.second.root.appendingPathComponent(".peer-credentials")
-            if FileManager.default.fileExists(atPath: keys.path) { try FileManager.default.removeItem(at: keys) }
+            if FileManager.default.fileExists(atPath: keys.path) {
+                try FileManager.default.removeItem(at: keys)
+            }
             let after = try pair.b.withAccess(forUID: pair.b.ownerUID, recoverPublication: false) {
                 try pair.b.personalPeerCanonicalStatus()
             }
@@ -1080,7 +1084,9 @@ final class PersonalSyncTests: XCTestCase {
             XCTAssertNil(after.personal?.pendingMembership)
             XCTAssertEqual(after.personal?.baselineSourceReplicaID, source)
             let json = String(decoding: try JSON.encode(after), as: UTF8.self)
-            for field in ["selectionID", "nonce", "administrator", "secret"] { XCTAssertFalse(json.contains(field)) }
+            for field in ["selectionID", "nonce", "administrator", "secret"] {
+                XCTAssertFalse(json.contains(field))
+            }
             XCTAssertTrue(pair.b.isPersonalBaselinePending)
         }
     }

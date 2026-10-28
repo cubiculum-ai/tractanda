@@ -456,7 +456,8 @@ final class SetupPackageLifecycleTests: XCTestCase {
         let options = f.options(selection: .freshPersonalTarget(storeID: storeID))
         let state = try XCTUnwrap(f.engine.readPackageState())
         XCTAssertEqual(state.phase, .committed)
-        XCTAssertEqual(state.incoming?.manifestSHA256, try f.engine.installedPackageCompatibility().manifestSHA256)
+        XCTAssertEqual(
+            state.incoming?.manifestSHA256, try f.engine.installedPackageCompatibility().manifestSHA256)
         XCTAssertEqual(options.bundle.standardizedFileURL.path, f.engine.packagePayload.path)
         try f.engine.install(options)
         let receipt = try XCTUnwrap(f.engine.readReceipt("a"))

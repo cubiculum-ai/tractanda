@@ -11,11 +11,19 @@ final class PersonalEnrollmentAuthenticatedReady: @unchecked Sendable {
     private let control: PeerExchangeControl
     private let lock = NSLock()
     private var used = false
-    fileprivate init(binding: PeerExchangeBinding, control: PeerExchangeControl) { self.binding = binding; self.control = control }
+    fileprivate init(binding: PeerExchangeBinding, control: PeerExchangeControl) {
+        self.binding = binding
+        self.control = control
+    }
     func consume() throws -> PeerExchangeControl {
-        lock.lock(); defer { lock.unlock() }
-        guard !used else { throw TractandaError("enrollmentConflict", "Renewal authentication was already consumed.") }
-        try control.check(); used = true; return control
+        lock.lock()
+        defer { lock.unlock() }
+        guard !used else {
+            throw TractandaError("enrollmentConflict", "Renewal authentication was already consumed.")
+        }
+        try control.check()
+        used = true
+        return control
     }
 }
 
@@ -49,7 +57,8 @@ actor PersonalPeerRuntime {
     private var dialSlots: [UUID: Int] = [:]
     private var controlPending: Set<String> = []
     private var enrollmentFinalizing = false
-    private var pullWaiters: [UUID: (peer: String, sessionID: UUID, continuation: CheckedContinuation<Void, Error>)] = [:]
+    private var pullWaiters:
+        [UUID: (peer: String, sessionID: UUID, continuation: CheckedContinuation<Void, Error>)] = [:]
     private var refreshID = UUID()
     private(set) var enrollmentErrorCode: String?
     private let configuration: PeerRuntimeConfiguration
@@ -62,7 +71,8 @@ actor PersonalPeerRuntime {
     private var responder: PeerExchangeResponder?
     private var sessions: [String: Session] = [:]
     private var handshaking: [UUID: any Channel] = [:]
-    private var readyAdmissions: [ObjectIdentifier: (PeerExchangeBinding, PersonalEnrollmentTransportPurpose)] = [:]
+    private var readyAdmissions:
+        [ObjectIdentifier: (PeerExchangeBinding, PersonalEnrollmentTransportPurpose)] = [:]
     private var reservations: [String: (PeerExchangeBinding, any Channel)] = [:]
     private var acceptingTasks: [UUID: Task<Void, Never>] = [:]
     private var pullJobs: [UUID: Task<Void, Never>] = [:]
@@ -108,7 +118,9 @@ actor PersonalPeerRuntime {
     }
     private nonisolated func operations(reserving channel: (any Channel)? = nil) -> PersonalPeerOperations {
         PersonalPeerOperations(
-            validate: { [coordinator] binding in try await coordinator.personalPeerValidate(binding, controlOnly: true) },
+            validate: { [coordinator] binding in
+                try await coordinator.personalPeerValidate(binding, controlOnly: true)
+            },
             handle: { [coordinator] binding, request in
                 // A retained control context never grants ordinary data access.
                 try await coordinator.personalPeerRequest(binding, request: request)
@@ -118,20 +130,26 @@ actor PersonalPeerRuntime {
             },
             enrollmentValidate: { [self] binding, purpose in
                 try await validateEnrollment(binding, purpose: purpose)
-                if let channel, purpose != .memberControl { await reservePrivateAdmission(channel, binding: binding, purpose: purpose) }
+                if let channel, purpose != .memberControl {
+                    await reservePrivateAdmission(channel, binding: binding, purpose: purpose)
+                }
             },
             enrollmentHandle: { [self] binding, purpose, request in
                 try await handleEnrollment(binding, purpose: purpose, request: request)
             }, transportValidate: { [self] binding in try await validateTransport(binding) })
     }
     private func validateTransport(_ binding: PeerExchangeBinding) async throws {
-        do { try await coordinator.personalPeerValidate(binding, controlOnly: true) }
-        catch {
-            guard enrollmentMaterial?.retainedControlCredentials.contains(where: { $0.binding == binding }) == true else { throw error }
+        do { try await coordinator.personalPeerValidate(binding, controlOnly: true) } catch {
+            guard
+                enrollmentMaterial?.retainedControlCredentials.contains(where: { $0.binding == binding })
+                    == true
+            else { throw error }
             try await validateEnrollment(binding, purpose: .memberControl)
         }
     }
-    private func validateEnrollment(_ binding: PeerExchangeBinding, purpose: PersonalEnrollmentTransportPurpose) async throws {
+    private func validateEnrollment(
+        _ binding: PeerExchangeBinding, purpose: PersonalEnrollmentTransportPurpose
+    ) async throws {
         guard !stopped, enrollmentErrorCode == nil, let bridge = enrollmentBridge else {
             throw TractandaError("untrustedPeer", "Enrollment context is unavailable.")
         }
@@ -139,15 +157,21 @@ actor PersonalPeerRuntime {
             // The provider validates actual current membership or one exact retained job.
             try await bridge.validate(binding, purpose)
         } else {
-            guard enrollmentMaterial?.privatePeers.contains(where: { $0.binding == binding && $0.purpose == purpose }) == true else {
+            guard
+                enrollmentMaterial?.privatePeers.contains(where: {
+                    $0.binding == binding && $0.purpose == purpose
+                }) == true
+            else {
                 throw TractandaError("untrustedPeer", "Enrollment context is unavailable.")
             }
             try await bridge.validate(binding, purpose)
         }
         guard !stopped else { throw CancellationError() }
     }
-    private func handleEnrollment(_ binding: PeerExchangeBinding, purpose: PersonalEnrollmentTransportPurpose,
-        request: PeerExchangeRequest) async throws -> Data {
+    private func handleEnrollment(
+        _ binding: PeerExchangeBinding, purpose: PersonalEnrollmentTransportPurpose,
+        request: PeerExchangeRequest
+    ) async throws -> Data {
         try await validateEnrollment(binding, purpose: purpose)
         guard let bridge = enrollmentBridge else { throw CancellationError() }
         return try await bridge.handle(binding, purpose, request)
@@ -179,8 +203,10 @@ actor PersonalPeerRuntime {
         if reservations[key]?.1 === channel { reservations[key] = nil }
         readyAdmissions[ObjectIdentifier(channel)] = nil
     }
-    private func reservePrivateAdmission(_ channel: any Channel, binding: PeerExchangeBinding,
-        purpose: PersonalEnrollmentTransportPurpose) {
+    private func reservePrivateAdmission(
+        _ channel: any Channel, binding: PeerExchangeBinding,
+        purpose: PersonalEnrollmentTransportPurpose
+    ) {
         let key = ObjectIdentifier(channel)
         if readyAdmissions[key] == nil {
             readyAdmissions[key] = (binding, purpose)
@@ -189,12 +215,19 @@ actor PersonalPeerRuntime {
     }
     private func releasePrivateAdmission(_ key: ObjectIdentifier) { readyAdmissions[key] = nil }
     func activate() { if !stopped { accepting = true } }
-    func setEnrollmentBridge(material: @escaping @Sendable () async throws -> PersonalEnrollmentRuntimeMaterial,
-        validate: @escaping @Sendable (PeerExchangeBinding, PersonalEnrollmentTransportPurpose) async throws -> Void,
-        handle: @escaping @Sendable (PeerExchangeBinding, PersonalEnrollmentTransportPurpose, PeerExchangeRequest) async throws -> Data,
-        completedCut: @escaping @Sendable (PeerExchangeBinding, PersonalSyncReport) async -> Void = { _, _ in }) async {
+    func setEnrollmentBridge(
+        material: @escaping @Sendable () async throws -> PersonalEnrollmentRuntimeMaterial,
+        validate:
+            @escaping @Sendable (PeerExchangeBinding, PersonalEnrollmentTransportPurpose) async throws -> Void,
+        handle:
+            @escaping @Sendable (PeerExchangeBinding, PersonalEnrollmentTransportPurpose, PeerExchangeRequest)
+            async throws -> Data,
+        completedCut: @escaping @Sendable (PeerExchangeBinding, PersonalSyncReport) async -> Void = { _, _ in
+        }
+    ) async {
         guard !stopped else { return }
-        enrollmentBridge = .init(material: material, validate: validate, handle: handle, completedCut: completedCut)
+        enrollmentBridge = .init(
+            material: material, validate: validate, handle: handle, completedCut: completedCut)
         await refreshNow()
     }
     func clearEnrollmentBridge() async {
@@ -207,13 +240,16 @@ actor PersonalPeerRuntime {
         return [try .init(host: hostname, port: listen.port)]
     }
     private var connectionSlots: Int {
-        sessions.count + enrollmentSessions.count + retiringEnrollment.count + handshaking.count + dialSlots.values.reduce(0, +)
+        sessions.count + enrollmentSessions.count + retiringEnrollment.count + handshaking.count
+            + dialSlots.values.reduce(0, +)
     }
     private func reserveDial(_ count: Int) throws -> UUID {
         guard accepting, !stopped, count > 0, count <= 4, connectionSlots <= 64 - count else {
             throw TractandaError("resourceLimit", "The shared peer connection limit is full.")
         }
-        let id = UUID(); dialSlots[id] = count; return id
+        let id = UUID()
+        dialSlots[id] = count
+        return id
     }
     private static func enrollmentKey(_ binding: PeerExchangeBinding) -> String {
         binding.pairingID + "|" + binding.configurationDigest + (binding.localIsInitiator ? "|out" : "|in")
@@ -226,7 +262,8 @@ actor PersonalPeerRuntime {
         guard Set(privateIDs).count == privateIDs.count else { throw PersonalEnrollmentError.invalid() }
         for peer in value.privatePeers {
             guard peer.purpose != .memberControl, peer.endpoints.count <= 4,
-                !peer.binding.localIsInitiator || !peer.endpoints.isEmpty else { throw PersonalEnrollmentError.invalid() }
+                !peer.binding.localIsInitiator || !peer.endpoints.isEmpty
+            else { throw PersonalEnrollmentError.invalid() }
             for endpoint in peer.endpoints {
                 guard (1...65535).contains(endpoint.port) else { throw PersonalEnrollmentError.invalid() }
                 _ = try PersonalMember(replicaID: peer.binding.remoteReplicaID, hostname: endpoint.host)
@@ -236,13 +273,20 @@ actor PersonalPeerRuntime {
             try Identifier.validate(route.operationID)
             guard UUID(uuidString: route.operationID)?.version1Components != nil,
                 route.configurationDigest.utf8.count == 64,
-                route.configurationDigest.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
+                route.configurationDigest.utf8.allSatisfy({
+                    (48...57).contains($0) || (97...102).contains($0)
+                })
+            else {
                 throw PersonalEnrollmentError.invalid()
             }
-            guard route.endpoints.count <= PersonalEnrollmentCapacity.maximumQualifiedMembers else { throw PersonalEnrollmentError.invalid() }
+            guard route.endpoints.count <= PersonalEnrollmentCapacity.maximumQualifiedMembers else {
+                throw PersonalEnrollmentError.invalid()
+            }
             for (replica, endpoints) in route.endpoints {
                 try Identifier.validate(replica)
-                guard UUID(uuidString: replica)?.version1Components != nil else { throw PersonalEnrollmentError.invalid() }
+                guard UUID(uuidString: replica)?.version1Components != nil else {
+                    throw PersonalEnrollmentError.invalid()
+                }
                 guard endpoints.count <= 4 else { throw PersonalEnrollmentError.invalid() }
                 for endpoint in endpoints {
                     guard (1...65535).contains(endpoint.port) else { throw PersonalEnrollmentError.invalid() }
@@ -251,10 +295,13 @@ actor PersonalPeerRuntime {
             }
         }
     }
-    private func makeResponder(current: [PeerCredential], material: PersonalEnrollmentRuntimeMaterial?) throws -> PeerExchangeResponder? {
+    private func makeResponder(current: [PeerCredential], material: PersonalEnrollmentRuntimeMaterial?) throws
+        -> PeerExchangeResponder?
+    {
         var pairings: [String: PeerPairing] = [:]
         var bindings: [String: PeerExchangeBinding] = [:]
-        for credential in current + (material?.retainedControlCredentials ?? []) where !credential.binding.localIsInitiator {
+        for credential in current + (material?.retainedControlCredentials ?? [])
+        where !credential.binding.localIsInitiator {
             let pairing = try PeerPairing(credential: credential)
             if let prior = bindings[credential.binding.pairingID] {
                 guard prior == credential.binding else { throw PersonalEnrollmentError.invalid() }
@@ -271,29 +318,41 @@ actor PersonalPeerRuntime {
     }
     func refreshNow() async {
         guard !stopped else { return }
-        let generation = UUID(); refreshID = generation
+        let generation = UUID()
+        refreshID = generation
         var material: PersonalEnrollmentRuntimeMaterial?
         var materialError: String?
         if let bridge = enrollmentBridge {
-            do { let candidate = try await bridge.material(); try validateMaterial(candidate); material = candidate }
-            catch { materialError = "enrollmentRuntimeUnavailable" }
+            do {
+                let candidate = try await bridge.material()
+                try validateMaterial(candidate)
+                material = candidate
+            } catch { materialError = "enrollmentRuntimeUnavailable" }
         }
         guard !stopped, refreshID == generation else { return }
         do {
             let loaded = try await coordinator.loadPersonalPeerCredentials()
-            for credential in loaded { try await coordinator.personalPeerValidate(credential.binding, controlOnly: true) }
+            for credential in loaded {
+                try await coordinator.personalPeerValidate(credential.binding, controlOnly: true)
+            }
             guard !stopped, refreshID == generation else { return }
             // A bad registry/context affects enrollment only. Canonical current credentials
             // and existing healthy data sessions remain available.
             var nextResponder: PeerExchangeResponder?
-            do { nextResponder = try makeResponder(current: loaded, material: material) }
-            catch { material = nil; materialError = "enrollmentRuntimeUnavailable"; nextResponder = try makeResponder(current: loaded, material: nil) }
+            do { nextResponder = try makeResponder(current: loaded, material: material) } catch {
+                material = nil
+                materialError = "enrollmentRuntimeUnavailable"
+                nextResponder = try makeResponder(current: loaded, material: nil)
+            }
             credentials = loaded
             enrollmentMaterial = material
             enrollmentErrorCode = materialError
             responder = nextResponder
-            for (key, reservation) in reservations where !loaded.contains(where: { $0.binding == reservation.0 })
-                && material?.retainedControlCredentials.contains(where: { $0.binding == reservation.0 }) != true {
+            for (key, reservation) in reservations
+            where !loaded.contains(where: { $0.binding == reservation.0 })
+                && material?.retainedControlCredentials.contains(where: { $0.binding == reservation.0 })
+                    != true
+            {
                 reservations[key] = nil
                 // The physical accept task still owns this channel. Its ready admission
                 // either fails current checks or adopts it for reply-flush retirement;
@@ -306,14 +365,22 @@ actor PersonalPeerRuntime {
             for (peer, session) in sessions {
                 guard !stopped, refreshID == generation else { return }
                 if !loaded.contains(where: { $0.binding == session.binding }) {
-                    if material?.retainedControlCredentials.contains(where: { $0.binding == session.binding }) == true {
+                    if material?.retainedControlCredentials.contains(where: { $0.binding == session.binding })
+                        == true
+                    {
                         sessions[peer] = nil
                         session.job?.cancel()
-                        rememberEnrollment(session.connection, binding: session.binding, purpose: .memberControl)
-                    } else { await remove(peer: peer, id: session.id) }
-                } else if session.controlOnly, (try? await coordinator.personalPeerValidate(session.binding)) != nil,
-                    var current = sessions[peer], current.id == session.id {
-                    current.controlOnly = false; sessions[peer] = current
+                        rememberEnrollment(
+                            session.connection, binding: session.binding, purpose: .memberControl)
+                    } else {
+                        await remove(peer: peer, id: session.id)
+                    }
+                } else if session.controlOnly,
+                    (try? await coordinator.personalPeerValidate(session.binding)) != nil,
+                    var current = sessions[peer], current.id == session.id
+                {
+                    current.controlOnly = false
+                    sessions[peer] = current
                 }
             }
             guard !stopped, refreshID == generation else { return }
@@ -322,9 +389,12 @@ actor PersonalPeerRuntime {
         } catch {
             guard refreshID == generation, !stopped else { return }
             lastErrorCode = (error as? TractandaError)?.code ?? "peerRuntimeUnavailable"
-            credentials = []; responder = nil
-            enrollmentMaterial = material; enrollmentErrorCode = materialError
-            let reserved = Array(reservations.values); reservations = [:]
+            credentials = []
+            responder = nil
+            enrollmentMaterial = material
+            enrollmentErrorCode = materialError
+            let reserved = Array(reservations.values)
+            reservations = [:]
             for (_, channel) in reserved { try? await channel.close().get() }
             for (peer, session) in sessions { await remove(peer: peer, id: session.id) }
             // Enrollment is independent of the ordinary item/index startup path.
@@ -333,21 +403,31 @@ actor PersonalPeerRuntime {
         }
     }
     private func retireWithdrawnEnrollment() {
-        let admitted = Set((enrollmentMaterial?.privatePeers.map { Self.enrollmentKey($0.binding) } ?? [])
-            + (enrollmentMaterial?.retainedControlCredentials.map { Self.enrollmentKey($0.binding) } ?? []))
+        let admitted = Set(
+            (enrollmentMaterial?.privatePeers.map { Self.enrollmentKey($0.binding) } ?? [])
+                + (enrollmentMaterial?.retainedControlCredentials.map { Self.enrollmentKey($0.binding) } ?? [])
+        )
         for (key, task) in enrollmentDials where !admitted.contains(key) { task.cancel() }
         for (key, session) in enrollmentSessions {
-            let retained = session.purpose == .memberControl
-                ? enrollmentMaterial?.retainedControlCredentials.contains(where: { $0.binding == session.binding }) == true
-                : enrollmentMaterial?.privatePeers.contains(where: { $0.binding == session.binding && $0.purpose == session.purpose }) == true
+            let retained =
+                session.purpose == .memberControl
+                ? enrollmentMaterial?.retainedControlCredentials.contains(where: {
+                    $0.binding == session.binding
+                }) == true
+                : enrollmentMaterial?.privatePeers.contains(where: {
+                    $0.binding == session.binding && $0.purpose == session.purpose
+                }) == true
             if !retained { _ = session.connection.closeAfterReplyFlush() }
             // Keep its capacity slot until the actual close callback reaps it.
             if !session.connection.isActive { enrollmentSessions[key] = nil }
         }
     }
-    private func rememberEnrollment(_ connection: PersonalPeerConnection, binding: PeerExchangeBinding,
-        purpose: PersonalEnrollmentTransportPurpose) {
-        let key = Self.enrollmentKey(binding), id = UUID()
+    private func rememberEnrollment(
+        _ connection: PersonalPeerConnection, binding: PeerExchangeBinding,
+        purpose: PersonalEnrollmentTransportPurpose
+    ) {
+        let key = Self.enrollmentKey(binding)
+        let id = UUID()
         if let old = enrollmentSessions[key], old.connection.isActive {
             guard old.connection !== connection else { return }
             let retiringID = UUID()
@@ -365,12 +445,19 @@ actor PersonalPeerRuntime {
         if enrollmentSessions[key]?.id == id { enrollmentSessions[key] = nil }
     }
     private func endpoints(for binding: PeerExchangeBinding) -> [PeerRuntimeConfiguration.Endpoint]? {
-        if let local = configuration.peers.first(where: { $0.alias == binding.peerID }) { return local.endpoints }
+        if let local = configuration.peers.first(where: { $0.alias == binding.peerID }) {
+            return local.endpoints
+        }
         if let routes = enrollmentMaterial?.routes, routes.configurationDigest == binding.configurationDigest,
-            let endpoints = routes.endpoints[binding.remoteReplicaID] { return endpoints.isEmpty ? nil : endpoints }
+            let endpoints = routes.endpoints[binding.remoteReplicaID]
+        {
+            return endpoints.isEmpty ? nil : endpoints
+        }
         return nil
     }
-    func endpointsForTesting(_ binding: PeerExchangeBinding) -> [PeerRuntimeConfiguration.Endpoint]? { endpoints(for: binding) }
+    func endpointsForTesting(_ binding: PeerExchangeBinding) -> [PeerRuntimeConfiguration.Endpoint]? {
+        endpoints(for: binding)
+    }
     func tick(now: Double = ProcessInfo.processInfo.systemUptime) {
         guard accepting, !stopped else { return }
         if refresh == nil, now >= nextRefresh {
@@ -382,7 +469,9 @@ actor PersonalPeerRuntime {
         }
         guard configuration.synchronization.enabled else { return }
         for (peer, session) in sessions
-        where !session.controlOnly && session.job == nil && session.nextPull <= now && !controlPending.contains(peer) {
+        where !session.controlOnly && session.job == nil && session.nextPull <= now
+            && !controlPending.contains(peer)
+        {
             if activeJobCount >= 2 { break }
             startPull(peer: peer)
         }
@@ -448,11 +537,16 @@ actor PersonalPeerRuntime {
                         // have consumed its key before this ready callback reaches the actor.
                         rememberEnrollment(connection, binding: binding, purpose: admission.1)
                         retireWithdrawnEnrollment()
-                    } else if (try? await coordinator.personalPeerValidate(binding, controlOnly: true)) == nil {
-                        guard admission?.0 == binding else { throw TractandaError("untrustedPeer", "Missing physical peer admission.") }
+                    } else if (try? await coordinator.personalPeerValidate(binding, controlOnly: true)) == nil
+                    {
+                        guard admission?.0 == binding else {
+                            throw TractandaError("untrustedPeer", "Missing physical peer admission.")
+                        }
                         rememberEnrollment(connection, binding: binding, purpose: .memberControl)
                         retireWithdrawnEnrollment()
-                    } else { try await adopt(connection, binding: binding, incoming: true) }
+                    } else {
+                        try await adopt(connection, binding: binding, incoming: true)
+                    }
                     readyAdmissions[ObjectIdentifier(channel)] = nil
                 } catch { try? await channel.close().get() }
                 handshaking[id] = nil
@@ -490,7 +584,8 @@ actor PersonalPeerRuntime {
             let id = UUID()
             sessions[peer] = Session(
                 id: id, binding: binding, connection: connection,
-                incoming: incoming, controlOnly: controlOnly, job: nil, pullID: nil, currentPull: nil, progressDelivery: nil, nextPull: 0)
+                incoming: incoming, controlOnly: controlOnly, job: nil, pullID: nil, currentPull: nil,
+                progressDelivery: nil, nextPull: 0)
             var observation = observations[peer, default: Observation()]
             observation.connectedAt = Self.eventTime()
             observations[peer] = observation
@@ -510,7 +605,8 @@ actor PersonalPeerRuntime {
     }
     private func startPull(peer: String) {
         guard var session = sessions[peer], !session.controlOnly, session.job == nil, !stopped,
-            !controlPending.contains(peer), !enrollmentFinalizing else { return }
+            !controlPending.contains(peer), !enrollmentFinalizing
+        else { return }
         let id = session.id
         let pullID = UUID()
         session.pullID = pullID
@@ -547,17 +643,24 @@ actor PersonalPeerRuntime {
         sessions[peer] = session
         pullJobs[id] = session.job
     }
-    private func recordProgress(_ progress: PersonalPullProgress, peer: String, sessionID: UUID, pullID: UUID) {
+    private func recordProgress(_ progress: PersonalPullProgress, peer: String, sessionID: UUID, pullID: UUID)
+    {
         guard var session = sessions[peer], session.id == sessionID, session.pullID == pullID,
-            session.job != nil else { return }
+            session.job != nil
+        else { return }
         session.currentPull = progress
         sessions[peer] = session
     }
-    func progressDeliveryForTesting(remoteReplicaID: String) -> (@Sendable (PersonalPullProgress) async -> Void)? {
+    func progressDeliveryForTesting(remoteReplicaID: String) -> (
+        @Sendable (PersonalPullProgress) async -> Void
+    )? {
         sessions.values.first { $0.binding.remoteReplicaID == remoteReplicaID }?.progressDelivery
     }
     private func finished(peer: String, id: UUID, result: Result<PersonalSyncReport?, Error>) async {
-        defer { pullJobs[id] = nil; resumePullWaiters(peer: peer, sessionID: id, error: stopped ? CancellationError() : nil) }
+        defer {
+            pullJobs[id] = nil
+            resumePullWaiters(peer: peer, sessionID: id, error: stopped ? CancellationError() : nil)
+        }
         guard !stopped, var session = sessions[peer], session.id == id else { return }
         // Retain the job slot while the cut callback suspends; otherwise a tick could
         // start another pull whose lifetime entry the old completion would then erase.
@@ -575,7 +678,9 @@ actor PersonalPeerRuntime {
             if let report {
                 reports[peer] = report
                 completedCuts[peer] = min(Int.max - 1, completedCuts[peer, default: 0]) + 1
-                if report.sourceCatalogueGeneration != nil, report.cutRowID != nil, let bridge = enrollmentBridge {
+                if report.sourceCatalogueGeneration != nil, report.cutRowID != nil,
+                    let bridge = enrollmentBridge
+                {
                     await bridge.completedCut(session.binding, report)
                     guard sessions[peer]?.id == id, !stopped else { return }
                 }
@@ -594,7 +699,10 @@ actor PersonalPeerRuntime {
             return
         }
         observations[peer] = observation
-        if var current = sessions[peer], current.id == id { current.job = nil; sessions[peer] = current }
+        if var current = sessions[peer], current.id == id {
+            current.job = nil
+            sessions[peer] = current
+        }
     }
     private func remove(peer: String, id: UUID) async {
         guard let session = sessions[peer], session.id == id else { return }
@@ -613,7 +721,8 @@ actor PersonalPeerRuntime {
         guard !stopped else { return }
         stopped = true
         accepting = false
-        let waiting = pullWaiters; pullWaiters = [:]
+        let waiting = pullWaiters
+        pullWaiters = [:]
         for waiter in waiting.values { waiter.continuation.resume(throwing: CancellationError()) }
         refresh?.cancel()
         let dials = Array(dialing.values)
@@ -652,13 +761,20 @@ actor PersonalPeerRuntime {
         readyAdmissions = [:]
         credentials = []
         responder = nil
-        enrollmentSessions = [:]; enrollmentDials = [:]; currentControlDials = [:]; enrollmentMaterial = nil; enrollmentBridge = nil
-        dialSlots = [:]; controlPending = []; retiringEnrollment = [:]
+        enrollmentSessions = [:]
+        enrollmentDials = [:]
+        currentControlDials = [:]
+        enrollmentMaterial = nil
+        enrollmentBridge = nil
+        dialSlots = [:]
+        controlPending = []
+        retiringEnrollment = [:]
         try? await resolver.close()
     }
     private func waitForPull(peer: String) async throws {
         guard let session = sessions[peer], session.job != nil else { return }
-        let waiterID = UUID(), sessionID = session.id
+        let waiterID = UUID()
+        let sessionID = session.id
         try await withTaskCancellationHandler {
             try Task.checkCancellation()
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -666,7 +782,9 @@ actor PersonalPeerRuntime {
                 if Task.isCancelled { cancelPullWaiter(waiterID) }
             }
             try Task.checkCancellation()
-        } onCancel: { Task { await self.cancelPullWaiter(waiterID) } }
+        } onCancel: {
+            Task { await self.cancelPullWaiter(waiterID) }
+        }
     }
     private func cancelPullWaiter(_ id: UUID) {
         pullWaiters.removeValue(forKey: id)?.continuation.resume(throwing: CancellationError())
@@ -677,14 +795,19 @@ actor PersonalPeerRuntime {
             if let error { waiter.continuation.resume(throwing: error) } else { waiter.continuation.resume() }
         }
     }
-    private func ensureCurrentConnection(remoteReplicaID: String, configurationDigest: String,
-        cancellation: PersonalEnrollmentRequestCancellation? = nil) async throws -> Session {
+    private func ensureCurrentConnection(
+        remoteReplicaID: String, configurationDigest: String,
+        cancellation: PersonalEnrollmentRequestCancellation? = nil
+    ) async throws -> Session {
         let key = remoteReplicaID + "|" + configurationDigest
         if let session = sessions[key], session.connection.isActive { return session }
-        guard let credential = credentials.first(where: {
-            $0.binding.remoteReplicaID == remoteReplicaID && $0.binding.configurationDigest == configurationDigest
-                && $0.binding.localIsInitiator
-        }), let routes = endpoints(for: credential.binding), !routes.isEmpty else {
+        guard
+            let credential = credentials.first(where: {
+                $0.binding.remoteReplicaID == remoteReplicaID
+                    && $0.binding.configurationDigest == configurationDigest
+                    && $0.binding.localIsInitiator
+            }), let routes = endpoints(for: credential.binding), !routes.isEmpty
+        else {
             throw TractandaError("membersOffline", "A required member has no current dial route.")
         }
         if let task = dialing[credential.binding.peerID + configurationDigest] {
@@ -694,13 +817,19 @@ actor PersonalPeerRuntime {
             if let session = sessions[key], session.connection.isActive { return session }
         }
         if let task = currentControlDials[key] {
-            cancellation?.add { task.cancel() }; return try await task.value
+            cancellation?.add { task.cancel() }
+            return try await task.value
         }
         let slot = try reserveDial(routes.count)
         let task = Task { [self] () async throws -> Session in
-            defer { dialSlots[slot] = nil; currentControlDials[key] = nil }
-            let connection = try await PersonalPeerConnector.connect(group: group, endpoints: routes,
-                pairing: PeerPairing(credential: credential), operations: operations(), resolver: resolver, limits: limits)
+            defer {
+                dialSlots[slot] = nil
+                currentControlDials[key] = nil
+            }
+            let connection = try await PersonalPeerConnector.connect(
+                group: group, endpoints: routes,
+                pairing: PeerPairing(credential: credential), operations: operations(), resolver: resolver,
+                limits: limits)
             do {
                 let binding = try await connection.ready.get()
                 try Task.checkCancellation()
@@ -709,22 +838,34 @@ actor PersonalPeerRuntime {
                     throw TractandaError("membersOffline", "The current peer connection was not admitted.")
                 }
                 return session
-            } catch { try? await connection.close().get(); throw error }
+            } catch {
+                try? await connection.close().get()
+                throw error
+            }
         }
         currentControlDials[key] = task
         cancellation?.add { task.cancel() }
         return try await task.value
     }
-    private func enrollmentConnection(binding: PeerExchangeBinding, purpose: PersonalEnrollmentTransportPurpose,
+    private func enrollmentConnection(
+        binding: PeerExchangeBinding, purpose: PersonalEnrollmentTransportPurpose,
         endpoints: [PeerRuntimeConfiguration.Endpoint], pairing: PeerPairing,
-        cancellation: PersonalEnrollmentRequestCancellation) async throws -> PersonalPeerConnection {
+        cancellation: PersonalEnrollmentRequestCancellation
+    ) async throws -> PersonalPeerConnection {
         let key = Self.enrollmentKey(binding)
         if let session = enrollmentSessions[key], session.connection.isActive { return session.connection }
-        if let task = enrollmentDials[key] { cancellation.add { task.cancel() }; return try await task.value }
+        if let task = enrollmentDials[key] {
+            cancellation.add { task.cancel() }
+            return try await task.value
+        }
         let slot = try reserveDial(endpoints.count)
         let task = Task { [self] () async throws -> PersonalPeerConnection in
-            defer { dialSlots[slot] = nil; enrollmentDials[key] = nil }
-            let connection = try await PersonalPeerConnector.connect(group: group, endpoints: endpoints,
+            defer {
+                dialSlots[slot] = nil
+                enrollmentDials[key] = nil
+            }
+            let connection = try await PersonalPeerConnector.connect(
+                group: group, endpoints: endpoints,
                 pairing: pairing, operations: operations(), resolver: resolver, limits: limits)
             do {
                 _ = try await connection.ready.get()
@@ -732,26 +873,39 @@ actor PersonalPeerRuntime {
                 try Task.checkCancellation()
                 rememberEnrollment(connection, binding: binding, purpose: purpose)
                 return enrollmentSessions[key]?.connection ?? connection
-            } catch { try? await connection.close().get(); throw error }
+            } catch {
+                try? await connection.close().get()
+                throw error
+            }
         }
         enrollmentDials[key] = task
         cancellation.add { task.cancel() }
         return try await task.value
     }
-    func controlRequest(remoteReplicaID: String, configurationDigest: String, request: PeerExchangeRequest) async throws -> Data {
+    func controlRequest(remoteReplicaID: String, configurationDigest: String, request: PeerExchangeRequest)
+        async throws -> Data
+    {
         let cancellation = PersonalEnrollmentRequestCancellation()
         return try await withTaskCancellationHandler {
-            try await controlRequest(remoteReplicaID: remoteReplicaID, configurationDigest: configurationDigest,
+            try await controlRequest(
+                remoteReplicaID: remoteReplicaID, configurationDigest: configurationDigest,
                 request: request, cancellation: cancellation)
-        } onCancel: { cancellation.cancel() }
+        } onCancel: {
+            cancellation.cancel()
+        }
     }
-    private func controlRequest(remoteReplicaID: String, configurationDigest: String, request: PeerExchangeRequest,
-        cancellation: PersonalEnrollmentRequestCancellation) async throws -> Data {
+    private func controlRequest(
+        remoteReplicaID: String, configurationDigest: String, request: PeerExchangeRequest,
+        cancellation: PersonalEnrollmentRequestCancellation
+    ) async throws -> Data {
         guard PersonalEnrollmentJMAP.permits(request.operation, purpose: .memberControl), !stopped else {
-            throw TractandaError("unsupportedPeerOperation", "Expected a restricted enrollment member method.")
+            throw TractandaError(
+                "unsupportedPeerOperation", "Expected a restricted enrollment member method.")
         }
         let peer = remoteReplicaID + "|" + configurationDigest
-        guard !controlPending.contains(peer) else { throw TractandaError("serviceBusy", "Enrollment control is already active.") }
+        guard !controlPending.contains(peer) else {
+            throw TractandaError("serviceBusy", "Enrollment control is already active.")
+        }
         controlPending.insert(peer)
         defer { controlPending.remove(peer) }
         // Every pull has a finite cut. Wait for it rather than colliding with its one
@@ -760,21 +914,34 @@ actor PersonalPeerRuntime {
         try Task.checkCancellation()
         let connection: PersonalPeerConnection
         let binding: PeerExchangeBinding
-        if credentials.contains(where: { $0.binding.remoteReplicaID == remoteReplicaID && $0.binding.configurationDigest == configurationDigest }) {
-            let session = try await ensureCurrentConnection(remoteReplicaID: remoteReplicaID, configurationDigest: configurationDigest, cancellation: cancellation)
-            connection = session.connection; binding = session.binding
+        if credentials.contains(where: {
+            $0.binding.remoteReplicaID == remoteReplicaID
+                && $0.binding.configurationDigest == configurationDigest
+        }) {
+            let session = try await ensureCurrentConnection(
+                remoteReplicaID: remoteReplicaID, configurationDigest: configurationDigest,
+                cancellation: cancellation)
+            connection = session.connection
+            binding = session.binding
         } else if let retained = enrollmentMaterial?.retainedControlCredentials.first(where: {
-            $0.binding.remoteReplicaID == remoteReplicaID && $0.binding.configurationDigest == configurationDigest && $0.binding.localIsInitiator
+            $0.binding.remoteReplicaID == remoteReplicaID
+                && $0.binding.configurationDigest == configurationDigest && $0.binding.localIsInitiator
         }), let endpoints = endpoints(for: retained.binding) {
             binding = retained.binding
             try await validateEnrollment(binding, purpose: .memberControl)
-            connection = try await enrollmentConnection(binding: binding, purpose: .memberControl,
+            connection = try await enrollmentConnection(
+                binding: binding, purpose: .memberControl,
                 endpoints: endpoints, pairing: PeerPairing(credential: retained), cancellation: cancellation)
         } else if let session = enrollmentSessions.values.first(where: {
             $0.purpose == .memberControl && $0.binding.remoteReplicaID == remoteReplicaID
                 && $0.binding.configurationDigest == configurationDigest && $0.connection.isActive
-        }) { binding = session.binding; connection = session.connection }
-        else { throw TractandaError("membersOffline", "No exact current or retained member control connection is available.") }
+        }) {
+            binding = session.binding
+            connection = session.connection
+        } else {
+            throw TractandaError(
+                "membersOffline", "No exact current or retained member control connection is available.")
+        }
         try await validateEnrollment(binding, purpose: .memberControl)
         cancellation.attach(connection)
         try Task.checkCancellation()
@@ -784,44 +951,67 @@ actor PersonalPeerRuntime {
         let cancellation = PersonalEnrollmentRequestCancellation()
         return try await withTaskCancellationHandler {
             try await privateRequest(binding: binding, request: request, cancellation: cancellation)
-        } onCancel: { cancellation.cancel() }
+        } onCancel: {
+            cancellation.cancel()
+        }
     }
-    func authenticateRenewalProbe(binding: PeerExchangeBinding) async throws -> PersonalEnrollmentAuthenticatedReady {
+    func authenticateRenewalProbe(binding: PeerExchangeBinding) async throws
+        -> PersonalEnrollmentAuthenticatedReady
+    {
         let cancellation = PersonalEnrollmentRequestCancellation()
         return try await withTaskCancellationHandler {
             guard let peer = enrollmentMaterial?.privatePeers.first(where: { $0.binding == binding }),
-                peer.purpose == .invitation, binding.localIsInitiator else {
+                peer.purpose == .invitation, binding.localIsInitiator
+            else {
                 throw TractandaError("untrustedPeer", "No exact never-claimed renewal probe is available.")
             }
             let key = Self.enrollmentKey(binding)
-            guard renewalProbeKeys.insert(key).inserted else { throw TractandaError("serviceBusy", "Renewal authentication is already active.") }
+            guard renewalProbeKeys.insert(key).inserted else {
+                throw TractandaError("serviceBusy", "Renewal authentication is already active.")
+            }
             defer { renewalProbeKeys.remove(key) }
-            if let pending = enrollmentDials[key] { pending.cancel(); _ = try? await pending.value }
-            if let cached = enrollmentSessions.removeValue(forKey: key) { try? await cached.connection.close().get() }
+            if let pending = enrollmentDials[key] {
+                pending.cancel()
+                _ = try? await pending.value
+            }
+            if let cached = enrollmentSessions.removeValue(forKey: key) {
+                try? await cached.connection.close().get()
+            }
             try await validateEnrollment(binding, purpose: .invitation)
-            let connection = try await enrollmentConnection(binding: binding, purpose: .invitation,
+            let connection = try await enrollmentConnection(
+                binding: binding, purpose: .invitation,
                 endpoints: peer.endpoints, pairing: PeerPairing(enrollment: peer), cancellation: cancellation)
             cancellation.attach(connection)
             let actual = try await connection.ready.get()
-            guard actual == binding, connection.isActive else { throw TractandaError("membersOffline", "Renewal authentication disconnected.") }
+            guard actual == binding, connection.isActive else {
+                throw TractandaError("membersOffline", "Renewal authentication disconnected.")
+            }
             try Task.checkCancellation()
             let control = PeerExchangeControl.commitCompletion()
             connection.closed.whenComplete { _ in control.cancel() }
             return PersonalEnrollmentAuthenticatedReady(binding: actual, control: control)
-        } onCancel: { cancellation.cancel() }
+        } onCancel: {
+            cancellation.cancel()
+        }
     }
     func cancelRenewalProbe(binding: PeerExchangeBinding) async {
         let key = Self.enrollmentKey(binding)
-        if let pending = enrollmentDials[key] { pending.cancel(); _ = try? await pending.value }
+        if let pending = enrollmentDials[key] {
+            pending.cancel()
+            _ = try? await pending.value
+        }
         if let session = enrollmentSessions[key], session.purpose == .invitation {
             enrollmentSessions.removeValue(forKey: key)
             try? await session.connection.close().get()
         }
     }
-    private func privateRequest(binding: PeerExchangeBinding, request: PeerExchangeRequest,
-        cancellation: PersonalEnrollmentRequestCancellation) async throws -> Data {
+    private func privateRequest(
+        binding: PeerExchangeBinding, request: PeerExchangeRequest,
+        cancellation: PersonalEnrollmentRequestCancellation
+    ) async throws -> Data {
         guard let peer = enrollmentMaterial?.privatePeers.first(where: { $0.binding == binding }),
-            PersonalEnrollmentJMAP.permits(request.operation, purpose: peer.purpose) else {
+            PersonalEnrollmentJMAP.permits(request.operation, purpose: peer.purpose)
+        else {
             throw TractandaError("untrustedPeer", "No exact private enrollment route is available.")
         }
         try await validateEnrollment(binding, purpose: peer.purpose)
@@ -830,76 +1020,110 @@ actor PersonalPeerRuntime {
             connection = accepted.connection
         } else {
             guard binding.localIsInitiator else {
-                throw TractandaError("membersOffline", "The target has not established its exact private connection.")
+                throw TractandaError(
+                    "membersOffline", "The target has not established its exact private connection.")
             }
-            connection = try await enrollmentConnection(binding: binding, purpose: peer.purpose,
+            connection = try await enrollmentConnection(
+                binding: binding, purpose: peer.purpose,
                 endpoints: peer.endpoints, pairing: PeerPairing(enrollment: peer), cancellation: cancellation)
         }
         cancellation.attach(connection)
         try Task.checkCancellation()
         return try await connection.request(request).get()
     }
-    func withEnrollmentFinalization(remoteReplicaID: String, configurationDigest: String,
-        action: @Sendable () async throws -> Void) async throws {
+    func withEnrollmentFinalization(
+        remoteReplicaID: String, configurationDigest: String,
+        action: @Sendable () async throws -> Void
+    ) async throws {
         let peer = remoteReplicaID + "|" + configurationDigest
         guard accepting, !stopped, !enrollmentFinalizing, !controlPending.contains(peer), activeJobCount == 0,
             sessions[peer]?.job == nil, observations[peer]?.outcome == .complete,
-            reports[peer]?.sourceCatalogueGeneration != nil, reports[peer]?.cutRowID != nil else {
-            throw TractandaError("baselineNotReady", "Actual transfer work must finish before baseline finalization.")
+            reports[peer]?.sourceCatalogueGeneration != nil, reports[peer]?.cutRowID != nil
+        else {
+            throw TractandaError(
+                "baselineNotReady", "Actual transfer work must finish before baseline finalization.")
         }
-        enrollmentFinalizing = true; controlPending.insert(peer)
-        defer { enrollmentFinalizing = false; controlPending.remove(peer) }
+        enrollmentFinalizing = true
+        controlPending.insert(peer)
+        defer {
+            enrollmentFinalizing = false
+            controlPending.remove(peer)
+        }
         try Task.checkCancellation()
         try await action()
     }
-    func commitEnrollment(preparation: PersonalMembershipPreparation,
-        authorization: PersonalEnrollmentMembershipAuthorization) async throws -> PersonalMembershipConfiguration {
+    func commitEnrollment(
+        preparation: PersonalMembershipPreparation,
+        authorization: PersonalEnrollmentMembershipAuthorization
+    ) async throws -> PersonalMembershipConfiguration {
         let cancellation = PersonalEnrollmentRequestCancellation()
         return try await withTaskCancellationHandler {
-            try await commitEnrollment(preparation: preparation, authorization: authorization, cancellation: cancellation)
-        } onCancel: { cancellation.cancel() }
+            try await commitEnrollment(
+                preparation: preparation, authorization: authorization, cancellation: cancellation)
+        } onCancel: {
+            cancellation.cancel()
+        }
     }
-    private func commitEnrollment(preparation: PersonalMembershipPreparation,
+    private func commitEnrollment(
+        preparation: PersonalMembershipPreparation,
         authorization: PersonalEnrollmentMembershipAuthorization,
-        cancellation: PersonalEnrollmentRequestCancellation) async throws -> PersonalMembershipConfiguration {
+        cancellation: PersonalEnrollmentRequestCancellation
+    ) async throws -> PersonalMembershipConfiguration {
         guard accepting, !stopped else { throw CancellationError() }
         let identity = try await coordinator.personalEnrollmentIdentity(authorization: authorization)
-        let capacity = try PersonalEnrollmentCapacity.preflight(current: authorization.plan.previousMembership,
+        let capacity = try PersonalEnrollmentCapacity.preflight(
+            current: authorization.plan.previousMembership,
             proposed: preparation.configuration, initiatingReplicaID: authorization.plan.issuerReplicaID,
             runtimeSocketLimit: 64, tlsContextLimit: 256, credentialRoleLimit: 512)
         let extra = max(0, capacity.maximumOverlappingSockets - sessions.count - enrollmentSessions.count)
         guard connectionSlots <= 64 - extra else {
-            throw TractandaError("enrollmentCapacityUnsupported", "Shared connection capacity is unavailable; membership was not changed.")
+            throw TractandaError(
+                "enrollmentCapacityUnsupported",
+                "Shared connection capacity is unavailable; membership was not changed.")
         }
-        let bytes = try JSON.encode(preparation), digest = try preparation.configuration.digest
+        let bytes = try JSON.encode(preparation)
+        let digest = try preparation.configuration.digest
         var acknowledgements: [PersonalMembershipOnlineAcknowledgement] = []
         if identity.membership != preparation.configuration {
             for replica in preparation.requiredOnlineReplicaIDs where replica != identity.replicaID {
                 let key = replica + "|" + digest
-                guard !controlPending.contains(key) else { throw TractandaError("serviceBusy", "A membership control call is active.") }
+                guard !controlPending.contains(key) else {
+                    throw TractandaError("serviceBusy", "A membership control call is active.")
+                }
                 controlPending.insert(key)
                 defer { controlPending.remove(key) }
                 try await waitForPull(peer: key)
-                let session = try await ensureCurrentConnection(remoteReplicaID: replica, configurationDigest: digest, cancellation: cancellation)
+                let session = try await ensureCurrentConnection(
+                    remoteReplicaID: replica, configurationDigest: digest, cancellation: cancellation)
                 cancellation.attach(session.connection)
                 try Task.checkCancellation()
-                let ready = try JSON.decode(PersonalMembershipReady.self, await session.connection.request(
-                    .init("personal.membership.ready", ["preparation": .bytes(bytes)])).get())
+                let ready = try JSON.decode(
+                    PersonalMembershipReady.self,
+                    await session.connection.request(
+                        .init("personal.membership.ready", ["preparation": .bytes(bytes)])
+                    ).get())
                 let presence = PeerExchangeControl.commitCompletion()
                 session.connection.closed.whenComplete { _ in presence.cancel() }
-                guard session.connection.isActive else { throw TractandaError("membersOffline", "A required member disconnected.") }
-                acknowledgements.append(try .init(binding: session.binding, response: ready, control: presence))
+                guard session.connection.isActive else {
+                    throw TractandaError("membersOffline", "A required member disconnected.")
+                }
+                acknowledgements.append(
+                    try .init(binding: session.binding, response: ready, control: presence))
             }
         }
         guard accepting, !stopped else { throw CancellationError() }
         try Task.checkCancellation()
-        let committed = try await coordinator.personalEnrollmentCommitMembership(preparation: preparation,
+        let committed = try await coordinator.personalEnrollmentCommitMembership(
+            preparation: preparation,
             acknowledgements: acknowledgements, authorization: authorization)
         await refreshNow()
         return committed
     }
     func enrollmentCountsForTesting() -> (sessions: Int, dials: Int, slots: Int, error: String?) {
-        (enrollmentSessions.count + retiringEnrollment.count, enrollmentDials.count, connectionSlots, enrollmentErrorCode)
+        (
+            enrollmentSessions.count + retiringEnrollment.count, enrollmentDials.count, connectionSlots,
+            enrollmentErrorCode
+        )
     }
 
     func admin(_ request: PeerExchangeRequest, forUID uid: UInt32) async throws -> Data {
@@ -1053,7 +1277,8 @@ actor PersonalPeerRuntime {
             listenerConfigured: configuration.listen != nil, responderPublished: responder != nil,
             incomingConnectionCount: sessions.values.filter(\.incoming).count,
             outgoingConnectionCount: sessions.values.filter { !$0.incoming }.count,
-            pendingConnectionCount: dialing.count + handshaking.count, lastErrorCode: lastErrorCode ?? enrollmentErrorCode,
+            pendingConnectionCount: dialing.count + handshaking.count,
+            lastErrorCode: lastErrorCode ?? enrollmentErrorCode,
             synchronization: .init(
                 state: stopped
                     ? .stopped

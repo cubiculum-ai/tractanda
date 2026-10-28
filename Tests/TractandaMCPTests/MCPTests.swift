@@ -145,8 +145,10 @@ final class MCPTests: XCTestCase {
     }
 
     func testCompactMutationReceiptsPassThroughOneAPIBoundaryUnchanged() async throws {
-        let methods = ["TractandaItem/commit", "TractandaItem/commitCapture",
-            "TractandaItem/resolveConflict", "TractandaLearning/feedback", "TractandaLearning/settings"]
+        let methods = [
+            "TractandaItem/commit", "TractandaItem/commitCapture",
+            "TractandaItem/resolveConflict", "TractandaLearning/feedback", "TractandaLearning/settings",
+        ]
         let receipt: Value = .object([
             "itemId": .string("11111111-1111-1111-8111-111111111111"),
             "revisionId": .string("22222222-2222-1222-8222-222222222222"),
@@ -156,9 +158,12 @@ final class MCPTests: XCTestCase {
         let gateway = NativeGateway(backend: { request in
             let envelope = try JSONDecoder().decode(Value.self, from: request)
             let call = envelope.objectValue!["methodCalls"]!.arrayValue![0].arrayValue!
-            XCTAssertTrue(envelope.objectValue!["using"]!.arrayValue!.contains(.string("urn:ietf:params:jmap:core")))
-            return try JSONEncoder().encode(Value.object([
-                "methodResponses": .array([.array([call[0], receipt, call[2]])])]))
+            XCTAssertTrue(
+                envelope.objectValue!["using"]!.arrayValue!.contains(.string("urn:ietf:params:jmap:core")))
+            return try JSONEncoder().encode(
+                Value.object([
+                    "methodResponses": .array([.array([call[0], receipt, call[2]])])
+                ]))
         })
         for method in methods {
             let data = try await gateway.call(method, arguments: [:])
@@ -178,8 +183,10 @@ final class MCPTests: XCTestCase {
             if method == "TractandaStore/info" {
                 result = ["features": [ServerFeature.revisionProjection.rawValue]]
             } else {
-                result = ["itemId": itemID, "revisionId": revisionID, "operationId": "resolve-op",
-                    "replayed": false, "indexReady": true, "diagnostics": []]
+                result = [
+                    "itemId": itemID, "revisionId": revisionID, "operationId": "resolve-op",
+                    "replayed": false, "indexReady": true, "diagnostics": [],
+                ]
 
             }
             return try JSONSerialization.data(withJSONObject: [
@@ -319,9 +326,13 @@ final class MCPTests: XCTestCase {
         XCTAssertNil(saved["revision"], "Mutation acknowledgement contains no full item")
         let itemID = try XCTUnwrap(saved["itemId"]?.stringValue)
         let savedRevisionID = try XCTUnwrap(saved["revisionId"]?.stringValue)
-        let fetched = try await gateway.call("TractandaRevision/get", arguments: [
-            "itemID": .string(itemID), "revisionID": .string(savedRevisionID)])
-        let fields = try JSONDecoder().decode(Value.self, from: fetched).objectValue!["revision"]!.objectValue!["fields"]!.objectValue!
+        let fetched = try await gateway.call(
+            "TractandaRevision/get",
+            arguments: [
+                "itemID": .string(itemID), "revisionID": .string(savedRevisionID),
+            ])
+        let fields = try JSONDecoder().decode(Value.self, from: fetched).objectValue!["revision"]!
+            .objectValue!["fields"]!.objectValue!
         XCTAssertEqual(fields["plannedDate"]?.objectValue?["value"]?.stringValue, "2026-03-29")
         _ = try store.commit(
             CommitRequest(

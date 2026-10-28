@@ -4,7 +4,10 @@ import TractandaCore
 /// At most one drainer task and one latest value per active pull. Publishing never waits for
 /// the runtime actor, throws into the driver, or creates an unbounded task/event queue.
 final class PersonalProgressMailbox: Sendable {
-    private struct State { var latest: PersonalPullProgress?; var draining = false }
+    private struct State {
+        var latest: PersonalPullProgress?
+        var draining = false
+    }
     private let state = Mutex(State())
     private let deliver: @Sendable (PersonalPullProgress) async -> Void
     init(deliver: @escaping @Sendable (PersonalPullProgress) async -> Void) { self.deliver = deliver }
@@ -19,7 +22,10 @@ final class PersonalProgressMailbox: Sendable {
     }
     private func drain() async {
         while let value = state.withLock({ state -> PersonalPullProgress? in
-            guard let next = state.latest else { state.draining = false; return nil }
+            guard let next = state.latest else {
+                state.draining = false
+                return nil
+            }
             state.latest = nil
             return next
         }) { await deliver(value) }

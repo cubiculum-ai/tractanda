@@ -98,7 +98,8 @@ func daemonConfiguration(from arguments: [String]) throws -> DaemonConfiguration
             "--document-no-progress-seconds", "--document-termination-grace-seconds",
             "--attachment-upload-idle-seconds", "--attachment-staged-byte-quota",
             "--attachment-minimum-free-bytes", "--rebuild-no-progress-seconds", "--peer-runtime-config",
-            "--public-jmap-config", "--model-provisioning-manifest", "--model-storage-directory", "--model-adoption-directory":
+            "--public-jmap-config", "--model-provisioning-manifest", "--model-storage-directory",
+            "--model-adoption-directory":
             guard index + 1 < arguments.count, !arguments[index + 1].hasPrefix("--") else {
                 throw TractandaError("usage", usage)
             }
@@ -158,11 +159,14 @@ func daemonConfiguration(from arguments: [String]) throws -> DaemonConfiguration
                 else { throw TractandaError("usage", usage) }
                 uploadStagedBytes = bytes
             case "--model-provisioning-manifest":
-                guard modelManifest == nil else { throw TractandaError("usage", usage) }; modelManifest = value
+                guard modelManifest == nil else { throw TractandaError("usage", usage) }
+                modelManifest = value
             case "--model-storage-directory":
-                guard modelStorage == nil else { throw TractandaError("usage", usage) }; modelStorage = value
+                guard modelStorage == nil else { throw TractandaError("usage", usage) }
+                modelStorage = value
             case "--model-adoption-directory":
-                guard modelAdoption == nil else { throw TractandaError("usage", usage) }; modelAdoption = value
+                guard modelAdoption == nil else { throw TractandaError("usage", usage) }
+                modelAdoption = value
             case "--public-jmap-config":
                 guard publicJMAP == nil else { throw TractandaError("usage", usage) }
                 publicJMAP = try PublicJMAPConfiguration.load(from: value)
@@ -179,13 +183,24 @@ func daemonConfiguration(from arguments: [String]) throws -> DaemonConfiguration
     }
     let documentValues = [documentExecutable, documentModel, documentScratch].compactMap { $0 }
     guard documentValues.isEmpty || documentValues.count == 3 else { throw TractandaError("usage", usage) }
-    guard (modelManifest == nil) == (modelStorage == nil), modelAdoption == nil || modelManifest != nil else { throw TractandaError("usage", usage) }
-    let provisioning = modelManifest.map { ModelProvisioningConfiguration(manifestPath: $0, storageDirectory: modelStorage!, adoptionDirectory: modelAdoption) }
-    let documentArtifact = try modelManifest.map { try ModelProvisioningCatalog.load($0).artifacts.first { $0.identifier == "granite-docling-258m-mlx" } } ?? nil
+    guard (modelManifest == nil) == (modelStorage == nil), modelAdoption == nil || modelManifest != nil else {
+        throw TractandaError("usage", usage)
+    }
+    let provisioning = modelManifest.map {
+        ModelProvisioningConfiguration(
+            manifestPath: $0, storageDirectory: modelStorage!, adoptionDirectory: modelAdoption)
+    }
+    let documentArtifact =
+        try modelManifest.map {
+            try ModelProvisioningCatalog.load($0).artifacts.first {
+                $0.identifier == "granite-docling-258m-mlx"
+            }
+        } ?? nil
     let converter = documentExecutable.map {
         DocumentConverterConfiguration(
             executablePath: $0, modelDirectory: documentModel!, scratchDirectory: documentScratch!,
-            modelArtifact: documentArtifact, modelStorageDirectory: documentArtifact == nil ? nil : modelStorage)
+            modelArtifact: documentArtifact,
+            modelStorageDirectory: documentArtifact == nil ? nil : modelStorage)
     }
     let documentResources: DocumentJobResources? =
         documentResourceValues.isEmpty
@@ -205,7 +220,8 @@ func daemonConfiguration(from arguments: [String]) throws -> DaemonConfiguration
         storePath: store, indexDirectory: indexDirectory, socketPath: socket, httpPort: port,
         managed: managed, viewItemID: view,
         projectRootID: projectRoot, statusRootID: statusRoot, initialProjectID: project,
-        documentConverter: converter, documentJobResources: documentResources, modelProvisioning: provisioning,
+        documentConverter: converter, documentJobResources: documentResources,
+        modelProvisioning: provisioning,
         attachmentUploadPolicy: AttachmentUploadPolicy(
             idleRetentionSeconds: uploadIdleSeconds ?? 3600,
             maximumStagedBytes: uploadStagedBytes ?? 8 * 1024 * 1024 * 1024,

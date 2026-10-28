@@ -10,12 +10,16 @@ package struct PersonalEnrollmentAdminDecision: Codable, Equatable, Sendable {
     package let configuration: PersonalMembershipConfiguration
     package let nonce: String
 
-    package static func issue(authorization: PersonalEnrollmentLocalAuthorization,
-        operationID: String, configuration: PersonalMembershipConfiguration, nonce: String) throws -> Self {
+    package static func issue(
+        authorization: PersonalEnrollmentLocalAuthorization,
+        operationID: String, configuration: PersonalMembershipConfiguration, nonce: String
+    ) throws -> Self {
         guard let current = authorization.identity.membership else {
-            throw TractandaError("membershipConflict", "Current-member delegation requires committed membership.")
+            throw TractandaError(
+                "membershipConflict", "Current-member delegation requires committed membership.")
         }
-        let decision = Self(operationID: operationID,
+        let decision = Self(
+            operationID: operationID,
             authorizingReplicaID: authorization.identity.replicaID,
             administrator: authorization.administrator, expectedMembershipDigest: try current.digest,
             configuration: configuration, nonce: nonce)
@@ -39,13 +43,19 @@ package struct PersonalEnrollmentAdminDecision: Codable, Equatable, Sendable {
     package static func decodeStrict(_ bytes: Data) throws -> Self {
         guard bytes.count <= 160 * 1024,
             let original = try JSONSerialization.jsonObject(with: bytes) as? [String: Any],
-            Set(original.keys) == ["operationID", "authorizingReplicaID", "administrator", "expectedMembershipDigest", "configuration", "nonce"] else {
+            Set(original.keys) == [
+                "operationID", "authorizingReplicaID", "administrator", "expectedMembershipDigest",
+                "configuration", "nonce",
+            ]
+        else {
             throw PersonalEnrollmentError.invalid()
         }
         let value = try JSON.decode(Self.self, bytes)
         try value.validate()
         let normalized = try JSONSerialization.jsonObject(with: JSON.encode(value)) as! [AnyHashable: Any]
-        guard NSDictionary(dictionary: original).isEqual(to: normalized) else { throw PersonalEnrollmentError.invalid() }
+        guard NSDictionary(dictionary: original).isEqual(to: normalized) else {
+            throw PersonalEnrollmentError.invalid()
+        }
         return value
     }
 }
@@ -58,12 +68,18 @@ package struct PersonalEnrollmentScopedAuthorization: Sendable {
     package let localUID: UInt32
     package let localName: String
     private let binding: PeerExchangeBinding
-    private init(decision: PersonalEnrollmentAdminDecision, account: AccountIdentity, binding: PeerExchangeBinding) {
-        self.decision = decision; localUID = account.uid; localName = account.name
+    private init(
+        decision: PersonalEnrollmentAdminDecision, account: AccountIdentity, binding: PeerExchangeBinding
+    ) {
+        self.decision = decision
+        localUID = account.uid
+        localName = account.name
         self.binding = binding
     }
-    package static func receive(store: ItemStore, binding: PeerExchangeBinding,
-        decision: PersonalEnrollmentAdminDecision) throws -> Self {
+    package static func receive(
+        store: ItemStore, binding: PeerExchangeBinding,
+        decision: PersonalEnrollmentAdminDecision
+    ) throws -> Self {
         try decision.validate()
         // This checks the existing current credential and canonical membership. A mere
         // invitation/prepared-only connection cannot construct an administrator witness.
@@ -88,8 +104,10 @@ package struct PersonalEnrollmentScopedAuthorization: Sendable {
             throw PersonalEnrollmentError.conflict()
         }
     }
-    package func require(configuration: PersonalMembershipConfiguration, nonce: String,
-        expectedDigest: String?, administrator: String) throws {
+    package func require(
+        configuration: PersonalMembershipConfiguration, nonce: String,
+        expectedDigest: String?, administrator: String
+    ) throws {
         guard decision.configuration == configuration, decision.nonce == nonce,
             decision.expectedMembershipDigest == expectedDigest,
             localName == administrator, localName == decision.administrator

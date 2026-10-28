@@ -62,15 +62,20 @@ final class SetupPeerRuntimeArgumentsTests: XCTestCase {
     }
     func testOutboundJoinActionRequiresExplicitInstallOrPlanAndExcludesOtherActions() throws {
         for command in ["install", "plan"] {
-            let parsed = try SetupPeerRuntimeArguments.parse([command, "--outbound-peer-sync", "--name", "production"])
+            let parsed = try SetupPeerRuntimeArguments.parse([
+                command, "--outbound-peer-sync", "--name", "production",
+            ])
             XCTAssertEqual(parsed.action, .outboundOnly)
             XCTAssertEqual(parsed.remainingArguments, [command, "--name", "production"])
         }
         for command in ["upgrade", "status", "start", "stop"] {
             XCTAssertThrowsError(try SetupPeerRuntimeArguments.parse([command, "--outbound-peer-sync"]))
         }
-        XCTAssertThrowsError(try SetupPeerRuntimeArguments.parse(["install", "--outbound-peer-sync", "--disable-peer-runtime"]))
-        XCTAssertThrowsError(try SetupPeerRuntimeArguments.parse(["install", "--outbound-peer-sync", "--outbound-peer-sync"]))
+        XCTAssertThrowsError(
+            try SetupPeerRuntimeArguments.parse(["install", "--outbound-peer-sync", "--disable-peer-runtime"])
+        )
+        XCTAssertThrowsError(
+            try SetupPeerRuntimeArguments.parse(["install", "--outbound-peer-sync", "--outbound-peer-sync"]))
     }
 
 }
