@@ -472,6 +472,34 @@ def require_unpublished_ci_repair(state):
             'liveManifestSHA256': expected}
 
 
+def require_public_ci_repair(state):
+    """Repair a pushed v3 candidate only after terminal CI failure, before any publication/update."""
+    required = set(PUBLIC_STEPS[:PUBLIC_STEPS.index('ci')])
+    if (not delivery.public(state) or state.get('status') != 'failed' or state.get('activeStep') != 'ci'
+            or set(state.get('steps', {})) != required):
+        raise RuntimeError('Only terminal pre-publication CI failure permits public candidate revision.')
+    runner = read(CONTROL / 'runner.json')
+    pid = runner.get('pid')
+    if (runner.get('version') != state['version'] or runner.get('status') != 'failed'
+            or not isinstance(runner.get('stoppedAt'), str) or type(pid) is not int or pid <= 0):
+        raise RuntimeError('Public candidate runner termination is unproven.')
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        pass
+    except OSError as error:
+        raise RuntimeError('Public candidate runner presence is uncertain.') from error
+    else:
+        raise RuntimeError('Public candidate runner remains present.')
+    runs = json.loads(command(['gh', 'run', 'list', '--repo', state['configuration']['repository'],
+        '--workflow', 'verify.yml', '--commit', state['commit'], '--event', 'push',
+        '--json', 'databaseId,status,conclusion,headSha']))
+    if (not runs or runs[0].get('headSha') != state['commit'] or runs[0].get('status') != 'completed'
+            or runs[0].get('conclusion') != 'failure'):
+        raise RuntimeError('A terminal CI failure for this public source commit is unproven.')
+    return {**require_unpublished_version(state), 'failedCI': runs[0], 'gate': 'public-pre-update-ci'}
+
+
 def require_unpublished_cluster_repair(state):
     """Permit explicit repair at the unaccepted cluster gate, without changing live state."""
     required = {'verify', 'release-build', 'bundle', 'package', 'notarization',
@@ -650,8 +678,9 @@ def revise(state, notes):
         raise RuntimeError('This candidate has been published; prepare a separate release after resolving it.')
     cluster_repair = (require_unpublished_cluster_repair(state)
                       if state.get('status') == 'paused' and state.get('activeStep') == 'cluster-acceptance' else None)
-    repair_proof = cluster_repair or (require_unpublished_ci_repair(state)
-                   if any(name in state['steps'] for name in ('install', 'push')) else None)
+    repair_proof = (require_public_ci_repair(state) if delivery.public(state) and 'push' in state['steps']
+                    else cluster_repair or (require_unpublished_ci_repair(state)
+                    if any(name in state['steps'] for name in ('install', 'push')) else None))
     current = Path(state['configuration']['softwareRoot']) / 'current/bundle-manifest.json'
     if not repair_proof and current.exists() and read(current).get('version') == state['version']:
         repair_proof = (require_unpublished_cluster_descendant_repair(state)

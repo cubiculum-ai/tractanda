@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """The authorized public sequence publishes and verifies before any live update."""
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -40,6 +41,24 @@ class PublicReleaseTests(unittest.TestCase):
                             'steps': {}, 'delivery': R.delivery.public_fresh()})
             with self.assertRaisesRegex(RuntimeError, 'Published source'):
                 p.verify_published_package()
+
+    def test_source_ci_repair_needs_terminal_failure_absence_and_closed_runner(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            control = Path(temporary)
+            (control / 'runner.json').write_text(json.dumps({'version': '0.1.0-poc.16', 'pid': 123,
+                                                           'status': 'failed', 'stoppedAt': 'now'}))
+            state = {'version': '0.1.0-poc.16', 'commit': 'a' * 40, 'status': 'failed', 'activeStep': 'ci',
+                     'configuration': {'repository': 'owner/repo'}, 'delivery': R.delivery.public_fresh(),
+                     'steps': {s: {} for s in R.PUBLIC_STEPS[:R.PUBLIC_STEPS.index('ci')]}}
+            failed = [{'headSha': 'a' * 40, 'status': 'completed', 'conclusion': 'failure'}]
+            with patch.object(R, 'CONTROL', control), patch.object(R.os, 'kill', side_effect=ProcessLookupError), \
+                    patch.object(R, 'command', return_value=json.dumps(failed)), \
+                    patch.object(R, 'require_unpublished_version', return_value={'remoteReleaseAbsent': True}) as absent:
+                self.assertEqual(R.require_public_ci_repair(state)['gate'], 'public-pre-update-ci')
+                absent.assert_called_once_with(state)
+                state['steps']['publish'] = {}
+                with self.assertRaisesRegex(RuntimeError, 'pre-publication'):
+                    R.require_public_ci_repair(state)
 
 
 if __name__ == '__main__': unittest.main(verbosity=2)
