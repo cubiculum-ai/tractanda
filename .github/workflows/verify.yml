@@ -1,0 +1,40 @@
+name: Verify source
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    # The source suite contains slow native Swift tests on shared CI hardware.
+    # This remains finite and may still be limited by the CI provider.
+    timeout-minutes: 360
+    # Official Swift 6.4.0 Debian 13 (Trixie) multiarch image; supports amd64 and arm64/v8.
+    container:
+      image: docker.io/library/swift@sha256:c90a484cbd45ff768e05bfdb2a73c4cc8978de0d940d8eb2cf68fcede6bad8f8
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install platform and test dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends libsqlite3-dev libpam0g-dev uuid-dev python3 acl gnupg
+      - name: Verify the published source tree
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          python3 scripts/audit-release.py --staged
+          swift --version
+          useradd --uid 2000 --user-group --create-home --shell /bin/sh tractanda-ci
+          chown -R tractanda-ci:tractanda-ci "$GITHUB_WORKSPACE"
+          runuser -u tractanda-ci -- env TRACTANDA_UUID_NODE=00:00:00:00:00:01 \
+            sh -c 'cd "$1" && sh scripts/test.sh' sh "$GITHUB_WORKSPACE"

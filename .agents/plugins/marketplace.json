@@ -1,0 +1,20 @@
+{
+  "name": "tractanda",
+  "interface": {
+    "displayName": "Tractanda"
+  },
+  "plugins": [
+    {
+      "name": "tractanda",
+      "source": {
+        "source": "local",
+        "path": "./plugins/tractanda"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

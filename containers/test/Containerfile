@@ -1,0 +1,5 @@
+# Official Swift 6.4.0 Debian 13 (Trixie) multiarch image; supports amd64 and arm64/v8.
+FROM docker.io/library/swift@sha256:c90a484cbd45ff768e05bfdb2a73c4cc8978de0d940d8eb2cf68fcede6bad8f8
+# Independent wire clients and a kernel POSIX ACL comparison fixture.
+RUN apt-get update && apt-get install -y --no-install-recommends python3 acl libsqlite3-dev libpam0g-dev uuid-dev \
+    && rm -rf /var/lib/apt/lists/*
