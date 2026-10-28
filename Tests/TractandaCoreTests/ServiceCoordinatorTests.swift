@@ -215,6 +215,14 @@ final class ServiceCoordinatorTests: XCTestCase {
             }
             await coordinator.close()
             accounts.groups.removeValue(forKey: "operators")
+            let profile = root.appendingPathComponent(PersonalWorkgroupProfile.name)
+            let unchanged = try Data(contentsOf: profile)
+            XCTAssertThrowsError(try ItemStore.openInitialized(root: root, accounts: accounts)) {
+                XCTAssertEqual(($0 as? TractandaError)?.code, "unresolvedPrincipal")
+            }
+            XCTAssertEqual(try Data(contentsOf: profile), unchanged)
+            // Restore the fixture's local namespace before exercising root's policy repair.
+            accounts.groups["operators"] = 71_002
             let repair = try ItemStore.openInitialized(root: root, accounts: accounts)
             try repair.withAccess(forUID: 0) {
                 try repair.configurePersonalAccess(systemConfiguration(administratorGroup: "staff"))

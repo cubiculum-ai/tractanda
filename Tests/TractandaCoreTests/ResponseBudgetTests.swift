@@ -136,7 +136,9 @@ final class ResponseBudgetTests: XCTestCase {
             })
         XCTAssertEqual(results.last?[0] as? String, "error")
         let failure = try XCTUnwrap(results.last?[1] as? [String: Any])
-        XCTAssertEqual(failure["type"] as? String, "responseTooLarge")
+        // Aggregate kernel overflow uses the common read-only serverFail contract;
+        // per-method record-size failures retain their separate responseTooLarge checks.
+        XCTAssertEqual(failure["type"] as? String, "serverFail")
         XCTAssertNil(failure["total"])
         XCTAssertNil(failure["list"])
         XCTAssertLessThanOrEqual(
