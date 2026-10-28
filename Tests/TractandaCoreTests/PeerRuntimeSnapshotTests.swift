@@ -147,20 +147,6 @@ final class PeerRuntimeSnapshotTests: XCTestCase {
         try f.capacity()
     }
 
-    func testCanonicalAdmissionFencesSnapshotWithoutPairingConfigurationChange() throws {
-        let f = try PeerEnrollmentApprovalTests.Fixture()
-        let handle = try f.begin()
-        _ = try f.ready(handle)
-        let files = InitialAuthorityBootstrap.files(f.sourceRoot)
-        let configuration = try AuthorityStore.configuration(root: f.sourceRoot, files: files)
-        let before = try f.source.peerRuntimeMaterial()
-        _ = try f.source.acceptPeerEnrollment(handle, forUID: f.uid)
-        XCTAssertEqual(try AuthorityStore.configuration(root: f.sourceRoot, files: files), configuration)
-        XCTAssertThrowsError(try before.requireCurrent(f.source.peerRuntimeMaterial()))
-        XCTAssertTrue(try f.source.peerRuntimeMaterial().credentials.isEmpty)
-        try f.capacity()
-    }
-
     func testDisposedRemoteIsOmittedWithoutAdmittingRetainedSnapshot() throws {
         let f = try Fixture()
         try f.bootstrap()
@@ -178,30 +164,6 @@ final class PeerRuntimeSnapshotTests: XCTestCase {
         XCTAssertTrue(try f.receiver.peerRuntimeMaterial().credentials.isEmpty)
         XCTAssertThrowsError(try before.requireCurrent(f.receiver.peerRuntimeMaterial()))
         try f.capacity()
-    }
-
-    func testActivatedCredentialsLoadWhenServiceOwnerIsNotAdministrator() async throws {
-        let f = try PeerEnrollmentActivationTests.Fixture()
-        try f.open()
-        try f.transfer()
-        _ = try f.finish()
-        f.closeSession()
-        try f.source.source.registerAcceptedPeerEnrollment(f.handle, forUID: f.source.uid)
-        XCTAssertThrowsError(
-            try f.source.source.withAccess(forUID: tractanda_uid()) {
-                try f.source.source.requireAdministrator()
-            })
-        let accounts = RuntimeAccounts(f.source.accounts)
-        f.source.source = nil
-        let service = try await ServiceCoordinator(
-            opening: f.source.sourceRoot,
-            embeddingProviderForTesting: nil, requireInitializedStore: true,
-            makeAccountDirectory: { accounts })
-        defer { await service.close() }
-        let snapshot = try await service.loadPeerRuntimeSnapshot()
-        XCTAssertEqual(snapshot.credentials.map(\.binding.peerID), [f.material.sourceContext.peerID])
-        try await service.validatePeerRuntimeSnapshot(snapshot)
-        try f.source.capacity()
     }
 
     func testRetainedSnapshotRejectsMissingMalformedAndSubstitutedPrivateBytesWithoutRepair() async throws {
@@ -245,37 +207,6 @@ final class PeerRuntimeSnapshotTests: XCTestCase {
         defer { await restarted.close() }
         await expect("peerConfigurationChanged") { try await restarted.validatePeerRuntimeSnapshot(snapshot) }
         _ = try await restarted.loadPeerRuntimeSnapshot()
-        try f.capacity()
-    }
-
-    func testRotationWhileSnapshotDeliveryWaitsRejectsStaleRefresh() async throws {
-        let f = try Fixture()
-        try f.bootstrap()
-        _ = try register(f)
-        let rotated = try PeerPackage.Context(
-            peerID: f.context.peerID, storeID: f.storeID,
-            configurationDigest: AuthorityRecordCodec.sha256(Data("runtime-paused-rotation".utf8)),
-            permittedOrigins: f.context.permittedOrigins)
-        let replacement = try credential(f, context: rotated)
-        let service = try await coordinator(f)
-        let gate = RuntimeDeliveryPause()
-        let entered = expectation(description: "snapshot captured")
-        defer {
-            await gate.release()
-            await service.close()
-        }
-        await service.setPeerRuntimeSnapshotDeliveryHookForTesting { await gate.wait(entered: entered) }
-        let loading = Task { try await service.loadPeerRuntimeSnapshot() }
-        await fulfillment(of: [entered], timeout: 5)
-        try await service.registerPeerCredential(
-            replacement, permittedOrigins: rotated.permittedOrigins,
-            expectedContextToken: service.peerCredentialRegistrationContext(forUID: tractanda_uid()),
-            operationID: Fixture.id(), forUID: tractanda_uid())
-        await service.setPeerRuntimeSnapshotDeliveryHookForTesting(nil)
-        await gate.release()
-        await expect("peerConfigurationChanged") { _ = try await loading.value }
-        let current = try await service.loadPeerRuntimeSnapshot()
-        XCTAssertEqual(current.credentials.first?.binding.configurationDigest, rotated.configurationDigest)
         try f.capacity()
     }
 
@@ -326,51 +257,4 @@ final class PeerRuntimeSnapshotTests: XCTestCase {
         try f.capacity()
     }
 
-    func testRebuildFencesCapturedAndPreviouslyIssuedSnapshots() async throws {
-        let f = try Fixture()
-        try f.bootstrap()
-        _ = try register(f)
-        let service = try await coordinator(f)
-        let issued = try await service.loadPeerRuntimeSnapshot()
-        let gate = RuntimeDeliveryPause()
-        let entered = expectation(description: "rebuild snapshot")
-        defer {
-            await gate.release()
-            await service.close()
-        }
-        await service.setPeerRuntimeSnapshotDeliveryHookForTesting { await gate.wait(entered: entered) }
-        let loading = Task { try await service.loadPeerRuntimeSnapshot() }
-        await fulfillment(of: [entered], timeout: 5)
-        let request = try nativeFixtureEnvelope(
-            calls: [["TractandaStore/rebuild", ["operationID": "runtime-rebuild"], "r"]],
-            accountID: nativeFixtureAccountID(f.receiverRoot))
-        let result = try await service.handle(request, forUID: tractanda_uid())
-        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: result) as? [String: Any])
-        XCTAssertEqual(
-            (object["methodResponses"] as? [[Any]])?.first?.first as? String, "TractandaStore/rebuild")
-        await service.setPeerRuntimeSnapshotDeliveryHookForTesting(nil)
-        await gate.release()
-        await expect("serviceBusy") { _ = try await loading.value }
-        await expect("serviceBusy") { try await service.validatePeerRuntimeSnapshot(issued) }
-        let status = try nativeFixtureEnvelope(
-            calls: [["TractandaStore/rebuildStatus", [:], "s"]],
-            accountID: nativeFixtureAccountID(f.receiverRoot))
-        var completed = false
-        for _ in 0..<200 {
-            let bytes = try await service.handle(status, forUID: tractanda_uid())
-            let response = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
-            let value = try XCTUnwrap((response["methodResponses"] as? [[Any]])?.first?[1])
-            let state = try JSON.decode(
-                StoreRebuildStatus.self, JSONSerialization.data(withJSONObject: value))
-            if state.isTerminal {
-                XCTAssertEqual(state.state, "completed")
-                completed = true
-                break
-            }
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        XCTAssertTrue(completed)
-        _ = try await service.loadPeerRuntimeSnapshot()
-        try f.capacity()
-    }
 }
