@@ -12,6 +12,14 @@ R = importlib.util.module_from_spec(spec); spec.loader.exec_module(R)
 
 
 class PublicReleaseTests(unittest.TestCase):
+    def test_push_uses_the_checkout_owning_the_sealed_commit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            p = R.Pipeline({'directory': temporary, 'configuration': {'branch': 'main'},
+                            'version': '0.1.0-poc.16', 'commit': 'a' * 40, 'steps': {}})
+            with patch.object(p, 'run_command') as run:
+                p.push()
+            run.assert_called_once_with('push', ['git', 'push', 'origin', 'a' * 40 + ':refs/heads/main'], p.source)
+
     def test_publication_and_source_pages_verification_precede_install(self):
         with tempfile.TemporaryDirectory() as temporary:
             state = {'directory': temporary, 'configuration': {}, 'version': '0.1.0-poc.16',

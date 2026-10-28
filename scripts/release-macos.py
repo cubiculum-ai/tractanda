@@ -970,7 +970,7 @@ class Pipeline:
                 'release': str(release.resolve()), 'semantic': semantic}
 
     def push(self):
-        self.run_command('push', ['git', 'push', 'origin', self.state['commit'] + ':refs/heads/' + self.settings['branch']], ROOT)
+        self.run_command('push', ['git', 'push', 'origin', self.state['commit'] + ':refs/heads/' + self.settings['branch']], self.source)
 
     def ci(self):
         runs = json.loads(command(['gh', 'run', 'list', '--repo', self.settings['repository'],
