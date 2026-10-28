@@ -672,9 +672,7 @@ final class DocumentJobCoordinatorTests: XCTestCase {
                 ])
             _ = try ItemStore.initializeFresh(
                 root: storeURL, accounts: selectedAccounts, initialAccessConfiguration: initialAccess)
-            let store = try ItemStore(
-                root: storeURL, accounts: selectedAccounts,
-                revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            let store = try ItemStore.openInitialized(root: storeURL, accounts: selectedAccounts)
             try store.setAttachmentReserveForTesting(10 * 1024 * 1024 * 1024)
             let item = try store.commit(CommitRequest(classID: "Item", operationID: "item")).revision
             let bytes = Data([1, 2, 3])
@@ -847,8 +845,7 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         let calls = try String(contentsOf: fixture.root.appendingPathComponent("page-calls"), encoding: .utf8)
         let changedID: String
         do {
-            let store = try ItemStore(
-                root: fixture.store, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            let store = try ItemStore.openInitialized(root: fixture.store)
             let changed = try store.commit(
                 CommitRequest(
                     action: .revise, itemID: fixture.request.itemID,
@@ -879,8 +876,7 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         XCTAssertEqual(
             try String(contentsOf: fixture.root.appendingPathComponent("page-calls"), encoding: .utf8), calls)
         do {
-            let store = try ItemStore(
-                root: fixture.store, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            let store = try ItemStore.openInitialized(root: fixture.store)
             let saved = try store.get(fixture.request.itemID)
             XCTAssertEqual(saved.fields["subject"], .text("fresh rebase field"))
             XCTAssertEqual(
@@ -907,8 +903,7 @@ final class DocumentJobCoordinatorTests: XCTestCase {
             opening: fixture.store, embeddingProviderForTesting: nil, requireInitializedStore: true,
             documentRuntimeVerifierForTesting: { _ in }, documentConverter: fixture.configuration)
         await second.close()
-        let store = try ItemStore(
-            root: fixture.store, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+        let store = try ItemStore.openInitialized(root: fixture.store)
         XCTAssertTrue(try store.documentJobStatus(admitted.jobID).discarded)
         let index = try ItemIndex(
             path: store.indexDirectory.appendingPathComponent("items.sqlite").path, create: false)
@@ -987,8 +982,7 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         let fixture = try fixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let id: String = try {
-            let store = try ItemStore(
-                root: fixture.store, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            let store = try ItemStore.openInitialized(root: fixture.store)
             let runtime = try XCTUnwrap(
                 ItemService(store: store, documentConverter: fixture.configuration).documentJobRuntime())
             return try store.startDocumentJob(
@@ -1035,8 +1029,7 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         }
         await first.close()
         let paused: DocumentJobStatus = try {
-            let store = try ItemStore(
-                root: fixture.store, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            let store = try ItemStore.openInitialized(root: fixture.store)
             return try store.documentJobStatus(admitted.jobID)
         }()
         XCTAssertEqual(paused.state, "paused")
@@ -1083,8 +1076,7 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         let page = try await client.documentJobPage(paused.jobID, pageNumber: 1)
         XCTAssertEqual(page.outcome.status, "timeout")
         await coordinator.close()
-        let reopened = try ItemStore(
-            root: fixture.store, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+        let reopened = try ItemStore.openInitialized(root: fixture.store)
         let persisted = try reopened.documentJobStatus(paused.jobID)
         XCTAssertEqual(persisted.reasonMessage, paused.reasonMessage)
         let recordPath = fixture.store.appendingPathComponent("document-jobs/\(paused.jobID)/record.json")
@@ -1170,8 +1162,7 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         }
         XCTAssertEqual(resumed.acceptedPages, 3)
         await coordinator.close()
-        let reopened = try ItemStore(
-            root: fixture.store, revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+        let reopened = try ItemStore.openInitialized(root: fixture.store)
         XCTAssertEqual(try reopened.documentJobStatus(admitted.jobID).state, "completed")
         XCTAssertEqual(try reopened.documentJobStatus(admitted.jobID).acceptedPages, 3)
     }
@@ -1294,9 +1285,7 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         let fixture = try fixture(pages: 1, accounts: accounts)
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let request: DocumentJobStart = try {
-            let store = try ItemStore(
-                root: fixture.store, accounts: accounts,
-                revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            let store = try ItemStore.openInitialized(root: fixture.store, accounts: accounts)
             let shared = try store.commit(
                 CommitRequest(
                     action: .revise, itemID: fixture.request.itemID,
@@ -1335,9 +1324,7 @@ final class DocumentJobCoordinatorTests: XCTestCase {
             XCTAssertEqual((error as? TractandaClient.TractandaError)?.code, "forbidden")
         }
         await coordinator.close()
-        let store = try ItemStore(
-            root: fixture.store, accounts: accounts,
-            revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+        let store = try ItemStore.openInitialized(root: fixture.store, accounts: accounts)
         XCTAssertNil(try store.get(request.itemID).fields["attachmentDocument"])
         XCTAssertEqual(try store.get(request.itemID).revisionID, request.expectedRevisionID)
     }
@@ -1347,9 +1334,7 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         let fixture = try fixture(delay: 0.05, accounts: accounts)
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let request: DocumentJobStart = try {
-            let store = try ItemStore(
-                root: fixture.store, accounts: accounts,
-                revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            let store = try ItemStore.openInitialized(root: fixture.store, accounts: accounts)
             let shared = try store.commit(
                 CommitRequest(
                     action: .revise, itemID: fixture.request.itemID,

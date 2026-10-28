@@ -43,9 +43,8 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
         if !FileManager.default.fileExists(atPath: root.path) {
             _ = try ItemStore.initializeFresh(root: root, accounts: accounts)
         }
-        return try ItemStore(
-            root: root, accounts: accounts, attachmentUploadPolicy: policy,
-            revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+        return try ItemStore.openInitialized(
+            root: root, accounts: accounts, attachmentUploadPolicy: policy)
     }
     private func intent(_ revision: Revision, bytes: Data, count: Int64? = nil) -> AttachmentUploadRequest {
         AttachmentUploadRequest(

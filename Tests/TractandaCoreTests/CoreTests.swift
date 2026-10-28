@@ -740,7 +740,7 @@ final class CoreTests: XCTestCase {
         let service = ItemService(store: store)
         func envelope(_ calls: [[Any]], uid: UInt32? = nil) throws -> [String: Any] {
             let data = try nativeFixtureEnvelope(
-                calls: [String: Any], accountID: store.nativeProtocolSessionBasis.identity)
+                calls: calls, accountID: store.nativeProtocolSessionBasis.identity)
             return try JSONSerialization.jsonObject(
                 with: service.handle(data, peerUID: uid ?? store.ownerUID)) as! [String: Any]
         }

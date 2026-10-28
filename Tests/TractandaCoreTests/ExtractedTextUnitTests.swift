@@ -51,10 +51,9 @@ final class ExtractedTextUnitTests: XCTestCase, @unchecked Sendable {
             _ = try ItemStore.initializeFresh(
                 root: root, accounts: accounts, initialAccessConfiguration: initialAccessConfiguration)
         }
-        return try ItemStore(
+        return try ItemStore.openInitialized(
             root: root, accounts: accounts,
-            attachmentUploadPolicy: .init(maximumStagedBytes: cap, minimumFreeBytes: reserve),
-            revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            attachmentUploadPolicy: .init(maximumStagedBytes: cap, minimumFreeBytes: reserve))
     }
     private func source(_ root: URL, text: String = "held source") throws -> Revision {
         let store = try makeStore(root)

@@ -137,10 +137,11 @@ final class ProjectionServiceTests: XCTestCase {
         let ids = [missing, base.itemID, other.itemID]
         let get = try call(
             service, "TractandaItem/getBounded", ["ids": ids, "maxBytes": 8192, "projection": "summary"])
-        let items = try JSONDecoder().decode(
-            [JMAPItemRecord].self, from: JSONSerialization.data(withJSONObject: get["list"]!))
+        let encodedItems = try JSONSerialization.data(withJSONObject: get["list"]!)
+        let items: [TractandaClient.JMAPItemRecord] = try JSONDecoder().decode(
+            [TractandaClient.JMAPItemRecord].self, from: encodedItems)
         XCTAssertEqual(items.count, 2)
-        XCTAssertEqual(items.filter { $0.fields != nil }.map(\.id), [other.itemID])
+        XCTAssertEqual(items.filter { $0.fields != nil }.map { $0.id }, [other.itemID])
         let unresolved = try XCTUnwrap(items.first { $0.id == base.itemID })
         XCTAssertEqual(unresolved.resolution?.status, .conflicted)
         XCTAssertNil(unresolved.fields)
@@ -176,10 +177,11 @@ final class ProjectionServiceTests: XCTestCase {
         let response = try XCTUnwrap(
             service.finishPooledGet(prepared, records: records, peerUID: tractanda_uid()))
         let result = try payload(response).1
-        let items = try JSONDecoder().decode(
-            [JMAPItemRecord].self, from: JSONSerialization.data(withJSONObject: result["list"]!))
+        let encodedItems = try JSONSerialization.data(withJSONObject: result["list"]!)
+        let items: [TractandaClient.JMAPItemRecord] = try JSONDecoder().decode(
+            [TractandaClient.JMAPItemRecord].self, from: encodedItems)
         XCTAssertEqual(items.count, 2)
-        XCTAssertEqual(items.filter { $0.fields != nil }.map(\.id), [other.itemID])
+        XCTAssertEqual(items.filter { $0.fields != nil }.map { $0.id }, [other.itemID])
         let unresolved = try XCTUnwrap(items.first { $0.id == base.itemID })
         XCTAssertEqual(unresolved.resolution?.status, .conflicted)
         XCTAssertNil(unresolved.fields)

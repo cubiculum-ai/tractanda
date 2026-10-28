@@ -35,10 +35,9 @@ final class DocumentContentIntegrationTests: XCTestCase, @unchecked Sendable {
     }
     private func freshStore(_ root: URL) throws -> ItemStore {
         _ = try ItemStore.initializeFresh(root: root)
-        let store = try ItemStore(
+        let store = try ItemStore.openInitialized(
             root: root,
-            attachmentUploadPolicy: .init(minimumFreeBytes: AttachmentFixtureCapacity.reserveBytes),
-            revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            attachmentUploadPolicy: .init(minimumFreeBytes: AttachmentFixtureCapacity.reserveBytes))
         try store.setAttachmentReserveForTesting(AttachmentFixtureCapacity.reserveBytes)
         return store
     }
