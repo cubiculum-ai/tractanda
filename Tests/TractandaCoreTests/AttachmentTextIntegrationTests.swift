@@ -1,6 +1,5 @@
 import CSQLite
 import Crypto
-import TractandaClient
 import TractandaVectors
 import XCTest
 
@@ -244,7 +243,7 @@ final class AttachmentTextIntegrationTests: XCTestCase {
         XCTAssertLessThan(response.count, 8_192)
         let object = try JSONSerialization.jsonObject(with: response) as! [String: Any]
         let encoded = try JSONSerialization.data(withJSONObject: object["list"]!)
-        let list = try JSONDecoder().decode([TractandaClient.JMAPItemRecord].self, from: encoded)
+        let list = try JSONDecoder().decode([TractandaCore.JMAPItemRecord].self, from: encoded)
         XCTAssertEqual(list.count, 1)
         XCTAssertEqual(list[0].id, saved.itemID)
         XCTAssertNil(list[0].fields?["attachmentText"])
