@@ -196,458 +196,109 @@ final class NativePeerEnrollmentSupervisorTests: XCTestCase {
             }
         }
     }
-    func testActualNativeSourceAndFixedHelperTransferRegisterAndExactRetry() async throws {
-        var phase = "fixture"
-        do {
-            let f = try Fixture(test: name)
-            let daemon = try await SharedDaemon.startForTesting(
-                configuration: .init(
-                    storePath: f.sourceRoot.path,
-                    socketPath: f.connection.socketPath, httpPort: nil),
-                makeAccountDirectory: { SystemAccountDirectory() })
-            defer { await daemon.close() }
-            let connection = f.connection
-            let operation = f.operation
-            let input = f.input
-            let pin = f.pin
-            let target = f.targetRoot
-            let children = Children()
-            let transientFinish = Mutex(0)
-            var hooks = children.hooks(helper: try f.helper())
-            hooks.reply = { operation, data in
-                if operation == "finished",
-                    let reply = try? JSON.decode(PeerTargetEnrollment.Reply.self, data),
-                    reply.code == "peerPayloadVerifying"
-                {
-                    transientFinish.withLock { $0 += 1 }
+
+    /// Exercises the current opaque private request boundary without a legacy authority store,
+    /// activation record, SSH helper, or mock enrollment authorization.
+    func testCurrentPersonalPrivateClientRefusesWrongKernelUIDAndUnsupportedReadyBeforeBody() async throws {
+        try PeerFixtureCapacity.requireFree()
+        let root = try GuardedFixtureDirectory.create(
+            prefix: "np", source: "NativePeerEnrollmentSupervisorTests", test: name, socket: "s")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let accounts = SystemAccountDirectory()
+        let actualUser = try accounts.user(forUID: tractanda_uid()).name
+        let wrongUser = tractanda_uid() == 0 ? "daemon" : "root"
+        XCTAssertNotEqual(try accounts.user(named: wrongUser).uid, tractanda_uid())
+        let request = try JMAPValue.object([
+            .init("using", .array([.string(NativePersonalEnrollment.capability)])),
+            .init(
+                "methodCalls",
+                .array([
+                    JMAPInvocation(
+                        name: "TractandaEnrollmentLocal/join",
+                        arguments: .object([.init("code", .string("synthetic-private-invitation"))]),
+                        callID: "privacy"
+                    ).value
+                ])),
+        ]).encoded()
+        for unsupportedReady in [false, true] {
+            let path = root.appendingPathComponent(unsupportedReady ? "r" : "u").path
+            let listener = tractanda_listen(path)
+            guard listener >= 0 else { throw TractandaError("fixtureSocket", "Listen failed") }
+            defer { tractanda_close(listener) }
+            let server = Task.detached { () throws -> (Data?, Data) in
+                // Fixture-only bound: a broken test must not leave a task blocked in accept/read.
+                try Self.socketReadable(listener)
+                let fd = tractanda_accept(listener)
+                guard fd >= 0 else { throw TractandaError("fixtureSocket", "Accept failed") }
+                defer { tractanda_close(fd) }
+                var begin: Data?
+                if unsupportedReady {
+                    let header = try Self.socketBytes(fd, maximum: 4)
+                    guard header.count == 4 else {
+                        throw TractandaError("fixtureSocket", "Missing marked begin header")
+                    }
+                    let marked = header.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+                    let count = Int(marked & 0x7fff_ffff)
+                    guard marked & 0x8000_0000 != 0, (1...4096).contains(count) else {
+                        throw TractandaError("fixtureSocket", "Invalid begin frame bound")
+                    }
+                    let bytes = try Self.socketBytes(fd, maximum: count)
+                    guard bytes.count == count else {
+                        throw TractandaError("fixtureSocket", "Incomplete begin frame")
+                    }
+                    begin = bytes
+                    let reply = NativePersonalEnrollment.ready + Data("/unsupported".utf8)
+                    let deadline = tractanda_private_io_begin(fd)
+                    guard
+                        reply.withUnsafeBytes({
+                            tractanda_private_send_frame(fd, $0.baseAddress, UInt32($0.count), deadline)
+                        }) == 0
+                    else {
+                        throw TractandaError("fixtureSocket", "READY fixture send failed")
+                    }
                 }
-                return data
+                // EOF must precede even the first byte of a request-body frame (or BEGIN on UID error).
+                return (begin, try Self.socketBytes(fd, maximum: 1))
             }
-            let stable = hooks
-            for iteration in 0..<2 {
-                phase = iteration == 0 ? "run1" : "run2"
-                let result = try await Task.detached {
-                    try PeerEnrollmentSupervisor.run(
-                        connection: connection, operationID: operation, input: input,
-                        targetRoot: target.path, pin: pin, custody: .current, seconds: 60,
-                        cancelled: { false }, hooks: stable)
-                }.value
-                XCTAssertTrue(String(decoding: result, as: UTF8.self).contains("registered"))
-                try Fixture.capacity(f.root)
+            let connection = ServerConnection(
+                socketPath: path, serverUser: unsupportedReady ? actualUser : wrongUser)
+            let client = await Task.detached { () -> String? in
+                do {
+                    _ = try NativePersonalEnrollment.call(connection: connection, request: request)
+                    return nil
+                } catch { return (error as? TractandaError)?.code ?? "untyped" }
+            }.value
+            // Await every owned task before leaving the fixture, including when an assertion fails.
+            let (begin, leaked) = try await server.value
+            XCTAssertEqual(client, unsupportedReady ? "privateEnrollmentUnavailable" : "forbidden")
+            XCTAssertTrue(leaked.isEmpty, "Untrusted private endpoint received request bytes")
+            if unsupportedReady {
+                let header = try NativePersonalEnrollment.Begin.parse(XCTUnwrap(begin))
+                XCTAssertEqual(header.byteCount, request.count)
+            } else {
+                XCTAssertNil(begin)
             }
-            children.assertClosed()
-            XCTAssertGreaterThan(transientFinish.withLock { $0 }, 0)
-            phase = "targetOpen"
-            let targetStore = try ItemStore.openInitialized(root: target, accounts: SystemAccountDirectory())
-            phase = "targetGet"
-            let current = try targetStore.withAccess(forUID: tractanda_uid()) {
-                try targetStore.get(f.itemID)
-            }
-            XCTAssertEqual(current.fields["subject"], .text("local supervisor"))
-            phase = "documentManifest"
-            let saved = try XCTUnwrap(
-                AttachmentDocumentRepresentation.representations(in: current.fields).first)
-            let reference = try XCTUnwrap(saved.content)
-            let manifest = try DocumentContentStore(
-                root: target, ownerUID: tractanda_uid(),
-                minimumFreeBytes: Int64(PeerFixtureCapacity.reserveBytes)
-            ).manifest(reference)
-            XCTAssertEqual(manifest.pageCount, 17)
-            phase = "attachmentRead"
-            let attachment = try XCTUnwrap(AttachmentDescriptor.descriptors(in: current.fields).first)
-            let data = try targetStore.withAccess(forUID: tractanda_uid()) {
-                let first = try targetStore.attachmentContent(
-                    itemID: f.itemID, attachmentID: attachment.attachmentID)
-                let last = try targetStore.attachmentContent(
-                    itemID: f.itemID, attachmentID: attachment.attachmentID, offset: first.nextOffset)
-                XCTAssertTrue(last.isComplete)
-                return first.data + last.data
-            }
-            XCTAssertEqual(data, Data(repeating: 0x71, count: 300 * 1024))
-            XCTAssertEqual(AuthorityRecordCodec.sha256(data), attachment.sha256)
-            try Fixture.capacity(f.root)
-            phase = "sourceReadonlyStatus"
-            let status = try await Task.detached {
-                try NativePeerEnrollment.call(connection: connection, action: .status, operationID: operation)
-            }.value
-            // Existing read-only status describes the accepted enrollment decision, even after registration.
-            XCTAssertEqual(try JSON.decode(PeerEnrollmentOperatorStatus.self, status).phase, "accepted")
-            phase = "registrationWitness"
-            let files = InitialAuthorityBootstrap.files(f.sourceRoot)
-            let record = try input.withBytes { try PeerEnrollmentTargetOutput.decode($0).0 }
-            let registered = try JSON.decode(
-                AuthorityBinding.self,
-                files.read(
-                    path: [PeerEnrollmentActivation.sourceDirectory, operation, "registered.json"],
-                    maximumBytes: 4096))
-            let commit = try JSON.decode(
-                PeerEnrollmentActivation.ConfigurationCommit.self,
-                files.read(
-                    path: [PeerEnrollmentActivation.sourceDirectory, operation, "configuration.json"],
-                    maximumBytes: PeerEnrollmentActivation.maximumBytes))
-            XCTAssertEqual(registered, record.pin.approval)
-            XCTAssertEqual(commit.approval, registered)
-            XCTAssertTrue(commit.after.peers.contains(record.sourceContext))
-            XCTAssertEqual(
-                try files.read(
-                    path: [".peer-configuration", String(format: "%020llu.json", commit.sequence)],
-                    maximumBytes: PeerEnrollmentActivation.maximumBytes), try JSON.encode(commit.after))
-            XCTAssertEqual(try AuthorityStore.configurationSequence(root: f.sourceRoot), commit.sequence)
-        } catch {
-            let code = (error as? TractandaError)?.code ?? "untyped"
-            let safeCode =
-                code.utf8.count <= 64
-                    && code.utf8.allSatisfy({
-                        (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0)
-                    }) ? code : "unclassified"
-            print(
-                "B1-BOUNDARY phase=\(phase) type=\(String(reflecting: type(of: error))) code=\(safeCode) parentCancelled=\(Task.isCancelled)"
-            )
-            throw error
         }
     }
-    func testLostClosedAfterFinishedSkipsRegistrationThenExactRetryCompletes() async throws {
-        let f = try Fixture(test: name)
-        let daemon = try await SharedDaemon.startForTesting(
-            configuration: .init(
-                storePath: f.sourceRoot.path,
-                socketPath: f.connection.socketPath, httpPort: nil),
-            makeAccountDirectory: { SystemAccountDirectory() })
-        defer { await daemon.close() }
-        let connection = f.connection
-        let operation = f.operation
-        let input = f.input
-        let pin = f.pin
-        let target = f.targetRoot
-        let children = Children()
-        let registrations = Mutex(0)
-        var hooks = children.hooks(helper: try f.helper())
-        hooks.reply = { operation, data in
-            if operation == "closed" { return Data("lost reply".utf8) }
-            return data
-        }
-        hooks.beforeRegister = { registrations.withLock { $0 += 1 } }
-        let damaged = hooks
-        do {
-            _ = try await Task.detached {
-                try PeerEnrollmentSupervisor.run(
-                    connection: connection, operationID: operation,
-                    input: input, targetRoot: target.path, pin: pin, custody: .current, seconds: 60,
-                    cancelled: { false }, hooks: damaged)
-            }.value
-            XCTFail("Injected CLOSED loss must not register")
-        } catch { XCTAssertEqual((error as? TractandaError)?.code, "targetCustodyUncertain") }
-        XCTAssertEqual(registrations.withLock { $0 }, 0)
-        let status = try await Task.detached {
-            try NativePeerEnrollment.call(connection: connection, action: .status, operationID: operation)
-        }.value
-        XCTAssertEqual(try JSON.decode(PeerEnrollmentOperatorStatus.self, status).phase, "accepted")
-        try ItemStore.requireInitializedRoot(target)
-        let exact = children.hooks(helper: try f.helper())
-        _ = try await Task.detached {
-            try PeerEnrollmentSupervisor.run(
-                connection: connection, operationID: operation,
-                input: input, targetRoot: target.path, pin: pin, custody: .current, seconds: 60,
-                cancelled: { false }, hooks: exact)
-        }.value
-        children.assertClosed()
-        try Fixture.capacity(f.root)
-    }
-    func testRepeatedExactTransientStopsOnCancellationDrainsChildAndNeverRegisters() async throws {
-        let f = try Fixture(test: name)
-        let daemon = try await SharedDaemon.startForTesting(
-            configuration: .init(
-                storePath: f.sourceRoot.path,
-                socketPath: f.connection.socketPath, httpPort: nil),
-            makeAccountDirectory: { SystemAccountDirectory() })
-        defer { await daemon.close() }
-        let connection = f.connection
-        let operation = f.operation
-        let input = f.input
-        let pin = f.pin
-        let target = f.targetRoot
-        let children = Children()
-        let transients = Mutex(0)
-        let registration = Mutex(0)
-        var hooks = children.hooks(helper: try f.helper())
-        hooks.reply = { operation, data in
-            guard operation == "finished" else { return data }
-            transients.withLock { $0 += 1 }
-            var reply = PeerTargetEnrollment.Reply("error")
-            reply.code = "peerPayloadVerifying"
-            return try JSON.encode(reply)  // Controlled no-progress wire fault, not a stalled-Core claim.
-        }
-        hooks.beforeRegister = { registration.withLock { $0 += 1 } }
-        let stable = hooks
-        let started = DispatchTime.now().uptimeNanoseconds
-        do {
-            _ = try await Task.detached {
-                try PeerEnrollmentSupervisor.run(
-                    connection: connection, operationID: operation,
-                    input: input, targetRoot: target.path, pin: pin, custody: .current, seconds: 30,
-                    cancelled: { transients.withLock { $0 >= 3 } }, hooks: stable)
-            }.value
-            XCTFail("Repeated transient must stop at cancellation")
-        } catch { XCTAssertEqual((error as? TractandaError)?.code, "cancelled") }
-        XCTAssertEqual(transients.withLock { $0 }, 3)
-        XCTAssertEqual(registration.withLock { $0 }, 0)
-        XCTAssertLessThan(DispatchTime.now().uptimeNanoseconds - started, 35_000_000_000)
-        children.assertClosed()
-        let lock = tractanda_lock(target.appendingPathComponent(".writer.lock").path)
-        XCTAssertGreaterThanOrEqual(lock, 0)
-        if lock >= 0 { tractanda_unlock(lock) }
-        let status = try await Task.detached {
-            try NativePeerEnrollment.call(connection: connection, action: .status, operationID: operation)
-        }.value
-        XCTAssertEqual(try JSON.decode(PeerEnrollmentOperatorStatus.self, status).phase, "accepted")
-        try Fixture.capacity(f.root)
-    }
-    func testWrongSourceKernelIdentityAndOldReadyRefuseBeforePrivateInput() async throws {
-        let f = try Fixture(test: name)
-        let daemon = try await SharedDaemon.startForTesting(
-            configuration: .init(
-                storePath: f.sourceRoot.path,
-                socketPath: f.connection.socketPath, httpPort: nil),
-            makeAccountDirectory: { SystemAccountDirectory() })
-        defer { await daemon.close() }
-        let operation = f.operation
-        let input = f.input
-        let pin = f.pin
-        let target = f.targetRoot
-        let sent = Mutex(0)
-        let children = Children()
-        var hooks = children.hooks(helper: try f.helper())
-        hooks.didSendPrivateInput = { sent.withLock { $0 += 1 } }
-        let wrong = ServerConnection(socketPath: f.connection.socketPath, serverUser: "root")
-        let unchanged = hooks
-        do {
-            _ = try await Task.detached {
-                try PeerEnrollmentSupervisor.run(
-                    connection: wrong, operationID: operation,
-                    input: input, targetRoot: target.path, pin: pin, custody: .current, seconds: 2,
-                    cancelled: { false }, hooks: unchanged)
-            }.value
-            XCTFail("Wrong kernel daemon UID")
-        } catch {
-            XCTAssertEqual((error as? TractandaError)?.code, "forbidden")
-            XCTAssertEqual(sent.withLock { $0 }, 0)
-        }
-        XCTAssertTrue(children.state.withLock { $0.isEmpty })
-        hooks.reply = { operation, data in
-            operation == "ready"
-                ? Data(
-                    String(decoding: data, as: UTF8.self).replacingOccurrences(of: ".v2", with: ".v1").utf8)
-                : data
-        }
-        let old = hooks
-        let connection = f.connection
-        do {
-            _ = try await Task.detached {
-                try PeerEnrollmentSupervisor.run(
-                    connection: connection, operationID: operation,
-                    input: input, targetRoot: target.path, pin: pin, custody: .current, seconds: 2,
-                    cancelled: { false }, hooks: old)
-            }.value
-            XCTFail("Old helper must be refused")
-        } catch { XCTAssertEqual((error as? TractandaError)?.code, "invalidHelperReply") }
-        XCTAssertEqual(sent.withLock { $0 }, 0)
-        children.assertClosed()
-        XCTAssertFalse(FileManager.default.fileExists(atPath: target.appendingPathComponent("index").path))
-        XCTAssertThrowsError(try ItemStore.requireInitializedRoot(target)) {
-            XCTAssertEqual(($0 as? TractandaError)?.code, "enrollmentPending")
-        }
-        try Fixture.capacity(f.root)
-    }
-    func testSimulatedSSHQuotedCommandActualHelperTransferAndExactRetry() async throws {
-        let f = try Fixture(test: name, targetName: "target '雪';$(touch injected)`id`")
-        let daemon = try await SharedDaemon.startForTesting(
-            configuration: .init(
-                storePath: f.sourceRoot.path,
-                socketPath: f.connection.socketPath, httpPort: nil),
-            makeAccountDirectory: { SystemAccountDirectory() })
-        defer { await daemon.close() }
-        let connection = f.connection
-        let operation = f.operation
-        let input = f.input
-        let pin = f.pin
-        let target = f.targetRoot
-        let destination = try PeerEnrollmentSSHDestination(
-            host: "simulated.example", login: "remote-login", platform: .linux)
-        let children = Children()
-        let registrations = Mutex(0)
-        var hooks = children.hooks(helper: try f.helper())
-        hooks.sshClient = try Self.simulatedSSH(f)
-        hooks.beforeRegister = { registrations.withLock { $0 += 1 } }
-        let stable = hooks
-        for _ in 0..<2 {
-            let result = try await Task.detached {
-                try PeerEnrollmentSupervisor.run(
-                    connection: connection, operationID: operation,
-                    input: input, targetRoot: target.path, pin: pin, custody: .current, ssh: destination,
-                    seconds: 60, cancelled: { false }, hooks: stable)
-            }.value
-            XCTAssertTrue(String(decoding: result, as: UTF8.self).contains("registered"))
-            try Fixture.capacity(f.root)
-        }
-        XCTAssertEqual(registrations.withLock { $0 }, 2)
-        children.assertClosed()
-        let store = try ItemStore.openInitialized(root: target, accounts: SystemAccountDirectory())
-        XCTAssertEqual(
-            try store.withAccess(forUID: tractanda_uid()) { try store.get(f.itemID) }.fields["subject"],
-            .text("local supervisor"))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: f.root.appendingPathComponent("injected").path))
-    }
-    func testSimulatedSSHExit255AndOldReadyNeverSendPrivateInputOrRegister() async throws {
-        let f = try Fixture(test: name)
-        let daemon = try await SharedDaemon.startForTesting(
-            configuration: .init(
-                storePath: f.sourceRoot.path,
-                socketPath: f.connection.socketPath, httpPort: nil),
-            makeAccountDirectory: { SystemAccountDirectory() })
-        defer { await daemon.close() }
-        let connection = f.connection
-        let operation = f.operation
-        let input = f.input
-        let pin = f.pin
-        let target = f.targetRoot
-        let destination = try PeerEnrollmentSSHDestination(
-            host: "simulated.example", login: "remote", platform: .macOS)
-        let children = Children()
-        let privateInputs = Mutex(0)
-        let registrations = Mutex(0)
-        // Exit 255 simulates SSH refusing host trust or an unsupported KEX before READY.
-        // It does not establish an actual host-key or algorithm negotiation result.
-        for oldReady in [false, true] {
-            var hooks = children.hooks(helper: try f.helper())
-            hooks.sshClient = try Self.simulatedSSH(f, failure: oldReady ? nil : "255")
-            hooks.didSendPrivateInput = { privateInputs.withLock { $0 += 1 } }
-            hooks.beforeRegister = { registrations.withLock { $0 += 1 } }
-            if oldReady {
-                hooks.reply = { operation, data in
-                    operation == "ready"
-                        ? Data(
-                            String(decoding: data, as: UTF8.self).replacingOccurrences(of: ".v2", with: ".v1")
-                                .utf8) : data
-                }
-            }
-            let stable = hooks
-            do {
-                _ = try await Task.detached {
-                    try PeerEnrollmentSupervisor.run(
-                        connection: connection, operationID: operation,
-                        input: input, targetRoot: target.path, pin: pin, custody: .current, ssh: destination,
-                        seconds: 5, cancelled: { false }, hooks: stable)
-                }.value
-                XCTFail("A simulated remote refusal must stop before secrets")
-            } catch { XCTAssertEqual((error as? TractandaError)?.code, "targetCustodyUncertain") }
-        }
-        XCTAssertEqual(privateInputs.withLock { $0 }, 0)
-        XCTAssertEqual(registrations.withLock { $0 }, 0)
-        children.assertClosed()
-        try Fixture.capacity(f.root)
-        XCTAssertThrowsError(try ItemStore.requireInitializedRoot(target)) {
-            XCTAssertEqual(($0 as? TractandaError)?.code, "enrollmentPending")
+
+    private static func socketReadable(_ fd: Int32) throws {
+        var event = pollfd(fd: fd, events: Int16(POLLIN | POLLHUP), revents: 0)
+        guard poll(&event, 1, 5_000) > 0 else {
+            throw TractandaError("fixtureSocket", "Socket fixture did not become readable")
         }
     }
-    func testSimulatedSSHLostClosedAndExitAfterClosedSkipRegistrationUntilExactRetry() async throws {
-        let f = try Fixture(test: name)
-        let daemon = try await SharedDaemon.startForTesting(
-            configuration: .init(
-                storePath: f.sourceRoot.path,
-                socketPath: f.connection.socketPath, httpPort: nil),
-            makeAccountDirectory: { SystemAccountDirectory() })
-        defer { await daemon.close() }
-        let connection = f.connection
-        let operation = f.operation
-        let input = f.input
-        let pin = f.pin
-        let target = f.targetRoot
-        let destination = try PeerEnrollmentSSHDestination(
-            host: "simulated.example", login: "remote", platform: .linux)
-        let children = Children()
-        let registrations = Mutex(0)
-        for loseClosed in [true, false] {
-            var hooks = children.hooks(helper: try f.helper())
-            hooks.sshClient = try Self.simulatedSSH(f, exitAfterHelper: !loseClosed)
-            hooks.beforeRegister = { registrations.withLock { $0 += 1 } }
-            if loseClosed {
-                hooks.reply = { operation, data in operation == "closed" ? Data("lost CLOSED".utf8) : data }
-            }
-            let stable = hooks
-            do {
-                _ = try await Task.detached {
-                    try PeerEnrollmentSupervisor.run(
-                        connection: connection, operationID: operation,
-                        input: input, targetRoot: target.path, pin: pin, custody: .current, ssh: destination,
-                        seconds: 60, cancelled: { false }, hooks: stable)
-                }.value
-                XCTFail("CLOSED and successful local SSH reap must both precede registration")
-            } catch { XCTAssertEqual((error as? TractandaError)?.code, "targetCustodyUncertain") }
-            XCTAssertEqual(registrations.withLock { $0 }, 0)
-            try Fixture.capacity(f.root)
+
+    private static func socketBytes(_ fd: Int32, maximum: Int) throws -> Data {
+        var result = Data()
+        while result.count < maximum {
+            try socketReadable(fd)
+            var bytes = [UInt8](repeating: 0, count: maximum - result.count)
+            let count = recv(fd, &bytes, bytes.count, 0)
+            if count == 0 { break }
+            guard count > 0 else { throw TractandaError("fixtureSocket", "Socket fixture read failed") }
+            result.append(contentsOf: bytes.prefix(count))
         }
-        var hooks = children.hooks(helper: try f.helper())
-        hooks.sshClient = try Self.simulatedSSH(f)
-        hooks.beforeRegister = { registrations.withLock { $0 += 1 } }
-        let stable = hooks
-        _ = try await Task.detached {
-            try PeerEnrollmentSupervisor.run(
-                connection: connection, operationID: operation,
-                input: input, targetRoot: target.path, pin: pin, custody: .current, ssh: destination,
-                seconds: 60, cancelled: { false }, hooks: stable)
-        }.value
-        XCTAssertEqual(registrations.withLock { $0 }, 1)
-        children.assertClosed()
-        try Fixture.capacity(f.root)
-    }
-    func testSimulatedSSHCancelledTransferReportsRemoteUncertaintyAndReapsOnlyLocalClient() async throws {
-        let f = try Fixture(test: name)
-        let daemon = try await SharedDaemon.startForTesting(
-            configuration: .init(
-                storePath: f.sourceRoot.path,
-                socketPath: f.connection.socketPath, httpPort: nil),
-            makeAccountDirectory: { SystemAccountDirectory() })
-        defer { await daemon.close() }
-        let connection = f.connection
-        let operation = f.operation
-        let input = f.input
-        let pin = f.pin
-        let target = f.targetRoot
-        let destination = try PeerEnrollmentSSHDestination(
-            host: "simulated.example", login: "remote", platform: .macOS)
-        let children = Children()
-        let transients = Mutex(0)
-        let registrations = Mutex(0)
-        var hooks = children.hooks(helper: try f.helper())
-        hooks.sshClient = try Self.simulatedSSH(f)
-        hooks.beforeRegister = { registrations.withLock { $0 += 1 } }
-        hooks.reply = { operation, data in
-            guard operation == "finished" else { return data }
-            transients.withLock { $0 += 1 }
-            var reply = PeerTargetEnrollment.Reply("error")
-            reply.code = "peerPayloadVerifying"
-            return try JSON.encode(reply)
-        }
-        let stable = hooks
-        let start = DispatchTime.now().uptimeNanoseconds
-        do {
-            _ = try await Task.detached {
-                try PeerEnrollmentSupervisor.run(
-                    connection: connection, operationID: operation,
-                    input: input, targetRoot: target.path, pin: pin, custody: .current, ssh: destination,
-                    seconds: 30, cancelled: { transients.withLock { $0 >= 3 } }, hooks: stable)
-            }.value
-            XCTFail("Cancellation must stop remote work")
-        } catch { XCTAssertEqual((error as? TractandaError)?.code, "targetCustodyUncertain") }
-        XCTAssertEqual(transients.withLock { $0 }, 3)
-        XCTAssertEqual(registrations.withLock { $0 }, 0)
-        XCTAssertLessThan(DispatchTime.now().uptimeNanoseconds - start, 35_000_000_000)
-        children.assertClosed()
-        try Fixture.capacity(f.root)
-        let status = try await Task.detached {
-            try NativePeerEnrollment.call(connection: connection, action: .status, operationID: operation)
-        }.value
-        XCTAssertEqual(try JSON.decode(PeerEnrollmentOperatorStatus.self, status).phase, "accepted")
+        return result
     }
 
 }
