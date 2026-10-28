@@ -59,10 +59,9 @@ final class StoreRebuildTests: XCTestCase, @unchecked Sendable {
         try AttachmentFixtureCapacity.requireFree()
         return FileManager.default.temporaryDirectory.appendingPathComponent("rebuild-" + Identifier.make())
     }
-    private func request(_ method: String, _ args: [String: String] = [:]) throws -> Data {
-        try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability], "methodCalls": [[method, args, "r"]],
-        ])
+    private func request(_ root: URL, _ method: String, _ args: [String: String] = [:]) throws -> Data {
+        try nativeFixtureRequest(
+            method: method, arguments: args, accountID: nativeFixtureAccountID(root), callID: "r")
     }
     private func body(_ data: Data) throws -> (String, [String: Any]) {
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -76,10 +75,12 @@ final class StoreRebuildTests: XCTestCase, @unchecked Sendable {
         }
         return try JSON.decode(StoreRebuildStatus.self, JSONSerialization.data(withJSONObject: args))
     }
-    private func finished(_ coordinator: ServiceCoordinator, uid: UInt32) async throws -> StoreRebuildStatus {
+    private func finished(_ coordinator: ServiceCoordinator, root: URL, uid: UInt32) async throws
+        -> StoreRebuildStatus
+    {
         for _ in 0..<300 {
             let value = try status(
-                await coordinator.handle(request("TractandaStore/rebuildStatus"), forUID: uid))
+                await coordinator.handle(request(root, "TractandaStore/rebuildStatus"), forUID: uid))
             if value.isTerminal { return value }
             try await Task.sleep(for: .milliseconds(10))
         }
@@ -104,31 +105,31 @@ final class StoreRebuildTests: XCTestCase, @unchecked Sendable {
         let coordinator = try await ServiceCoordinator(opening: root, makeAccountDirectory: { accounts })
         let gate = Gate()
         await coordinator.setRebuildHookForTesting { try await gate.wait() }
-        let begin = try request("TractandaStore/rebuild", ["operationID": "intent"])
+        let begin = try request(root, "TractandaStore/rebuild", ["operationID": "intent"])
         let started = try status(await coordinator.handle(begin, forUID: accounts.admin))
         XCTAssertFalse(started.isTerminal)
         try await gate.awaitEntry()
         let repeated = try status(await coordinator.handle(begin, forUID: accounts.admin))
         XCTAssertEqual(repeated.jobID, started.jobID)
         do {
-            _ = try await coordinator.handle(request("TractandaStore/info"), forUID: accounts.admin)
+            _ = try await coordinator.handle(request(root, "TractandaStore/info"), forUID: accounts.admin)
             XCTFail("Ordinary requests must be busy during exclusive rebuild")
         } catch { XCTAssertEqual((error as? TractandaError)?.code, "serviceBusy") }
         let denied = try body(
-            await coordinator.handle(request("TractandaStore/rebuildStatus"), forUID: accounts.reader))
+            await coordinator.handle(request(root, "TractandaStore/rebuildStatus"), forUID: accounts.reader))
         XCTAssertEqual(denied.0, "error")
         XCTAssertNil(denied.1["jobID"])
         accounts.revoke()
         let revoked = try body(
-            await coordinator.handle(request("TractandaStore/rebuildStatus"), forUID: accounts.admin))
+            await coordinator.handle(request(root, "TractandaStore/rebuildStatus"), forUID: accounts.admin))
         XCTAssertEqual(revoked.1["type"] as? String, "forbidden")
         XCTAssertNil(revoked.1["phase"])
         let stopping = try status(
             await coordinator.handle(
-                request("TractandaStore/rebuildCancel", ["jobID": started.jobID]), forUID: 0))
+                request(root, "TractandaStore/rebuildCancel", ["jobID": started.jobID]), forUID: 0))
         XCTAssertEqual(stopping.state, "stopping")
         await gate.release()
-        let final = try await finished(coordinator, uid: 0)
+        let final = try await finished(coordinator, root: root, uid: 0)
         XCTAssertEqual(final.state, "cancelled")
         XCTAssertTrue(
             final.indexTrusted, "Cancellation before dirty rebuild preserves the prior trusted index")
@@ -162,16 +163,16 @@ final class StoreRebuildTests: XCTestCase, @unchecked Sendable {
         }
         let started = try status(
             await coordinator.handle(
-                request("TractandaStore/rebuild", ["operationID": "dirty"]), forUID: getuid()))
+                request(root, "TractandaStore/rebuild", ["operationID": "dirty"]), forUID: getuid()))
         await fulfillment(of: [entered], timeout: 3)
         let progress = try status(
-            await coordinator.handle(request("TractandaStore/rebuildStatus"), forUID: getuid()))
+            await coordinator.handle(request(root, "TractandaStore/rebuildStatus"), forUID: getuid()))
         XCTAssertGreaterThan(progress.recordsVerified, 0)
         XCTAssertFalse(progress.indexTrusted)
         _ = try await coordinator.handle(
-            request("TractandaStore/rebuildCancel", ["jobID": started.jobID]), forUID: getuid())
+            request(root, "TractandaStore/rebuildCancel", ["jobID": started.jobID]), forUID: getuid())
         release.signal()
-        let final = try await finished(coordinator, uid: getuid())
+        let final = try await finished(coordinator, root: root, uid: getuid())
         XCTAssertEqual(final.state, "cancelled")
         XCTAssertTrue(final.requiresRecovery)
         XCTAssertFalse(final.indexTrusted)
@@ -184,7 +185,7 @@ final class StoreRebuildTests: XCTestCase, @unchecked Sendable {
         }
         let restarted = try await ServiceCoordinator(opening: root)
         let saved = try status(
-            await restarted.handle(request("TractandaStore/rebuildStatus"), forUID: getuid()))
+            await restarted.handle(request(root, "TractandaStore/rebuildStatus"), forUID: getuid()))
         XCTAssertEqual(
             saved.state, "cancelled", "Terminal cancellation is durable, not a resumed SQLite cursor")
         await restarted.close()
@@ -219,16 +220,13 @@ final class StoreRebuildTests: XCTestCase, @unchecked Sendable {
             action: .copy, itemID: source.itemID,
             expectedRevisionID: source.revisionID, operationID: "copy")
         let args = try JSONSerialization.jsonObject(with: JSON.encode(copy))
-        let copyRequest = try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability],
-            "methodCalls": [["TractandaItem/commit", args, "copy"]],
-        ])
+        let copyRequest = try nativeFixtureEnvelope(
+            calls: [["TractandaItem/commit", args, "copy"]], accountID: nativeFixtureAccountID(root))
         let first = try body(await coordinator.handle(copyRequest, forUID: getuid()))
         XCTAssertEqual(first.1["type"] as? String, "attachmentCopyPending")
         try await copies.awaitEntry()
-        let read = try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability],
-            "methodCalls": [
+        let read = try nativeFixtureEnvelope(
+            calls: [
                 [
                     "TractandaAttachment/content",
                     [
@@ -236,14 +234,13 @@ final class StoreRebuildTests: XCTestCase, @unchecked Sendable {
                         "attachmentID": attachment.attachmentID, "offset": 0, "limit": 1,
                     ], "read",
                 ]
-            ],
-        ])
+            ], accountID: nativeFixtureAccountID(root))
         let pending = try body(await coordinator.handle(read, forUID: getuid()))
         XCTAssertEqual(pending.1["type"] as? String, "attachmentVerifying")
         try await originals.awaitEntry()
         _ = try await coordinator.handle(
-            request("TractandaStore/rebuild", ["operationID": "quiesce"]), forUID: getuid())
-        let rebuilt = try await finished(coordinator, uid: getuid())
+            request(root, "TractandaStore/rebuild", ["operationID": "quiesce"]), forUID: getuid())
+        let rebuilt = try await finished(coordinator, root: root, uid: getuid())
         XCTAssertEqual(rebuilt.state, "completed")
         XCTAssertTrue(rebuilt.indexTrusted)
         await coordinator.setAttachmentCopyHookForTesting(nil)
@@ -307,12 +304,12 @@ final class StoreRebuildTests: XCTestCase, @unchecked Sendable {
         }
         let started = try status(
             await coordinator.handle(
-                request("TractandaStore/rebuild", ["operationID": "http-auth"]), forUID: getuid()))
+                request(root, "TractandaStore/rebuild", ["operationID": "http-auth"]), forUID: getuid()))
         await fulfillment(of: [entered], timeout: 3)
         let responded = expectation(description: "HTTP session dispatch bypasses occupied Store queue")
         let authenticated = Task {
             let result = try await sessions.dispatch(
-                request("TractandaStore/rebuildStatus"), token: session.token)
+                request(root, "TractandaStore/rebuildStatus"), token: session.token)
             responded.fulfill()
             return try status(result)
         }
@@ -322,7 +319,7 @@ final class StoreRebuildTests: XCTestCase, @unchecked Sendable {
         let cancelResponded = expectation(description: "HTTP session cancel is available")
         let cancelling = Task {
             let result = try await sessions.dispatch(
-                request("TractandaStore/rebuildCancel", ["jobID": started.jobID]), token: session.token)
+                request(root, "TractandaStore/rebuildCancel", ["jobID": started.jobID]), token: session.token)
             cancelResponded.fulfill()
             return try status(result)
         }
@@ -330,7 +327,7 @@ final class StoreRebuildTests: XCTestCase, @unchecked Sendable {
         let cancelled = try await cancelling.value
         XCTAssertEqual(cancelled.state, "stopping")
         released.signal()
-        let final = try await finished(coordinator, uid: getuid())
+        let final = try await finished(coordinator, root: root, uid: getuid())
         XCTAssertEqual(final.state, "cancelled")
         XCTAssertEqual(final.durabilityEntriesChecked, 1, "Cancel must stop before the next separate fsync")
         await sessions.close()
@@ -392,15 +389,15 @@ final class StoreRebuildTests: XCTestCase, @unchecked Sendable {
         }
         let started = try status(
             await coordinator.handle(
-                request("TractandaStore/rebuild", ["operationID": "graph-cancel"]), forUID: getuid()))
+                request(root, "TractandaStore/rebuild", ["operationID": "graph-cancel"]), forUID: getuid()))
         await fulfillment(of: [entered], timeout: 3)
         let progress = try status(
-            await coordinator.handle(request("TractandaStore/rebuildStatus"), forUID: getuid()))
+            await coordinator.handle(request(root, "TractandaStore/rebuildStatus"), forUID: getuid()))
         XCTAssertEqual(progress.phase, "validatingRevisionGraph")
         _ = try await coordinator.handle(
-            request("TractandaStore/rebuildCancel", ["jobID": started.jobID]), forUID: getuid())
+            request(root, "TractandaStore/rebuildCancel", ["jobID": started.jobID]), forUID: getuid())
         release.signal()
-        let final = try await finished(coordinator, uid: getuid())
+        let final = try await finished(coordinator, root: root, uid: getuid())
         XCTAssertEqual(final.state, "cancelled")
         XCTAssertTrue(final.requiresRecovery)
         await coordinator.close()

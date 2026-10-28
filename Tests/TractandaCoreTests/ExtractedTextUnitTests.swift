@@ -168,12 +168,10 @@ final class ExtractedTextUnitTests: XCTestCase, @unchecked Sendable {
         XCTAssertFalse(window.wholeDocumentVerified)
         XCTAssertFalse(window.globalPlacementVerified)
         XCTAssertNil(window.next)
-        let request = try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability],
-            "methodCalls": [
+        let request = try nativeFixtureEnvelope(
+            calls: [
                 ["TractandaItem/extractedText", ["ids": [revision.itemID], "projection": "summary"], "test"]
-            ],
-        ])
+            ], accountID: nativeFixtureAccountID(root))
         let response = try await coordinator.handle(request, forUID: getuid())
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: response) as? [String: Any])
         let calls = try XCTUnwrap(object["methodResponses"] as? [[Any]])
@@ -365,9 +363,8 @@ final class ExtractedTextUnitTests: XCTestCase, @unchecked Sendable {
                 itemID: revision.itemID, expectedRevisionID: revision.revisionID, unit: 0)
         }
         try await gate.awaitState()
-        let request = try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability], "methodCalls": [["TractandaSemantic/reset", [:], "test"]],
-        ])
+        let request = try nativeFixtureEnvelope(
+            calls: [["TractandaSemantic/reset", [:], "test"]], accountID: nativeFixtureAccountID(root))
         let reset = Task { try await coordinator.handle(request, forUID: getuid()) }
         try await gate.awaitState(cancelled: true)
         let held = try await coordinator.semanticReaderStateForTesting()
@@ -489,12 +486,10 @@ final class ExtractedTextUnitTests: XCTestCase, @unchecked Sendable {
         XCTAssertThrowsError(try client.call(ExtractedTextUnitCall.method, arguments: arguments)) {
             XCTAssertEqual(($0 as? TractandaError)?.code, "extractedTextUnitsRequireCoordinator")
         }
-        let batch = try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability],
-            "methodCalls": [
+        let batch = try nativeFixtureEnvelope(
+            calls: [
                 [ExtractedTextUnitCall.method, arguments, "unit"], ["TractandaStore/info", [:], "info"],
-            ],
-        ])
+            ], accountID: service.store.nativeProtocolSessionBasis.identity)
         let response = try XCTUnwrap(
             JSONSerialization.jsonObject(with: service.handle(batch, peerUID: getuid())) as? [String: Any])
         let calls = try XCTUnwrap(response["methodResponses"] as? [[Any]])

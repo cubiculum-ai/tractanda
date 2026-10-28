@@ -341,10 +341,9 @@ final class PeerRuntimeSnapshotTests: XCTestCase {
         await service.setPeerRuntimeSnapshotDeliveryHookForTesting { await gate.wait(entered: entered) }
         let loading = Task { try await service.loadPeerRuntimeSnapshot() }
         await fulfillment(of: [entered], timeout: 5)
-        let request = try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability],
-            "methodCalls": [["TractandaStore/rebuild", ["operationID": "runtime-rebuild"], "r"]],
-        ])
+        let request = try nativeFixtureEnvelope(
+            calls: [["TractandaStore/rebuild", ["operationID": "runtime-rebuild"], "r"]],
+            accountID: nativeFixtureAccountID(f.receiverRoot))
         let result = try await service.handle(request, forUID: tractanda_uid())
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: result) as? [String: Any])
         XCTAssertEqual(
@@ -353,10 +352,9 @@ final class PeerRuntimeSnapshotTests: XCTestCase {
         await gate.release()
         await expect("serviceBusy") { _ = try await loading.value }
         await expect("serviceBusy") { try await service.validatePeerRuntimeSnapshot(issued) }
-        let status = try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability],
-            "methodCalls": [["TractandaStore/rebuildStatus", [:], "s"]],
-        ])
+        let status = try nativeFixtureEnvelope(
+            calls: [["TractandaStore/rebuildStatus", [:], "s"]],
+            accountID: nativeFixtureAccountID(f.receiverRoot))
         var completed = false
         for _ in 0..<200 {
             let bytes = try await service.handle(status, forUID: tractanda_uid())

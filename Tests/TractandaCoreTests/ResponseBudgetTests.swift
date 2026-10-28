@@ -3,10 +3,8 @@ import XCTest
 @testable import TractandaCore
 
 final class ResponseBudgetTests: XCTestCase {
-    private func request(_ calls: [[Any]]) throws -> Data {
-        try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability], "methodCalls": calls,
-        ])
+    private func request(_ store: ItemStore, _ calls: [[Any]]) throws -> Data {
+        try nativeFixtureEnvelope(calls: calls, accountID: store.nativeProtocolSessionBasis.identity)
     }
 
     private func firstCall(_ response: Data) throws -> [Any] {
@@ -39,15 +37,21 @@ final class ResponseBudgetTests: XCTestCase {
             .revision
         }
         let service = ItemService(store: store)
-        let queryRequest = try request([
-            ["TractandaItem/query", ["expression": "subject == \"budget target\"", "limit": 1], "query"]
-        ])
-        let getRequest = try request([
-            ["TractandaItem/get", ["ids": [item.itemID]], "get"]
-        ])
-        let historyRequest = try request([
-            ["TractandaItem/history", ["itemID": item.itemID, "limit": 4], "history"]
-        ])
+        let queryRequest = try request(
+            store,
+            [
+                ["TractandaItem/query", ["expression": "subject == \"budget target\"", "limit": 1], "query"]
+            ])
+        let getRequest = try request(
+            store,
+            [
+                ["TractandaItem/get", ["ids": [item.itemID]], "get"]
+            ])
+        let historyRequest = try request(
+            store,
+            [
+                ["TractandaItem/history", ["itemID": item.itemID, "limit": 4], "history"]
+            ])
         let queryBytes = try encodedSize(firstCall(service.handle(queryRequest, peerUID: store.ownerUID)))
         let getBytes = try encodedSize(firstCall(service.handle(getRequest, peerUID: store.ownerUID)))
         let historyBytes = try encodedSize(firstCall(service.handle(historyRequest, peerUID: store.ownerUID)))
@@ -91,7 +95,7 @@ final class ResponseBudgetTests: XCTestCase {
             ])
         }
         calls.append(["TractandaItem/history", ["itemID": item.itemID, "limit": 4], "h"])
-        let mixed = try request(calls)
+        let mixed = try request(store, calls)
         let response = service.handle(mixed, peerUID: store.ownerUID)
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: response) as? [String: Any])
         let results = try XCTUnwrap(object["methodResponses"] as? [[Any]])

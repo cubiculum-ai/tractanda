@@ -558,10 +558,9 @@ final class PersonalSyncTests: XCTestCase {
                 assertCode("forbidden") { _ = try pair.a.personalSharingMetadata(base.itemID) }
             }
             let service = ItemService(store: pair.a)
-            let request = try JSONSerialization.data(withJSONObject: [
-                "using": [ItemService.capability],
-                "methodCalls": [["TractandaItem/sharing", ["itemID": base.itemID], "c"]],
-            ])
+            let request = try nativeFixtureEnvelope(
+                calls: [["TractandaItem/sharing", ["itemID": base.itemID], "c"]],
+                accountID: pair.a.nativeProtocolSessionBasis.identity)
             let result =
                 try JSONSerialization.jsonObject(with: service.handle(request, peerUID: accounts.alice))
                 as? [String: Any]
@@ -946,15 +945,13 @@ final class PersonalSyncTests: XCTestCase {
             XCTAssertEqual(proposal.status, .reviewRequired)
             let reviewID = try XCTUnwrap(proposal.reviewItemID)
             let stateToken = try pair.a.itemState(base.itemID).stateToken
-            let request = try JSONSerialization.data(withJSONObject: [
-                "using": ["urn:ietf:params:jmap:core", ItemService.capability],
-                "methodCalls": [
+            let request = try nativeFixtureEnvelope(
+                calls: [
                     [
                         "TractandaSync/acceptReview",
                         ["reviewID": reviewID, "expectedStateToken": stateToken], "review",
                     ]
-                ],
-            ])
+                ], accountID: pair.a.nativeProtocolSessionBasis.identity)
             var publications = 0
             pair.a.personalSyncAfterRevisionPublicationForTesting = {
                 publications += 1
@@ -1031,9 +1028,8 @@ final class PersonalSyncTests: XCTestCase {
             pair.a.afterCanonicalReaderRequirementForTesting = {
                 throw TractandaError("stateMismatch", "injected after durable fence update")
             }
-            let request = try JSONSerialization.data(withJSONObject: [
-                "using": ["urn:ietf:params:jmap:core", ItemService.capability],
-                "methodCalls": [
+            let request = try nativeFixtureEnvelope(
+                calls: [
                     [
                         "TractandaSync/acceptReview",
                         [
@@ -1041,8 +1037,7 @@ final class PersonalSyncTests: XCTestCase {
                             "expectedStateToken": try pair.a.itemState(base.itemID).stateToken,
                         ], "fence",
                     ]
-                ],
-            ])
+                ], accountID: pair.a.nativeProtocolSessionBasis.identity)
             let response = ItemService(store: pair.a).handle(request, peerUID: tractanda_uid())
             let body = try XCTUnwrap(JSONSerialization.jsonObject(with: response) as? [String: Any])
             let replies = try XCTUnwrap(body["methodResponses"] as? [[Any]])

@@ -1,4 +1,5 @@
 import CTractandaPlatform
+import TractandaClient
 import XCTest
 
 @testable import TractandaCore
@@ -34,7 +35,13 @@ final class ProjectionServiceTests: XCTestCase {
     }
     private func call(_ service: ItemService, _ method: String, _ args: [String: Any]) throws -> [String: Any]
     {
-        try payload(service.handle(request(method, args), peerUID: tractanda_uid())).1
+        try payload(
+            service.handle(
+                nativeFixtureRequest(
+                    method: method, arguments: args,
+                    accountID: service.store.nativeProtocolSessionBasis.identity),
+                peerUID: tractanda_uid())
+        ).1
     }
     private func conflictFixture() throws -> (URL, Revision, Revision, Revision) {
         let root = try folder()
@@ -129,9 +136,15 @@ final class ProjectionServiceTests: XCTestCase {
         let missing = try UUID.makeVersion1().uuidString.lowercased()
         let ids = [missing, base.itemID, other.itemID]
         let get = try call(
-            service, "TractandaItem/get", ["ids": ids, "maxBytes": 8192, "projection": "summary"])
-        XCTAssertEqual((get["list"] as? [Any])?.count, 1)
-        XCTAssertEqual((get["unresolved"] as? [[String: Any]])?.first?["itemID"] as? String, base.itemID)
+            service, "TractandaItem/getBounded", ["ids": ids, "maxBytes": 8192, "projection": "summary"])
+        let items = try JSONDecoder().decode(
+            [JMAPItemRecord].self, from: JSONSerialization.data(withJSONObject: get["list"]!))
+        XCTAssertEqual(items.count, 2)
+        XCTAssertEqual(items.filter { $0.fields != nil }.map(\.id), [other.itemID])
+        let unresolved = try XCTUnwrap(items.first { $0.id == base.itemID })
+        XCTAssertEqual(unresolved.resolution?.status, .conflicted)
+        XCTAssertNil(unresolved.fields)
+        XCTAssertNil(unresolved.revisionID)
         XCTAssertEqual(get["notFound"] as? [String], [missing])
         XCTAssertEqual(get["remainingIDs"] as? [String], [])
         let states = try call(service, "TractandaItem/state", ["ids": ids])
@@ -163,8 +176,14 @@ final class ProjectionServiceTests: XCTestCase {
         let response = try XCTUnwrap(
             service.finishPooledGet(prepared, records: records, peerUID: tractanda_uid()))
         let result = try payload(response).1
-        XCTAssertEqual((result["list"] as? [Any])?.count, 1)
-        XCTAssertEqual((result["unresolved"] as? [Any])?.count, 1)
+        let items = try JSONDecoder().decode(
+            [JMAPItemRecord].self, from: JSONSerialization.data(withJSONObject: result["list"]!))
+        XCTAssertEqual(items.count, 2)
+        XCTAssertEqual(items.filter { $0.fields != nil }.map(\.id), [other.itemID])
+        let unresolved = try XCTUnwrap(items.first { $0.id == base.itemID })
+        XCTAssertEqual(unresolved.resolution?.status, .conflicted)
+        XCTAssertNil(unresolved.fields)
+        XCTAssertNil(unresolved.revisionID)
         let state = try store.itemState(base.itemID)
         _ = try store.resolveConflict(
             .init(
@@ -258,7 +277,10 @@ final class ProjectionServiceTests: XCTestCase {
         accounts.leaveTeam()
         XCTAssertEqual(try store.itemState(item.itemID).stateToken, token)
         XCTAssertNil(try service.finishPooledGet(prepared, records: records, peerUID: accounts.bob))
-        let denied = try payload(service.handle(data, peerUID: accounts.bob)).1
+        let denied = try payload(
+            service.handle(
+                readWireRequest(store, "TractandaItem/get", ["ids": [item.itemID]]), peerUID: accounts.bob)
+        ).1
         XCTAssertEqual(denied["notFound"] as? [String], [item.itemID])
         XCTAssertEqual((denied["list"] as? [Any])?.count, 0)
     }

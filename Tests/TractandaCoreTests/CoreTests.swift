@@ -1,4 +1,5 @@
 import CSQLite
+import TractandaClient
 import XCTest
 
 @testable import TractandaCore
@@ -167,8 +168,10 @@ final class CoreTests: XCTestCase {
         let response =
             try JSONSerialization.jsonObject(
                 with: service.handle(data, peerUID: store.ownerUID)) as! [String: Any]
-        XCTAssertEqual(response["code"] as? String, "unsupportedCapability")
-        XCTAssertTrue((response["message"] as? String)?.contains(ItemService.capability) == true)
+        XCTAssertEqual(response["type"] as? String, "urn:ietf:params:jmap:error:unknownCapability")
+        XCTAssertEqual(response["status"] as? Int, 400)
+        XCTAssertNil(response["code"])
+        XCTAssertNil(response["message"])
         XCTAssertTrue(try store.candidates().isEmpty)
     }
 
@@ -736,9 +739,8 @@ final class CoreTests: XCTestCase {
         _ = try DemoFixture.seed(store)
         let service = ItemService(store: store)
         func envelope(_ calls: [[Any]], uid: UInt32? = nil) throws -> [String: Any] {
-            let data = try JSONSerialization.data(withJSONObject: [
-                "using": ["urn:ietf:params:jmap:core", ItemService.capability], "methodCalls": calls,
-            ])
+            let data = try nativeFixtureEnvelope(
+                calls: [String: Any], accountID: store.nativeProtocolSessionBasis.identity)
             return try JSONSerialization.jsonObject(
                 with: service.handle(data, peerUID: uid ?? store.ownerUID)) as! [String: Any]
         }
@@ -803,9 +805,8 @@ final class CoreTests: XCTestCase {
         ).revision
         let service = ItemService(store: store)
         func response(_ method: String, _ args: [String: Any]) throws -> [String: Any] {
-            let data = try JSONSerialization.data(withJSONObject: [
-                "using": [ItemService.capability], "methodCalls": [[method, args, "test"]],
-            ])
+            let data = try nativeFixtureEnvelope(
+                calls: [[method, args, "test"]], accountID: store.nativeProtocolSessionBasis.identity)
             let result =
                 try JSONSerialization.jsonObject(
                     with: service.handle(data, peerUID: store.ownerUID)) as! [String: Any]
@@ -813,10 +814,13 @@ final class CoreTests: XCTestCase {
         }
         let projected = try response(
             "TractandaItem/get",
-            ["ids": [oversized.itemID], "properties": ["subject", "customInt"]])
-        let projectedRecord = (projected["list"] as! [[String: Any]])[0]
-        XCTAssertEqual(projectedRecord["formatVersion"] as? Int, oversized.formatVersion)
-        let fields = projectedRecord["fields"] as! [String: Any]
+            ["ids": [oversized.itemID], "fieldProperties": ["subject", "customInt"]])
+        let projectedRecord = try JSONDecoder().decode(
+            JMAPItemRecord.self,
+            from: JSONSerialization.data(withJSONObject: (projected["list"] as! [[String: Any]])[0]))
+        XCTAssertEqual(projectedRecord.formatVersion, oversized.formatVersion)
+        let fields = try XCTUnwrap(projectedRecord.fields)
+        XCTAssertEqual(fields["customInt"], .integer(Int64.max))
         XCTAssertNotNil(fields["itemID"])
         XCTAssertNotNil(fields["customInt"])
         XCTAssertNil(fields["body"])
@@ -824,23 +828,37 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(
             (try response(
                 "TractandaItem/get",
-                ["ids": [oversized.itemID], "properties": ["custom\\0"]]))["notFound"] as? [String], [])
+                ["ids": [oversized.itemID], "fieldProperties": ["custom\\0"]]))["notFound"] as? [String], [])
         let nulProperty = try response(
-            "TractandaItem/get", ["ids": [oversized.itemID], "properties": ["custom\0"]])
+            "TractandaItem/get", ["ids": [oversized.itemID], "fieldProperties": ["custom\0"]])
         XCTAssertEqual(nulProperty["type"] as? String, "invalidArguments")
         let bounded = try response(
-            "TractandaItem/get",
+            "TractandaItem/getBounded",
             ["ids": [oversized.itemID], "projection": "content", "maxBytes": 8_192])
         XCTAssertEqual(bounded["oversizedIDs"] as? [String], [oversized.itemID])
         XCTAssertEqual(bounded["remainingIDs"] as? [String], [])
         XCTAssertEqual((bounded["list"] as? [Any])?.count, 0)
-        let boundary = try response(
+        let duplicateIDs = try response(
             "TractandaItem/get",
-            [
-                "ids": [nearLimit.itemID] + Array(repeating: nearLimit.itemID, count: 63),
-                "projection": "content", "maxBytes": 8_192,
-            ])
-        XCTAssertEqual(boundary["type"] as? String, "responseTooLarge")
+            ["ids": Array(repeating: nearLimit.itemID, count: 64), "projection": "content"])
+        XCTAssertEqual((duplicateIDs["list"] as? [Any])?.count, 1)
+        let additional = try (0..<2).map { index in
+            try store.commit(
+                CommitRequest(
+                    classID: "Item", changes: ["body": .text(String(repeating: "😀", count: 1_500))],
+                    operationID: "continuation-projection-\(index)")
+            ).revision.itemID
+        }
+        let requested = [nearLimit.itemID] + additional
+        let boundary = try response(
+            "TractandaItem/getBounded",
+            ["ids": requested, "projection": "content", "maxBytes": 8_192])
+        let remaining = try XCTUnwrap(boundary["remainingIDs"] as? [String])
+        let returned = try XCTUnwrap(boundary["list"] as? [[String: Any]])
+        let oversizedIDs = try XCTUnwrap(boundary["oversizedIDs"] as? [String])
+        XCTAssertFalse(remaining.isEmpty)
+        XCTAssertEqual(returned.count + remaining.count + oversizedIDs.count, requested.count)
+        XCTAssertLessThanOrEqual(try JSONSerialization.data(withJSONObject: boundary).count, 8_192)
         let description = try response("TractandaStore/describe", ["topic": "types"])
         XCTAssertTrue(
             (description["types"] as? [[String: Any]])?.contains {

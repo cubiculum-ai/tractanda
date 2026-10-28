@@ -378,6 +378,7 @@ final class ServiceCoordinatorTests: XCTestCase {
             }
             // Fresh stores also retain a policy item; this paging oracle counts the three data Items.
             let request = try nativeRequest(
+                root,
                 "TractandaItem/query", ["expression": "classID == \"Item\"", "limit": 2])
             let first = Task { try await coordinator.handle(request, forUID: accounts.service) }
             let second = Task { try await coordinator.handle(request, forUID: accounts.service) }
@@ -398,6 +399,7 @@ final class ServiceCoordinatorTests: XCTestCase {
             let cursor = try XCTUnwrap(result["nextCursor"] as? String)
             let next = try await coordinator.handle(
                 nativeRequest(
+                    root,
                     "TractandaItem/query",
                     ["expression": "classID == \"Item\"", "cursor": cursor, "limit": 2]),
                 forUID: accounts.service)
@@ -437,7 +439,7 @@ final class ServiceCoordinatorTests: XCTestCase {
             await coordinator.setPooledReadLeaseHookForTesting { streamed.fulfill() }
             for (index, expression) in expressions.enumerated() {
                 let response = try await coordinator.handle(
-                    nativeRequest("TractandaItem/query", ["expression": expression, "limit": 10]),
+                    nativeRequest(root, "TractandaItem/query", ["expression": expression, "limit": 10]),
                     forUID: accounts.service)
                 let page = try nativePage(response)
                 XCTAssertEqual(page.ids, oracle[index])
@@ -494,6 +496,7 @@ final class ServiceCoordinatorTests: XCTestCase {
             await coordinator.setPooledReadLeaseHookForTesting { leased.fulfill() }
             let response = try await coordinator.handle(
                 nativeRequest(
+                    root,
                     "TractandaItem/query",
                     [
                         "categoryPath": [category.itemID], "limit": 10,
@@ -547,7 +550,7 @@ final class ServiceCoordinatorTests: XCTestCase {
             let leased = expectation(description: "Saved category view used a read lease")
             await coordinator.setPooledReadLeaseHookForTesting { leased.fulfill() }
             let response = try await coordinator.handle(
-                nativeRequest("TractandaItem/query", ["viewID": view.itemID, "limit": 10]),
+                nativeRequest(root, "TractandaItem/query", ["viewID": view.itemID, "limit": 10]),
                 forUID: accounts.service)
             XCTAssertEqual(try nativePage(response).ids, oracle.ids)
             XCTAssertEqual(try nativePage(response).total, oracle.total)
@@ -583,7 +586,7 @@ final class ServiceCoordinatorTests: XCTestCase {
                 opening: root, makeAccountDirectory: { accounts })
             let gate = PreparedReadGate()
             await coordinator.setPooledReadBeforeFinishHookForTesting { await gate.pause() }
-            let request = try nativeRequest("TractandaItem/get", ["ids": [item.itemID]])
+            let request = try nativeRequest(root, "TractandaItem/get", ["ids": [item.itemID]])
             let reading = Task { try await coordinator.handle(request, forUID: accounts.bob) }
             try await waitForPreparedReads(1, gate: gate)
             let change = CommitRequest(
@@ -592,7 +595,7 @@ final class ServiceCoordinatorTests: XCTestCase {
             let arguments = try XCTUnwrap(
                 JSONSerialization.jsonObject(with: JSON.encode(change)) as? [String: Any])
             _ = try await coordinator.handle(
-                nativeRequest("TractandaItem/commit", arguments, id: "write"),
+                nativeRequest(root, "TractandaItem/commit", arguments, id: "write"),
                 forUID: accounts.alice)
             await gate.release()
             let result = try await reading.value
@@ -639,8 +642,9 @@ final class ServiceCoordinatorTests: XCTestCase {
                 bothLeases.fulfill()
                 _ = release.wait(timeout: .now() + 10)
             }
-            let getRequest = try nativeRequest("TractandaItem/get", ["ids": [item.itemID]])
+            let getRequest = try nativeRequest(root, "TractandaItem/get", ["ids": [item.itemID]])
             let historyRequest = try nativeRequest(
+                root,
                 "TractandaItem/history", ["itemID": item.itemID, "position": 1, "limit": 1])
             let getting = Task { try await coordinator.handle(getRequest, forUID: accounts.service) }
             let listing = Task { try await coordinator.handle(historyRequest, forUID: accounts.service) }
@@ -685,7 +689,7 @@ final class ServiceCoordinatorTests: XCTestCase {
             let coordinator = try await noAuthorityIntakeCoordinator(root: root, accounts: accounts)
             let gate = PreparedReadGate()
             await coordinator.setPooledReadBeforeFinishHookForTesting { await gate.pause() }
-            let request = try nativeRequest("TractandaItem/history", ["itemID": first.itemID])
+            let request = try nativeRequest(root, "TractandaItem/history", ["itemID": first.itemID])
             let reading = Task { try await coordinator.handle(request, forUID: accounts.service) }
             try await waitForPreparedReads(1, gate: gate)
             let change = CommitRequest(
@@ -696,7 +700,7 @@ final class ServiceCoordinatorTests: XCTestCase {
             let arguments = try XCTUnwrap(
                 JSONSerialization.jsonObject(with: JSON.encode(change)) as? [String: Any])
             _ = try await coordinator.handle(
-                nativeRequest("TractandaItem/commit", arguments), forUID: accounts.service)
+                nativeRequest(root, "TractandaItem/commit", arguments), forUID: accounts.service)
             await gate.release()
             let response = try await reading.value
             let object = try XCTUnwrap(JSONSerialization.jsonObject(with: response) as? [String: Any])
@@ -730,7 +734,7 @@ final class ServiceCoordinatorTests: XCTestCase {
                 entered.fulfill()
                 _ = release.wait(timeout: .now() + 10)
             }
-            let request = try nativeRequest("TractandaItem/history", ["itemID": first.itemID])
+            let request = try nativeRequest(root, "TractandaItem/history", ["itemID": first.itemID])
             let reading = Task { try await coordinator.handle(request, forUID: accounts.service) }
             await fulfillment(of: [entered], timeout: 5)
             let change = CommitRequest(
@@ -741,7 +745,7 @@ final class ServiceCoordinatorTests: XCTestCase {
             let arguments = try XCTUnwrap(
                 JSONSerialization.jsonObject(with: JSON.encode(change)) as? [String: Any])
             _ = try await coordinator.handle(
-                nativeRequest("TractandaItem/commit", arguments), forUID: accounts.service)
+                nativeRequest(root, "TractandaItem/commit", arguments), forUID: accounts.service)
             release.signal()
             let response = try await reading.value
             let object = try XCTUnwrap(JSONSerialization.jsonObject(with: response) as? [String: Any])
@@ -795,18 +799,18 @@ final class ServiceCoordinatorTests: XCTestCase {
                 return payload["type"] as? String
             }
             let get = try await coordinator.handle(
-                nativeRequest("TractandaItem/get", ["ids": [item.itemID, secondItem.itemID]]),
+                nativeRequest(root, "TractandaItem/get", ["ids": [item.itemID, secondItem.itemID]]),
                 forUID: accounts.service)
             XCTAssertEqual(try errorType(get), "resourceLimit")
             let history = try await coordinator.handle(
-                nativeRequest("TractandaItem/history", ["itemID": item.itemID, "limit": 3]),
+                nativeRequest(root, "TractandaItem/history", ["itemID": item.itemID, "limit": 3]),
                 forUID: accounts.service)
             XCTAssertEqual(try errorType(history), "resourceLimit")
 
             try await coordinator.setPooledRecordByteLimitForTesting(nil)
             try await coordinator.setPooledHistoryBatchLimitForTesting(2)
             let overflow = try await coordinator.handle(
-                nativeRequest("TractandaItem/history", ["itemID": item.itemID, "limit": 1]),
+                nativeRequest(root, "TractandaItem/history", ["itemID": item.itemID, "limit": 1]),
                 forUID: accounts.service)
             let overflowObject = try XCTUnwrap(
                 JSONSerialization.jsonObject(with: overflow) as? [String: Any])
@@ -840,13 +844,11 @@ final class ServiceCoordinatorTests: XCTestCase {
             let coordinator = try await ServiceCoordinator(
                 opening: root, makeAccountDirectory: { accounts })
             try await coordinator.setPooledHistoryBatchLimitForTesting(2)
-            let request = try JSONSerialization.data(withJSONObject: [
-                "using": [ItemService.capability],
-                "methodCalls": [
+            let request = try nativeFixtureEnvelope(
+                calls: [
                     ["TractandaItem/history", ["itemID": item.itemID, "limit": 1], "history"],
                     ["TractandaItem/get", ["ids": [item.itemID], "projection": "summary"], "get"],
-                ],
-            ])
+                ], accountID: nativeFixtureAccountID(root))
             let response = try await coordinator.handle(request, forUID: accounts.service)
             let object = try XCTUnwrap(JSONSerialization.jsonObject(with: response) as? [String: Any])
             let calls = try XCTUnwrap(object["methodResponses"] as? [[Any]])
@@ -881,13 +883,13 @@ final class ServiceCoordinatorTests: XCTestCase {
                 entered.fulfill()
                 _ = release.wait(timeout: .now() + 10)
             }
-            let queryRequest = try nativeRequest("TractandaItem/query", ["limit": 1])
+            let queryRequest = try nativeRequest(root, "TractandaItem/query", ["limit": 1])
             let reading = Task {
                 try await coordinator.handle(queryRequest, forUID: accounts.administrator)
             }
             await fulfillment(of: [entered], timeout: 5)
             let finished = CompletionFlag()
-            let rebuildRequest = try nativeRequest("TractandaStore/rebuild", [:])
+            let rebuildRequest = try nativeRequest(root, "TractandaStore/rebuild", [:])
             let rebuilding = Task {
                 let result = try await coordinator.handle(rebuildRequest, forUID: accounts.administrator)
                 await finished.mark()
@@ -904,7 +906,7 @@ final class ServiceCoordinatorTests: XCTestCase {
             XCTAssertTrue(completedBeforeDrain, "Admission must return before a held reader drains")
             release.signal()
             _ = try? await reading.value
-            try await waitForRebuild(coordinator, uid: accounts.administrator)
+            try await waitForRebuild(coordinator, root: root, uid: accounts.administrator)
             let rebuilt = try await rebuilding.value
             let object = try XCTUnwrap(JSONSerialization.jsonObject(with: rebuilt) as? [String: Any])
             let call = try XCTUnwrap((object["methodResponses"] as? [[Any]])?.first)
@@ -936,7 +938,7 @@ final class ServiceCoordinatorTests: XCTestCase {
             seed = nil
             let coordinator = try await ServiceCoordinator(
                 opening: root, makeAccountDirectory: { accounts })
-            let query = try nativeRequest("TractandaItem/query", ["limit": 10])
+            let query = try nativeRequest(root, "TractandaItem/query", ["limit": 10])
             func ids(_ data: Data) throws -> [String] {
                 let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
                 let body = try XCTUnwrap((object["methodResponses"] as? [[Any]])?.first?[1] as? [String: Any])
@@ -952,7 +954,7 @@ final class ServiceCoordinatorTests: XCTestCase {
                 operationID: "after-auto-recovery")
             let arguments = try XCTUnwrap(
                 JSONSerialization.jsonObject(with: JSON.encode(request)) as? [String: Any])
-            let commit = try nativeRequest("TractandaItem/commit", arguments, id: "write")
+            let commit = try nativeRequest(root, "TractandaItem/commit", arguments, id: "write")
             let uncertain = try await coordinator.handle(commit, forUID: accounts.alice)
             XCTAssertTrue(String(decoding: uncertain, as: UTF8.self).contains("uncertainCommit"))
             try await coordinator.setPersonalDurableAcknowledgementHookForTesting(nil)
@@ -991,8 +993,9 @@ final class ServiceCoordinatorTests: XCTestCase {
             let gate = PreparedReadGate()
             await coordinator.setPooledReadBeforeFinishHookForTesting { await gate.pause() }
             let query = try nativeRequest(
+                root,
                 "TractandaItem/query", ["expression": "classID == \"Item\"", "limit": 1])
-            let rebuildingRequest = try nativeRequest("TractandaStore/rebuild", [:])
+            let rebuildingRequest = try nativeRequest(root, "TractandaStore/rebuild", [:])
             let reading = Task { try await coordinator.handle(query, forUID: accounts.service) }
             try await waitForPreparedReads(1, gate: gate)
             let activeLeases = await coordinator.pooledReadLeaseCountForTesting()
@@ -1010,7 +1013,7 @@ final class ServiceCoordinatorTests: XCTestCase {
                 if finishedBeforeRelease { break }
                 try await Task.sleep(for: .milliseconds(20))
             }
-            try await waitForRebuild(coordinator, uid: accounts.service)
+            try await waitForRebuild(coordinator, root: root, uid: accounts.service)
             await gate.release()
             XCTAssertTrue(finishedBeforeRelease, "Rebuild waited on a read with no active lease.")
             let rebuiltData = try await rebuilding.value
@@ -1079,7 +1082,7 @@ final class ServiceCoordinatorTests: XCTestCase {
             seed = nil
             let coordinator = try await ServiceCoordinator(
                 opening: root, makeAccountDirectory: { accounts })
-            let request = try nativeRequest("TractandaItem/query", ["limit": 10])
+            let request = try nativeRequest(root, "TractandaItem/query", ["limit": 10])
             let initially = try await coordinator.handle(request, forUID: accounts.bob)
             XCTAssertEqual(try nativePage(initially).ids, [shared.itemID])
             XCTAssertEqual(try nativePage(initially).total, 1)
@@ -1161,6 +1164,7 @@ final class ServiceCoordinatorTests: XCTestCase {
             await coordinator.setPooledReadLeaseHookForTesting { leased.fulfill() }
             let response = try await coordinator.handle(
                 nativeRequest(
+                    root,
                     "TractandaItem/query",
                     [
                         "categoryPath": [category.itemID], "limit": 10,
@@ -1177,9 +1181,10 @@ final class ServiceCoordinatorTests: XCTestCase {
             let arguments = try XCTUnwrap(
                 JSONSerialization.jsonObject(with: JSON.encode(change)) as? [String: Any])
             _ = try await coordinator.handle(
-                nativeRequest("TractandaItem/commit", arguments), forUID: accounts.bob)
+                nativeRequest(root, "TractandaItem/commit", arguments), forUID: accounts.bob)
             let exactFallback = try await coordinator.handle(
                 nativeRequest(
+                    root,
                     "TractandaItem/query",
                     [
                         "categoryPath": [category.itemID], "limit": 10,
@@ -1207,6 +1212,7 @@ final class ServiceCoordinatorTests: XCTestCase {
                 _ = release.wait(timeout: .now() + 10)
             }
             let request = try nativeRequest(
+                root,
                 "TractandaItem/query", ["expression": "classID == \"Item\"", "limit": 1])
             let reading = Task { try await coordinator.handle(request, forUID: accounts.service) }
             await fulfillment(of: [entered], timeout: 5)
@@ -1251,18 +1257,18 @@ final class ServiceCoordinatorTests: XCTestCase {
         func value() -> Bool { completed }
     }
 
-    private func nativeRequest(_ method: String, _ arguments: [String: Any], id: String = "read") throws
+    private func nativeRequest(_ root: URL, _ method: String, _ arguments: [String: Any], id: String = "read")
+        throws
         -> Data
     {
         let args =
             method == "TractandaStore/rebuild" && arguments.isEmpty
             ? ["operationID": "test-rebuild-" + Identifier.make()] : arguments
-        return try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability], "methodCalls": [[method, args, id]],
-        ])
+        return try nativeFixtureRequest(
+            method: method, arguments: args, accountID: nativeFixtureAccountID(root), callID: id)
     }
-    private func waitForRebuild(_ coordinator: ServiceCoordinator, uid: UInt32) async throws {
-        let request = try nativeRequest("TractandaStore/rebuildStatus", [:])
+    private func waitForRebuild(_ coordinator: ServiceCoordinator, root: URL, uid: UInt32) async throws {
+        let request = try nativeRequest(root, "TractandaStore/rebuildStatus", [:])
         for _ in 0..<200 {
             let data = try await coordinator.handle(request, forUID: uid)
             let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -1305,12 +1311,13 @@ final class ServiceCoordinatorTests: XCTestCase {
             await coordinator.startCanonicalVerification(every: .seconds(3600))
             try await waitForPreparedReads(1, gate: gate)
 
-            let rebuild = try nativeRequest("TractandaStore/rebuild", [:], id: "rebuild")
+            let rebuild = try nativeRequest(root, "TractandaStore/rebuild", [:], id: "rebuild")
             let denied = try await coordinator.handle(rebuild, forUID: accounts.alice)
             let deniedObject = try XCTUnwrap(JSONSerialization.jsonObject(with: denied) as? [String: Any])
             let deniedCall = try XCTUnwrap((deniedObject["methodResponses"] as? [[Any]])?.first)
             XCTAssertEqual((deniedCall[1] as? [String: Any])?["type"] as? String, "forbidden")
             let malformed = try nativeRequest(
+                root,
                 "TractandaStore/rebuild", ["unexpected": true], id: "malformed")
             let rejected = try await coordinator.handle(malformed, forUID: accounts.administrator)
             let rejectedObject = try XCTUnwrap(JSONSerialization.jsonObject(with: rejected) as? [String: Any])
@@ -1331,7 +1338,7 @@ final class ServiceCoordinatorTests: XCTestCase {
             await coordinator.setVerificationScanHookForTesting(nil)
             await gate.release()
             let response = try await accepted.value
-            try await waitForRebuild(coordinator, uid: accounts.administrator)
+            try await waitForRebuild(coordinator, root: root, uid: accounts.administrator)
             let object = try XCTUnwrap(JSONSerialization.jsonObject(with: response) as? [String: Any])
             let call = try XCTUnwrap((object["methodResponses"] as? [[Any]])?.first)
             XCTAssertEqual(call[0] as? String, "TractandaStore/rebuild")
@@ -1370,12 +1377,14 @@ final class ServiceCoordinatorTests: XCTestCase {
                 oracleArguments["position"] = 0
                 oracleArguments["limit"] = 64
                 let oracleResponse = try await coordinator.handle(
-                    nativeRequest("TractandaItem/query", oracleArguments), forUID: accounts.administrator)
+                    nativeRequest(root, "TractandaItem/query", oracleArguments),
+                    forUID: accounts.administrator)
                 let oracle = try nativePage(oracleResponse)
                 var firstArguments = criteria
                 firstArguments["limit"] = 2
                 let firstResponse = try await coordinator.handle(
-                    nativeRequest("TractandaItem/query", firstArguments), forUID: accounts.administrator)
+                    nativeRequest(root, "TractandaItem/query", firstArguments), forUID: accounts.administrator
+                )
                 let firstObject = try XCTUnwrap(
                     JSONSerialization.jsonObject(with: firstResponse) as? [String: Any])
                 let first = try XCTUnwrap(
@@ -1386,7 +1395,7 @@ final class ServiceCoordinatorTests: XCTestCase {
                 nextArguments["cursor"] = next
                 nextArguments["limit"] = 2
                 let nextResponse = try await coordinator.handle(
-                    nativeRequest("TractandaItem/query", nextArguments), forUID: accounts.administrator)
+                    nativeRequest(root, "TractandaItem/query", nextArguments), forUID: accounts.administrator)
                 let nextObject = try XCTUnwrap(
                     JSONSerialization.jsonObject(with: nextResponse) as? [String: Any])
                 let nextPage = try XCTUnwrap(
@@ -1398,12 +1407,14 @@ final class ServiceCoordinatorTests: XCTestCase {
             try await verifyAdminCursor(for: ["expression": "priority == 9"])
             let oracleData = try await coordinator.handle(
                 nativeRequest(
+                    root,
                     "TractandaItem/query", ["expression": "priority == 9", "position": 0, "limit": 3]),
                 forUID: accounts.alice)
             let oracle = try nativePage(oracleData)
             let fixedClock = "2026-09-27T12:34:56.123Z"
             let firstData = try await coordinator.handle(
                 nativeRequest(
+                    root,
                     "TractandaItem/query",
                     [
                         "expression": "priority == 9", "limit": 2, "at": fixedClock,
@@ -1421,6 +1432,7 @@ final class ServiceCoordinatorTests: XCTestCase {
             XCTAssertEqual(firstClock, fixedClock)
             let crossUserData = try await coordinator.handle(
                 nativeRequest(
+                    root,
                     "TractandaItem/query", ["expression": "priority == 9", "cursor": next, "limit": 2]),
                 forUID: accounts.bob)
             let crossUser = try XCTUnwrap(JSONSerialization.jsonObject(with: crossUserData) as? [String: Any])
@@ -1444,10 +1456,11 @@ final class ServiceCoordinatorTests: XCTestCase {
             let privateArgs = try XCTUnwrap(
                 JSONSerialization.jsonObject(with: JSON.encode(privateItem)) as? [String: Any])
             _ = try await coordinator.handle(
-                nativeRequest("TractandaItem/commit", privateArgs, id: "private-write"),
+                nativeRequest(root, "TractandaItem/commit", privateArgs, id: "private-write"),
                 forUID: accounts.bob)
             let secondData = try await coordinator.handle(
                 nativeRequest(
+                    root,
                     "TractandaItem/query", ["expression": "priority == 9", "cursor": next, "limit": 2]),
                 forUID: accounts.alice)
             let secondResponse = try XCTUnwrap(
@@ -1462,6 +1475,7 @@ final class ServiceCoordinatorTests: XCTestCase {
             let previous = try XCTUnwrap(secondResult["previousCursor"] as? String)
             let backData = try await coordinator.handle(
                 nativeRequest(
+                    root,
                     "TractandaItem/query", ["expression": "priority == 9", "cursor": previous, "limit": 5]),
                 forUID: accounts.alice)
             let backResponse = try XCTUnwrap(JSONSerialization.jsonObject(with: backData) as? [String: Any])
@@ -1472,6 +1486,7 @@ final class ServiceCoordinatorTests: XCTestCase {
             XCTAssertNil(backResult["previousCursor"] as? String)
             let wrongZoneData = try await coordinator.handle(
                 nativeRequest(
+                    root,
                     "TractandaItem/query",
                     ["expression": "priority == 9", "cursor": next, "limit": 2, "timeZone": "UTC"]),
                 forUID: accounts.alice)
@@ -1488,6 +1503,7 @@ final class ServiceCoordinatorTests: XCTestCase {
                 opening: otherRoot, makeAccountDirectory: { accounts })
             let crossStoreData = try await otherCoordinator.handle(
                 nativeRequest(
+                    root,
                     "TractandaItem/query", ["expression": "priority == 9", "cursor": next, "limit": 2]),
                 forUID: accounts.alice)
             let crossStore = try XCTUnwrap(
@@ -1497,6 +1513,7 @@ final class ServiceCoordinatorTests: XCTestCase {
             await otherCoordinator.close()
             let ambiguous = try await coordinator.handle(
                 nativeRequest(
+                    root,
                     "TractandaItem/query",
                     ["expression": "priority == 9", "cursor": next, "position": 1, "limit": 2]),
                 forUID: accounts.alice)
@@ -1507,6 +1524,7 @@ final class ServiceCoordinatorTests: XCTestCase {
             let tampered = String(next.dropLast()) + (next.last == "A" ? "B" : "A")
             let badData = try await coordinator.handle(
                 nativeRequest(
+                    root,
                     "TractandaItem/query", ["expression": "priority == 9", "cursor": tampered, "limit": 2]),
                 forUID: accounts.alice)
             let badResponse = try XCTUnwrap(JSONSerialization.jsonObject(with: badData) as? [String: Any])
@@ -1518,10 +1536,11 @@ final class ServiceCoordinatorTests: XCTestCase {
             let editArgs = try XCTUnwrap(
                 JSONSerialization.jsonObject(with: JSON.encode(edit)) as? [String: Any])
             _ = try await coordinator.handle(
-                nativeRequest("TractandaItem/commit", editArgs, id: "cursor-write"),
+                nativeRequest(root, "TractandaItem/commit", editArgs, id: "cursor-write"),
                 forUID: accounts.alice)
             let staleData = try await coordinator.handle(
                 nativeRequest(
+                    root,
                     "TractandaItem/query", ["expression": "priority == 9", "cursor": next, "limit": 2]),
                 forUID: accounts.alice)
             let staleResponse = try XCTUnwrap(JSONSerialization.jsonObject(with: staleData) as? [String: Any])
@@ -1587,6 +1606,7 @@ final class ServiceCoordinatorTests: XCTestCase {
             let gate = PreparedReadGate()
             await coordinator.setPreparedReadHookForTesting { await gate.pause() }
             let request = try nativeRequest(
+                root,
                 "TractandaItem/query",
                 [
                     "expression": "classID == \"Item\"",
@@ -1629,6 +1649,7 @@ final class ServiceCoordinatorTests: XCTestCase {
             let counter = ReadCounter()
             await coordinator.setPreparedReadHookForTesting { await counter.record() }
             let request = try nativeRequest(
+                root,
                 "TractandaItem/query",
                 [
                     "expression": "itemID == \"\(selected.itemID)\"",
@@ -1669,6 +1690,7 @@ final class ServiceCoordinatorTests: XCTestCase {
             let gate = PreparedReadGate()
             await coordinator.setPreparedReadHookForTesting { await gate.pause() }
             let request = try nativeRequest(
+                root,
                 "TractandaItem/query", ["sort": [["property": "subject", "isAscending": true]]])
             let reading = Task { try await coordinator.handle(request, forUID: accounts.bob) }
             try await waitForPreparedReads(1, gate: gate)
@@ -1678,7 +1700,7 @@ final class ServiceCoordinatorTests: XCTestCase {
             let arguments = try XCTUnwrap(
                 JSONSerialization.jsonObject(with: JSON.encode(changes)) as? [String: Any])
             let committed = try await coordinator.handle(
-                nativeRequest("TractandaItem/commit", arguments, id: "write"), forUID: accounts.alice)
+                nativeRequest(root, "TractandaItem/commit", arguments, id: "write"), forUID: accounts.alice)
             XCTAssertTrue(String(decoding: committed, as: UTF8.self).contains("parallel-revoke"))
             await gate.release()
             let page = try nativePage(await reading.value)
@@ -1714,6 +1736,7 @@ final class ServiceCoordinatorTests: XCTestCase {
             let gate = PreparedReadGate()
             await coordinator.setPreparedReadHookForTesting { await gate.pause() }
             let request = try nativeRequest(
+                root,
                 "TractandaItem/query", ["sort": [["property": "subject", "isAscending": true]]])
             let reading = Task { try await coordinator.handle(request, forUID: accounts.service) }
             try await waitForPreparedReads(1, gate: gate)
@@ -1765,6 +1788,7 @@ final class ServiceCoordinatorTests: XCTestCase {
             let counter = ReadCounter()
             await coordinator.setPreparedReadHookForTesting { await counter.record() }
             let request = try nativeRequest(
+                root,
                 "TractandaItem/query",
                 [
                     "expression": "classID == \"Item\"",

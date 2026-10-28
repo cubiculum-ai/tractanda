@@ -962,9 +962,8 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         let client = client(coordinator)
         let admitted = try await client.startDocumentJob(fixture.request)
         try await waitForGate(gate)
-        let info = try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability], "methodCalls": [["TractandaStore/info", [:], "read"]],
-        ])
+        let info = try nativeFixtureEnvelope(
+            calls: [["TractandaStore/info", [:], "read"]], accountID: nativeFixtureAccountID(fixture.store))
         let response = try await coordinator.handle(info, forUID: getuid())
         let root = try XCTUnwrap(JSONSerialization.jsonObject(with: response) as? [String: Any])
         XCTAssertNil(root["code"])

@@ -51,10 +51,8 @@ final class AuthorityCausalStoreTests: XCTestCase {
     }
     private func response(_ store: ItemStore, _ method: String, _ args: [String: Any]) throws -> [String: Any]
     {
-        let request = try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability],
-            "methodCalls": [[method, args, "c"]],
-        ])
+        let request = try nativeFixtureEnvelope(
+            calls: [[method, args, "c"]], accountID: store.nativeProtocolSessionBasis.identity)
         let reply = try ItemService(store: store).handle(request, peerUID: tractanda_uid())
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: reply) as? [String: Any])
         let calls = try XCTUnwrap(object["methodResponses"] as? [[Any]])
@@ -120,12 +118,10 @@ final class AuthorityCausalStoreTests: XCTestCase {
             store: f.receiver,
             expression: "itemID == \"\(b.itemID)\" && modifiedAt > $time.iso(\"\(b.modifiedAt)\")")
         XCTAssertEqual(changed.map(\.revisionID), [d.revisionID])
-        let request = try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability],
-            "methodCalls": [
+        let request = try nativeFixtureEnvelope(
+            calls: [
                 ["TractandaItem/history", ["itemID": b.itemID, "position": 0, "limit": 20], "h"]
-            ],
-        ])
+            ], accountID: f.receiver.nativeProtocolSessionBasis.identity)
         XCTAssertNil(
             try ItemService(store: f.receiver).preparePooledHistory(
                 nativeFixtureInvocation(request), peerUID: tractanda_uid()))

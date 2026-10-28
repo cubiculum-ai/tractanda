@@ -15,10 +15,9 @@ final class ExtractedTextTests: XCTestCase {
             .revision
     }
     private func call(_ store: ItemStore, _ args: [String: Any]) throws -> [String: Any] {
-        let request = try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability],
-            "methodCalls": [["TractandaItem/extractedText", args, "test"]],
-        ])
+        let request = try nativeFixtureEnvelope(
+            calls: [["TractandaItem/extractedText", args, "test"]],
+            accountID: store.nativeProtocolSessionBasis.identity)
         let response = try XCTUnwrap(
             JSONSerialization.jsonObject(
                 with: ItemService(store: store).handle(request, peerUID: store.ownerUID)) as? [String: Any])

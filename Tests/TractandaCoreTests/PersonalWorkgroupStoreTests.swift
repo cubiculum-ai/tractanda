@@ -314,10 +314,9 @@ final class PersonalWorkgroupStoreTests: XCTestCase {
             }
             do {
                 let service = ItemService(store: store!)
-                let call = try JSONSerialization.data(withJSONObject: [
-                    "using": [ItemService.capability],
-                    "methodCalls": [["TractandaItem/get", ["ids": [first.itemID]], "c"]],
-                ])
+                let call = try nativeFixtureEnvelope(
+                    calls: [["TractandaItem/get", ["ids": [first.itemID]], "c"]],
+                    accountID: store!.nativeProtocolSessionBasis.identity)
                 let response = try XCTUnwrap(
                     JSONSerialization.jsonObject(with: service.handle(call, peerUID: accounts.alice))
                         as? [String: Any])

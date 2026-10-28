@@ -154,10 +154,9 @@ final class ClusterBoundaryRepairTests: XCTestCase {
             .revision
         XCTAssertGreaterThan(try JSON.encode(record.provenance!.itemValue).count, 2048)
         let service = ItemService(store: store)
-        let request = try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability],
-            "methodCalls": [["TractandaItem/history", ["itemID": record.itemID, "limit": 1], "history"]],
-        ])
+        let request = try nativeFixtureEnvelope(
+            calls: [["TractandaItem/history", ["itemID": record.itemID, "limit": 1], "history"]],
+            accountID: store.nativeProtocolSessionBasis.identity)
         let prepared = try XCTUnwrap(
             service.preparePooledHistory(nativeFixtureInvocation(request), peerUID: tractanda_uid()))
         let pool = try SQLiteReadPool(

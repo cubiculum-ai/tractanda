@@ -91,7 +91,10 @@ final class AccessControlTests: XCTestCase {
             XCTAssertEqual(($0 as? TractandaError)?.code, code, "\($0)", file: file, line: line)
         }
     }
-    private func response(_ service: ItemService, uid: UInt32, method: String, args: [String: Any] = [:])
+    private func response(
+        _ service: ItemService, uid: UInt32, method: String, args: [String: Any] = [:],
+        accountID: String? = nil
+    )
         throws -> [String: Any]
     {
         var arguments = args
@@ -111,7 +114,7 @@ final class AccessControlTests: XCTestCase {
         }
         let data = try nativeFixtureRequest(
             method: method, arguments: arguments,
-            accountID: service.store.nativeProtocolSessionBasis.identity)
+            accountID: accountID ?? service.store.nativeProtocolSessionBasis.identity)
         let result =
             try JSONSerialization.jsonObject(with: service.handle(data, peerUID: uid)) as! [String: Any]
         if let responses = result["methodResponses"] as? [[Any]] { return responses[0][1] as! [String: Any] }
@@ -462,6 +465,32 @@ final class AccessControlTests: XCTestCase {
         }
     }
 
+    func testDeniedRebuildReportsForbiddenWithoutChangingCanonicalStateOrHistory() throws {
+        try fixture { store, accounts in
+            let item = try create(
+                store, uid: accounts.alice, fields: ["subject": .text("retained rebuild denial")])
+            let service = ItemService(store: store)
+            let beforeState = store.state
+            let beforeHistory = try store.history(item.itemID)
+            let beforeRows = try store.exportCatalogueForVerification()
+            let beforeBytes = try Dictionary(
+                uniqueKeysWithValues: beforeRows.map { row in
+                    (row.path, try Data(contentsOf: store.root.appendingPathComponent(row.path)))
+                })
+            let denied = try response(service, uid: accounts.bob, method: "TractandaStore/rebuild")
+            XCTAssertEqual(denied["type"] as? String, "forbidden")
+            XCTAssertEqual(store.state, beforeState)
+            XCTAssertEqual(try store.history(item.itemID), beforeHistory)
+            XCTAssertEqual(try store.get(item.itemID), item)
+            let afterRows = try store.exportCatalogueForVerification()
+            let afterBytes = try Dictionary(
+                uniqueKeysWithValues: afterRows.map { row in
+                    (row.path, try Data(contentsOf: store.root.appendingPathComponent(row.path)))
+                })
+            XCTAssertEqual(afterBytes, beforeBytes)
+        }
+    }
+
     func testSortedSectionQueriesApplyCurrentPermissionsBeforeCountingAndPaging() throws {
         try fixture { store, accounts in
             let category = try create(
@@ -593,8 +622,11 @@ final class AccessControlTests: XCTestCase {
         let args: [String: Any] = [
             "text": "needle", "expression": "classID == \"Item\"", "limit": 20,
         ]
+        // Account discovery happens before measuring the query's per-item ACL work.
+        let accountID = try store!.nativeProtocolSessionBasis.identity
         let before = store!.aclSwiftReadCheckCount
-        let withGroups = try response(service!, uid: accounts.bob, method: "TractandaItem/query", args: args)
+        let withGroups = try response(
+            service!, uid: accounts.bob, method: "TractandaItem/query", args: args, accountID: accountID)
         XCTAssertEqual(withGroups["total"] as? Int, 2)
         XCTAssertLessThanOrEqual(store!.aclSwiftReadCheckCount - before, 2)
 

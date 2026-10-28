@@ -2746,6 +2746,9 @@ public final class ItemService {
                 ].contains(call.method)
             ) {
                 func executeCall() throws -> NativeMethodOutcome {
+                    // Rebuild authorization cannot mutate the store. Reject it before the
+                    // generic mutation observer begins, so denial retains its precise error.
+                    if call.method == "TractandaStore/rebuild" { try store.requireAdministrator() }
                     if !store.isCanonicalTrusted,
                         !["TractandaStore/info", "TractandaStore/rebuild"].contains(call.method)
                     {

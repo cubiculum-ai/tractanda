@@ -57,10 +57,9 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
     private func create(_ store: ItemStore) throws -> Revision {
         try store.commit(CommitRequest(classID: "Item", operationID: "item")).revision
     }
-    private func request(_ method: String, _ arguments: [String: Any]) throws -> Data {
-        try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability], "methodCalls": [[method, arguments, "test"]],
-        ])
+    private func request(_ directory: URL, _ method: String, _ arguments: [String: Any]) throws -> Data {
+        try nativeFixtureRequest(
+            method: method, arguments: arguments, accountID: nativeFixtureAccountID(directory))
     }
     private func payload(_ data: Data) throws -> [String: Any] {
         let envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -159,7 +158,7 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
             _ = try store.appendAttachment(uploadID: XCTUnwrap(upload.uploadID), offset: 0, data: bytes)
         }
         let id = try XCTUnwrap(upload.uploadID)
-        let finish = try request("TractandaAttachment/finish", ["uploadID": id])
+        let finish = try request(directory, "TractandaAttachment/finish", ["uploadID": id])
         let coordinator = try await ServiceCoordinator(opening: directory)
         let gate = Gate()
         await coordinator.setAttachmentIntegrityHookForTesting { try await gate.enter() }
@@ -172,7 +171,7 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(repeated["type"] as? String, "attachmentVerifying")
         let arrivals = await gate.arrivals
         XCTAssertEqual(arrivals, 1)
-        let info = try request("TractandaStore/info", [:])
+        let info = try request(directory, "TractandaStore/info", [:])
         let response = try await coordinator.handle(info, forUID: getuid())
         XCTAssertNotNil(try payload(response)["features"])
         await coordinator.close()
@@ -194,24 +193,20 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
         defer { try? FileManager.default.removeItem(at: directory) }
         _ = try ItemStore.initializeFresh(root: directory)
         let coordinator = try await ServiceCoordinator(opening: directory)
-        let batch = try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability],
-            "methodCalls": [
+        let batch = try nativeFixtureEnvelope(
+            calls: [
                 [
                     "TractandaAttachment/content",
                     ["itemID": Identifier.make(), "attachmentID": Identifier.make()], "one",
                 ],
                 ["TractandaStore/info", [:], "two"],
-            ],
-        ])
+            ], accountID: nativeFixtureAccountID(directory))
         let response = try await coordinator.handle(batch, forUID: getuid())
         XCTAssertEqual(try payload(response)["type"] as? String, "attachmentSingletonRequired")
-        let metadata = try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability],
-            "methodCalls": [
+        let metadata = try nativeFixtureEnvelope(
+            calls: [
                 ["TractandaStore/info", [:], "one"], ["TractandaStore/info", [:], "two"],
-            ],
-        ])
+            ], accountID: nativeFixtureAccountID(directory))
         let normal = try await coordinator.handle(metadata, forUID: getuid())
         let envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: normal) as? [String: Any])
         XCTAssertEqual((envelope["methodResponses"] as? [[Any]])?.count, 2)
@@ -280,12 +275,12 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
         let gate = Gate()
         await coordinator.setAttachmentIntegrityHookForTesting { try await gate.enter() }
         let id = try XCTUnwrap(upload.uploadID)
-        let finish = try request("TractandaAttachment/finish", ["uploadID": id])
+        let finish = try request(directory, "TractandaAttachment/finish", ["uploadID": id])
         let pending = try await coordinator.handle(finish, forUID: accounts.alice)
         XCTAssertEqual(try payload(pending)["type"] as? String, "attachmentVerifying")
         try await gate.awaitArrival()
         accounts.revoke()
-        let statusRequest = try request("TractandaAttachment/uploadStatus", ["uploadID": id])
+        let statusRequest = try request(directory, "TractandaAttachment/uploadStatus", ["uploadID": id])
         let denied = try await coordinator.handle(statusRequest, forUID: accounts.alice)
         let error = try JSON.decode(TractandaError.self, denied)
         XCTAssertEqual(error.code, "forbidden")
@@ -321,6 +316,7 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
         let gate = Gate()
         await coordinator.setAttachmentIntegrityHookForTesting { try await gate.enter() }
         let read = try request(
+            directory,
             "TractandaAttachment/content",
             [
                 "itemID": itemID, "revisionID": revisionID, "attachmentID": descriptor.attachmentID,
@@ -360,7 +356,7 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
             _ = try store.appendAttachment(uploadID: id, offset: 0, data: Data([1]))
         }
         let coordinator = try await ServiceCoordinator(opening: directory)
-        let finish = try request("TractandaAttachment/finish", ["uploadID": id])
+        let finish = try request(directory, "TractandaAttachment/finish", ["uploadID": id])
         let pending = try await coordinator.handle(finish, forUID: getuid())
         XCTAssertEqual(try payload(pending)["type"] as? String, "attachmentVerifying")
         let client = TractandaClient.ItemClient(transport: Transport(coordinator: coordinator, uid: getuid()))
@@ -404,10 +400,11 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
         let service = ItemService(store: store)
         service.rejectsBlockingNetworkAttachments = true
         for method in ["TractandaAttachment/finish", "TractandaAttachment/content"] {
-            let response = service.handle(try request(method, [:]), peerUID: getuid())
+            let response = service.handle(try request(directory, method, [:]), peerUID: getuid())
             XCTAssertEqual(try payload(response)["type"] as? String, "attachmentRequiresDaemon")
         }
-        let info = try payload(service.handle(request("TractandaStore/info", [:]), peerUID: getuid()))
+        let info = try payload(
+            service.handle(request(directory, "TractandaStore/info", [:]), peerUID: getuid()))
         XCTAssertFalse(
             (info["features"] as? [String] ?? []).contains(ServerFeature.resumableAttachmentTransfer.rawValue)
         )
@@ -473,7 +470,7 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
         }
         let coordinator = try await ServiceCoordinator(opening: directory)
         let client = TractandaClient.ItemClient(transport: Transport(coordinator: coordinator, uid: getuid()))
-        let finish = try request("TractandaAttachment/finish", ["uploadID": id])
+        let finish = try request(directory, "TractandaAttachment/finish", ["uploadID": id])
         let pending = try await coordinator.handle(finish, forUID: getuid())
         XCTAssertEqual(try payload(pending)["type"] as? String, "attachmentVerifying")
         let deadline = ContinuousClock.now.advanced(by: .seconds(2))

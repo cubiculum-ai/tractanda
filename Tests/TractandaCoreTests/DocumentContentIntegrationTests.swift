@@ -96,10 +96,12 @@ final class DocumentContentIntegrationTests: XCTestCase, @unchecked Sendable {
                 classID: "Item", changes: ["subject": .text("storage fixture")], operationID: "item")
         ).revision
     }
-    private func request(_ method: String, _ args: Any) throws -> Data {
-        try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability], "methodCalls": [[method, args, "test"]],
-        ])
+    private func request(_ root: URL, _ method: String, _ args: Any) throws -> Data {
+        guard let arguments = args as? [String: Any] else {
+            throw TractandaError("testFixture", "Document request arguments must be an object.")
+        }
+        return try nativeFixtureRequest(
+            method: method, arguments: arguments, accountID: nativeFixtureAccountID(root))
     }
     private func object(_ value: some Encodable) throws -> Any {
         try JSONSerialization.jsonObject(with: JSON.encode(value))
@@ -191,11 +193,11 @@ final class DocumentContentIntegrationTests: XCTestCase, @unchecked Sendable {
         await coordinator.setAttachmentCopyHookForTesting { try await gate.wait() }
         let operation = CommitRequest(
             action: .copy, itemID: saved.itemID, expectedRevisionID: saved.revisionID, operationID: "copy")
-        let raw = try request("TractandaItem/commit", object(operation))
+        let raw = try request(root, "TractandaItem/commit", object(operation))
         _ = try await coordinator.handle(raw, forUID: getuid())
         try await gate.awaitEntry()
         _ = try await coordinator.handle(raw, forUID: getuid())
-        _ = try await coordinator.handle(request("TractandaStore/info", [:]), forUID: getuid())
+        _ = try await coordinator.handle(request(root, "TractandaStore/info", [:]), forUID: getuid())
         await gate.release()
         let client = TractandaClient.ItemClient(transport: Transport(coordinator: coordinator, uid: getuid()))
         let copiedReceipt = try await client.commit(operation)

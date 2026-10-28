@@ -356,9 +356,8 @@ final class PersonalDAGTests: XCTestCase {
             func call(_ method: String, _ arguments: [String: Any] = [:], uid: UInt32 = 51001) throws
                 -> [String: Any]
             {
-                let request = try JSONSerialization.data(withJSONObject: [
-                    "using": [ItemService.capability], "methodCalls": [[method, arguments, "c"]],
-                ])
+                let request = try nativeFixtureEnvelope(
+                    calls: [[method, arguments, "c"]], accountID: store.nativeProtocolSessionBasis.identity)
                 let response = try XCTUnwrap(
                     JSONSerialization.jsonObject(
                         with: service.handle(request, peerUID: uid)) as? [String: Any])
