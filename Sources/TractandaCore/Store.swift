@@ -7632,7 +7632,16 @@ extension ItemStore {
     }
     /// Actual private runtime readiness; reading this never enables clustering.
     private func peerClockRuntimeContext() throws -> String? {
-        guard authorityIntakeEnabled, isCanonicalReady, let peerIntake,
+        guard isCanonicalReady else { return nil }
+        if personalProfile != nil {
+            // Read current local membership without publication recovery or old intake state.
+            let identity = try personalConfiguredIdentity()
+            guard let membership = identity.membership, membership.members.count > 1,
+                membership.members.contains(where: { $0.replicaID == identity.replicaID })
+            else { return nil }
+            return "personal:" + (try membership.digest)
+        }
+        guard authorityIntakeEnabled, let peerIntake,
             let configuration = try peerIntake.configuration(), !configuration.peers.isEmpty
         else { return nil }
         return AuthorityRecordCodec.sha256(try JSON.encode(configuration))

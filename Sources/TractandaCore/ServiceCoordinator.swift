@@ -2501,7 +2501,7 @@ private final class CoreBox: @unchecked Sendable {
                 revisionProjectionEnabled: revisionProjectionEnabled,
                 authorityIntakeEnabled: authorityIntakeEnabled)
         }
-        peerClockIntakeEnabled = store.authorityIntakeEnabled
+        peerClockIntakeEnabled = store.isPersonalWorkgroup || store.authorityIntakeEnabled
         if let embeddingProviderForTesting {
             guard documentConverter == nil else {
                 throw TractandaError(
