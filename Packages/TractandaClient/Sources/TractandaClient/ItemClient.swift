@@ -198,7 +198,8 @@ public struct ItemClient: Sendable {
         return revision
     }
 
-    /// Query/get share one caller-visible state; unresolved and byte-limited outcomes remain explicit.
+    /// Query tokens stay opaque; Item state is observed separately around hydration.
+    /// Unresolved and byte-limited outcomes remain explicit.
     public func page(matching query: ItemQuery, requiring state: String? = nil) async throws -> ItemPage {
         guard (0...256).contains(query.limit), query.categoryPath.count <= 32,
             query.excludedCategoryIDs.count <= 32

@@ -58,6 +58,41 @@ final class BreadcrumbTests: XCTestCase {
             .init(kind: .release, button: .left, column: x, row: actualRow, modifiers: []), at: 1.01)
     }
 
+    func testOpaqueClockQueryLoadsAndActualMutationDuringHydrationWithholdsRows() throws {
+        let f = try Fixture()
+        let category = try f.category("Clock-scoped category")
+        let item = try f.item("Before concurrent change")
+        var mutateAfterPairedRead = false
+        let client = ItemClient(transport: { data in
+            let result = f.service.handle(data, peerUID: f.store.ownerUID)
+            let envelope = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+            let methods = (envelope["methodCalls"] as! [[Any]]).compactMap { $0[0] as? String }
+            if mutateAfterPairedRead && methods == ["TractandaItem/query", "TractandaItem/get"] {
+                mutateAfterPairedRead = false
+                _ = try f.client.commitFixture(
+                    CommitRequest(
+                        action: .revise, itemID: item.itemID,
+                        expectedRevisionID: item.revisionID,
+                        changes: ["subject": .text("Changed after hydration")], operationID: Identifier.make()
+                    ))
+            }
+            return result
+        })
+        let workspace = Workspace(client: client)
+        try workspace.browse(path: [category])
+        XCTAssertTrue(workspace.items.contains { $0.itemID == item.itemID })
+        XCTAssertNotEqual(
+            workspace.queryState, try client.state(),
+            "Clock query token and Item state are distinct opaque domains")
+        mutateAfterPairedRead = true
+        XCTAssertThrowsError(try workspace.refresh()) {
+            XCTAssertEqual(($0 as? TractandaError)?.code, "stateChanged")
+        }
+        XCTAssertFalse(mutateAfterPairedRead, "The actual query/get hydration hook must run")
+        XCTAssertTrue(workspace.items.isEmpty, "Stale rows must be withheld after a real data change")
+        XCTAssertEqual(try f.store.history(item.itemID).count, 2)
+    }
+
     func testClickingAncestorsDropsLaterCategoriesAndRootRestoresNativeResults() throws {
         let f = try Fixture()
         let root = try f.category("Item")
