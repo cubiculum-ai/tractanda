@@ -210,7 +210,7 @@ final class PeerExchangeBoundaryTests: XCTestCase {
         defer { try? original.write(to: floor) }
         let prior = try JSON.decode(CanonicalReaderRequirement.self, original)
         let advanced = CanonicalReaderRequirement(
-            storeID: prior.storeID, minimumReaderLevel: 15,
+            storeID: prior.storeID, minimumReaderLevel: CanonicalFormatSupport.current.readerLevel + 1,
             recordFormats: prior.recordFormats, capabilities: prior.capabilities)
         // Model a newer writer's durable floor; no newer item is published by this fixture.
         try JSON.encode(advanced).write(to: floor)
@@ -342,7 +342,7 @@ final class PeerExchangeBoundaryTests: XCTestCase {
         let prior = try JSON.decode(CanonicalReaderRequirement.self, originalFloor)
         try JSON.encode(
             CanonicalReaderRequirement(
-                storeID: prior.storeID, minimumReaderLevel: 15,
+                storeID: prior.storeID, minimumReaderLevel: CanonicalFormatSupport.current.readerLevel + 1,
                 recordFormats: prior.recordFormats, capabilities: prior.capabilities)
         ).write(to: floor)
         do {
