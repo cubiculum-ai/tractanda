@@ -1,3 +1,4 @@
+import CTractandaPlatform
 import Foundation
 import TractandaClient
 
@@ -37,7 +38,8 @@ extension TractandaCore.ItemClient {
 /// Build positive domain fixtures with the current JMAP account, filter and wire-value contracts.
 /// Protocol-rejection tests intentionally keep their own raw envelopes.
 func nativeFixtureEnvelope(calls: [[Any]], accountID: String) throws -> Data {
-    let prepared: [[Any]] = try calls.map { call in
+    var prepared: [[Any]] = []
+    for call in calls {
         guard call.count == 3, let method = call[0] as? String,
             var arguments = call[1] as? [String: Any], let callID = call[2] as? String
         else {
@@ -62,17 +64,20 @@ func nativeFixtureEnvelope(calls: [[Any]], accountID: String) throws -> Data {
             if let sort = arguments["sort"] as? [[String: Any]],
                 sort.contains(where: { $0["categoryRootID"] != nil })
             {
-                let domain = try JSONDecoder().decode(
-                    [ItemSort].self, from: JSONSerialization.data(withJSONObject: sort))
-                arguments["sort"] = try JSONSerialization.jsonObject(
-                    with: JSONEncoder().encode(domain.map(JMAPReadComparator.init)))
+                let data = try JSONSerialization.data(withJSONObject: sort)
+                let domain = try JSONDecoder().decode([TractandaClient.ItemSort].self, from: data)
+                let comparators = try domain.map { try TractandaClient.JMAPReadComparator($0) }
+                let encoded = try JSONEncoder().encode(comparators)
+                arguments["sort"] = try JSONSerialization.jsonObject(with: encoded)
             }
         }
         let canonical = try JMAPValue.decode(JSONSerialization.data(withJSONObject: arguments))
         let selected = try TractandaJMAP.prepareArguments(
             method: method, arguments: canonical, accountID: accountID)
         let wire = try TractandaJMAPCodec.argumentsToWire(method: method, arguments: selected)
-        return [method, try JSONSerialization.jsonObject(with: wire.encoded()), callID]
+        let encoded = try wire.encoded()
+        let object = try JSONSerialization.jsonObject(with: encoded)
+        prepared.append([method, object, callID])
     }
     return try NativeClientContext.envelope(calls: prepared)
 }
@@ -92,11 +97,10 @@ func nativeFixtureAccountID(_ root: URL) throws -> String {
 /// Positive in-process fixtures use production discovery, account selection and typed wire values.
 func nativeFixtureResponse(
     _ service: ServiceCoordinator, forUID uid: UInt32, method: String,
-    arguments: [String: Any] = [:], callID: String = "fixture"
+    arguments: Data = Data("{}".utf8), callID: String = "fixture"
 ) async throws -> Data {
-    let bytes = try JSONSerialization.data(withJSONObject: arguments)
     let context = NativeAsyncClientContext { request in
         try await service.handle(request, forUID: uid)
     }
-    return try await context.send(method: method, arguments: bytes, callID: callID)
+    return try await context.send(method: method, arguments: arguments, callID: callID)
 }

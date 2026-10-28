@@ -1,6 +1,5 @@
 import CTractandaPlatform
 import Foundation
-import TractandaClient
 import XCTest
 
 @testable import TractandaCore
@@ -67,7 +66,7 @@ final class DaemonApplicationTests: XCTestCase {
                 try native("TractandaAuth/createSession", ["uid": uid &+ 1]), forUID: uid)
             XCTAssertFalse(String(data: forged, encoding: .utf8)!.contains("token"))
             let mixed = try JSONSerialization.data(withJSONObject: [
-                "using": TractandaJMAP.using,
+                "using": ["urn:ietf:params:jmap:core", ItemService.capability],
                 "methodCalls": [
                     ["TractandaAuth/createSession", [:], "a"], ["TractandaAuth/createSession", [:], "b"],
                 ],

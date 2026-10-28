@@ -1,7 +1,6 @@
 import Foundation
 import NIOCore
 import NIOPosix
-import TractandaClient
 import TractandaPeerTransport
 import XCTest
 
@@ -690,7 +689,8 @@ extension SharedDaemonTests {
         defer { await source.close() }
         let connection = try await source.connectPeer(peerID: "target")
         let response = try await connection.request(.init("inventory")).get()
-        XCTAssertNotNil(try JSON.decode([String: ItemValue].self, response)["entries"])
+        let inventory = try JSON.decode([String: TractandaCore.ItemValue].self, response)
+        XCTAssertNotNil(inventory["entries"])
         do {
             _ = try await target.connectPeer(peerID: "source")
             XCTFail("Responder opened outbound transport")

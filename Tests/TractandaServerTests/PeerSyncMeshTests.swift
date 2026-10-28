@@ -87,7 +87,7 @@ final class PeerSyncMeshTests: XCTestCase {
         func call(_ node: String, _ method: String, _ arguments: [String: Any]) async throws -> Data {
             let response = try await nativeFixtureResponse(
                 XCTUnwrap(services[node]), forUID: fixture.accountDirectory(for: node).human,
-                method: method, arguments: arguments, callID: "mesh")
+                method: method, arguments: JSONSerialization.data(withJSONObject: arguments), callID: "mesh")
             return try NativeMethodResult.unwrap(response, method: method, callID: "mesh")
         }
         func current(_ node: String, _ itemID: String) async throws -> Revision? {
