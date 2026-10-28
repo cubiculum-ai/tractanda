@@ -86,7 +86,7 @@ private actor ScenarioTransport: ItemTransport {
                 ? current.map { [$0.itemID] } ?? [] : []
             return try reply(
                 method, ["ids": items, "position": 0, "total": items.count, "queryState": state])
-        case "TractandaItem/getBounded":
+        case "TractandaItem/get", "TractandaItem/getBounded":
             let ids = args["ids"] as! [String]
             let list = current.flatMap { ids.contains($0.itemID) && !hidesCurrent ? [$0] : nil } ?? []
             // Every requested ID must be classified, including items hidden by current access.
