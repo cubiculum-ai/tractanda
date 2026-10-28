@@ -523,7 +523,7 @@ final class PeerIntakeStoreTests: XCTestCase {
             operationID: "revocation-with-cut")
         XCTAssertEqual(try f.receiver.get(f.base.itemID).revisionID, f.base.revisionID)
     }
-    func testRelayVouchesOnlyForExplicitKnownOriginsAndReusesTheOriginalLocator() throws {
+    func testOriginAllowlistDoesNotInventSourcePolicyAndRetainsOneOriginalLocator() throws {
         let f = try Fixture()
         try f.bootstrap()
         let sourceEdit = try f.edit()
@@ -609,8 +609,25 @@ final class PeerIntakeStoreTests: XCTestCase {
             configurationDigest: AuthorityRecordCodec.sha256(Data("raven-allows-known-relay".utf8)),
             permittedOrigins: [f.origin, relayedOrigin].sorted())
         try f.receiver.configurePeerIntake(peers: [previous, f.context])
-        XCTAssertEqual(try f.send(f.packet(objects)).accepted, 1)
-        XCTAssertEqual(try f.receiver.get(revision.itemID), revision)
+        let repeated = try f.send(f.packet(objects))
+        XCTAssertEqual(repeated.accepted, 0)
+        XCTAssertEqual(repeated.held + repeated.missing, 1)
+        XCTAssertEqual(try f.receiver.get(revision.itemID).revisionID, f.base.revisionID)
+        // The relayed control references a different issuer's cut without admitting its policies.
+        // Close the Store before directly inspecting its disposable historical component index.
+        let database = f.receiver.indexDirectory.appendingPathComponent("items.sqlite")
+        f.receiver = nil
+        let index = try ItemIndex(path: database.path, create: false)
+        let disposition = try XCTUnwrap(index.authorityDisposition(id: revisionID))
+        XCTAssertEqual(disposition.disposition, .missingDependencies)
+        XCTAssertEqual(disposition.reason, "No complete currently authorized original evidence is available.")
+        let coordinator = PeerIntakeCoordinator(
+            root: f.receiverRoot, ownerUID: tractanda_uid(), storeID: f.storeID)
+        XCTAssertThrowsError(try coordinator.validatePolicyCut(evidence, index: index)) {
+            XCTAssertEqual(($0 as? TractandaError)?.code, "invalidAuthority")
+            XCTAssertEqual(
+                ($0 as? TractandaError)?.message, "Source policies are not current at the frozen PRE cut.")
+        }
         let files = FileManager.default.enumerator(
             at: f.receiverRoot.appendingPathComponent("items"), includingPropertiesForKeys: nil)!
         var matches = 0
