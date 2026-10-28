@@ -56,6 +56,7 @@ struct CategoryPreviewPage: Sendable {
             let conflictsAvailable: Bool?
         }
         typealias GetResult = FullItemRead
+        let itemState = try client.state()
         let sortValue = try JSONSerialization.jsonObject(with: JSON.encode(sort))
         let page = try JSON.decode(
             QueryResult.self,
@@ -67,6 +68,9 @@ struct CategoryPreviewPage: Sendable {
             throw TractandaError("protocolError", "Empty non-final category preview page.")
         }
         guard !page.ids.isEmpty else {
+            guard try client.state() == itemState else {
+                throw TractandaError("stateChanged", "Refresh the changing board.")
+            }
             return CategoryPreviewPage(
                 rows: [], position: position, total: page.total, queryState: page.queryState,
                 consumedCount: 0, unresolvedCount: 0, unhydratedCount: 0,
@@ -75,7 +79,7 @@ struct CategoryPreviewPage: Sendable {
         }
         let got = try JSON.decode(
             GetResult.self, client.call("TractandaItem/get", arguments: ["ids": page.ids]))
-        guard got.notFound.isEmpty, got.state == page.queryState else {
+        guard got.notFound.isEmpty, got.state == itemState, try client.state() == itemState else {
             throw TractandaError("stateChanged", "Refresh the changing board.")
         }
         let unresolved = got.unresolved ?? []

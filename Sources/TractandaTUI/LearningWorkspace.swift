@@ -66,6 +66,7 @@ final class LearningWorkspace {
         let nextExpression = expression ?? self.expression
         let selected = current?.item.itemID
         do {
+            let itemState = try client.state()
             let category = try client.revision(for: categoryID)
             let state: CategoryLearningState
             let loaded: [Row]
@@ -108,7 +109,7 @@ final class LearningWorkspace {
                 guard page.position == position, page.ids.count <= Self.pageSize,
                     page.total >= position + page.ids.count
                 else { throw TractandaError("protocolError", "Invalid example page.") }
-                loaded = try items(page.ids, requiring: page.queryState).map {
+                loaded = try items(page.ids, requiring: itemState).map {
                     Row(item: $0, suggestion: nil)
                 }
                 total = page.total
@@ -120,6 +121,9 @@ final class LearningWorkspace {
                 final.categoryRevisionID == state.categoryRevisionID, final.modelID == state.modelID,
                 final.status == state.status
             else { throw TractandaError("stateChanged", "Learning changed while loading. R refreshes.") }
+            guard try client.state() == itemState else {
+                throw TractandaError("stateChanged", "Items changed while learning; refresh the view.")
+            }
             self.category = category
             self.state = final
             self.mode = nextMode

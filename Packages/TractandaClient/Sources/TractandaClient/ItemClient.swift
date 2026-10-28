@@ -206,6 +206,7 @@ public struct ItemClient: Sendable {
             throw TractandaError("invalidArguments", "Invalid query page or category path.")
         }
         try ItemSort.validate(query.sort)
+        let itemState = try await itemRecords(ids: []).state
         let page: QueryResult = try await call(
             "TractandaItem/query", arguments: query, returning: QueryResult.self)
         guard page.total >= 0,
@@ -226,7 +227,7 @@ public struct ItemClient: Sendable {
         var fetched: [ItemGetResult] = []
         for ids in chunks {
             let result = try await items(ids: ids)
-            guard result.state == page.queryState else {
+            guard result.state == itemState else {
                 throw TractandaError("stateChanged", "Items changed while loading; refresh the view.")
             }
             fetched.append(result)
@@ -253,6 +254,9 @@ public struct ItemClient: Sendable {
         let unresolvedByID = Dictionary(uniqueKeysWithValues: unresolved.map { ($0.itemID, $0) })
         let completeness: ItemPage.Completeness =
             unresolved.isEmpty && page.completeness != .unresolvedItems ? .complete : .unresolvedItems
+        guard try await itemRecords(ids: []).state == itemState else {
+            throw TractandaError("stateChanged", "Items changed while loading; refresh the view.")
+        }
         return ItemPage(
             items: page.ids.compactMap { byID[$0] }, position: page.position,
             consumedCount: page.ids.count, total: page.total, state: page.queryState,

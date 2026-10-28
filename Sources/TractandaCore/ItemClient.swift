@@ -393,6 +393,7 @@ public final class ItemClient {
             let notFound: [String]
             let state: String
         }
+        let itemState = try state()
         var position = 0
         let queryDate = Timestamp.now()
         var revisions: [Revision] = []
@@ -412,7 +413,7 @@ public final class ItemClient {
             if !page.ids.isEmpty {
                 let result = try JSON.decode(
                     GetResult.self, call("TractandaItem/get", arguments: ["ids": page.ids]))
-                guard result.state == page.queryState, result.notFound.isEmpty else {
+                guard result.state == itemState, result.notFound.isEmpty else {
                     throw TractandaError("stateChanged", "Refresh the changing board.")
                 }
                 revisions.append(
@@ -421,7 +422,12 @@ public final class ItemClient {
                     }.map { try $0.canonicalRevision() })
             }
             position += page.ids.count
-            if position >= page.total { return revisions }
+            if position >= page.total {
+                guard try state() == itemState else {
+                    throw TractandaError("stateChanged", "Items changed while loading; refresh the view.")
+                }
+                return revisions
+            }
             guard !page.ids.isEmpty else {
                 throw TractandaError("protocolError", "Empty non-final query page.")
             }

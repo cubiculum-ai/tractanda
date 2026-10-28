@@ -243,6 +243,7 @@ final class Workspace {
     func items(inSectionAt index: Int) throws -> [Revision] {
         guard sections.indices.contains(index) else { return [] }
         if isSemanticSearch { return sections[index].items }
+        let itemState = try client.state()
         let page = try JSON.decode(
             ItemPage.self,
             client.query(
@@ -264,7 +265,7 @@ final class Workspace {
             let ids = Array(page.ids[start..<min(start + Self.pageSize, page.ids.count)])
             let result = try JSON.decode(
                 Response.self, client.call("TractandaItem/get", arguments: ["ids": ids]))
-            guard result.state == page.queryState else {
+            guard result.state == itemState else {
                 throw TractandaError("stateChanged", "Items changed while marking; refresh first.")
             }
             let unresolved = result.unresolved ?? []
@@ -289,6 +290,9 @@ final class Workspace {
             }
             for revision in result.list { byID[revision.itemID] = revision }
         }
+        guard try client.state() == itemState else {
+            throw TractandaError("stateChanged", "Items changed while marking; refresh first.")
+        }
         return page.ids.compactMap { byID[$0] }
     }
 
@@ -298,6 +302,7 @@ final class Workspace {
     ) throws {
         typealias Response = FullItemRead
         do {
+            let itemState = try client.state()
             // Refresh names through authorization too; a hidden category must not remain a heading.
             let excludedNames = try excludedCategoryIDs.map {
                 try client.revision(for: $0).fields["subject"]?.string ?? "Category"
@@ -344,7 +349,7 @@ final class Workspace {
                         let (page, result) = try queryAndGet(position, limit: limit, cursor: continuation)
                         if firstPage == nil { firstPage = page }
                         lastPage = page
-                        guard result.state == page.queryState, result.notFound.isEmpty else {
+                        guard result.state == itemState, result.notFound.isEmpty else {
                             throw TractandaError(
                                 "stateChanged", "Items changed while loading; refresh the view.")
                         }
@@ -439,7 +444,7 @@ final class Workspace {
                 !unresolvedIDs.isEmpty
                 || loaded.contains { $0.completeness == "unresolvedItems" || $0.conflictsAvailable }
             let navigation = try categoryPath.isEmpty ? nil : CategoryHierarchy(self.categories())
-            if navigation != nil, try client.state() != initialState {
+            if navigation != nil, try client.state() != itemState {
                 throw TractandaError("stateChanged", "Categories changed while loading. Refresh the view.")
             }
             sections = loaded
@@ -458,7 +463,7 @@ final class Workspace {
                 let projection = try client.categoryMemberships(
                     ids: loaded.flatMap(\.items).map(\.itemID), categoryRootIDs: roots,
                     at: evaluatedAt)
-                guard projection.state == initialState, projection.notFound.isEmpty else {
+                guard projection.state == itemState, projection.notFound.isEmpty else {
                     throw TractandaError("stateChanged", "Items changed while loading; refresh the view.")
                 }
                 categoryMemberships = projection.memberships
@@ -472,6 +477,9 @@ final class Workspace {
             } else {
                 categoryMemberships = [:]
                 categoryMembershipLabels = [:]
+            }
+            guard try client.state() == itemState else {
+                throw TractandaError("stateChanged", "Items changed while loading; refresh the view.")
             }
             excludedCategoryNames = excludedNames
             categoryNavigation = navigation
