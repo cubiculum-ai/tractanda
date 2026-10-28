@@ -130,8 +130,7 @@ final class AuthorityCausalStoreTests: XCTestCase {
             ["itemID": b.itemID, "position": 0, "limit": 20])
         XCTAssertEqual((history["historicalDispositions"] as? [String: String])?[b.revisionID], "demoted")
         let exactResponse = try response(
-            f.receiver, "TractandaRevision/get",
-            ["itemID": b.itemID, "revisionID": b.revisionID])
+            f.receiver, "TractandaRevision/get", ["ids": [b.revisionID]])
         XCTAssertEqual(
             (exactResponse["historicalDispositions"] as? [String: String])?[b.revisionID], "demoted")
         try f.receiver.rebuildIndex()
