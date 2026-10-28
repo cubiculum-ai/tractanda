@@ -243,6 +243,72 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
             return 71991
         }
     }
+    func testCoordinatorFinishAbsentAndForeignIDsPreserveExpiredStageAndCurrentContent() async throws {
+        let directory = try root()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let accounts = Accounts()
+        let bytes = Data("staged original owned by alice".utf8)
+        let seeded: (Revision, String) = try {
+            let store = try fixtureStore(directory, accounts: accounts)
+            try store.configurePersonalAccess(
+                .object(["profile": .text(AccessConfiguration.profile), "groups": .list([.text("staff")])]))
+            let base = try store.commit(
+                CommitRequest(
+                    classID: "Item",
+                    changes: [
+                        "permissions": .object([
+                            "profile": .text(ItemPermissions.profile), "owner": .text("admin"),
+                            "group": .text("staff"), "mode": .integer(0o660), "acl": .object([:]),
+                        ])
+                    ], operationID: "finish-admission-item")
+            ).revision
+            store.attachmentClockForTesting = { Date(timeIntervalSince1970: 1_700_000_000) }
+            let upload = try store.withAccess(forUID: accounts.alice) {
+                let upload = try store.beginAttachment(intent(base, bytes: bytes))
+                _ = try store.appendAttachment(uploadID: XCTUnwrap(upload.uploadID), offset: 0, data: bytes)
+                return upload
+            }
+            return (base, try XCTUnwrap(upload.uploadID))
+        }()
+        let coordinator = try await ServiceCoordinator(
+            opening: directory, makeAccountDirectory: { accounts })
+        defer { await coordinator.close() }
+        func files(_ root: URL) throws -> [String: Data] {
+            var result: [String: Data] = [:]
+            for path in try FileManager.default.subpathsOfDirectory(atPath: root.path) {
+                let url = root.appendingPathComponent(path)
+                if try url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true {
+                    result[path] = try Data(contentsOf: url)
+                }
+            }
+            return result
+        }
+        let attachments = directory.appendingPathComponent("attachments")
+        let items = directory.appendingPathComponent("items")
+        let beforeAttachments = try files(attachments)
+        let beforeItems = try files(items)
+        var failures: [TractandaError] = []
+        for (uid, id) in [(accounts.alice, Identifier.make()), (getuid(), seeded.1)] {
+            let client = TractandaClient.ItemClient(transport: Transport(coordinator: coordinator, uid: uid))
+            do {
+                _ = try await client.finishAttachment(uploadID: id)
+                XCTFail("Absent or foreign finish identity must be denied")
+            } catch let error as TractandaError {
+                failures.append(error)
+                XCTAssertEqual(error.code, "uploadExpired")
+                XCTAssertFalse(error.message.contains(seeded.1))
+            }
+        }
+        XCTAssertEqual(failures.count, 2)
+        XCTAssertEqual(failures.first?.message, failures.last?.message)
+        XCTAssertEqual(try files(attachments), beforeAttachments)
+        XCTAssertEqual(try files(items), beforeItems)
+        let owner = TractandaClient.ItemClient(
+            transport: Transport(coordinator: coordinator, uid: accounts.alice))
+        let current = try await owner.revision(for: seeded.0.itemID)
+        XCTAssertEqual(current, seeded.0)
+    }
+
     func testPermissionRevocationHidesStatusAndPreventsPublicationAfterBackgroundHash() async throws {
         let directory = try root()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -250,9 +316,8 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
         let upload: AttachmentUploadResult
         do {
             let store = try fixtureStore(directory, accounts: accounts)
-            _ = try store.configureAccess(
-                .object(["profile": .text(AccessConfiguration.profile), "groups": .list([.text("staff")])]),
-                operationID: "access")
+            try store.configurePersonalAccess(
+                .object(["profile": .text(AccessConfiguration.profile), "groups": .list([.text("staff")])]))
             let revision = try store.commit(
                 CommitRequest(
                     classID: "Item",

@@ -298,6 +298,13 @@ public actor ServiceCoordinator {
         {
             throw TractandaError("serviceBusy", "An exclusive rebuild is in progress.")
         }
+        if ["TractandaStore/rebuild", "TractandaAttachment/finish"].contains(request.method) {
+            try await submit(principal: principal) { service in
+                try service.store.withAccess(forUID: uid, recoverPublication: false) {
+                    try service.preflightNativeMutationIdentity(request)
+                }
+            }
+        }
         if !NativeMethodCatalog.readOnly.contains(request.method) {
             if request.method == "TractandaStore/rebuild" || request.method == "TractandaStore/rebuildCancel"
             {

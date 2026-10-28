@@ -249,12 +249,15 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(replay.revision.revisionID, created.revision.revisionID)
         XCTAssertNotEqual(later.revisionID, replay.revision.revisionID)
 
-        let description = try response([
-            "using": [ItemService.capability],
-            "methodCalls": [["TractandaStore/describe", ["topic": "properties"], "describe"]],
-        ])
-        let describeResult = (description["methodResponses"] as! [[Any]])[0][1] as! [String: Any]
-        let properties = describeResult["properties"] as! [[String: Any]]
+        let describeRequest = try nativeFixtureRequest(
+            method: "TractandaStore/describe", arguments: ["topic": "properties"],
+            accountID: store.nativeProtocolSessionBasis.identity, callID: "describe")
+        let description = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: service.handle(describeRequest, peerUID: store.ownerUID)) as? [String: Any])
+        let describeCall = try XCTUnwrap((description["methodResponses"] as? [[Any]])?.first)
+        let describeResult = try XCTUnwrap(describeCall[1] as? [String: Any])
+        let properties = try XCTUnwrap(describeResult["properties"] as? [[String: Any]])
         XCTAssertTrue(properties.contains { $0["name"] as? String == "workingNotes" })
     }
 
@@ -810,7 +813,8 @@ final class CoreTests: XCTestCase {
             let result =
                 try JSONSerialization.jsonObject(
                     with: service.handle(data, peerUID: store.ownerUID)) as! [String: Any]
-            return (result["methodResponses"] as! [[Any]])[0][1] as! [String: Any]
+            let call = try XCTUnwrap((result["methodResponses"] as? [[Any]])?.first)
+            return try XCTUnwrap(call[1] as? [String: Any])
         }
         let projected = try response(
             "TractandaItem/get",

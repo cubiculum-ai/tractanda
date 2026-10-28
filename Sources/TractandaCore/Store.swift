@@ -5371,6 +5371,14 @@ public final class ItemStore {
             attachmentUploads.removeValue(forKey: id)
         }
     }
+    /// Read-only identity admission. In particular, do not expire or renew any upload here.
+    /// The real operation must still perform attachmentUpload's current ACL and expiry checks.
+    func requireAttachmentUploadIdentity(_ id: String) throws {
+        guard let uid = accessContext?.uid, let upload = attachmentUploads[id], upload.uid == uid else {
+            throw TractandaError("uploadExpired", "Upload is unavailable; begin again with the same intent.")
+        }
+    }
+
     private func attachmentUpload(_ id: String) throws -> AttachmentUploadState {
         try expireAttachmentUploads()
         guard let upload = attachmentUploads[id], upload.uid == accessContext!.uid else {

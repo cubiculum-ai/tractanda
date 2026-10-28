@@ -624,11 +624,16 @@ final class AccessControlTests: XCTestCase {
         ]
         // Account discovery happens before measuring the query's per-item ACL work.
         let accountID = try store!.nativeProtocolSessionBasis.identity
+        let envelopeBefore = store!.aclSwiftReadCheckCount
+        _ = try response(service!, uid: accounts.bob, method: "Core/echo", accountID: accountID)
+        let envelopeChecks = store!.aclSwiftReadCheckCount - envelopeBefore
         let before = store!.aclSwiftReadCheckCount
         let withGroups = try response(
             service!, uid: accounts.bob, method: "TractandaItem/query", args: args, accountID: accountID)
         XCTAssertEqual(withGroups["total"] as? Int, 2)
-        XCTAssertLessThanOrEqual(store!.aclSwiftReadCheckCount - before, 2)
+        let queryChecks = store!.aclSwiftReadCheckCount - before
+        XCTAssertGreaterThanOrEqual(queryChecks, envelopeChecks)
+        XCTAssertLessThanOrEqual(queryChecks - envelopeChecks, 2)
 
         accounts.users[accounts.bob] = AccountIdentity(
             uid: accounts.bob, name: "bob", primaryGroupName: "staff", groupIDs: [])

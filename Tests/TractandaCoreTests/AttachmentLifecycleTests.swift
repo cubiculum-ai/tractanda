@@ -56,6 +56,90 @@ final class AttachmentLifecycleTests: XCTestCase {
             XCTAssertEqual(($0 as? TractandaError)?.code, code, "\($0)", file: file, line: line)
         }
     }
+    func testNativeFinishAbsentAndForeignIDsDoNotDiscloseOrRunExpiryCleanup() throws {
+        let root = fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let accounts = Accounts()
+        let store = try AttachmentFixtureCapacity.makeStore(root: root, accounts: accounts)
+        _ = try store.configureAccess(
+            .object([
+                "profile": .text(AccessConfiguration.profile),
+                "users": .list([.text("alice"), .text("bob")]),
+            ]), operationID: "finish-admission-access")
+        let base = try store.withAccess(forUID: accounts.alice) {
+            try store.commit(
+                CommitRequest(
+                    classID: "Item",
+                    changes: ["permissions": permissions(owner: "alice", mode: 0o600)],
+                    operationID: "finish-admission-item")
+            ).revision
+        }
+        let bytes = Data("private staged original".utf8)
+        let upload = try store.withAccess(forUID: accounts.alice) {
+            let upload = try store.beginAttachment(request(base, bytes: bytes))
+            _ = try store.appendAttachment(uploadID: XCTUnwrap(upload.uploadID), offset: 0, data: bytes)
+            return upload
+        }
+        let id = try XCTUnwrap(upload.uploadID)
+        store.attachmentClockForTesting = { Date().addingTimeInterval(3_601) }
+        var discarded = 0
+        store.afterAttachmentStageDiscardForTesting = { discarded += 1 }
+        let service = ItemService(store: store)
+        let beforeState = store.state
+        let beforeHistory = try store.history(base.itemID)
+        var failures: [TractandaError] = []
+        for (uid, selectedID) in [(accounts.alice, Identifier.make()), (accounts.bob, id)] {
+            let client = ItemClient(transport: { service.handle($0, peerUID: uid) })
+            XCTAssertThrowsError(try client.finishAttachment(uploadID: selectedID)) { error in
+                guard let error = error as? TractandaError else { return XCTFail("Unexpected error type") }
+                failures.append(error)
+                XCTAssertEqual(error.code, "uploadExpired")
+                XCTAssertFalse(error.message.contains(id))
+                XCTAssertFalse(error.message.contains(upload.attachment.sha256))
+            }
+            let data = try nativeFixtureRequest(
+                method: "TractandaAttachment/finish", arguments: ["uploadID": selectedID],
+                accountID: store.nativeProtocolSessionBasis.identity)
+            XCTAssertThrowsError(
+                try service.prepareAttachmentIntegrityNativeCall(
+                    nativeFixtureInvocation(data), peerUID: uid)
+            ) { error in
+                XCTAssertEqual((error as? TractandaError)?.code, "uploadExpired")
+            }
+        }
+        XCTAssertEqual(failures.count, 2)
+        XCTAssertEqual(failures.first?.message, failures.last?.message)
+        XCTAssertEqual(discarded, 0, "Rejected identities must not expire another staged upload.")
+        XCTAssertEqual(store.state, beforeState)
+        XCTAssertEqual(try store.history(base.itemID), beforeHistory)
+        XCTAssertEqual(try store.get(base.itemID), base)
+        let owner = ItemClient(transport: { service.handle($0, peerUID: accounts.alice) })
+        assertCode("serverPartialFail") { try owner.finishAttachment(uploadID: id) }
+        XCTAssertGreaterThan(discarded, 0, "An owned expired operation retains conservative cleanup effects.")
+    }
+
+    func testNativeFinishPublicationFailureRetainsPartialFailure() throws {
+        let root = fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try AttachmentFixtureCapacity.makeStore(root: root)
+        let base = try item(store)
+        let bytes = Data("verified original".utf8)
+        let service = ItemService(store: store)
+        let client = ItemClient(transport: { service.handle($0, peerUID: getuid()) })
+        let upload = try client.beginAttachment(request(base, bytes: bytes))
+        let id = try XCTUnwrap(upload.uploadID)
+        _ = try client.appendAttachment(uploadID: id, offset: 0, data: bytes)
+        var published = false
+        store.afterAttachmentPayloadPublicationForTesting = {
+            published = true
+            throw TractandaError("injectedCrash", "after payload publication")
+        }
+        assertCode("serverPartialFail") { try client.finishAttachment(uploadID: id) }
+        XCTAssertTrue(published)
+        XCTAssertEqual(try store.get(base.itemID), base)
+        XCTAssertEqual(try store.history(base.itemID), [base])
+    }
+
     func testNativeChunksLostReplyReplayDetachAndHistoricalExport() throws {
         let root = fixture()
         defer { try? FileManager.default.removeItem(at: root) }

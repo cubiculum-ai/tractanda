@@ -507,6 +507,9 @@ public final class ItemService {
             ].contains(method) {
                 try check(args, allowed: ["uploadID"])
                 let id = try string(args, "uploadID")
+                if method == "TractandaAttachment/finish" {
+                    try store.requireAttachmentUploadIdentity(id)
+                }
                 _ = try store.attachmentUploadStatus(uploadID: id)
                 let work =
                     method == "TractandaAttachment/finish"
@@ -2735,6 +2738,17 @@ public final class ItemService {
         }
     }
 
+    /// These denials are proven read-only, before generic mutation observation begins.
+    /// Keep the actual Store operation's authorization and expiry defenses in place.
+    func preflightNativeMutationIdentity(_ call: NativeMethodInvocation) throws {
+        if call.method == "TractandaStore/rebuild" { try store.requireAdministrator() }
+        if call.method == "TractandaAttachment/finish", call.callCount == 1 {
+            let args = try call.dictionary()
+            try check(args, allowed: ["uploadID"])
+            try store.requireAttachmentUploadIdentity(string(args, "uploadID"))
+        }
+    }
+
     func nativeInvocationOutcome(_ call: NativeMethodInvocation, peerUID: UInt32) -> NativeMethodOutcome {
         do {
             let call = try call.normalizedForDomain()
@@ -2746,9 +2760,6 @@ public final class ItemService {
                 ].contains(call.method)
             ) {
                 func executeCall() throws -> NativeMethodOutcome {
-                    // Rebuild authorization cannot mutate the store. Reject it before the
-                    // generic mutation observer begins, so denial retains its precise error.
-                    if call.method == "TractandaStore/rebuild" { try store.requireAdministrator() }
                     if !store.isCanonicalTrusted,
                         !["TractandaStore/info", "TractandaStore/rebuild"].contains(call.method)
                     {
@@ -2776,6 +2787,7 @@ public final class ItemService {
                         throw TractandaError(
                             "singleCallRequired", "Source-unit reads require one invocation.")
                     }
+                    try preflightNativeMutationIdentity(call)
                     try reserveNativeMutationReply(call)
                     if store.isPersonalWorkgroup, NativeMethodCatalog.completelyObserved.contains(call.method)
                     {
