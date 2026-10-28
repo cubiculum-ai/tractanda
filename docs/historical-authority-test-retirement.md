@@ -59,3 +59,75 @@ The current tests retain the useful content, permission, retry and recovery inva
 Two former tests were ported to current invariants rather than removed: `AtomicAuthorityActivationTests.testCurrentPersonalPolicyDoesNotAdmitServiceAccountBeforeOrAfterReopen` preserves service-account denial and admitted-human administration across cold reopen; `AtomicAuthorityProducerTests.testCurrentPersonalFreshAndJoiningReplicaNeedNoAuditGenesis` verifies fresh personal creation, a distinct joining replica and reopened ordinary history without an authority genesis ledger.
 
 `AtomicAuthorityCompatibilityTests` continues to validate the retained floor-15 format transition. Its historical floor-14 fixture uses the retained atomic capability set, rather than importing newer floor-18 personal capabilities. Current floor-18 support and retained floor-15 support are checked separately; lock, custody, exact-prior, old-reader rejection and no-rewrite assertions are preserved.
+
+## Retired metadata-runtime integration bodies
+
+A further 30 precisely enumerated failing integration methods used the retired canonical authority genesis, metadata enrollment and old exchange handler. Their originals remain in the same reachable `d520f9979f7b0d2887d8df48d6275ef0a77d910e` source. Passing codec, private-frame fragmentation, listener cancellation, raw protocol-negative and current personal tests remain active; no target or class exclusion was added.
+
+### NativeCredentialRegistrationTests
+
+[Original source](https://github.com/cubiculum-ai/tractanda/blob/d520f9979f7b0d2887d8df48d6275ef0a77d910e/Tests/TractandaServerTests/NativeCredentialRegistrationTests.swift)
+
+- `testKernelServiceOwnerIsDeniedBeforePayloadAndGenericRoutesHaveNoAdapter`
+- `testKernelSocketRegistrationAndExactCurrentRetryUseExistingImmutableBytes`
+- `testReadyIsNotAuthorityAndContextCancellationAndShutdownFailClosed`
+
+### PeerExchangeTests
+
+[Original source](https://github.com/cubiculum-ai/tractanda/blob/d520f9979f7b0d2887d8df48d6275ef0a77d910e/Tests/TractandaPeerTransportTests/PeerExchangeTests.swift)
+
+- `testAuthenticatedBidirectionalOriginalExchangeSurvivesOrdinaryWriteAndResume`
+- `testCommitCompletionWaitOutlivesOrdinaryOperationDeadline`
+- `testCompatibilityFinalFreshnessRejectsFloorAdvanceAndCancellationBeforeReady`
+- `testCompatibilityOldMissingAndOutOfOrderReadyCannotReachOrdinaryExchange`
+- `testCompatibilityReadyWaitsForBothSidesAndCoalescedFirstRequestSurvivesAsymmetricDelay`
+- `testDelayedReceivedResponseReauthorizesBeforeCallerSuccess`
+- `testDelayedServerResultReauthorizesBeforeReturningUserData`
+- `testDisconnectCancelsPausedResponseAuthorizationWithoutCallerSuccess`
+- `testDuplicateUnorderedUnsolicitedAndPipelinedFramesAreRejected`
+- `testEncryptedDocumentPartsResumeAtChunkBoundaryAndRelayExactSavedOutcomes`
+- `testEncryptedOriginalStreamsInBoundedFramesAndPublishesBeforeReference`
+- `testExistingSessionCannotInitiateRequestToRetiredActualRemote`
+- `testExistingSessionReturnsOnlySanitizedRemoteRetirementDenial`
+- `testFragmentedAndCoalescedInvalidPrefixesCloseAtHeaderBoundary`
+- `testMissingParentRequiresLaterExactTransferAndExplicitCommitRetry`
+- `testPersistedCurrentPairingsAuthenticateExchangeAfterServiceRestart`
+- `testRequestQuotaAndAbsoluteSessionDeadlineRejectFurtherWork`
+- `testRetainedPairingCannotOpenAfterActualRemoteRetirement`
+- `testSharedResponderRetainedCredentialCannotOpenAfterActualRemoteRetirement`
+- `testSharedResponderRetainedCredentialCannotOpenAfterRotation`
+
+### PeerServiceRuntimeTests
+
+[Original source](https://github.com/cubiculum-ai/tractanda/blob/d520f9979f7b0d2887d8df48d6275ef0a77d910e/Tests/TractandaServerTests/PeerServiceRuntimeTests.swift)
+
+- `testActivatedPeerFallbackBidirectionalExchangeOrdinaryWriteAndShutdown`
+- `testCancelledConnectorRetainsSharedDNSBudgetAndCloseDrainsActualLookup`
+- `testRebuildRecoversFreshSnapshotAndStaleRefreshCannotRepublishAfterStop`
+- `testUnknownWrongSecretRotationAndDisposalDenyCurrentAdmission`
+
+### PeerSyncMeshTests
+
+[Original source](https://github.com/cubiculum-ai/tractanda/blob/d520f9979f7b0d2887d8df48d6275ef0a77d910e/Tests/TractandaServerTests/PeerSyncMeshTests.swift)
+
+- `testThreeNodesCycleOfflineConcurrentMetadataWritersAndColdIndexRecoveryQuiesce`
+- `testThreeNodesRelayResumeAndMergeSavedDocumentReferencesThenRebuildQuiescently`
+
+### SharedDaemonTests
+
+[Original source](https://github.com/cubiculum-ai/tractanda/blob/d520f9979f7b0d2887d8df48d6275ef0a77d910e/Tests/TractandaServerTests/SharedDaemonTests.swift)
+
+- `testSharedDaemonActivatedPeersOwnListenerConnectorAndChildren`
+
+### Current transport and storage coverage
+
+- `CurrentPersonalTransportInvariantTests.testCurrentIncrementalHeadersOrderingAndUnsolicitedRepliesCloseTheActualHandler` exercises fragmented invalid headers, ordering, duplicate/pipelined requests and unsolicited replies on real protected current frames.
+- `testCurrentSuspendedReplyRechecksMembershipAndDisconnectNeverReturnsSuccess` suspends a current operation, then revokes its binding or disconnects before reply delivery.
+- `testDefaultHealthyWaitSurvivesVirtualDaysAndOnlyExplicitLimitExpiresIt` proves the selected healthy-wait policy and explicit opt-in operation limits. Old absolute session lifetime and cumulative session quotas are not current requirements.
+- `PersonalSyncTests.testReplyCapturedBeforeRemovalCannotAppendFinishOrApplyAfterCurrentMembershipChanges` verifies the actual current Core admission boundary. Receiving bytes through an internal transport promise is not canonical acceptance.
+- `CurrentPublicationWaitTests.testCancelledWaitAfterDurablePublicationFinishesAndExactRetryRevealsOneRevision` cancels at the real durable acknowledgement hook, then proves one immutable revision and the same operation's exact retry outcome after reopen.
+- Existing `PersonalPeerConnectionTests`, `PersonalPeerRoutingConnectionTests`, `PeerNameResolverTests`, `PersonalPeerJMAPTests` and `PersonalEnrollmentJMAPTests` retain actual TLS duplex, purpose/correlation, DNS/TLS cancellation, allocation bounds, private mutations and exact-retry checks.
+- `PersonalPeerDaemonTests.testActualDaemonPairFreshEnrollmentBidirectionalWriteAndRestart` covers current daemon data and owned payloads; its hot-enrollment bridge test closes a revoked live data session. Current nonfounder three-node enrollment/direct edits, DAG/rebuild and saved-document recovery remain in the personal enrollment, sync, DAG and store suites.
+- The ported `SharedDaemonTests` keep explicit current runtime documents, empty-listener refusal, startup unwind, physical store identity and closure/port-release assertions. Current private registration framing and listener-close cancellation tests remain in `NativeCredentialRegistrationTests` and `PersonalEnrollmentDaemonTests`.
+
+The five new grouped invariants passed within the single composed macOS invocation recorded at commit `cf1f2765c52400f7b0de6133466821c44708dc7b` (83 tests, zero failures/skips). That receipt is a bounded qualification, not a full-suite or deployment claim.

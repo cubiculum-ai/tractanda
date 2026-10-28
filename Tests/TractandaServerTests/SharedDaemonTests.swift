@@ -687,45 +687,4 @@ extension SharedDaemonTests {
         try await rebound.close().get()
     }
 
-    func testSharedDaemonActivatedPeersOwnListenerConnectorAndChildren() async throws {
-        let root = try directory()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let f = try PeerServiceFixture(root: root)
-        f.releaseWriter()
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { try? await group.shutdownGracefully() }
-        let port = try await availablePeerPort(group)
-        let targetPath = try writePeerConfiguration(
-            .init(listen: .init(host: "127.0.0.1", port: port)), root: root)
-        let accounts = f.accounts
-        let target = try await SharedDaemon.startForTesting(
-            configuration: .init(
-                storePath: f.targetRoot.path,
-                socketPath: root.appendingPathComponent("s").path, httpPort: nil,
-                peerRuntimeConfigurationPath: targetPath), makeAccountDirectory: { accounts })
-        defer { await target.close() }
-        // The first daemon already loaded immutable settings; a separate node-local document now configures source.
-        let sourcePath = try writePeerConfiguration(
-            .init(peers: [.init(alias: "target", host: "127.0.0.1", port: port)]), root: root)
-        let source = try await SharedDaemon.startForTesting(
-            configuration: .init(
-                storePath: f.sourceRoot.path,
-                socketPath: root.appendingPathComponent("r").path, httpPort: nil,
-                peerRuntimeConfigurationPath: sourcePath), makeAccountDirectory: { accounts })
-        defer { await source.close() }
-        let connection = try await source.connectPeer(peerID: "target")
-        let response = try await connection.request(.init("inventory")).get()
-        let inventory = try JSON.decode([String: TractandaCore.ItemValue].self, response)
-        XCTAssertNotNil(inventory["entries"])
-        do {
-            _ = try await target.connectPeer(peerID: "source")
-            XCTFail("Responder opened outbound transport")
-        } catch {}
-        await target.close()
-        try await connection.closed.get()
-        await source.close()
-        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("s").path))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("r").path))
-        try f.capacity()
-    }
 }
