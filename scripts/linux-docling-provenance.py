@@ -9,6 +9,32 @@ CONVERTER='Packages/TractandaDocuments/Sources/TractandaDocumentConverter/Genera
 REGISTRY='debian/linux-runtime-inputs.json'
 PLACEHOLDERS={'amd64':'0'*64,'arm64':'1'*64}
 EXCLUDED={REGISTRY:'Generated packaging output index binds resulting component manifests; not a converter compiler input.'}
+SELECTION_PROFILE='tractanda.linux-docling-compiler-inputs.v2'
+SOURCE_ROOTS=(
+    'Packages/TractandaClient/Package.swift',
+    'Packages/TractandaClient/Sources/TractandaClient',
+    'Packages/TractandaDocuments/Package.swift',
+    'Packages/TractandaDocuments/Package.resolved',
+    'Packages/TractandaDocuments/Sources/DoclingRGB',
+    'Packages/TractandaDocuments/Sources/DoclingRaster',
+    'Packages/TractandaDocuments/Sources/TractandaDocumentConverter',
+    'Packages/TractandaDocuments/Sources/CDoclingRaster',
+    'Packages/TractandaDocuments/RuntimePatches',
+    'Packages/TractandaDocuments/ThirdPartyNotices',
+    'config/model-artifacts.json',
+    'scripts/build-linux-ml-component.py',
+    'scripts/produce-linux-payload.py',
+    'scripts/package-linux.py',
+    'scripts/package-macos.py',
+    'scripts/validate-docling-model.py',
+    'scripts/export-linux-ml-component.py',
+    'scripts/build-docling-linux-native.py',
+    'scripts/build-docling-native.py',
+    'scripts/linux-docling-provenance.py',
+    'scripts/generate-linux-docling-binding.py',
+    'scripts/assemble-linux-docling-component.py',
+)
+
 
 def normalize(relative,data):
     text=data.decode('utf-8'); assert text.encode()==data and relative in (CLIENT,CONVERTER)
@@ -25,14 +51,15 @@ def normalize(relative,data):
     return text.encode(),actual
 
 def normalized_rows(P,C,source,expected_templates):
-    rows=P.rows(source,roots=C.SOURCE_ROOTS,skip=P.SKIP);out=[];actual={};seen=set()
+    for name in SOURCE_ROOTS:
+        p=source/name;assert p.exists() and not p.is_symlink(),name
+    rows=P.rows(source,roots=SOURCE_ROOTS,skip=P.SKIP);out=[];actual={};seen=set()
     for row in rows:
         name=row['path']
-        if name==REGISTRY:seen.add(name);continue
         if name in (CLIENT,CONVERTER):
             original=(source/name).read_bytes();data,digests=normalize(name,original);h=hashlib.sha256(data).hexdigest();assert h==expected_templates[name],(name,h)
             actual[name]={'sha256':row['sha256'],'digests':digests};row=dict(row);row['sha256']=h;row['size']=len(data);seen.add(name)
         out.append(row)
-    assert seen=={REGISTRY,CLIENT,CONVERTER},seen
+    assert seen=={CLIENT,CONVERTER},seen
     assert actual[CLIENT]['digests']==actual[CONVERTER]['digests']
     return out,actual

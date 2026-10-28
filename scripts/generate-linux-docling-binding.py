@@ -60,6 +60,7 @@ def prepare(arch, component_root, manifest, converter, toolchain, output):
     rows, generated = N.normalized_rows(P, C, ROOT, TEMPLATES)
     provenance = {
         'profile': 'tractanda.linux-docling-normalized-build.v1', 'architecture': arch,
+        'sourceSelectionProfile': N.SELECTION_PROFILE, 'sourceSelectionRoots': list(N.SOURCE_ROOTS),
         'sourceFiles': rows, 'generatedDigestNormalizations': {
             N.CLIENT: 'Only amd64 and arm64 digest literals replaced by fixed 64-byte placeholders.',
             N.CONVERTER: 'Only x86_64 and arm64 digest literals replaced by fixed 64-byte placeholders.',

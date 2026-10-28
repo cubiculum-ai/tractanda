@@ -20,6 +20,7 @@ def prepare(arch,baseline,manifest,converter,descriptor,provenance,output,output
     assert converter.is_file() and not converter.is_symlink() and descriptor.is_file() and provenance.is_file()
     oldhash=P.require_admitted(arch)['documents'];old=P.component(manifest,baseline,'documents',arch,oldhash)
     desc=B.read_json(descriptor);prov=B.read_json(provenance);assert desc['architecture']==arch and desc['buildProvenanceSHA256']==digest(provenance)
+    assert prov['sourceSelectionProfile']==N.SELECTION_PROFILE and prov['sourceSelectionRoots']==list(N.SOURCE_ROOTS)
     rows,generated=N.normalized_rows(P,G.C,ROOT,G.TEMPLATES);assert rows==prov['sourceFiles'],'Compiler source does not match descriptor provenance'
     assert prov['normalizationRecipeSHA256']==digest(ROOT/'scripts/linux-docling-provenance.py') and prov['descriptorRecipeSHA256']==digest(ROOT/'scripts/generate-linux-docling-binding.py') and prov['componentRecipeSHA256']==digest(ROOT/'scripts/build-linux-ml-component.py')
     assert prov['architecture']==arch and prov['toolchain']==old['toolchain'] and prov['buildFlags']==G.C.build_arguments('/usr/bin/swift',[],arch,'tractanda-document-converter')
