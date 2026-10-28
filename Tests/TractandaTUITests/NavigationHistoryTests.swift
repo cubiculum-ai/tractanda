@@ -306,9 +306,12 @@ final class NavigationHistoryTests: XCTestCase {
         workspace.view = nil
         let location = workspace.navigationLocation
         try workspace.allItems()
+        let setupHistoricalReads = historyReads
         denied = true
         XCTAssertThrowsError(try workspace.restore(location))
-        XCTAssertEqual(historyReads, 0)
+        XCTAssertEqual(
+            historyReads, setupHistoricalReads,
+            "Current authorization must fail before any additional historical read")
         XCTAssertTrue(workspace.items.isEmpty)
     }
 

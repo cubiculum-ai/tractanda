@@ -13,7 +13,7 @@ final class ViewWorkflowTests: XCTestCase {
             try FileManager.default.createDirectory(
                 at: root, withIntermediateDirectories: true,
                 attributes: [.posixPermissions: 0o700])
-            store = try ItemStore(root: root.appendingPathComponent("store"))
+            store = try ItemStore.initializeFresh(root: root.appendingPathComponent("store"))
             let service = ItemService(store: store)
             let uid = store.ownerUID
             client = ItemClient(transport: { service.handle($0, peerUID: uid) })

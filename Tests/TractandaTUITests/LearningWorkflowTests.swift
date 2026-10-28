@@ -91,6 +91,19 @@ final class LearningWorkflowTests: XCTestCase {
                     changes: fields, operationID: Identifier.make())
             ).revision
         }
+        func learningStatus() throws -> CategoryLearningState {
+            try store.withAccess(forUID: store.ownerUID) { try service.learning.status(for: category.itemID) }
+        }
+        func resetLearning() throws -> CategoryLearningState {
+            try store.withAccess(forUID: store.ownerUID) {
+                try service.learning.reset(categoryID: category.itemID)
+            }
+        }
+        func trainLearning() throws -> CategoryLearningState {
+            try store.withAccess(forUID: store.ownerUID) {
+                try service.learning.train(categoryID: category.itemID)
+            }
+        }
         func journal() -> RecoveryJournal {
             RecoveryJournal(url: root.appendingPathComponent("pending.json"), socket: "/fixture")
         }
@@ -157,18 +170,18 @@ final class LearningWorkflowTests: XCTestCase {
         open(app)
         app.handle(.text("t"))
         app.handle(.text("d"))
-        XCTAssertEqual(try f.service.learning.status(for: f.category.itemID).negativeExamples, 2)
+        XCTAssertEqual(try f.learningStatus().negativeExamples, 2)
         XCTAssertNil(try f.store.get(item.itemID).fields["categoryOverrides"])
         app.handle(.text("e"))
         filter(app, subject: "chess tournament board")
         app.handle(.text("n"))
-        XCTAssertEqual(try f.service.learning.status(for: f.category.itemID).negativeExamples, 3)
+        XCTAssertEqual(try f.learningStatus().negativeExamples, 3)
         app.handle(.text("c"))
-        XCTAssertEqual(try f.service.learning.status(for: f.category.itemID).negativeExamples, 2)
+        XCTAssertEqual(try f.learningStatus().negativeExamples, 2)
         app.handle(.text("a"))
         app.handle(.text("n"))
         app.handle(.text("c"))
-        XCTAssertEqual(try f.service.learning.status(for: f.category.itemID).positiveExamples, 3)
+        XCTAssertEqual(try f.learningStatus().positiveExamples, 3)
         XCTAssertEqual(
             try f.store.get(item.itemID).fields["categoryOverrides"]?.map?[f.category.itemID],
             .text("include"))
@@ -177,7 +190,7 @@ final class LearningWorkflowTests: XCTestCase {
         XCTAssertEqual(
             try f.store.get(item.itemID).fields["categoryOverrides"]?.map?[f.category.itemID],
             .text("exclude"))
-        XCTAssertEqual(try f.service.learning.status(for: f.category.itemID).negativeExamples, 3)
+        XCTAssertEqual(try f.learningStatus().negativeExamples, 3)
         XCTAssertTrue(screen(app).contains("manual assignments and exclusions kept"))
     }
 
@@ -188,20 +201,20 @@ final class LearningWorkflowTests: XCTestCase {
         open(app)
         let before = f.store.state
         app.handle(.text("t"))
-        let model = try f.service.learning.status(for: f.category.itemID).modelID
+        let model = try f.learningStatus().modelID
         XCTAssertNotNil(model)
         app.handle(.text("u"))
         app.handle(.escape)
-        XCTAssertEqual(try f.service.learning.status(for: f.category.itemID).modelID, model)
+        XCTAssertEqual(try f.learningStatus().modelID, model)
         app.handle(.text("u"))
         app.handle(.control(19))
         XCTAssertTrue(screen(app).contains("Type reset"))
         app.handle(.paste("reset"))
         app.handle(.control(19))
-        XCTAssertNil(try f.service.learning.status(for: f.category.itemID).modelID)
+        XCTAssertNil(try f.learningStatus().modelID)
         XCTAssertEqual(f.store.state, before)
         app.handle(.text("t"))
-        XCTAssertNotEqual(try f.service.learning.status(for: f.category.itemID).modelID, model)
+        XCTAssertNotEqual(try f.learningStatus().modelID, model)
         XCTAssertEqual(f.store.state, before)
     }
 
@@ -219,9 +232,9 @@ final class LearningWorkflowTests: XCTestCase {
         app.handle(.text("a"))
         filter(app, subject: negative.fields["subject"]!.string!)
         app.handle(.text("x"))
-        XCTAssertEqual(try f.service.learning.status(for: f.category.itemID).status, .untrained)
+        XCTAssertEqual(try f.learningStatus().status, .untrained)
         app.handle(.text("t"))
-        XCTAssertEqual(try f.service.learning.status(for: f.category.itemID).status, .ready)
+        XCTAssertEqual(try f.learningStatus().status, .ready)
     }
 
     func testSettingsValidateWholeEditPreserveRecipeAndRejectConcurrentChanges() throws {
@@ -264,7 +277,7 @@ final class LearningWorkflowTests: XCTestCase {
         app.handle(.control(21))
         app.handle(.text("off"))
         app.handle(.control(19))
-        XCTAssertEqual(try f.service.learning.status(for: f.category.itemID).status, .off)
+        XCTAssertEqual(try f.learningStatus().status, .off)
     }
 
     func testStaleSuggestionCannotBecomeNewFeedbackAndRefreshAllowsReview() throws {
@@ -294,7 +307,7 @@ final class LearningWorkflowTests: XCTestCase {
         try page.loadPage(forward: true)
         XCTAssertEqual(page.rows.count, 8)
         XCTAssertEqual(page.position, 32)
-        _ = try f.service.learning.reset(categoryID: f.category.itemID)
+        _ = try f.resetLearning()
         XCTAssertThrowsError(try page.loadPage(forward: false))
         XCTAssertTrue(page.rows.isEmpty)
         try page.refresh(mode: .examples, expression: "subject == \"*chess*\"")
@@ -306,7 +319,7 @@ final class LearningWorkflowTests: XCTestCase {
     func testItemChangedBetweenSuggestionAndGetNeverAppearsInReview() throws {
         let f = try Fixture()
         let item = try f.item("chess tournament board")
-        _ = try f.service.learning.train(categoryID: f.category.itemID)
+        _ = try f.trainLearning()
         var changed = false
         let client = ItemClient(transport: { data in
             let response = f.service.handle(data, peerUID: f.store.ownerUID)
@@ -363,7 +376,7 @@ final class LearningWorkflowTests: XCTestCase {
             app!.handle(.text("u"))
             XCTAssertEqual(sent.count, 1, "Unconfirmed edit locks unrelated actions")
             app = nil
-            _ = try f.service.learning.reset(categoryID: f.category.itemID)
+            _ = try f.resetLearning()
             app = try f.app(client: client, journal: journal)
             XCTAssertEqual(sent.count, 1, "Loading does not resend")
             app!.handle(.text("r"))
