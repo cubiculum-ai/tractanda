@@ -4,7 +4,10 @@ enum LinuxDocumentConverterProfiles {
     static let macConverter = "tractanda.docling-native.v2-idefics3-gelu-f32"
     // Retain each formerly admitted Linux profile here when current bundled
     // dependencies change. This grants history readability, never execution.
-    static let historicalLinuxDigests: [String] = []
+    static let historicalLinuxDigests: [String] = [
+        "8edce98a4bc2d2c3e359f79010d17c67ee08f84409ef83149f3522b0629d3cae",
+        "26fa7c7735ee62b725fbb628e17f32f5b4f340ee47a89f89eb438bafaa886ae5",
+    ]
     static var knownConverters: [String] {
         converterNames(
             currentDigests: [
