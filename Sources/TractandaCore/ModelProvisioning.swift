@@ -729,7 +729,7 @@ public final class ModelProvisioner: @unchecked Sendable {
         let parentFD = open(parent.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard parentFD >= 0 else { throw failure("Cannot open model metadata directory safely.") }
         defer { _ = close(parentFD) }
-        let directoryURL = parent.standardizedFileURL
+        let directoryURL = parent
         try ModelProvisioner(root: directoryURL).safeParents(directoryURL)
         var parentMetadata = stat()
         guard fstat(parentFD, &parentMetadata) == 0,
