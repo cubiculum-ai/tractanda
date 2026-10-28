@@ -633,7 +633,7 @@ extension SharedDaemonTests {
         let loadedRuntime = await daemon.personalPeerRuntimeForTesting()
         let runtime = try XCTUnwrap(loadedRuntime)
         let status = try await personalStatus(endpoints.socketPath)
-        XCTAssertFalse(status.runtime.responderPublished)
+        XCTAssertFalse(try XCTUnwrap(status.runtime.responderPublished))
         let child = try await ClientBootstrap(group: group).connectTimeout(.seconds(2))
             .connect(host: "127.0.0.1", port: port).get()
         try await child.closeFuture.get()  // Bound socket alone grants no TLS/application admission.
