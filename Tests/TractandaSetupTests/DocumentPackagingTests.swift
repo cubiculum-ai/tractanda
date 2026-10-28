@@ -172,7 +172,7 @@ final class DocumentPackagingTests: XCTestCase {
         try JSONEncoder().encode(
             BundleManifest(
                 version: "0.1.0-package-test", platform: "macos", arch: "arm64",
-                files: try inventory(), documentExtraction: .pinned)
+                files: try inventory(), documentExtraction: .pinned, canonicalFormats: .current)
         ).write(to: release.appendingPathComponent("bundle-manifest.json"))
         var receipt = try InstallationReceipt(
             options: SetupOptions(name: "preview", bundle: release), roots: roots,
@@ -327,7 +327,9 @@ final class DocumentPackagingTests: XCTestCase {
                 let arch = "x86_64"
             #endif
             try JSONEncoder().encode(
-                BundleManifest(version: "0.1.0-package-test", platform: "macos", arch: arch, files: files)
+                BundleManifest(
+                    version: "0.1.0-package-test", platform: "macos", arch: arch, files: files,
+                    canonicalFormats: .current)
             )
             .write(to: bundle.appendingPathComponent("bundle-manifest.json"))
             let owner = try SystemAccountDirectory().user(forUID: getuid()).name

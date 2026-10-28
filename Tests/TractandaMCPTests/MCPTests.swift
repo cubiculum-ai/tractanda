@@ -331,10 +331,13 @@ final class MCPTests: XCTestCase {
         let fetched = try await gateway.call(
             "TractandaRevision/get",
             arguments: [
-                "itemID": .string(itemID), "revisionID": .string(savedRevisionID),
+                "ids": .array([.string(savedRevisionID)]), "projection": .string("content"),
             ])
-        let fields = try JSONDecoder().decode(Value.self, from: fetched).objectValue!["revision"]!
-            .objectValue!["fields"]!.objectValue!
+        let fetchedObject = try XCTUnwrap(try JSONDecoder().decode(Value.self, from: fetched).objectValue)
+        let revision = try XCTUnwrap(fetchedObject["list"]?.arrayValue?.first?.objectValue)
+        XCTAssertEqual(revision["id"]?.stringValue, savedRevisionID)
+        XCTAssertEqual(revision["itemId"]?.stringValue, itemID)
+        let fields = try XCTUnwrap(revision["fields"]?.objectValue)
         XCTAssertEqual(fields["plannedDate"]?.objectValue?["value"]?.stringValue, "2026-03-29")
         _ = try store.commit(
             CommitRequest(
@@ -1056,7 +1059,8 @@ final class MCPTests: XCTestCase {
             try query.arguments(from: [
                 "sort": .array([
                     .object([
-                        "categoryRootID": .string(rootID), "isAscending": .bool(true),
+                        "property": .string("categoryMembership"), "categoryRootId": .string(rootID),
+                        "isAscending": .bool(true),
                     ])
                 ])
             ]))
@@ -1064,7 +1068,7 @@ final class MCPTests: XCTestCase {
             try query.arguments(from: [
                 "sort": .array([
                     .object([
-                        "categoryRootID": .string(rootID), "property": .string("subject"),
+                        "categoryRootId": .string(rootID), "property": .string("subject"),
                     ])
                 ])
             ]))
@@ -1072,7 +1076,7 @@ final class MCPTests: XCTestCase {
             try query.arguments(from: [
                 "sort": .array([
                     .object([
-                        "categoryRootID": .string("not-an-id")
+                        "categoryRootId": .string("not-an-id")
                     ])
                 ])
             ]))
@@ -1085,32 +1089,38 @@ final class MCPTests: XCTestCase {
         let get = try XCTUnwrap(definitions.first { $0.tool.name == "tractanda_get" })
         for name in ["tractanda_get", "tractanda_history", "tractanda_revision"] {
             let tool = try XCTUnwrap(definitions.first { $0.tool.name == name })
-            XCTAssertTrue(tool.description.contains("projection and properties are mutually exclusive"))
+            XCTAssertTrue(tool.description.contains("projection and fieldProperties are mutually exclusive"))
             var arguments: [String: Value] = [
-                "projection": .string("summary"), "properties": .array([.string("subject")]),
+                "projection": .string("summary"), "fieldProperties": .array([.string("subject")]),
             ]
-            if name == "tractanda_get" {
+            if name == "tractanda_get" || name == "tractanda_revision" {
                 arguments["ids"] = .array([.string(rootID)])
             } else {
                 arguments["itemID"] = .string(rootID)
             }
-            if name == "tractanda_revision" { arguments["revisionID"] = .string(rootID) }
             XCTAssertThrowsError(try tool.arguments(from: arguments)) { error in
                 XCTAssertTrue((error as? TractandaError)?.message.contains("mutually exclusive") == true)
             }
         }
         let getProperties = try XCTUnwrap(get.tool.inputSchema.objectValue?["properties"]?.objectValue)
-        XCTAssertEqual(getProperties["maxBytes"]?.objectValue?["maximum"]?.intValue, 524_288)
+        XCTAssertNil(getProperties["maxBytes"])
+        XCTAssertThrowsError(
+            try get.arguments(from: ["ids": .array([.string(rootID)]), "maxBytes": .int(8192)]))
+        let bounded = try XCTUnwrap(definitions.first { $0.tool.name == "tractanda_get_bounded" })
+        let boundedProperties = try XCTUnwrap(
+            bounded.tool.inputSchema.objectValue?["properties"]?.objectValue)
+        XCTAssertEqual(boundedProperties["maxBytes"]?.objectValue?["maximum"]?.intValue, 524_288)
         XCTAssertNoThrow(
-            try get.arguments(from: [
-                "ids": .array([.string("id")]),
-                "properties": .array([.string("subject"), .string("unknown.key")]),
+            try bounded.arguments(from: [
+                "ids": .array([.string(rootID)]),
+                "properties": .array([.string("id"), .string("fields")]),
+                "fieldProperties": .array([.string("subject"), .string("unknown.key")]),
                 "maxBytes": .int(8_192),
             ]))
         XCTAssertThrowsError(
             try get.arguments(from: [
                 "ids": .array([.string("id")]), "projection": .string("content"),
-                "properties": .array([.string("subject")]),
+                "fieldProperties": .array([.string("subject")]),
             ]))
         XCTAssertThrowsError(try get.arguments(from: ["unexpected": .string("value")])) { error in
             XCTAssertEqual(

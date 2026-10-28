@@ -442,7 +442,7 @@ enum ToolCatalog {
         .init(
             "tractanda_get", method: "TractandaItem/get",
             description:
-                "Complete collection get for zero through 64 Item IDs. DTO id is stable ItemID; unresolved readable objects remain in list with resolution and null content. properties selects DTO keys; fieldProperties/projection selects inner fields. No continuations; oversized complete replies fail.",
+                "Complete collection get for zero through 64 Item IDs. DTO id is stable ItemID; unresolved readable objects remain in list with resolution and null content. properties selects DTO keys; fieldProperties/projection selects inner fields; projection and fieldProperties are mutually exclusive. No continuations; oversized complete replies fail.",
             properties: [
                 "ids": readIdentifiers, "projection": projection, "properties": dtoProperties,
                 "fieldProperties": propertyNames,
@@ -450,7 +450,7 @@ enum ToolCatalog {
         .init(
             "tractanda_get_bounded", method: "TractandaItem/getBounded",
             description:
-                "Explicit bounded Item get. Same DTOs as get; follow remainingIDs and handle oversizedIDs, comparing state. Unresolved readable objects are list entries with null content; never select a diagnostic head as content.",
+                "Explicit bounded Item get. Same DTOs as get; follow remainingIDs and handle oversizedIDs, comparing state. projection and fieldProperties are mutually exclusive. Unresolved readable objects are list entries with null content; never select a diagnostic head as content.",
             properties: [
                 "ids": readIdentifiers, "projection": projection, "properties": dtoProperties,
                 "fieldProperties": propertyNames,
@@ -665,7 +665,7 @@ enum ToolCatalog {
         .init(
             "tractanda_history", method: "TractandaItem/history",
             description:
-                "Paged immutable Revision DTOs under current item permissions. properties selects DTO keys; fieldProperties/projection selects inner fields.",
+                "Paged immutable Revision DTOs under current item permissions. properties selects DTO keys; fieldProperties/projection selects inner fields; projection and fieldProperties are mutually exclusive.",
             properties: page([
                 "itemID": identifier, "projection": projection, "properties": dtoProperties,
                 "fieldProperties": propertyNames,
@@ -673,7 +673,7 @@ enum ToolCatalog {
         .init(
             "tractanda_revision", method: "TractandaRevision/get",
             description:
-                "Collection get keyed by Revision IDs. Current item permissions govern every historical record. Returns accountId/state/list/notFound; id is RevisionID and itemId identifies its item.",
+                "Collection get keyed by Revision IDs. Current item permissions govern every historical record. Returns accountId/state/list/notFound; id is RevisionID and itemId identifies its item. properties selects DTO keys; projection and fieldProperties are mutually exclusive inner-field selectors.",
             properties: [
                 "ids": readIdentifiers, "projection": projection, "properties": dtoProperties,
                 "fieldProperties": propertyNames,
