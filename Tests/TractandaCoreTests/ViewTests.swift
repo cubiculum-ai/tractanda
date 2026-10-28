@@ -1379,10 +1379,23 @@ final class ViewTests: XCTestCase {
         XCTAssertEqual(descending.ids, items.prefix(3).map(\.itemID))
         try store.rebuildIndex()
         XCTAssertEqual(try query(64).ids, Array(ascending.suffix(6)))
+        let omittedSort = try JSON.decode(
+            Page.self,
+            nativeQuery(client, store: store, arguments: ["expression": "rank == *", "limit": 3]))
+        let nullSort = try JSON.decode(
+            Page.self,
+            client.call(
+                "TractandaItem/query",
+                arguments: [
+                    "filter": ["expression": "rank == *"], "sort": NSNull(),
+                    "limit": 3, "calculateTotal": true,
+                ]))
+        XCTAssertEqual(nullSort.ids, omittedSort.ids)
+        XCTAssertEqual(nullSort.total, 70)
         for arguments: [String: Any] in [
             ["sort": [["property": "rank", "isAscending": "no"]]],
             ["sort": [["property": ""]]], ["sort": [["property": "rank"], ["property": "rank"]]],
-            ["sort": NSNull()], ["filter": ["viewID": view.itemID], "sort": []],
+            ["filter": ["viewID": view.itemID], "sort": []],
             ["filter": ["sectionID": view.itemID]],
         ] {
             // Keep malformed query inputs raw so the actual server must reject them.
