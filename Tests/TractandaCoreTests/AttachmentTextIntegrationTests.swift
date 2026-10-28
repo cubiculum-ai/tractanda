@@ -1,5 +1,6 @@
 import CSQLite
 import Crypto
+import TractandaClient
 import TractandaVectors
 import XCTest
 
@@ -238,15 +239,17 @@ final class AttachmentTextIntegrationTests: XCTestCase {
             data: Data(String(repeating: "searchable text\n", count: 4_000).utf8))
         let saved = try extract(XCTUnwrap(store), base: attached, id: descriptor.attachmentID)
         let response = try client(XCTUnwrap(store)).call(
-            "TractandaItem/get",
+            "TractandaItem/getBounded",
             arguments: ["ids": [saved.itemID], "projection": "summary", "maxBytes": 8_192])
         XCTAssertLessThan(response.count, 8_192)
         let object = try JSONSerialization.jsonObject(with: response) as! [String: Any]
-        let list = object["list"] as! [[String: Any]]
+        let encoded = try JSONSerialization.data(withJSONObject: object["list"]!)
+        let list = try JSONDecoder().decode([TractandaClient.JMAPItemRecord].self, from: encoded)
         XCTAssertEqual(list.count, 1)
-        XCTAssertNil((list[0]["fields"] as? [String: Any])?["attachmentText"])
+        XCTAssertEqual(list[0].id, saved.itemID)
+        XCTAssertNil(list[0].fields?["attachmentText"])
         let full = try client(XCTUnwrap(store)).call(
-            "TractandaItem/get", arguments: ["ids": [saved.itemID], "maxBytes": 8_192])
+            "TractandaItem/getBounded", arguments: ["ids": [saved.itemID], "maxBytes": 8_192])
         let fullObject = try JSONSerialization.jsonObject(with: full) as! [String: Any]
         XCTAssertEqual(fullObject["oversizedIDs"] as? [String], [saved.itemID])
         let row = try XCTUnwrap(
@@ -254,10 +257,23 @@ final class AttachmentTextIntegrationTests: XCTestCase {
         XCTAssertEqual(
             try PooledCanonicalRecord.read(row: row, root: root, ownerUID: XCTUnwrap(store).ownerUID)
                 .revision, saved)
+        let sourceIndex = try XCTUnwrap(store).indexDirectory
         store = nil
         try FileManager.default.copyItem(at: root, to: restored)
-        try FileManager.default.removeItem(at: restored.appendingPathComponent("index"))
-        let recovered = try AttachmentFixtureCapacity.makeStore(root: restored)
+        let physicalRoot = root.resolvingSymlinksInPath()
+        let physicalIndex = sourceIndex.resolvingSymlinksInPath()
+        if physicalIndex.path.hasPrefix(physicalRoot.path + "/") {
+            let relative = String(physicalIndex.path.dropFirst(physicalRoot.path.count + 1))
+            let copiedIndex = restored.appendingPathComponent(relative)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: copiedIndex.path))
+            try FileManager.default.removeItem(at: copiedIndex)
+        }
+        let rebuiltIndex = restored.appendingPathComponent("rebuilt-index")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: rebuiltIndex.path))
+        let recovered = try AttachmentFixtureCapacity.makeStore(
+            root: restored, indexDirectory: rebuiltIndex)
+        XCTAssertEqual(
+            recovered.indexDirectory.resolvingSymlinksInPath(), rebuiltIndex.resolvingSymlinksInPath())
         XCTAssertEqual(
             try recovered.get(saved.itemID).fields["attachmentText"], saved.fields["attachmentText"])
         XCTAssertEqual(try recovered.candidates(text: "searchable text").map(\.itemID), [saved.itemID])
