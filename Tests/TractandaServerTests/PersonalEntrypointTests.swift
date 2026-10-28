@@ -327,9 +327,15 @@ final class PersonalEntrypointTests: XCTestCase, @unchecked Sendable {
             daemon = try await SharedDaemon.startForTesting(
                 configuration: config, makeAccountDirectory: { accounts })
             let reopened = await daemon!.coordinatorForTesting()
-            let rejected = try await reopened.handle(query, forUID: accounts.bob)
-            XCTAssertThrowsError(try NativeMethodResult.unwrap(rejected, method: "TractandaItem/query")) {
-                XCTAssertEqual(($0 as? TractandaError)?.code, "forbidden")
+            do {
+                let rejected = try await reopened.handle(query, forUID: accounts.bob)
+                XCTAssertThrowsError(try NativeMethodResult.unwrap(rejected, method: "TractandaItem/query")) {
+                    XCTAssertEqual(($0 as? TractandaError)?.code, "forbidden")
+                }
+                XCTAssertFalse(String(decoding: rejected, as: UTF8.self).contains("office-number"))
+            } catch let error as TractandaError {
+                // After reopen there is no admitted account Session to execute this method in.
+                XCTAssertEqual(error.code, "forbidden")
             }
             await daemon!.close()
             daemon = nil
@@ -480,7 +486,9 @@ final class PersonalEntrypointTests: XCTestCase, @unchecked Sendable {
             let reopened = try await SharedDaemon.start(configuration: config)
             do {
                 let result = try object(
-                    await call(config.socketPath, "TractandaItem/query", ["text": "cancelpageneedle"]))
+                    await call(
+                        config.socketPath, "TractandaItem/query",
+                        ["filter": ["text": "cancelpageneedle"], "calculateTotal": true]))
                 XCTAssertEqual(result["total"] as? Int, 1)
                 await reopened.close()
             } catch {

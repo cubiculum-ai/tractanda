@@ -182,6 +182,24 @@ final class SharedDaemonTests: XCTestCase {
         url.standardizedFileURL.resolvingSymlinksInPath().path
     }
 
+    private func assertSameStoreRoot(
+        _ observed: URL, _ expected: URL, file: StaticString = #filePath, line: UInt = #line
+    ) throws {
+        XCTAssertEqual(canonicalPath(observed), canonicalPath(expected), file: file, line: line)
+        let actual = try FileMetadata.read(at: observed)
+        let selected = try FileMetadata.read(at: expected)
+        XCTAssertEqual(actual.type, .directory, file: file, line: line)
+        XCTAssertEqual(actual.device, selected.device, file: file, line: line)
+        XCTAssertEqual(actual.inode, selected.inode, file: file, line: line)
+    }
+
+    private func personalStatus(_ socket: String) async throws -> PeerOperatorStatus {
+        let bytes = try await Task.detached {
+            try TractandaCore.ItemClient(socketPath: socket).call(PeerOperatorStatus.nativeMethod)
+        }.value
+        return try JSON.decode(PeerOperatorStatus.self, bytes)
+    }
+
     func testHTTPRequestProblemsAndMethodFailuresKeepDistinctShapes() async throws {
         let root = try directory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -338,7 +356,7 @@ final class SharedDaemonTests: XCTestCase {
             _ = await (first, second)
             XCTAssertFalse(FileManager.default.fileExists(atPath: socket.path))
             let reopened = try ItemStore.openInitialized(root: store)
-            XCTAssertEqual(reopened.root.path, canonicalPath(store))
+            try assertSameStoreRoot(reopened.root, store)
             do {
                 _ = try await URLSession.shared.data(from: URL(string: address + "/manual")!)
                 XCTFail("HTTP listener remained open after close")
@@ -377,7 +395,7 @@ final class SharedDaemonTests: XCTestCase {
             XCTAssertFalse(FileManager.default.fileExists(atPath: candidateSocket.path))
             XCTAssertEqual(try Data(contentsOf: sentinel), Data("keep".utf8))
             let reopened = try ItemStore.openInitialized(root: candidateStore)
-            XCTAssertEqual(reopened.root.path, canonicalPath(candidateStore))
+            try assertSameStoreRoot(reopened.root, candidateStore)
             _ = try await nativeInfo(endpoints.socketPath)
             await occupied.close()
         } catch {
@@ -399,7 +417,7 @@ final class SharedDaemonTests: XCTestCase {
             XCTFail("Expected startup readiness claim rejection")
         } catch is CancellationError {}
         XCTAssertFalse(FileManager.default.fileExists(atPath: socket.path))
-        XCTAssertEqual(try ItemStore.openInitialized(root: store).root.path, canonicalPath(store))
+        try assertSameStoreRoot(ItemStore.openInitialized(root: store).root, store)
     }
 
     func testManagedDaemonAcceptsExternalIndexDirectory() async throws {
@@ -542,7 +560,8 @@ extension SharedDaemonTests {
     private func writePeerConfiguration(_ configuration: PeerRuntimeConfiguration, root: URL) throws -> String
     {
         let file = root.appendingPathComponent("peer.json")
-        try JSONEncoder().encode(configuration).write(to: file, options: .atomic)
+        try PersonalPeerRuntimeConfiguration(settings: configuration).encoded().write(
+            to: file, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
         return file.path
     }
@@ -584,8 +603,13 @@ extension SharedDaemonTests {
                 storePath: store.path,
                 socketPath: root.appendingPathComponent("s").path, httpPort: nil,
                 peerRuntimeConfigurationPath: path))
-        let synchronization = await configured.synchronizationForTesting()
-        XCTAssertNotNil(synchronization)
+        let network = await configured.personalPeerRuntimeForTesting()
+        XCTAssertNotNil(network)
+        let configuredEndpoints = await configured.endpoints()
+        let status = try await personalStatus(configuredEndpoints.socketPath)
+        XCTAssertTrue(status.runtime.synchronizationEnabled)
+        XCTAssertEqual(status.runtime.synchronization.state, .active)
+        XCTAssertEqual(status.runtime.synchronization.eligibleEdgeCount, 0)
         await configured.close()
     }
 
@@ -606,15 +630,17 @@ extension SharedDaemonTests {
         defer { await daemon.close() }
         let endpoints = await daemon.endpoints()
         XCTAssertEqual(endpoints.peerPort, port)
-        let loadedRuntime = await daemon.peerRuntimeForTesting()
+        let loadedRuntime = await daemon.personalPeerRuntimeForTesting()
         let runtime = try XCTUnwrap(loadedRuntime)
-        let ready = await runtime.hasResponderForTesting()
-        XCTAssertFalse(ready)
+        let status = try await personalStatus(endpoints.socketPath)
+        XCTAssertFalse(status.runtime.responderPublished)
         let child = try await ClientBootstrap(group: group).connectTimeout(.seconds(2))
             .connect(host: "127.0.0.1", port: port).get()
         try await child.closeFuture.get()  // Bound socket alone grants no TLS/application admission.
-        let children = await runtime.connectionsForTesting()
-        XCTAssertTrue(children.isEmpty)
+        let children = await runtime.enrollmentCountsForTesting()
+        XCTAssertEqual(children.sessions, 0)
+        XCTAssertEqual(children.dials, 0)
+        XCTAssertEqual(children.slots, 0)
         await daemon.close()
         do {
             let unexpected = try await ClientBootstrap(group: group).connectTimeout(.seconds(1))
@@ -627,7 +653,7 @@ extension SharedDaemonTests {
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .bind(host: "127.0.0.1", port: port).get()
         try await rebound.close().get()
-        XCTAssertEqual(try ItemStore.openInitialized(root: store).root.path, canonicalPath(store))
+        try assertSameStoreRoot(ItemStore.openInitialized(root: store).root, store)
     }
 
     func testPeerBindFailureAndLateStartupClaimUnwindAllOwnedResources() async throws {
