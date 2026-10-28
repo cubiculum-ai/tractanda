@@ -245,39 +245,20 @@ final class CanonicalMaintenanceContextTests: XCTestCase {
             FileManager.default.fileExists(atPath: f.root.appendingPathComponent(".peer-credentials").path))
         try f.source.capacity()
     }
-    func testRealMaintenanceStorePreservesReadsButRejectsOrdinaryCommit() throws {
-        let f = try Fixture()
-        let before = try f.protectedHashes()
-        let store = try f.open()
-        XCTAssertFalse(try store.exportCatalogueForVerification().isEmpty)
-        XCTAssertEqual(
-            code {
-                _ = try store.commit(
-                    .init(
-                        classID: "Item", changes: ["subject": .text("must not publish")],
-                        operationID: "maintenance-rejected-create"))
-            }, "maintenanceProposedMutation")
-        XCTAssertEqual(try f.protectedHashes(), before)
-        XCTAssertTrue(try CanonicalMaintenanceContext.pending(root: f.root))
-        try f.source.capacity()
-    }
-    func testRealColdRebuildKeepsCanonicalDataOrStopsAtExactProposedOutput() throws {
-        let f = try Fixture()
-        let before = try f.protectedHashes()
-        let store = try f.open()
-        do {
-            try store.rebuildIndex()
-            print("MAINTENANCE_COLD_RESULT completed-normal-derived-rebuild")
-        } catch let error as TractandaError where error.code == "maintenanceProposedMutation" {
-            print("MAINTENANCE_COLD_RESULT stopped-before-proposed-output \(error.message)")
+
+    func testHistoricalMaintenancePlanCannotBypassExplicitPersonalActivationOrChangeCanonicalBytes() throws {
+        for atomic in [false, true] {
+            let fixture = try Fixture(atomicSource: atomic)
+            let before = try fixture.allCanonicalHashes()
+            XCTAssertThrowsError(try fixture.open()) {
+                XCTAssertEqual(($0 as? TractandaError)?.code, "personalMigrationRequired")
+            }
+            XCTAssertEqual(try fixture.allCanonicalHashes(), before)
+            XCTAssertTrue(try CanonicalMaintenanceContext.pending(root: fixture.root))
+            try fixture.source.capacity()
         }
-        XCTAssertEqual(try f.protectedHashes(), before)
-        XCTAssertTrue(try CanonicalMaintenanceContext.pending(root: f.root))
-        XCTAssertThrowsError(try CanonicalMaintenanceJournal.requireOrdinaryOpeningAllowed(root: f.root))
-        let names = try FileManager.default.contentsOfDirectory(atPath: f.audit.path)
-        XCTAssertTrue(names.contains(where: { $0.hasPrefix("derived-") }))
-        try f.source.capacity()
     }
+
     func testMarkerDriftAndDerivedCapacityRefuseBeforeNormalColdWork() throws {
         let f = try Fixture()
         let before = try f.protectedHashes()
@@ -409,211 +390,6 @@ final class CanonicalMaintenanceContextTests: XCTestCase {
         }
     }
 
-    func testAdmissionCapabilityPrefaceIsFencedAndRealStoreStopsBeforeCanonicalWrite() throws {
-        let f = try PeerEnrollmentApprovalTests.Fixture()
-        let handle = try f.begin()
-        _ = try f.ready(handle)
-        let accepted = try f.source.acceptPeerEnrollment(handle, forUID: f.uid)
-        XCTAssertNotNil(accepted.approval)
-        let target = f.request.sourceCredential.binding.remoteReplicaID
-        let root = f.sourceRoot
-        let decision = root.appendingPathComponent(PeerOriginAdmission.directory).appendingPathComponent(
-            target)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: decision.path))
-        f.source = nil
-        // Completed writer scratch is disposable and not an admitted maintenance namespace.
-        // Remove only this fixture-owned derived directory before the marker is prepared;
-        // retain its usable index and every canonical accepted receipt/part/context original.
-        let completedScratch = root.appendingPathComponent("index/atomic-authority-work")
-        if FileManager.default.fileExists(atPath: completedScratch.path) {
-            XCTAssertEqual(try FileMetadata.read(at: completedScratch).type, .directory)
-            try FileManager.default.removeItem(at: completedScratch)
-        }
-        // Genuine retained enrollment approval/receipt remains. Model its missing derived
-        // canonical admission decision before any maintenance operation is prepared.
-        try FileManager.default.removeItem(at: decision)
-        let requirement = try XCTUnwrap(
-            CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid()))
-        let withoutAdmission = CanonicalReaderRequirement(
-            storeID: requirement.storeID,
-            minimumReaderLevel: requirement.minimumReaderLevel, recordFormats: requirement.recordFormats,
-            capabilities: requirement.capabilities.filter { $0 != PeerOriginAdmission.capability })
-        let requirementPath = root.appendingPathComponent(CanonicalReaderRequirement.fileName)
-        let priorBytes = try JSON.encode(withoutAdmission)
-        func installFixturePriorRequirement() throws {
-            try priorBytes.write(to: requirementPath)
-            try FileManager.default.setAttributes(
-                [.posixPermissions: 0o600], ofItemAtPath: requirementPath.path)
-        }
-        try installFixturePriorRequirement()
-        // Ordinary pre-marker activation still performs its real monotonic capability write.
-        try CanonicalReaderRequirement.beforeOriginAdmissionPublication(root: root, ownerUID: tractanda_uid())
-        XCTAssertTrue(
-            try XCTUnwrap(CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid()))
-                .capabilities.contains(PeerOriginAdmission.capability))
-        try installFixturePriorRequirement()
-        let audit = f.root.appendingPathComponent("maintenance-capability-audit")
-        try FileManager.default.createDirectory(
-            at: audit, withIntermediateDirectories: false,
-            attributes: [.posixPermissions: 0o700])
-        let replica = try XCTUnwrap(
-            ReplicaIdentity.load(
-                root: root,
-                storeID: requirement.storeID, ownerUID: tractanda_uid()))
-        let all = FileManager.default.enumerator(
-            at: root.appendingPathComponent("authority/records"),
-            includingPropertiesForKeys: nil)!
-        let original = try XCTUnwrap(
-            all.allObjects.compactMap { $0 as? URL }.first { $0.pathExtension == "authority" })
-        let bytes = try Data(contentsOf: original)
-        let plan = CanonicalMaintenanceJournal.Plan(
-            version: 1,
-            operationID: try UUID.makeVersion1().uuidString.lowercased(), storeID: requirement.storeID,
-            replicaID: replica.replicaID,
-            edits: [
-                .init(
-                    path: String(original.path.dropFirst(root.path.count + 1)).split(separator: "/").map(
-                        String.init),
-                    role: .authorityOriginal, beforeSHA256: AuthorityRecordCodec.sha256(bytes), after: bytes)
-            ])
-        do {
-            let writer = tractanda_lock(root.appendingPathComponent(".writer.lock").path)
-            guard writer >= 0 else { throw TractandaError("fixture", "Writer did not close") }
-            defer { tractanda_unlock(writer) }
-            let journal = try CanonicalMaintenanceJournal(
-                root: root, journal: audit,
-                writerDescriptor: writer, plan: plan)
-            try journal.applyAll()
-        }
-        func canonicalHashes() throws -> [String: String] {
-            var result = [String: String]()
-            let scan = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)!
-            for case let path as URL in scan {
-                let relative = String(path.path.dropFirst(root.path.count + 1))
-                if relative == "index" || relative.hasPrefix("index/") || relative == StoreCheckpoint.name {
-                    continue
-                }
-                if try FileMetadata.read(at: path).type == .regular {
-                    result[relative] = AuthorityRecordCodec.sha256(try Data(contentsOf: path))
-                }
-            }
-            return result
-        }
-        let before = try canonicalHashes()
-        let opening = CanonicalMaintenanceContext.Opening(
-            journalRoot: audit, plan: plan,
-            expectedPendingSHA256: AuthorityRecordCodec.sha256(
-                try Data(
-                    contentsOf:
-                        root.appendingPathComponent(CanonicalMaintenanceJournal.pendingName))))
-        // Exercise the exact production capability preface called by activateOriginAdmissions.
-        // Normal opening also reconstructs genuine accepted atomic history through its
-        // receipt-bound disposable reader scope before reaching this same capability preface.
-        do {
-            try CanonicalReaderRequirement.beforeOriginAdmissionPublication(
-                root: root, ownerUID: tractanda_uid())
-            XCTFail("Capability publication must stop before any stage")
-        } catch let error as TractandaError {
-            XCTAssertEqual(error.code, "maintenanceProposedMutation", error.message)
-            XCTAssertTrue(error.message.contains(CanonicalReaderRequirement.fileName), error.message)
-        }
-        XCTAssertEqual(try Data(contentsOf: requirementPath), priorBytes)
-        XCTAssertEqual(try canonicalHashes(), before)
-        do {
-            _ = try ItemStore(
-                root: root, accounts: f.accounts, revisionProjectionEnabled: true,
-                authorityIntakeEnabled: true, firstSourceOperation: nil, requireInitializedStore: true,
-                maintenanceOpening: opening)
-            XCTFail("Real Store must stop before canonical admission/capability publication")
-        } catch let error as TractandaError {
-            XCTAssertEqual(error.code, "maintenanceProposedMutation", error.message)
-            XCTAssertTrue(error.message.contains(CanonicalReaderRequirement.fileName), error.message)
-        }
-        XCTAssertEqual(try Data(contentsOf: requirementPath), priorBytes)
-        XCTAssertEqual(try canonicalHashes(), before)
-        XCTAssertFalse(
-            try FileManager.default.contentsOfDirectory(atPath: root.path)
-                .contains { $0.hasPrefix(".reader-requirement-") })
-        XCTAssertTrue(try CanonicalMaintenanceContext.pending(root: root))
-        try f.capacity()
-    }
-
-    func testHistoricalAtomicColdRebuildUsesOnlyDerivedReaderScratchAndPreservesCanonicalBytes() throws {
-        let f = try Fixture(atomicSource: true, freshDerivedIndex: true)
-        let before = try f.allCanonicalHashes()
-        let store = try f.open()
-        XCTAssertFalse(try store.exportCatalogueForVerification().isEmpty)
-        XCTAssertEqual(try f.allCanonicalHashes(), before)
-        try store.rebuildIndex()
-        XCTAssertEqual(try f.allCanonicalHashes(), before)
-        let scratch = f.root.appendingPathComponent("index/atomic-authority-work")
-        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: scratch.path), [])
-        let names = try FileManager.default.contentsOfDirectory(atPath: f.audit.path)
-        let audits = try names.filter { $0.hasPrefix("derived-") }.map {
-            try JSON.decode(
-                CanonicalMaintenanceContext.DerivedAudit.self,
-                Data(contentsOf: f.audit.appendingPathComponent($0)))
-        }.filter { $0.kind == .historicalAtomicScratch }
-        XCTAssertFalse(audits.isEmpty)
-        XCTAssertTrue(audits.allSatisfy { $0.canonicalRoot != nil && $0.acceptedReceiptSHA256 != nil })
-        XCTAssertTrue(
-            audits.contains {
-                $0.phase == .completed && $0.mutation == "immutableWrite"
-                    && $0.snapshot.path.hasSuffix("/control/root")
-            })
-        for completed in audits
-        where completed.phase == .completed && completed.mutation == "immutableWrite"
-            && completed.snapshot.path.hasSuffix("/control/root")
-        {
-            let requested = try XCTUnwrap(completed.requestedScratchBytes)
-            XCTAssertEqual(completed.scratchAllocationState, .reserved)
-            XCTAssertEqual(completed.reservedScratchBytes, requested)
-            // A root is one physical data file plus its conservative temporary/parent blocks.
-            XCTAssertEqual(requested, try XCTUnwrap(completed.snapshot.bytes) + 2 * 4096)
-            let intent = try XCTUnwrap(
-                audits.first { $0.eventID == completed.eventID && $0.phase == .intent })
-            XCTAssertEqual(intent.requestedScratchBytes, requested)
-            XCTAssertEqual(intent.reservedScratchBytes, requested)
-            XCTAssertEqual(intent.scratchAllocationState, .reserved)
-            XCTAssertFalse(intent.snapshot.exists)
-            XCTAssertNil(intent.snapshot.bytes)
-        }
-        XCTAssertTrue(try CanonicalMaintenanceContext.pending(root: f.root))
-        try f.source.capacity()
-    }
-    func testHistoricalArchiveBudgetRefusesActualRootWriteBeforeBytesAndRecordsFailure() throws {
-        let f = try Fixture(atomicSource: true, freshDerivedIndex: true)
-        let before = try f.allCanonicalHashes()
-        var request = try f.opening
-        // Three directory blocks and one lock fit; the real archive root write must not.
-        request.maximumHistoricalScratchBytes = 16 * 1024
-        XCTAssertEqual(code { _ = try f.open(request) }, "resourceLimit")
-        let audits = try f.derivedAudits()
-        let failed: [CanonicalMaintenanceContext.DerivedAudit] = audits.filter { audit in
-            audit.kind == .historicalAtomicScratch && audit.phase == .failed
-                && audit.mutation == "immutableWrite" && audit.snapshot.path.hasSuffix("/control/root")
-        }
-        XCTAssertEqual(failed.count, 1)
-        let refusal = try XCTUnwrap(failed.first)
-        XCTAssertFalse(refusal.snapshot.exists)
-        XCTAssertNil(refusal.snapshot.bytes)
-        let requested = try XCTUnwrap(refusal.requestedScratchBytes)
-        let root = try XCTUnwrap(refusal.canonicalRoot)
-        let original = try f.authorityOriginalBytes(id: root.recordID)
-        XCTAssertEqual(AuthorityRecordCodec.sha256(original), root.sha256)
-        XCTAssertEqual(requested, UInt64(original.count) + 2 * 4096)
-        XCTAssertEqual(refusal.reservedScratchBytes, 0)
-        XCTAssertEqual(refusal.scratchAllocationState, .refused)
-        let intent = try XCTUnwrap(audits.first { $0.eventID == refusal.eventID && $0.phase == .intent })
-        XCTAssertEqual(intent.requestedScratchBytes, requested)
-        XCTAssertEqual(intent.reservedScratchBytes, 0)
-        XCTAssertEqual(intent.scratchAllocationState, .refused)
-        XCTAssertFalse(intent.snapshot.exists)
-        XCTAssertNil(intent.snapshot.bytes)
-        XCTAssertEqual(try f.allCanonicalHashes(), before)
-        XCTAssertTrue(try CanonicalMaintenanceContext.pending(root: f.root))
-        try f.source.capacity()
-    }
     func testUnknownProducerScratchIsNeverAdoptedOrDeletedByHistoricalScope() throws {
         for marker in [false, true] {
             let f = try Fixture(atomicSource: true, freshDerivedIndex: true)

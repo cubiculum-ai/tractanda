@@ -228,3 +228,18 @@ The current equivalents use real current APIs and retain their security/storage 
 | Current node exclusion, authenticated native join/restart, one initiated duplex connection and nonfounder third-node coordination | `PersonalSyncTests.testRemovalNeedsRetainedMembersOnlyAndOmittedPeerCannotUseOldCredentials`; `PersonalPeerDaemonTests` actual pair/hot-revocation cases; `PersonalEnrollmentDaemonTests.testTwoNodesPairOverSingleOutboundConnectionAndReplicateHistoryAndPayload` and `testNonFounderAddsThirdNodeOnlyAfterRetainedMemberReturns` |
 
 Current membership and credentials are administrator-controlled operational configuration. Index-only recovery preserves that current configuration; fresh-cluster recovery explicitly pairs new credentials. Recovered raw items or old policy/authority items cannot recreate current trust. The rejected historical ledger is not repaired or required to certify an administrator-selected recovery set.
+
+## Explicit historical maintenance and metadata-control tail cases
+
+The following eight observed failures exercise superseded authority-store opening, admission, or conversion/export success. Their originals remain reachable at `d520f9979f7b0d2887d8df48d6275ef0a77d910e`. No current production initialization guard is relaxed. Independent maintenance fence, canonical-writer, accepted-proof, unknown-scratch and no-write tests remain.
+
+- `Tests/TractandaCoreTests/CanonicalMaintenanceContextTests.swift::testRealMaintenanceStorePreservesReadsButRejectsOrdinaryCommit`
+- `Tests/TractandaCoreTests/CanonicalMaintenanceContextTests.swift::testRealColdRebuildKeepsCanonicalDataOrStopsAtExactProposedOutput`
+- `Tests/TractandaCoreTests/CanonicalMaintenanceContextTests.swift::testAdmissionCapabilityPrefaceIsFencedAndRealStoreStopsBeforeCanonicalWrite`
+- `Tests/TractandaCoreTests/CanonicalMaintenanceContextTests.swift::testHistoricalAtomicColdRebuildUsesOnlyDerivedReaderScratchAndPreservesCanonicalBytes`
+- `Tests/TractandaCoreTests/CanonicalMaintenanceContextTests.swift::testHistoricalArchiveBudgetRefusesActualRootWriteBeforeBytesAndRecordsFailure`
+- `Tests/TractandaCoreTests/GlobalAdministratorScopeTests.swift::testForeignProtectedReviewUsesSourceDecisionAndPreservesCurrentACL`
+- `Tests/TractandaCoreTests/GlobalAdministratorScopeTests.swift::testSourceValidatedRetirementAppliesWithoutRecipientAdministratorLookup`
+- `scripts/development/first-source-conversion/DevelopmentFirstSourceConversionTests.swift::testSameOriginModernConversionExportsCompleteApprovedBaseline`
+
+A new `CanonicalMaintenanceContextTests.testHistoricalMaintenancePlanCannotBypassExplicitPersonalActivationOrChangeCanonicalBytes` checks both retained historical formats, exact canonical byte preservation, and refusal without explicit personal activation. Current trusted source administration is covered by `PersonalEnrollmentAuthorizationTests`' mapping-without-local-veto, substitution rejection and source-admin recheck cases. Explicit selected-content recovery and unchanged files/history are covered by `PersonalWorkgroupStoreTests.testNormalOpenRequiresExplicitSelectionAndSelectedDAGPreservesFiles` and `testSelectedMergeHistoryOwnedDocumentAndOldPolicyItemRemainOrdinaryContent`. Historical conversion custody, identity and byte tests other than the single enumerated export tail remain.

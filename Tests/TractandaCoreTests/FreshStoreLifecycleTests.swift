@@ -96,7 +96,9 @@ final class FreshStoreLifecycleTests: XCTestCase {
         let store = try ItemStore.initializeFresh(
             root: root, accounts: accounts,
             initialAccessConfiguration: policy, initializationKey: "setup:fixture")
-        try assertInitialPackages(root, applied: true)
+        XCTAssertTrue(store.isPersonalWorkgroup)
+        XCTAssertNotNil(try PersonalWorkgroupProfile.load(root, ownerUID: tractanda_uid()))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("authority").path))
         XCTAssertThrowsError(
             try store.withAccess(forUID: tractanda_uid()) { try store.requireAdministrator() })
         _ = try store.withAccess(forUID: accounts.owner) {
@@ -110,47 +112,38 @@ final class FreshStoreLifecycleTests: XCTestCase {
                 )
             })
     }
-    func testRestartBeforeAndAfterAcceptedHandoffOnlyCompletesExactOperation() throws {
-        for boundary in [
-            "beforeFoundingPolicy", "afterFoundingPolicy", "afterInitialCapture", "beforePolicy", "beforePin",
-            "beforePinAcceptance", "afterPin", "beforeComplete",
-        ] {
-            let root = try directory()
-            defer { try? FileManager.default.removeItem(at: root) }
-            let accounts = Accounts()
-            let operation = try UUID.makeVersion1().uuidString.lowercased()
-            XCTAssertThrowsError(
-                try start(root, operation: operation, accounts: accounts) {
-                    if $0 == boundary { throw CancellationError() }
-                })
-            try assertInitialPackages(root, applied: boundary == "beforeComplete")
-            let receipt = try Data(
-                contentsOf: root.appendingPathComponent(InitialAuthorityBootstrap.receiptName))
-            let identity = try Data(contentsOf: root.appendingPathComponent(ReplicaIdentity.name))
-            let configuration = try AuthorityStore.configuration(
-                root: root, files: InitialAuthorityBootstrap.files(root))
-            XCTAssertThrowsError(try ItemStore.openInitialized(root: root, accounts: accounts))
-            XCTAssertThrowsError(
-                try ItemStore.initializeFresh(
-                    root: root, accounts: accounts,
-                    initialAccessConfiguration: policy, initializationKey: "other-request"))
-            var resumed: ItemStore? = try start(root, operation: operation, accounts: accounts)
-            XCTAssertEqual(
-                try Data(contentsOf: root.appendingPathComponent(InitialAuthorityBootstrap.receiptName)),
-                receipt)
-            XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(ReplicaIdentity.name)), identity)
-            if let originalPin = configuration?.bootstrap {
-                XCTAssertEqual(
-                    try AuthorityStore.configuration(
-                        root: root, files: InitialAuthorityBootstrap.files(root))?.bootstrap,
-                    originalPin)
+    func testPersonalRestartKeepsIdentityPolicyAndHumanRightsAcrossSetupRequestLabels() throws {
+        let parent = try directory()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let root = parent.appendingPathComponent("store")
+        let accounts = Accounts()
+        let identity: Data
+        let profile: Data
+        do {
+            let created = try ItemStore.initializeFresh(
+                root: root, accounts: accounts,
+                initialAccessConfiguration: policy, initializationKey: "setup:first")
+            _ = try created.withAccess(forUID: accounts.owner) {
+                try created.commit(
+                    .init(
+                        classID: "Item", changes: ["subject": .text("human")],
+                        operationID: "human-write"))
             }
-            try assertInitialPackages(root, applied: true)
-            XCTAssertThrowsError(
-                try resumed!.withAccess(forUID: tractanda_uid()) { try resumed!.requireAdministrator() })
-            resumed = nil
-            let opened = try ItemStore.openInitialized(root: root, accounts: accounts)
-            XCTAssertEqual(try opened.withAccess(forUID: accounts.owner) { try opened.candidates().count }, 1)
+            identity = try Data(contentsOf: root.appendingPathComponent(ReplicaIdentity.name))
+            profile = try Data(contentsOf: root.appendingPathComponent(PersonalWorkgroupProfile.name))
+        }
+        let resumed = try ItemStore.initializeFresh(
+            root: root, accounts: accounts,
+            initialAccessConfiguration: policy, initializationKey: "setup:another-label")
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(ReplicaIdentity.name)), identity)
+        XCTAssertEqual(
+            try Data(contentsOf: root.appendingPathComponent(PersonalWorkgroupProfile.name)), profile)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("authority").path))
+        XCTAssertThrowsError(
+            try resumed.withAccess(forUID: tractanda_uid()) { try resumed.requireAdministrator() })
+        try resumed.withAccess(forUID: accounts.owner) {
+            try resumed.requireAdministrator()
+            XCTAssertEqual(try resumed.candidates().count, 1)
         }
     }
     func testCreatorResolutionRevokedBeforePolicyAcceptanceCannotPinOrComplete() throws {
@@ -180,37 +173,35 @@ final class FreshStoreLifecycleTests: XCTestCase {
                 try store.withAccess(forUID: tractanda_uid()) { try store.requireAdministrator() })
         }
     }
-    func testAcceptedPinCompletesAfterCreatorDisappearsWithoutRestoringRights() throws {
-        for boundary in ["afterPin", "beforeComplete"] {
-            let root = try directory()
-            defer { try? FileManager.default.removeItem(at: root) }
-            let accounts = Accounts()
-            let operation = try UUID.makeVersion1().uuidString.lowercased()
-            XCTAssertThrowsError(
-                try start(root, operation: operation, accounts: accounts) {
-                    if $0 == boundary { throw CancellationError() }
-                })
-            let request = try XCTUnwrap(InitialAuthorityBootstrap.load(root: root))
-            let before = try Data(
-                contentsOf: root.appendingPathComponent(InitialAuthorityBootstrap.receiptName))
-            let identity = try Data(contentsOf: root.appendingPathComponent(ReplicaIdentity.name))
-            accounts.actorAvailable = false
-            var store: ItemStore? = try start(root, operation: operation, accounts: accounts)
-            XCTAssertTrue(try InitialAuthorityBootstrap.completed(root: root, request: request))
-            XCTAssertEqual(
-                try Data(contentsOf: root.appendingPathComponent(InitialAuthorityBootstrap.receiptName)),
-                before)
-            XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(ReplicaIdentity.name)), identity)
-            try assertInitialPackages(root, applied: true)
-            XCTAssertThrowsError(
-                try store!.withAccess(forUID: tractanda_uid()) { try store!.requireAdministrator() })
-            store = nil
-            try FileManager.default.removeItem(at: root.appendingPathComponent("index"))
-            store = try ItemStore.openInitialized(root: root, accounts: accounts)
-            try store!.withAccess(forUID: accounts.owner) {
-                try store!.requireAdministrator()
-                XCTAssertEqual(try store!.candidates().count, 1)
+    func testPersonalRestartAfterCreatorDisappearsPreservesHumanPolicyWithoutRestoringServiceRights() throws {
+        let parent = try directory()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let root = parent.appendingPathComponent("store")
+        let accounts = Accounts()
+        let identity: Data
+        do {
+            let created = try ItemStore.initializeFresh(
+                root: root, accounts: accounts,
+                initialAccessConfiguration: policy)
+            _ = try created.withAccess(forUID: accounts.owner) {
+                try created.commit(
+                    .init(
+                        classID: "Item", changes: ["body": .text("human retained")],
+                        operationID: "human-write"))
             }
+            identity = try Data(contentsOf: root.appendingPathComponent(ReplicaIdentity.name))
+        }
+        accounts.actorAvailable = false
+        let reopened = try ItemStore.openInitialized(root: root, accounts: accounts)
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(ReplicaIdentity.name)), identity)
+        XCTAssertEqual(
+            try PersonalWorkgroupProfile.load(root, ownerUID: tractanda_uid())?.accessConfiguration, policy)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("authority").path))
+        XCTAssertThrowsError(
+            try reopened.withAccess(forUID: tractanda_uid()) { try reopened.requireAdministrator() })
+        try reopened.withAccess(forUID: accounts.owner) {
+            try reopened.requireAdministrator()
+            XCTAssertEqual(try reopened.candidates().count, 1)
         }
     }
     func testChangedCurrentPolicyAfterAcceptedHandoffCannotCompleteEarlierOperation() throws {
