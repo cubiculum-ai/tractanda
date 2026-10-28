@@ -665,40 +665,83 @@ final class SetupTests: XCTestCase {
         let root = f.root.appendingPathComponent("handoff")
         let index = f.root.appendingPathComponent("handoff-index")
         let accounts = HandoffAccounts()
+        let paths = [
+            PersonalWorkgroupProfile.name, ReplicaIdentity.name,
+            ".tractanda-store-identity.json", CanonicalReaderRequirement.fileName,
+        ]
+        var original: [Data]?
         for _ in 0..<2 {
             try StoreBootstrap.initialize(
                 store: root, indexDirectory: index, owner: "human", instance: "handoff",
                 accounts: accounts)
+            let bytes = try paths.map { try Data(contentsOf: root.appendingPathComponent($0)) }
+            if let original { XCTAssertEqual(bytes, original) } else { original = bytes }
+            var store: ItemStore? = try ItemStore.openInitialized(
+                root: root, indexDirectory: index, accounts: accounts)
+            XCTAssertTrue(try XCTUnwrap(store).isPersonalWorkgroup)
+            XCTAssertEqual(try XCTUnwrap(store).ownerUID, tractanda_uid())
+            XCTAssertThrowsError(
+                try XCTUnwrap(store).withAccess(forUID: tractanda_uid()) {
+                    try XCTUnwrap(store).requireAdministrator()
+                })
+            try XCTUnwrap(store).withAccess(forUID: accounts.ownerUID) {
+                try XCTUnwrap(store).requireAdministrator()
+            }
+            store = nil
         }
-        let store = try ItemStore.openInitialized(root: root, indexDirectory: index, accounts: accounts)
-        XCTAssertThrowsError(
-            try store.withAccess(forUID: tractanda_uid()) { try store.requireAdministrator() })
-        try store.withAccess(forUID: accounts.ownerUID) { try store.requireAdministrator() }
+        let profile = try XCTUnwrap(PersonalWorkgroupProfile.load(root))
+        XCTAssertEqual(
+            try AccessConfiguration(profile.accessConfiguration).administratorGroup,
+            SetupPlatform.host == .macos ? "admin" : "sudo")
         XCTAssertTrue(
-            FileManager.default.fileExists(
-                atPath: root.appendingPathComponent(".tractanda-first-source-complete.json").path))
-        XCTAssertTrue(
-            FileManager.default.fileExists(
-                atPath: root.appendingPathComponent(".tractanda-replica-identity.json").path))
+            FileManager.default.fileExists(atPath: root.appendingPathComponent(ReplicaIdentity.name).path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("authority").path))
     }
-    func testStoreBootstrapRejectsLegacyRootAndChangedInitializationKey() throws {
+    func testStoreBootstrapRejectsLegacyRootAndChangedRequestLabelPreservesCurrentIdentityAndPolicy() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
         let legacy = f.root.appendingPathComponent("legacy")
         let index = f.root.appendingPathComponent("legacy-index")
         do { _ = try ItemStore(root: legacy, indexDirectory: index) }
+        func legacyBytes() throws -> [String: Data] {
+            let scan = try XCTUnwrap(
+                FileManager.default.enumerator(at: legacy, includingPropertiesForKeys: nil))
+            var bytes: [String: Data] = [:]
+            for case let file as URL in scan where try FileMetadata.read(at: file).type == .regular {
+                bytes[String(file.path.dropFirst(legacy.path.count))] = try Data(contentsOf: file)
+            }
+            return bytes
+        }
+        let retainedLegacy = try legacyBytes()
         XCTAssertThrowsError(
             try StoreBootstrap.initialize(
-                store: legacy, indexDirectory: index,
-                owner: f.owner, instance: "legacy"))
+                store: legacy, indexDirectory: index, owner: f.owner, instance: "legacy"))
+        XCTAssertEqual(try legacyBytes(), retainedLegacy)
         let root = f.root.appendingPathComponent("fresh")
         let freshIndex = f.root.appendingPathComponent("fresh-index")
         try StoreBootstrap.initialize(
             store: root, indexDirectory: freshIndex, owner: f.owner, instance: "original")
-        XCTAssertThrowsError(
-            try StoreBootstrap.initialize(
-                store: root, indexDirectory: freshIndex,
-                owner: f.owner, instance: "different"))
+        let paths = [
+            PersonalWorkgroupProfile.name, ReplicaIdentity.name,
+            ".tractanda-store-identity.json", CanonicalReaderRequirement.fileName,
+        ]
+        let before = try paths.map { try Data(contentsOf: root.appendingPathComponent($0)) }
+        let profile = try XCTUnwrap(PersonalWorkgroupProfile.load(root))
+        for label in ["different", "original"] {
+            XCTAssertNoThrow(
+                try StoreBootstrap.initialize(
+                    store: root, indexDirectory: freshIndex, owner: f.owner, instance: label))
+            XCTAssertEqual(try paths.map { try Data(contentsOf: root.appendingPathComponent($0)) }, before)
+            var store: ItemStore? = try ItemStore.openInitialized(root: root, indexDirectory: freshIndex)
+            let identity = try XCTUnwrap(store).personalSyncIdentity()
+            XCTAssertEqual(identity.storeID, profile.storeID)
+            XCTAssertEqual(identity.replicaID, profile.replicaID)
+            try XCTUnwrap(store).withAccess(forUID: tractanda_uid()) {
+                try XCTUnwrap(store).requireAdministrator()
+            }
+            store = nil
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("authority").path))
     }
 
     func testUpgradeUsesRecordedStorageWithoutCreatingNewDefaultDirectories() throws {
