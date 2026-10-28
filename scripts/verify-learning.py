@@ -50,7 +50,9 @@ def main():
 
             if not args.import_from:
                 founding = client.call('TractandaItem/query', query_arguments({'expression': 'classID == "AccessConfigurationItem"'}))
-                check(founding['total'] == 1, 'Fresh store has exactly one founding access policy')
+                check(founding['total'] == 0 and founding['ids'] == [], 'Fresh personal policy is local configuration')
+                profile_path = store / '.tractanda-personal-profile.json'
+                profile_before = profile_path.read_bytes()
                 category_revision = client.commit_with_revision(ipc.intent('create', 'category', class_id='Item', changes={
                     'subject':ipc.text('Chess'),
                     'selection':{'type':'object','value':{'language':ipc.text('tractanda.spotlight.v0'),
@@ -68,7 +70,7 @@ def main():
                 check(cli('suggest',category)['list'] == [], 'Suggest does not train implicitly')
                 model = cli('learn',category)
                 check(model['status'] == 'ready', 'CLI trains a category through the server')
-                check((model['positiveExamples'],model['negativeExamples'],model['unknownItems']) == (2,2,3), 'Two unassigned examples and the founding policy remain unknown')
+                check((model['positiveExamples'],model['negativeExamples'],model['unknownItems']) == (2,2,2), 'Exactly two unassigned item examples remain unknown')
                 check(client.call('TractandaStore/info')['state'] == before, 'Training does not revise canonical state')
                 check(cli('learn',category)['modelID'] == model['modelID'], 'Repeated unchanged training preserves model identity')
                 suggestions = cli('suggest',category)
@@ -122,6 +124,8 @@ def main():
             check(client.get(ipc.item_id(manifest['accepted'])) == manifest['accepted'], 'Reset leaves feedback and manual assignments intact')
             client.rebuild("verify-learning-rebuild")
             check(cli('learn',category)['status'] == 'ready', 'Rebuilt index can train again from canonical files')
+            if not args.import_from:
+                check(profile_path.read_bytes() == profile_before, 'Learning preserves exact local personal policy')
         if args.export:
             args.export.mkdir(parents=True,exist_ok=True)
             shutil.copytree(store/'items',args.export/'items')

@@ -125,9 +125,12 @@ class MCPClient:
         result = self.request("resources/read", {"uri": uri}, error=error)
         if error: return result
         content = dict(result["contents"][0])
-        payload = json.loads(content["text"])
-        method = 'TractandaRevision/get' if '/revisions/' in uri else 'TractandaItem/get'
-        content['text'] = json.dumps(decode_result(method, payload))
+        if content.get("mimeType") == "application/json":
+            payload = json.loads(content["text"])
+            method = 'TractandaRevision/get' if '/revisions/' in uri else 'TractandaItem/get'
+            content['text'] = json.dumps(decode_result(method, payload))
+        else:
+            assert content.get("mimeType") == "text/plain" and uri.startswith("tractanda://reference/")
         return content
 
     def close(self):
