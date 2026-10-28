@@ -287,6 +287,30 @@ final class SemanticService {
         }
     }
 
+    /// Pure schema bound for reply admission. Do not call status(): its corpus scan owns
+    /// durable reader leases and may incur retirement work before a mutator is admitted.
+    func statusReplyByteCountBound() throws -> Int {
+        let configuration = try configurations.load()
+        let profile: Any
+        if let configuration {
+            profile = try SemanticSource.profileID(configuration)
+        } else {
+            profile = NSNull()
+        }
+        let payload: [String: Any] = [
+            "enabled": false,  // false has the longer JSON spelling.
+            "configurationID": configuration?.configurationID as Any? ?? NSNull(),
+            "model": configuration?.model as Any? ?? NSNull(),
+            "profileID": profile,
+            "inputEncoding": configuration?.inputEncoding.rawValue as Any? ?? NSNull(),
+            "itemTextProfile": ItemTextContent.profile,
+            // Actual counts are nonnegative Ints; use their longest possible decimal form.
+            "indexableItems": Int.max, "indexedItems": Int.max, "pendingItems": Int.max,
+            "coverage": "complete",  // complete and disabled are the longest declared variants.
+        ]
+        return try JSONSerialization.data(withJSONObject: payload).count
+    }
+
     func status() throws -> [String: Any] {
         let configuration = try configurations.load()
         guard let configuration else {

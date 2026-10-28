@@ -292,6 +292,9 @@ public actor ServiceCoordinator {
         let request = try request.normalizedForDomain()
         let principal = request.principal
         await nativeAdmissionHookForTesting?(request.method)
+        if ItemService.semanticLifecycleMethod(request) != nil, semanticLifecyclePending {
+            throw TractandaError("serviceBusy", "Another semantic lifecycle operation is draining readers.")
+        }
         if exclusiveRebuildPending,
             !["TractandaStore/rebuild", "TractandaStore/rebuildStatus", "TractandaStore/rebuildCancel"]
                 .contains(request.method)
@@ -301,7 +304,7 @@ public actor ServiceCoordinator {
         if [
             "TractandaStore/rebuild", "TractandaAttachment/finish", "TractandaAttachment/upload",
             "TractandaDocumentJob/resume", "TractandaDocumentJob/rebase",
-        ].contains(request.method) {
+        ].contains(request.method) || ItemService.semanticLifecycleMethod(request) != nil {
             try await submit(principal: principal) { service in
                 try service.store.withAccess(forUID: uid, recoverPublication: false) {
                     try service.preflightNativeMutationAdmission(request)
@@ -329,7 +332,9 @@ public actor ServiceCoordinator {
         {
             request.replyBudget?.useCompletePublicationObservation()
         }
-        if !NativeMethodCatalog.readOnly.contains(request.method) {
+        if !NativeMethodCatalog.readOnly.contains(request.method),
+            ItemService.semanticLifecycleMethod(request) == nil
+        {
             request.replyBudget?.markDomainOperationBegan()
         }
         if let call = ItemService.rebuildNativeCall(request) {

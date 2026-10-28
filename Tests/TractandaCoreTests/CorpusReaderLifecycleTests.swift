@@ -301,6 +301,11 @@ final class CorpusReaderLifecycleTests: XCTestCase {
             lock.unlock()
             for waiter in pending { waiter.resume() }
         }
+        func contains(_ event: String) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return events.contains(event)
+        }
         func wait(_ event: String) async {
             await withCheckedContinuation { continuation in
                 lock.lock()
@@ -372,7 +377,11 @@ final class CorpusReaderLifecycleTests: XCTestCase {
                     operation: {
                         gate.mark("started")
                         await gate.wait("released")
-                    }, onCancel: { gate.mark("cancelled") })
+                    },
+                    onCancel: {
+                        gate.mark("cancelled")
+                        gate.mark("cancelled-or-finished")
+                    })
                 return inputs.map { _ in [1, 0] }
             }, requireInitializedStore: true,
             attachmentUploadPolicy: .init(maximumStagedBytes: cap, minimumFreeBytes: reserve))
@@ -390,7 +399,10 @@ final class CorpusReaderLifecycleTests: XCTestCase {
             XCTAssertGreaterThan(held.charge, 0)
             if failRetirement { try await coordinator.setCorpusReaderReleaseFailureForTesting(true) }
             let operation = Task {
-                defer { evidence.finish() }
+                defer {
+                    evidence.finish()
+                    gate.mark("cancelled-or-finished")
+                }
                 if endpoint == "close" {
                     await coordinator.close()
                     return
@@ -425,7 +437,15 @@ final class CorpusReaderLifecycleTests: XCTestCase {
                             operationID: "reader-" + endpoint), returning: SemanticReply.self)
                 }
             }
-            await gate.wait("cancelled")
+            await gate.wait("cancelled-or-finished")
+            if evidence.isFinished(), !gate.contains("cancelled") {
+                gate.mark("released")
+                try await operation.value
+                throw TractandaError(
+                    "fixtureLifecycleEarlyCompletion",
+                    "Lifecycle completed before requesting the held reader's cancellation.")
+            }
+            XCTAssertTrue(gate.contains("cancelled"))
             XCTAssertFalse(evidence.isFinished(), "Lifecycle cannot finish while an owned reader is held")
             let stillHeld = try await coordinator.semanticReaderStateForTesting()
             XCTAssertEqual(stillHeld.count, 1)
@@ -445,7 +465,11 @@ final class CorpusReaderLifecycleTests: XCTestCase {
                 do {
                     try await operation.value
                     XCTFail("Replacement must refuse failed metadata retirement")
-                } catch { XCTAssertEqual((error as? TractandaError)?.code, "injectedReadRetirement") }
+                } catch { XCTAssertEqual((error as? TractandaError)?.code, "serverPartialFail") }
+                XCTAssertEqual(
+                    try SemanticConfigurationStore(storeRoot: root).load()?.configurationID,
+                    configuration.configurationID,
+                    "Failed retirement must not replace the active configuration.")
                 let pending = try await coordinator.semanticReaderStateForTesting()
                 XCTAssertGreaterThan(pending.charge, 0)
                 XCTAssertEqual(pending.pending, 1)

@@ -155,6 +155,34 @@ final class SemanticServiceTests: XCTestCase {
             queryPrefix: "query: ")
     }
 
+    func testReplySchemaBoundIsPureAndCoversDisabledAndConfiguredStatus() throws {
+        try fixture { store, root in
+            let service = SemanticService(store: store)
+            let disabledBound = try service.statusReplyByteCountBound()
+            XCTAssertLessThanOrEqual(
+                try JSONSerialization.data(withJSONObject: service.status()).count, disabledBound)
+            _ = try note(store, subject: "Bound", body: "source", operation: "bound-source")
+            var selected = configuration()
+            selected.model = String(repeating: "quoted\"😀", count: 8)
+            _ = try service.configure(selected, expectedConfigurationID: nil)
+            let before = try store.corpusReadStateForTesting()
+            store.afterCorpusReadCaptureForTesting = {
+                throw TractandaError(
+                    "unexpectedReplyAdmissionCapture", "Reply admission must not own a reader.")
+            }
+            let bound = try service.statusReplyByteCountBound()
+            let after = try store.corpusReadStateForTesting()
+            XCTAssertEqual(after.count, before.count)
+            XCTAssertEqual(after.charge, before.charge)
+            XCTAssertEqual(after.pending, before.pending)
+            store.afterCorpusReadCaptureForTesting = nil
+            XCTAssertLessThanOrEqual(
+                try JSONSerialization.data(withJSONObject: service.status()).count, bound)
+            XCTAssertTrue(
+                FileManager.default.fileExists(atPath: root.appendingPathComponent("semantic.json").path))
+        }
+    }
+
     private func drain(_ service: SemanticService) {
         for _ in 0..<50 {
             service.maintain()

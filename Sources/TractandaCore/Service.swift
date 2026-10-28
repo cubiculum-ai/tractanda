@@ -2742,6 +2742,7 @@ public final class ItemService {
     /// Keep the actual Store operation's authorization and expiry defenses in place.
     func preflightNativeMutationAdmission(_ call: NativeMethodInvocation) throws {
         if call.method == "TractandaStore/rebuild" { try store.requireAdministrator() }
+        if Self.semanticLifecycleMethod(call) != nil { try store.requireAdministrator() }
         if call.method == "TractandaAttachment/finish", call.callCount == 1 {
             let args = try call.dictionary()
             try check(args, allowed: ["uploadID"])
@@ -2837,7 +2838,7 @@ public final class ItemService {
     }
 
     func nativeSemanticStatusByteCount() throws -> Int {
-        try JSONSerialization.data(withJSONObject: semantic.status()).count
+        try semantic.statusReplyByteCountBound()
     }
 
     static func rebuildNativeCall(_ call: NativeMethodInvocation) -> RebuildNativeCall? {
