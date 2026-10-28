@@ -4,6 +4,7 @@
 Uses disposable stores only. This validates the native API, CLI and MCP contract,
 not embedding-model quality (which has its own frozen, real-model evaluation).
 """
+from jmap_client import query_arguments
 import argparse
 from collections import Counter
 from datetime import datetime
@@ -152,14 +153,14 @@ def main():
             'inputEncoding':'item-text-utf8-v2'}
         with wire.server(binary,store,path) as client:
             assert client.call('TractandaSemantic/status')['enabled'] is False
-            note=client.commit(wire.intent('create','first',class_id='Item',changes={
+            note=client.commit_with_revision(wire.intent('create','first',class_id='Item',changes={
                 'subject':wire.text('Schach und Kalender'),'body':wire.text('Frédéric ☃ discusses the chess club. '*30)}))['revision']
             before=wire.manifest(store)
             configured=client.call('TractandaSemantic/configure',{'configuration':config})
             assert configured['configurationID']==config['configurationID']
             assert provider.entered.wait(3),'Background provider did not start'
             start=time.monotonic()
-            empty=client.commit(wire.intent('create','empty-body',class_id='Item',changes={
+            empty=client.commit_with_revision(wire.intent('create','empty-body',class_id='Item',changes={
                 'subject':wire.text('Only a subject')}))['revision']
             elapsed=time.monotonic()-start
             assert elapsed<2,'Commit waited for held embedding request'
@@ -181,7 +182,7 @@ def main():
             checks.append('Current UTF-8 source passages, one result per item, empty-body safety and deterministic native filters')
 
             count=provider.total()
-            revised=client.commit(wire.intent('revise','metadata',wire.item_id(note),wire.revision_id(note),
+            revised=client.commit_with_revision(wire.intent('revise','metadata',wire.item_id(note),wire.revision_id(note),
                 changes={'privateFixtureField':{'type':'integer','value':7}}))['revision']
             ready(client)
             time.sleep(.6)
@@ -193,13 +194,13 @@ def main():
 
             provider.entered.clear()
             provider.gate.clear()
-            changed=client.commit(wire.intent('revise','change',wire.item_id(note),wire.revision_id(revised),
+            changed=client.commit_with_revision(wire.intent('revise','change',wire.item_id(note),wire.revision_id(revised),
                 changes={'body':wire.text('Replacement content after an edit.')}))['revision']
             assert provider.entered.wait(3)
             stale=results(client,{'queryID':initial['queryID']})
             assert wire.item_id(note) not in [h['itemID'] for h in stale['results']]
             assert stale['partialCoverage']
-            client.commit(wire.intent('revise','delete',wire.item_id(note),wire.revision_id(changed),
+            client.commit_with_revision(wire.intent('revise','delete',wire.item_id(note),wire.revision_id(changed),
                 changes={'isDeleted':{'type':'boolean','value':True}}))
             provider.gate.set()
             assert ready(client)['indexableItems']==1
@@ -231,7 +232,7 @@ def main():
             checks.append('Shipped CLI polling and real MCP stdio discovery/status/search/results use the native service')
 
             canonical=wire.manifest(store)
-            fts=client.call('TractandaItem/query',{'text':'Only'})['ids']
+            fts=client.call('TractandaItem/query',query_arguments({'text':'Only'}))['ids']
             reset={'expectedConfigurationID':config['configurationID'],'operationID':'reset-fixture'}
             client.call('TractandaSemantic/reset',reset)
             ready(client)
@@ -240,7 +241,7 @@ def main():
             ready(client)
             assert provider.total()==count,'Replaying a reset discarded newly rebuilt data'
             assert wire.manifest(store)==canonical
-            assert client.call('TractandaItem/query',{'text':'Only'})['ids']==fts
+            assert client.call('TractandaItem/query',query_arguments({'text':'Only'}))['ids']==fts
             checks.append('Reset exact replay preserves rebuilt data, canonical bytes and FTS results')
 
         # Delete the disposable vector index, retain operational configuration and canonical files.
@@ -255,7 +256,7 @@ def main():
             assert ready(client)['indexedItems']==1
             assert list((store/'index').glob('semantic.quarantine.*.sqlite'))
             assert wire.manifest(store)==canonical
-            assert client.call('TractandaItem/query',{'text':'Only'})['ids']==fts
+            assert client.call('TractandaItem/query',query_arguments({'text':'Only'}))['ids']==fts
         checks.append('Restart after index loss and actual SQLite corruption reconstructs vectors without canonical/FTS changes')
 
     report={'status':'passed','provider':'synthetic local HTTP contract fixture, not a quality benchmark',

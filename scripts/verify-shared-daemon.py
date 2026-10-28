@@ -14,9 +14,14 @@ import struct
 import subprocess
 import tempfile
 import time
+import importlib.util
+_jmap_spec = importlib.util.spec_from_file_location("tractanda_fixture_jmap", Path(__file__).with_name("jmap_client.py"))
+_jmap_module = importlib.util.module_from_spec(_jmap_spec)
+_jmap_spec.loader.exec_module(_jmap_module)
+DiscoveryContext = _jmap_module.DiscoveryContext
 
 
-CAPABILITY = "https://tractanda.ai/ns/local-prototype/4"
+CAPABILITY = "https://tractanda.ai/ns/jmap/1"
 
 
 def exact(connection, count):
@@ -29,14 +34,20 @@ def exact(connection, count):
     return bytes(result)
 
 
-def native(socket_path, calls):
-    request = json.dumps({"using": [CAPABILITY], "methodCalls": calls}).encode()
+def _native(socket_path, envelope):
+    request = json.dumps(envelope).encode()
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
         connection.settimeout(10)
         connection.connect(str(socket_path))
         connection.sendall(struct.pack("!I", len(request)) + request)
         size = struct.unpack("!I", exact(connection, 4))[0]
         return json.loads(exact(connection, size))
+
+
+_native_contexts = {}
+def native(socket_path, calls):
+    context = _native_contexts.setdefault(str(socket_path), DiscoveryContext(lambda value: _native(socket_path, value)))
+    return context.request(calls)
 
 
 def http_request(port, method, path, body=None, headers=None):
@@ -136,16 +147,17 @@ def main():
             status, _, body = http_request(port, "GET", "/auth/session", headers={"Authorization": "Bearer " + token})
             assert status == 200 and json.loads(body)["isAuthenticated"] is True
             api_headers = {"Authorization": "Bearer " + token, "Content-Type": "application/json"}
-            info_request = json.dumps({"using": [CAPABILITY], "methodCalls": [["TractandaStore/info", {}, "http-info"]]}).encode()
-            status, _, body = http_request(port, "POST", "/api", info_request, api_headers)
-            assert status == 200 and "ownerUID" in response_value(json.loads(body))
+            def exchange_http(envelope):
+                status, _, body = http_request(port, "POST", "/api", json.dumps(envelope).encode(), api_headers)
+                assert status == 200, (status, body)
+                return json.loads(body)
+            http_context = DiscoveryContext(exchange_http)
+            assert "ownerUID" in response_value(http_context.request([["TractandaStore/info", {}, "http-info"]]))
             write = {
                 "action": "create", "operationID": "shared-daemon-wire-write", "classID": "Item",
                 "changes": {"subject": {"type": "text", "value": "shared daemon wire fixture"}}, "unset": [],
             }
-            commit_request = json.dumps({"using": [CAPABILITY], "methodCalls": [["TractandaItem/commit", write, "write"]]}).encode()
-            status, _, body = http_request(port, "POST", "/api", commit_request, api_headers)
-            assert status == 200 and "revision" in response_value(json.loads(body))
+            assert "revisionId" in response_value(http_context.request([["TractandaItem/commit", write, "write"]]))
             checks.append("manual, authenticated HTTP session, native read and guarded write")
 
             initialize = {

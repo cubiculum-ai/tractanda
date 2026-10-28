@@ -3,6 +3,7 @@ import Foundation
 import NIOCore
 import NIOHTTP1
 import NIOPosix
+import TractandaClient
 import TractandaCore
 import TractandaKanban
 
@@ -264,14 +265,21 @@ private final class KanbanHTTPHandler: ChannelInboundHandler {
                     else {
                         throw TractandaError("invalidCredentials", "Enter your account name and password.")
                     }
-                    return try JSON.encode(authentication.signIn(username: username, password: password))
+                    return (
+                        try JSON.encode(authentication.signIn(username: username, password: password)),
+                        Optional<JMAPProblem>.none
+                    )
                 }
-                return try connection.send(request)
+                let response = try connection.send(request)
+                return (response, JMAPProblem.decode(response))
             }.whenComplete { result in
                 let handler = boundHandler.value
                 let context = boundContext.value
                 switch result {
-                case .success(let response): handler.respond(context, status: .ok, data: response)
+                case .success(let response):
+                    handler.respond(
+                        context, status: .init(statusCode: response.1?.status ?? 200), data: response.0,
+                        contentType: response.1 == nil ? "application/json" : "application/problem+json")
                 case .failure(let error):
                     if isSignIn {
                         let failure =
@@ -309,6 +317,15 @@ private final class KanbanHTTPHandler: ChannelInboundHandler {
         _ context: ChannelHandlerContext, status: HTTPResponseStatus, code: String, message: String? = nil
     ) {
         hasFinished = true
+        if requestHead?.uri == "/api", ["unsupportedMediaType", "requestTooLarge"].contains(code) {
+            let problem = JMAPProblem(
+                code == "requestTooLarge" ? "limit" : "notJSON",
+                status: Int(status.code), limit: code == "requestTooLarge" ? "maxSizeRequest" : nil)
+            respond(
+                context, status: status, data: (try? problem.value.encoded()) ?? Data(),
+                contentType: "application/problem+json")
+            return
+        }
         let data = (try? JSON.encode(TractandaError(code, message ?? code))) ?? Data()
         respond(context, status: status, data: data)
     }

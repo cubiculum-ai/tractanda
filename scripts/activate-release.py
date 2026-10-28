@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
-"""Upgrade one existing installation and verify immutable record preservation.
+"""Upgrade an existing installation through its managed stop/swap/start workflow.
 
 Invoked by release-macos.py through normal macOS administrator authentication.
 No persistent privileged service or authorization exception is installed.
 """
 import argparse
 import hashlib
-import ctypes
-import fcntl
-import errno
 import json
 import importlib.util
-import plistlib
 import os
 from pathlib import Path
 import platform
@@ -23,8 +19,6 @@ import shutil
 import stat
 import subprocess
 import tempfile
-import time
-import uuid
 from contextlib import contextmanager
 
 _FORMAT_SPEC = importlib.util.spec_from_file_location('canonical_format_guard', Path(__file__).with_name('canonical-format-guard.py'))
@@ -32,11 +26,7 @@ format_guard = importlib.util.module_from_spec(_FORMAT_SPEC)
 _FORMAT_SPEC.loader.exec_module(format_guard)
 
 
-CANCELLED = False
-
 def cancel_startup(_signal, _frame):
-    global CANCELLED
-    CANCELLED = True
     raise KeyboardInterrupt('Operator cancelled activation.')
 
 
@@ -49,9 +39,9 @@ def protected_candidate_stage(bundle, package, manifest_sha256, package_sha256):
     if digest(bundle / 'bundle-manifest.json') != manifest_sha256 or digest(package) != package_sha256:
         raise RuntimeError('Candidate inputs changed before protected staging.')
     manifest = json.loads((bundle / 'bundle-manifest.json').read_text())
-    require_capacity(Path('/private/tmp'), sum(int(v['size']) for v in manifest['files']) + package.stat().st_size)
+    require_capacity(Path('/private/var/tmp'), sum(int(v['size']) for v in manifest['files']) + package.stat().st_size)
     group = pwd.getpwnam('daemon').pw_gid
-    root = Path(tempfile.mkdtemp(prefix='tractanda-root-software-', dir='/private/tmp')).resolve(strict=True)
+    root = Path(tempfile.mkdtemp(prefix='tractanda-install-', dir='/private/var/tmp')).resolve(strict=True)
     try:
         os.chown(root, 0, group); root.chmod(0o710)
         control = root / 'control'; control.mkdir(mode=0o700)
@@ -116,133 +106,8 @@ def digest(path):
         return result
 
 
-BACKUP_RESERVE = 10 * 1024**3
-BACKUP_COPY_CAP = 32 * 1024**3
-BACKUP_ENTRY_CAP = 100_000
-BACKUP_MANIFEST_CAP = 64 * 1024**2
-OPERATIONAL_NAMES = {'.writer.lock', '.tractanda-index-binding.json', 'semantic-maintenance.json'}
-OPERATIONAL_PREFIXES = ('attachments/.staging/', 'attachments/.uploads/', 'documents/.staging/',
-                        'document-jobs/', 'copies/')
-
-
-def acl_text_fd(fd):
-    """Darwin extended ACL, without path-dependent ls output or credential access."""
-    if platform.system() != 'Darwin':
-        raise RuntimeError('ACL-preserving release backup requires macOS.')
-    library = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
-    library.acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
-    library.acl_get_fd_np.restype = ctypes.c_void_p
-    library.acl_to_text.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ssize_t)]
-    library.acl_to_text.restype = ctypes.c_void_p
-    library.acl_free.argtypes = [ctypes.c_void_p]
-    library.acl_free.restype = ctypes.c_int
-    acl = library.acl_get_fd_np(fd, 0x100)  # ACL_TYPE_EXTENDED
-    if not acl:
-        code = ctypes.get_errno()
-        if code == errno.ENOENT:
-            value = os.fstat(fd)
-            if stat.S_ISREG(value.st_mode) or stat.S_ISDIR(value.st_mode):
-                return ''  # Existing Darwin file/directory without an extended ACL.
-        raise OSError(code, 'Cannot read canonical extended ACL.')
-    try:
-        length = ctypes.c_ssize_t()
-        text = library.acl_to_text(acl, ctypes.byref(length))
-        if not text:
-            raise RuntimeError('Canonical ACL text is unavailable.')
-        try:
-            if not 0 <= length.value <= 1024**2:
-                raise RuntimeError('Canonical ACL exceeds its metadata bound.')
-            return ctypes.string_at(text, length.value).decode('utf-8')
-        finally:
-            library.acl_free(text)
-    finally:
-        library.acl_free(acl)
-
-
-def acl_text(path):
-    value = Path(path).lstat()
-    fd = secure_open(path, stat.S_ISDIR(value.st_mode))
-    try:
-        return acl_text_fd(fd)
-    finally:
-        os.close(fd)
-
-
-def xattr_hashes(fd):
-    if platform.system() != 'Darwin':
-        raise RuntimeError('Native extended-attribute backup requires macOS.')
-    library = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
-    library.flistxattr.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
-    library.flistxattr.restype = ctypes.c_ssize_t
-    library.fgetxattr.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p,
-                                 ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int]
-    library.fgetxattr.restype = ctypes.c_ssize_t
-    length = library.flistxattr(fd, None, 0, 0)
-    if not 0 <= length <= 256 * 1024:
-        raise RuntimeError('Extended-attribute names are unavailable or exceed their bound.')
-    names = ctypes.create_string_buffer(length)
-    if library.flistxattr(fd, names, length, 0) != length:
-        raise RuntimeError('Extended-attribute names changed during stopped backup.')
-    result, total = {}, 0
-    for key in sorted(k for k in names.raw.split(b'\0') if k):
-        size = library.fgetxattr(fd, key, None, 0, 0, 0)
-        if not 0 <= size <= 1024**2 or total + size > 1024**2:
-            raise RuntimeError('Extended-attribute value is unavailable or exceeds its metadata bound.')
-        data = ctypes.create_string_buffer(size)
-        if library.fgetxattr(fd, key, data, size, 0, 0) != size:
-            raise RuntimeError('Extended attribute changed during stopped backup.')
-        total += size
-        result[os.fsdecode(key)] = {'bytes': size, 'sha256': hashlib.sha256(data.raw).hexdigest()}
-    return result
-
-
-def file_metadata(path):
-    initial = Path(path).lstat()
-    if not stat.S_ISDIR(initial.st_mode) and not stat.S_ISREG(initial.st_mode):
-        raise RuntimeError('Metadata requires a nofollow regular file or directory.')
-    fd = secure_open(path, stat.S_ISDIR(initial.st_mode))
-    try:
-        value = os.fstat(fd)
-        attributes = xattr_hashes(fd)
-        return {'mode': stat.S_IMODE(value.st_mode), 'uid': value.st_uid, 'gid': value.st_gid,
-                'flags': getattr(value, 'st_flags', 0), 'acl': acl_text_fd(fd), 'xattrs': attributes}
-    finally:
-        os.close(fd)
-
-
-def inventory(store, metadata=file_metadata, hashes=True):
-    """A stopped/locked inventory includes pending operational work for recovery."""
-    store = Path(store)
-    entries, logical, receipt_bytes, attribute_bytes = {}, 0, 0, 0
-    for directory, folders, files in os.walk(store, followlinks=False):
-        for path in [Path(directory), *(Path(directory) / name for name in folders + files)]:
-            key = path.relative_to(store).as_posix()
-            if key in entries:
-                continue
-            value = path.lstat()
-            if not stat.S_ISDIR(value.st_mode) and not stat.S_ISREG(value.st_mode):
-                raise RuntimeError('Canonical root contains a symlink or special file; inspect before upgrade.')
-            if len(entries) >= BACKUP_ENTRY_CAP:
-                raise RuntimeError('Canonical backup entry bound exceeded; no upgrade performed.')
-            entry = {'kind': 'directory' if stat.S_ISDIR(value.st_mode) else 'file'}
-            if entry['kind'] == 'file':
-                logical += value.st_size
-                entry['bytes'] = value.st_size
-                if hashes:
-                    entry['sha256'] = digest(path)
-            if logical > BACKUP_COPY_CAP:
-                raise RuntimeError('Canonical backup ordinary-copy cap exceeded; no upgrade performed.')
-            if hashes:
-                entry['metadata'] = metadata(path)
-                attribute_bytes += sum(a['bytes'] for a in entry['metadata']['xattrs'].values())
-                receipt_bytes += len(json.dumps(entry).encode()) + len(os.fsencode(key))
-                if receipt_bytes > BACKUP_MANIFEST_CAP - 1024**2:
-                    raise RuntimeError('Canonical backup inventory receipt bound exceeded.')
-            entries[key] = entry
-    estimate = logical + attribute_bytes + 16_384 * len(entries) + BACKUP_MANIFEST_CAP
-    if estimate > BACKUP_COPY_CAP:
-        raise RuntimeError('Canonical backup copy/metadata estimate exceeds its cap.')
-    return {'entries': entries, 'logicalBytes': logical, 'copyEstimateBytes': estimate}
+STAGING_RESERVE = 10 * 1024**3
+STAGING_COPY_CAP = 32 * 1024**3
 
 
 def available_bytes(path):
@@ -253,341 +118,8 @@ def available_bytes(path):
 
 
 def require_capacity(path, estimate, available=available_bytes):
-    if not 0 <= estimate <= BACKUP_COPY_CAP or available(path) < BACKUP_RESERVE + estimate:
-        raise RuntimeError('Backup requires its ordinary-copy estimate plus genuine10GiB reserve.')
-
-
-def write_private(path, value):
-    data = (json.dumps(value, indent=2) + '\n').encode()
-    if len(data) > BACKUP_MANIFEST_CAP:
-        raise RuntimeError('Private backup receipt exceeds its bound.')
-    with path.open('xb') as stream:
-        os.chmod(path, 0o600)
-        stream.write(data)
-        stream.flush()
-        os.fsync(stream.fileno())
-    synchronize(path.parent)
-
-
-def synchronize(path):
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
-@contextmanager
-def existing_writer_lock(store):
-    path = Path(store) / '.writer.lock'
-    fd = secure_open(path, writable=True)
-    try:
-        value = os.fstat(fd)
-        if not stat.S_ISREG(value.st_mode) or value.st_nlink != 1 or value.st_uid != Path(store).lstat().st_uid or value.st_mode & 0o022:
-            raise RuntimeError('Existing canonical writer lock is unsafe.')
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        yield
-    finally:
-        os.close(fd)
-
-
-def copy_backup(store, destination, before, available=available_bytes, metadata=file_metadata):
-    require_capacity(destination.parent, before['copyEstimateBytes'], available)
-    destination.mkdir(mode=0o700)
-    container = destination.lstat()
-    if container.st_uid != os.geteuid() or stat.S_IMODE(container.st_mode) != 0o700 or acl_text(destination).strip() not in ('', '!#acl 1'):
-        raise RuntimeError('New backup container is not private; no copy performed.')
-    process = subprocess.Popen(['/usr/bin/ditto', '--rsrc', '--extattr', '--acl', str(store),
-                                str(destination / 'store')], stdout=subprocess.DEVNULL)
-    deadline = time.monotonic() + 600
-    try:
-        while process.poll() is None:
-            require_capacity(destination, 0, available)
-            if time.monotonic() >= deadline:
-                raise TimeoutError('Bounded canonical backup copy did not finish.')
-            time.sleep(.2)
-        if process.wait() != 0:
-            raise RuntimeError('Native metadata-preserving canonical copy failed.')
-    except BaseException:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-        raise
-    observed = inventory(destination / 'store', metadata)
-    if observed['entries'] != before['entries']:
-        raise RuntimeError('Canonical backup bytes or ownership/mode/ACL/xattrs differ.')
-    for key, entry in observed['entries'].items():
-        if entry['kind'] == 'file':
-            synchronize(destination / 'store' / key)
-    for directory, _, _ in os.walk(destination / 'store', topdown=False):
-        synchronize(Path(directory))
-    require_capacity(destination, 0, available)
-    write_private(destination / 'backup.json', {'status': 'verified', 'canonicalRoot': str(store),
-                  'ordinaryCopyEstimateBytes': before['copyEstimateBytes'], 'inventory': before})
-    return destination / 'backup.json'
-
-
-def operational_path(path, index_relative=None):
-    return (path in OPERATIONAL_NAMES or any(path == prefix.rstrip('/') or path.startswith(prefix) for prefix in OPERATIONAL_PREFIXES)
-            or index_relative is not None and (path == index_relative or path.startswith(index_relative + '/')))
-
-
-def require_preserved(before, after, index_relative=None, semantic_change=None, reader_change=None):
-    """Immutable content/identity/settings are distinct from recoverable operation checkpoints."""
-    changed = []
-    for path, entry in before['entries'].items():
-        if operational_path(path, index_relative):
-            continue
-        current = after['entries'].get(path)
-        if path == format_guard.MARKER_NAME and reader_change and entry != current:
-            if current is None or entry['metadata'] != current['metadata']:
-                raise RuntimeError('Canonical reader requirement ownership/mode/ACL/xattrs changed.')
-            reader_change()
-            changed.append(path)
-            continue
-        if path == 'semantic.json' and semantic_change and entry != current:
-            if current is None or entry['metadata'] != current['metadata']:
-                raise RuntimeError('Semantic setting ownership/mode/ACL/xattrs changed.')
-            semantic_change(entry, current)
-            changed.append(path)
-            continue
-        if current != entry:
-            raise RuntimeError('Pre-existing canonical bytes or meaningful metadata changed/disappeared: ' + path)
-    return changed
-
-
-def service_pid(label):
-    output = subprocess.check_output(['/bin/launchctl', 'print', label], text=True)
-    found = re.search(r'^\s*pid = (\d+)\s*$', output, re.M)
-    if not found:
-        raise RuntimeError('Managed writer process cannot be identified.')
-    return int(found.group(1))
-
-
-def wait_writer_exit(pid, identity, timeout=30):
-    deadline = time.monotonic() + timeout
-    while True:
-        result = subprocess.run(['/bin/ps', '-p', str(pid), '-o', 'lstart=,command='],
-                                capture_output=True, text=True)
-        if result.returncode:
-            return
-        if result.stdout.strip() != identity:
-            return  # Original process exited; never signal a reused PID.
-        if time.monotonic() >= deadline:
-            raise TimeoutError('Graceful managed writer shutdown did not complete.')
-        time.sleep(.05)
-
-
-def retain_stopped_recovery(receipt_path, expected, definition, expected_definition, reason):
-    """Persist an actionable stopped state; never restore canonical data from the backup."""
-    current = format_guard.bounded_json(receipt_path, 1024**2)
-    if current.get('instance') != expected['instance'] or current.get('manifestSHA256') != expected['manifestSHA256']:
-        raise RuntimeError('Receipt changed while stopping incompatible reader; inspect retained data.')
-    if definition.exists() and digest(definition) == expected_definition:
-        label = 'system/ai.tractanda.server.' + expected['instance']
-        running = subprocess.run(['/bin/launchctl', 'print', label], capture_output=True)
-        if running.returncode == 0:
-            pid = service_pid(label)
-            identity = subprocess.check_output(['/bin/ps', '-p', str(pid), '-o', 'lstart=,command='], text=True).strip()
-            if str(Path(expected['release']) / 'bin/tractanda') not in identity:
-                raise RuntimeError('Restored process identity is unknown; operator must inspect without data restoration.')
-            subprocess.run(['/bin/launchctl', 'bootout', label], check=True)
-            wait_writer_exit(pid, identity)
-        definition.unlink()
-        synchronize(definition.parent)
-    current['state'] = 'preparing'
-    current['definitionSHA256'] = None
-    current['recoveryReason'] = ('Canonical reader restoration blocked; writer is stopped. Keep live data/backups intact and retry with a compatible reader. ' + str(reason))[:4096]
-    metadata = receipt_path.lstat()
-    with tempfile.NamedTemporaryFile(mode='w', dir=receipt_path.parent, delete=False) as stream:
-        temporary = Path(stream.name)
-        os.chmod(temporary, 0o600)
-        os.chown(temporary, metadata.st_uid, metadata.st_gid)
-        json.dump(current, stream, indent=2)
-        stream.write('\n')
-        stream.flush()
-        os.fsync(stream.fileno())
-    try:
-        temporary.replace(receipt_path)
-        synchronize(receipt_path.parent)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
-
-
-def restore_service(label, definition, expected_definition, old_client, socket, expected_manifest=None, owner=None):
-    if digest(definition) != expected_definition:
-        raise RuntimeError('Old owned service definition changed; restoration requires inspection.')
-    specification = plistlib.loads(Path(definition).read_bytes())
-    arguments = specification.get('ProgramArguments', [])
-    if len(arguments) < 4 or arguments[0] != str(old_client) or arguments[1] not in ('daemon', 'serve'):
-        raise RuntimeError('Old writer store binding is unknown; leave it stopped.')
-    format_guard.require_owned_reader(old_client, Path(arguments[2]), expected_manifest)
-    while True:
-        if CANCELLED:
-            raise KeyboardInterrupt('Operator cancelled old writer startup.')
-        try:
-            status = subprocess.run(['/bin/launchctl', 'print', label], capture_output=True, timeout=5)
-            break
-        except subprocess.TimeoutExpired:
-            print('Old managed startup: process observation timed out; retrying observation.', flush=True)
-            time.sleep(.1)
-    if status.returncode:
-        subprocess.run(['/bin/launchctl', 'bootstrap', 'system', str(definition)], check=True)
-    last_observation = None
-    last_error = None
-    probe = [str(old_client), 'info', socket]
-    if owner is not None:
-        probe = ['/usr/bin/sudo', '-n', '-u', owner, '/usr/bin/env', 'TRACTANDA_SERVER_USER=daemon', *probe]
-    while True:
-        if CANCELLED:
-            raise KeyboardInterrupt('Operator cancelled old writer startup.')
-        try:
-            status = subprocess.run(['/bin/launchctl', 'print', label], capture_output=True, text=True, timeout=5)
-        except subprocess.TimeoutExpired:
-            print('Old managed startup: process observation timed out; not a process exit.', flush=True)
-            time.sleep(.1)
-            continue
-        if status.returncode:
-            raise RuntimeError('Old managed service disappeared during startup: ' + status.stderr[-4096:])
-        pid = re.search(r'^\s*pid = (\d+)\s*$', status.stdout, re.M)
-        terminal = [line.strip() for line in status.stdout.splitlines()
-                    if 'last exit code =' in line or 'last terminating signal =' in line]
-        if not pid and any('never exited' not in line for line in terminal):
-            raise RuntimeError('Old managed startup process exited: ' + '; '.join(terminal))
-        observation = '; '.join(line.strip() for line in status.stdout.splitlines()
-                                if line.strip().startswith(('pid = ', 'state = ', 'last exit code = ')))
-        if observation != last_observation:
-            print('Old managed startup: ' + observation, flush=True); last_observation = observation
-        try:
-            result = subprocess.run(probe, capture_output=True, text=True,
-                                    env={**os.environ, 'TRACTANDA_SERVER_USER': 'daemon'}, timeout=5)
-        except subprocess.TimeoutExpired:
-            print('Old managed startup: bounded readiness probe timed out; retrying.', flush=True)
-            time.sleep(.1)
-            continue
-        if result.returncode == 0:
-            info = json.loads(result.stdout)
-            if info.get('server', {}).get('executableSHA256') != digest(old_client) or info.get('server', {}).get('processID') != service_pid(label):
-                raise RuntimeError('Old managed startup answered with another executable/process identity.')
-            return
-        error = (result.stderr + result.stdout)[-4096:]
-        if error != last_error:
-            print('Old managed startup probe: ' + error, flush=True); last_error = error
-        time.sleep(.1)
-
-
-
-def backup_before_upgrade(receipt, base, candidate_setup):
-    store = Path(receipt['store']).resolve(strict=True)
-    index = Path(receipt['indexDirectory']).resolve(strict=True)
-    backup_parent = Path('/Users/Shared/Library/Tractanda/Backups') / receipt['instance']
-    for reserved in (store, index, base / 'releases'):
-        if backup_parent == reserved or reserved in backup_parent.parents or backup_parent in reserved.parents:
-            raise RuntimeError('Private backup overlaps canonical/index/software-release trees.')
-    for path in (backup_parent.parent, backup_parent):
-        if not path.exists():
-            path.mkdir(mode=0o700)
-            subprocess.run(['/bin/chmod', '-N', str(path)], check=True)
-            synchronize(path.parent)
-        value = path.lstat()
-        if not stat.S_ISDIR(value.st_mode) or value.st_uid != 0 or value.st_mode & 0o077:
-            raise RuntimeError('Backup parent must be a private root-owned directory.')
-        if acl_text(path).strip() not in ('', '!#acl 1'):
-            raise RuntimeError('Backup parent has an extended ACL requiring inspection.')
-    require_capacity(backup_parent, inventory(store, hashes=False)['copyEstimateBytes'])
-    label = 'system/ai.tractanda.server.' + receipt['instance']
-    definition = Path('/Library/LaunchDaemons/ai.tractanda.server.' + receipt['instance'] + '.plist')
-    expected_definition = receipt['definitionSHA256']
-    if digest(definition) != expected_definition:
-        raise RuntimeError('Managed writer definition differs from its owned receipt.')
-    pid = service_pid(label)
-    identity = subprocess.check_output(['/bin/ps', '-p', str(pid), '-o', 'lstart=,command='], text=True).strip()
-    if str(Path(receipt['release']) / 'bin/tractanda') not in identity:
-        raise RuntimeError('Managed writer is not the receipt-owned executable.')
-    destination = backup_parent / (time.strftime('%Y%m%dT%H%M%SZ', time.gmtime()) + '-' + str(uuid.uuid4()))
-    def stop_writer():
-        subprocess.run(['/bin/launchctl', 'bootout', label], check=True)
-        wait_writer_exit(pid, identity)
-    def restore_writer():
-        try:
-            restore_service(label, definition, expected_definition,
-                            Path(receipt['release']) / 'bin/tractanda', receipt['socket'], receipt['manifestSHA256'], owner=receipt['owner'])
-        except BaseException as failure:
-            # Backup already stopped the owned writer. A failed compatibility proof must
-            # not leave an active receipt that a later outer catch could restart.
-            retain_stopped_recovery(base / 'receipts' / (receipt['instance'] + '.json'), receipt,
-                                    definition, expected_definition, failure)
-            raise
-    def admit_reader():
-        subprocess.run(['/usr/bin/sudo', '-n', '-u', 'daemon', '--', str(candidate_setup),
-                        '--canonical-reader-admit', str(store)], check=True)
-    before, proof = checkpoint_backup(store, destination, stop_writer, restore_writer, admit_reader=admit_reader)
-    return before, proof, store, index
-
-
-def checkpoint_backup(store, destination, stop_writer, restore_writer,
-                      lock=existing_writer_lock, inspect=inventory, copier=copy_backup, admit_reader=None):
-    try:
-        stop_writer()
-        if admit_reader is not None:
-            admit_reader()
-        with lock(store):
-            before = inspect(store)
-            proof = copier(store, destination, before)
-        return before, proof
-    except BaseException as original:
-        if destination.exists() and not (destination / 'failure.json').exists():
-            try:
-                write_private(destination / 'failure.json', {'status': 'failed', 'reason': type(original).__name__,
-                              'partialCopyRetained': True})
-            except OSError:
-                pass  # Failure evidence must not bypass mandatory old-service restoration.
-        try:
-            restore_writer()
-        except BaseException as restored:
-            raise RuntimeError('Backup failed and old writer restoration failed: ' + str(restored)) from original
-        raise
-
-
-def preserved_after_upgrade(store, before, index_relative=None):
-    entries = {}
-    for path, entry in before['entries'].items():
-        if operational_path(path, index_relative):
-            continue
-        target = store / path
-        try:
-            value = target.lstat()
-        except FileNotFoundError:
-            continue
-        kind = 'directory' if stat.S_ISDIR(value.st_mode) else 'file' if stat.S_ISREG(value.st_mode) else 'unsafe'
-        current = {'kind': kind, 'metadata': file_metadata(target)}
-        if kind == 'file':
-            current.update(bytes=value.st_size, sha256=digest(target))
-        entries[path] = current
-    return {'entries': entries}
-
-
-def verify_semantic_migration(store, before_receipt, after_receipt, previous, current):
-    payload = after_receipt.get('embedding')
-    if not payload or payload.get('backend') != 'vmlx-granite-embedding-f32-v1':
-        raise RuntimeError('Unrecognized semantic settings migration.')
-    configuration = json.loads((store / 'semantic.json').read_text())
-    expected = {'formatVersion': 2, 'configurationID': after_receipt['embeddingConfigurationID'],
-                'operationID': 'setup-embedding-v2-' + after_receipt['instance'] + '-' + after_receipt['embeddingConfigurationID'],
-                'endpoint': 'http://127.0.0.1:' + str(after_receipt['port'] + 1) + '/v1/embeddings',
-                'model': payload['model'], 'modelRevision': payload['modelRevision'],
-                'dimensions': payload['dimensions'], 'documentPrefix': '', 'queryPrefix': '',
-                'chunkBytes': 384, 'overlapBytes': 64, 'pooling': 'cls', 'normalization': 'l2',
-                'inputEncoding': 'item-text-utf8-v2'}
-    if configuration != expected:
-        raise RuntimeError('Semantic setting change is not the supported installer-owned bundled migration.')
-    return {'path': 'semantic.json', 'beforeSHA256': previous['sha256'], 'afterSHA256': current['sha256'],
-            'reason': 'supported installer-managed bundled embedding configuration'}
+    if not 0 <= estimate <= STAGING_COPY_CAP or available(path) < STAGING_RESERVE + estimate:
+        raise RuntimeError('Software staging requires its copy estimate plus genuine 10 GiB reserve.')
 
 
 def obsolete_releases(receipt, previous_release, other_receipts):
@@ -600,7 +132,7 @@ def obsolete_releases(receipt, previous_release, other_receipts):
 
 def prune_releases(base, receipt_path, receipt, previous_release, setup):
     others = []
-    for path in (base / 'receipts').glob('*.json'):
+    for path in receipt_path.parent.glob('*.json'):
         if path != receipt_path:
             others.append(json.loads(path.read_text()))
     removed = []
@@ -653,10 +185,10 @@ def main():
 
 
 def active_installation(args):
-    base = Path('/Users/Shared/Library/Application Support/Tractanda')
+    base = Path('/Library/Tractanda/Software')
     if args.software_root != base or not re.fullmatch(r'[a-z0-9-]+', args.instance):
         raise ValueError('Choose an existing managed Tractanda installation.')
-    receipt_path = base / 'receipts' / (args.instance + '.json')
+    receipt_path = base.parent / 'Installation' / 'receipts' / (args.instance + '.json')
     mode = receipt_path.lstat()
     if not stat.S_ISREG(mode.st_mode) or mode.st_uid != 0 or mode.st_mode & 0o022:
         raise ValueError('Installation receipt must be a protected root-owned regular file.')
@@ -679,50 +211,32 @@ def activate_candidate(args):
     subprocess.run(['/usr/sbin/pkgutil', '--check-signature', str(args.package)], check=True)
     subprocess.run(['xcrun', 'stapler', 'validate', str(args.package)], check=True)
     subprocess.run(['/usr/sbin/spctl', '--assess', '--type', 'install', '--verbose=4', str(args.package)], check=True)
-    registry = json.loads((base / 'connections.json').read_text())
-    before, backup_proof, store, index = backup_before_upgrade(receipt, base, setup)
+    registry = json.loads((base.parent / 'Configuration' / 'connections.json').read_text())
+    store = Path(receipt['store']).resolve(strict=True)
     before_reader = format_guard.load_requirement(store)
-    try:
-        if registry.get('defaultProfile') == args.instance:
-            subprocess.run(['/usr/sbin/installer', '-pkg', str(args.package), '-target', '/'], check=True)
-        else:
-            # The native package targets the system default; other databases use explicit setup.
-            subprocess.run([str(setup), 'upgrade', '--bundle', str(bundle), '--name', args.instance], check=True)
-    except BaseException:
-        # Setup owns installation rollback. Restore a stopped old writer only when its exact
-        # previous active receipt/definition still apply; never force an old binary over a candidate.
-        current = json.loads(receipt_path.read_text())
-        if current.get('state') == 'active' and current.get('manifestSHA256') == receipt['manifestSHA256']:
-            definition = Path('/Library/LaunchDaemons/ai.tractanda.server.' + args.instance + '.plist')
-            try:
-                restore_service('system/ai.tractanda.server.' + args.instance, definition,
-                                receipt['definitionSHA256'], Path(receipt['release']) / 'bin/tractanda', receipt['socket'], receipt['manifestSHA256'], owner=receipt['owner'])
-            except BaseException as failure:
-                retain_stopped_recovery(receipt_path, receipt, definition, receipt['definitionSHA256'], failure)
-                raise
-        raise
+    manifest = json.loads((bundle / 'bundle-manifest.json').read_text())
+    format_guard.require_reader(format_guard.support_from_manifest(manifest), before_reader)
+    # Setup owns drain/stop/swap/start and fail-closed recovery. The release helper
+    # never copies, restores or inventories canonical content for a binary update.
+    if registry.get('defaultProfile') == args.instance:
+        subprocess.run(['/usr/sbin/installer', '-pkg', str(args.package), '-target', '/'], check=True)
+    else:
+        subprocess.run([str(setup), 'upgrade', '--bundle', str(bundle), '--name', args.instance], check=True)
     updated = json.loads(receipt_path.read_text())
-    index_relative = index.relative_to(store).as_posix() if store in index.parents else None
-    after = preserved_after_upgrade(store, before, index_relative)
-    semantic_changes = []
-    def allow_semantic(previous, current):
-        semantic_changes.append(verify_semantic_migration(store, receipt, updated, previous, current))
-    require_preserved(before, after, index_relative, allow_semantic,
-                      lambda: format_guard.require_monotonic(before_reader, format_guard.load_requirement(store)))
+    format_guard.require_monotonic(before_reader, format_guard.load_requirement(store))
     for key in ('store', 'indexDirectory', 'owner', 'port', 'socket'):
         if updated[key] != receipt[key]:
             raise RuntimeError('Upgrade changed an existing installation property: ' + key)
     if updated['manifestSHA256'] != args.manifest_sha256 or updated['state'] != 'active':
         raise RuntimeError('Installation did not activate the prepared bundle.')
     cleanup_warnings = []
+    removed = []
     try:
         removed = prune_releases(base, receipt_path, updated, receipt['release'], setup)
     except Exception as error:
-        removed = []
         cleanup_warnings.append(str(error))
-    print(json.dumps({'status': 'passed', 'preservedCanonicalEntries': len(after['entries']),
-                      'backupProof': str(backup_proof), 'backupProofSHA256': digest(backup_proof),
-                      'semanticSettingsChanges': semantic_changes, 'release': updated['release'],
+    print(json.dumps({'status': 'passed', 'canonicalStoreID': before_reader['storeID'],
+                      'release': updated['release'],
                       'manifestSHA256': args.manifest_sha256, 'removedOldReleases': removed,
                       'cleanupWarnings': cleanup_warnings}))
 

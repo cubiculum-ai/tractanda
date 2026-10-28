@@ -39,8 +39,9 @@ extension SetupEngine {
         receipt.sampled = false
     }
 
-    func verifySelectedReplicaIdentity(_ receipt: InstallationReceipt) throws {
-        guard let storeID = receipt.preparedStoreID, let replicaID = receipt.preparedReplicaID else { return }
+    func verifySelectedReplicaIdentity(_ receipt: InstallationReceipt, requireUnjoined: Bool = false) throws {
+        guard let storeID = receipt.freshTargetStoreID ?? receipt.preparedStoreID,
+            let replicaID = receipt.freshTargetReplicaID ?? receipt.preparedReplicaID else { return }
         let root = URL(fileURLWithPath: receipt.store)
         let uid: UInt32
         if trustedOwnership {
@@ -54,8 +55,12 @@ extension SetupEngine {
             }
             uid = value.uint32Value
         }
-        try ItemStore.verifyPersonalSyncReplicaIdentityForSetup(
-            root: root, ownerUID: uid,
-            expectedStoreID: storeID, expectedReplicaID: replicaID)
+        if requireUnjoined {
+            try ItemStore.verifyUnjoinedPersonalSyncReplicaIdentityForSetup(
+                root: root, ownerUID: uid, expectedStoreID: storeID, expectedReplicaID: replicaID)
+        } else {
+            try ItemStore.verifyPersonalSyncReplicaIdentityForSetup(
+                root: root, ownerUID: uid, expectedStoreID: storeID, expectedReplicaID: replicaID)
+        }
     }
 }

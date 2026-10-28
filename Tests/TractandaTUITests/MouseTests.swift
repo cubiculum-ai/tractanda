@@ -20,7 +20,7 @@ final class MouseTests: XCTestCase {
         }
         deinit { try? FileManager.default.removeItem(at: root) }
         func item(_ title: String, fields: [String: ItemValue] = [:]) throws -> Revision {
-            try client.commit(
+            try client.commitFixture(
                 CommitRequest(
                     classID: "Item", changes: fields.merging(["subject": .text(title)]) { _, new in new },
                     operationID: Identifier.make())

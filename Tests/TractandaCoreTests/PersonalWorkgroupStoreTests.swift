@@ -4,6 +4,12 @@ import XCTest
 
 @testable import TractandaCore
 
+#if canImport(Darwin)
+    import Darwin
+#else
+    import Glibc
+#endif
+
 final class PersonalWorkgroupStoreTests: XCTestCase {
     private final class AvailableBytes: @unchecked Sendable {
         private let lock = NSLock()
@@ -166,6 +172,121 @@ final class PersonalWorkgroupStoreTests: XCTestCase {
             rasterSHA256: String(repeating: "b", count: 64),
             parsed: DoclingDocTagsParser.parse(Data(("<doctag><text>" + text + "</text></doctag>").utf8)),
             generatedTokens: 16, stopReason: "stop")
+    }
+
+    private func savedDocumentForRecovery(_ store: ItemStore, accounts: Accounts) throws
+        -> DocumentContentReference
+    {
+        try store.withAccess(forUID: accounts.alice) {
+            let item = try create(store, operation: "document-io-base").revision
+            let bytes = Data([137, 80, 78, 71, 13, 10, 26, 10])
+            let upload = try store.beginAttachment(
+                .init(
+                    itemID: item.itemID, expectedRevisionID: item.revisionID,
+                    operationID: "document-io-original", filename: "io.png", mediaType: "image/png",
+                    byteCount: Int64(bytes.count), sha256: AuthorityRecordCodec.sha256(bytes)))
+            let uploadID = try XCTUnwrap(upload.uploadID)
+            _ = try store.appendAttachment(uploadID: uploadID, offset: 0, data: bytes)
+            let attached = try store.finishAttachment(uploadID: uploadID).revision
+            guard
+                case .prepared(let snapshot) = try store.prepareAttachmentDocument(
+                    itemID: item.itemID, expectedRevisionID: attached.revisionID,
+                    attachmentID: upload.attachment.attachmentID, operationID: "document-io-page",
+                    identity: .init())
+            else { throw TractandaError("fixture", "Expected document admission") }
+            _ = try store.finishAttachmentDocument(snapshot, pages: [page()])
+            let revision = try store.get(item.itemID)
+            return try XCTUnwrap(
+                AttachmentDocumentRepresentation.representations(in: revision.fields).first?.content)
+        }
+    }
+
+    func testExplicitNegativeDocumentReadIOPropagatesThroughInventoryAndRetries() throws {
+        try fixture { root, accounts in
+            let store = try open(root, accounts, .fresh(policy()))
+            _ = try savedDocumentForRecovery(store, accounts: accounts)
+            var clock: Double = 100
+            store.personalRecoveryClockForTesting = { clock }
+            store.beforePersonalDurableAcknowledgementForTesting = {
+                throw TractandaError("injected", "Uncertain publication")
+            }
+            let request = CommitRequest(
+                classID: "Item",
+                changes: ["subject": .text("read fault"), "permissions": permissions()],
+                operationID: "read-fault-retry")
+            assertCode("uncertainCommit") {
+                _ = try store.withAccess(forUID: accounts.alice) { try store.commit(request) }
+            }
+            store.beforePersonalDurableAcknowledgementForTesting = nil
+            store.personalRecoveryDocumentReadFailureForTesting = EIO
+            var attempts = 0
+            store.personalRecoveryIndexWillReplace = { attempts += 1 }
+            for _ in 0..<2 {
+                XCTAssertThrowsError(
+                    try store.withAccess(forUID: accounts.alice) { try store.commit(request) }
+                ) {
+                    let failure = $0 as? TractandaError
+                    XCTAssertEqual(failure?.code, "documentIntegrity")
+                    XCTAssertEqual(
+                        failure?.osError, EIO,
+                        "Inventory must preserve explicit negative-read I/O instead of declaring corruption")
+                }
+            }
+            XCTAssertEqual(attempts, 1)
+            store.personalRecoveryDocumentReadFailureForTesting = nil
+            clock += 31
+            let result = try store.withAccess(forUID: accounts.alice) { try store.commit(request) }
+            XCTAssertTrue(result.wasReplayed)
+            XCTAssertEqual(attempts, 2)
+            XCTAssertTrue(store.isCanonicalTrusted)
+            XCTAssertEqual(try store.history(result.revision.itemID).count, 1)
+        }
+    }
+
+    func testLogicalDocumentIntegrityIgnoresStaleErrnoAndDoesNotRetry() throws {
+        try fixture { root, accounts in
+            var store: ItemStore? = try open(root, accounts, .fresh(policy()))
+            let reference = try savedDocumentForRecovery(store!, accounts: accounts)
+            let files = DocumentContentFiles(root: root, ownerUID: tractanda_uid(), minimumFreeBytes: 0)
+            errno = EIO
+            let logical: TractandaError
+            do {
+                try files.freezePeerStage(["invalid-stage"], reference: reference)
+                XCTFail("Expected logical stage validation failure")
+                return
+            } catch {
+                logical = try XCTUnwrap(error as? TractandaError)
+            }
+            XCTAssertEqual(logical.code, "documentIntegrity")
+            XCTAssertNil(logical.osError, "A logical guard must not attach ambient EIO")
+            var clock: Double = 100
+            store!.personalRecoveryClockForTesting = { clock }
+            store!.beforePersonalDurableAcknowledgementForTesting = {
+                throw TractandaError("injected", "Uncertain publication")
+            }
+            let request = CommitRequest(
+                classID: "Item",
+                changes: ["subject": .text("logical fault"), "permissions": permissions()],
+                operationID: "logical-fault-retry")
+            assertCode("uncertainCommit") {
+                _ = try store!.withAccess(forUID: accounts.alice) { try store!.commit(request) }
+            }
+            store!.beforePersonalDurableAcknowledgementForTesting = nil
+            var attempts = 0
+            store!.personalRecoveryIndexWillReplace = { attempts += 1 }
+            store!.beforeCanonicalDurabilitySync = { throw logical }
+            assertCode("documentIntegrity") { try store!.withAccess(forUID: accounts.alice) {} }
+            store!.beforeCanonicalDurabilitySync = nil
+            clock += 1_000
+            assertCode("documentIntegrity") { try store!.withAccess(forUID: accounts.alice) {} }
+            XCTAssertEqual(
+                attempts, 1, "Logical integrity remains terminal after the transient retry interval")
+            store = nil
+            store = try open(root, accounts, .existing)
+            XCTAssertTrue(
+                try store!.withAccess(forUID: accounts.alice) { try store!.commit(request).wasReplayed })
+            store = nil
+        }
     }
 
     func testFreshWriteReviseDeleteReopenIndexLossAndNativeService() throws {
@@ -340,6 +461,271 @@ final class PersonalWorkgroupStoreTests: XCTestCase {
                 }
                 store = nil
             }
+        }
+    }
+
+    func testUncertainDurablePublicationIsNotAcknowledgedAndExactRetryRecoversOnce() throws {
+        for phase in 0..<2 {
+            try fixture { root, accounts in
+                var store: ItemStore? = try open(root, accounts, .fresh(policy()))
+                if phase == 0 {
+                    store!.publishResultOverrideForTesting = 1
+                } else {
+                    store!.beforePersonalDurableAcknowledgementForTesting = {
+                        throw TractandaError("fixtureFault", "Device flush failed after publication")
+                    }
+                }
+                let request = CommitRequest(
+                    classID: "Item", changes: ["subject": .text("uncertain"), "permissions": permissions()],
+                    operationID: "durable-exact-retry")
+                assertCode("uncertainCommit") {
+                    _ = try store!.withAccess(forUID: accounts.alice) { try store!.commit(request) }
+                }
+                XCTAssertTrue(StoreCheckpoint.isDirty(root: root))
+                XCTAssertFalse(store!.isCanonicalTrusted)
+                let published = try fingerprint(root)
+                XCTAssertEqual(published.count, 1)
+                if phase == 0 {
+                    store = nil
+                    store = try open(root, accounts, .existing)
+                } else {
+                    // A transient barrier failure must recover on the next serial
+                    // request without stopping/restarting the service.
+                    store!.beforePersonalDurableAcknowledgementForTesting = nil
+                }
+                try store!.withAccess(forUID: accounts.alice) {
+                    let replay = try store!.commit(request)
+                    XCTAssertTrue(replay.wasReplayed)
+                    XCTAssertTrue(replay.isIndexReady)
+                    XCTAssertEqual(try store!.history(replay.revision.itemID).count, 1)
+                    XCTAssertEqual(try store!.commit(request).revision, replay.revision)
+                }
+                XCTAssertEqual(try fingerprint(root), published)
+                store = nil
+            }
+        }
+    }
+
+    func testCompatibleUpgradeUsesEstablishedFenceWithoutInventoryAndStartupStillChecksContent() throws {
+        try fixture { root, accounts in
+            var store: ItemStore? = try open(root, accounts, .fresh(policy()))
+            _ = try store!.withAccess(forUID: accounts.alice) { try create(store!) }
+            let row = try XCTUnwrap(store!.exportCatalogueForVerification().first)
+            store = nil
+            let markerURL = root.appendingPathComponent(CanonicalReaderRequirement.fileName)
+            let marker = try Data(contentsOf: markerURL)
+            let canonical = root.appendingPathComponent(row.path)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: canonical.path)
+            try Data("corrupt canonical content".utf8).write(to: canonical)
+            try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: canonical.path)
+            let requirement = try CanonicalReaderRequirement.withWriterLock(
+                root: root, ownerUID: tractanda_uid()
+            ) {
+                try ItemStore.personalWorkgroupUpgradeRequirement(root: root, ownerUID: tractanda_uid())
+            }
+            XCTAssertEqual(requirement, try JSON.decode(CanonicalReaderRequirement.self, marker))
+            XCTAssertEqual(try Data(contentsOf: markerURL), marker)
+            XCTAssertThrowsError(try open(root, accounts, .existing))
+            XCTAssertEqual(try Data(contentsOf: canonical), Data("corrupt canonical content".utf8))
+        }
+    }
+
+    func testTransientPublicationRecoveryBacksOffAndRejectsUnauthorizedTrigger() throws {
+        try fixture { root, accounts in
+            let store = try open(root, accounts, .fresh(policy(["alice"])))
+            var clock: Double = 100
+            store.personalRecoveryClockForTesting = { clock }
+            store.beforePersonalDurableAcknowledgementForTesting = {
+                throw TractandaError("fixtureFault", "Uncertain device flush")
+            }
+            let request = CommitRequest(
+                classID: "Item", changes: ["subject": .text("backoff"), "permissions": permissions()],
+                operationID: "backoff-exact-retry")
+            assertCode("uncertainCommit") {
+                _ = try store.withAccess(forUID: accounts.alice) { try store.commit(request) }
+            }
+            store.beforePersonalDurableAcknowledgementForTesting = nil
+            var attempts = 0
+            store.beforeCanonicalDurabilitySync = {
+                attempts += 1
+                throw TractandaError("resourceLimit", "Temporary recovery capacity failure")
+            }
+            assertCode("forbidden") { try store.withAccess(forUID: accounts.bob) {} }
+            XCTAssertEqual(attempts, 0)
+            for _ in 0..<3 {
+                assertCode("resourceLimit") {
+                    _ = try store.withAccess(forUID: accounts.alice) { try store.commit(request) }
+                }
+            }
+            XCTAssertEqual(attempts, 1, "Repeated requests must not restart a failed recovery scan")
+            clock += 31
+            store.beforeCanonicalDurabilitySync = nil
+            let replay = try store.withAccess(forUID: accounts.alice) { try store.commit(request) }
+            XCTAssertTrue(replay.wasReplayed)
+            XCTAssertTrue(store.isCanonicalTrusted)
+            XCTAssertEqual(try store.history(replay.revision.itemID).count, 1)
+        }
+    }
+
+    func testCanonicalCorruptionStopsAutomaticRetryUntilExplicitRepairAndReopen() throws {
+        try fixture { root, accounts in
+            var store: ItemStore? = try open(root, accounts, .fresh(policy()))
+            store!.publishResultOverrideForTesting = 1
+            let request = CommitRequest(
+                classID: "Item", changes: ["subject": .text("repair"), "permissions": permissions()],
+                operationID: "repair-exact-retry")
+            assertCode("uncertainCommit") {
+                _ = try store!.withAccess(forUID: accounts.alice) { try store!.commit(request) }
+            }
+            let physicalRoot = store!.root
+            let relative = try XCTUnwrap(fingerprint(physicalRoot).keys.first)
+            let path = physicalRoot.appendingPathComponent(relative)
+            let original = try Data(contentsOf: path)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
+            try Data("corrupt canonical bytes".utf8).write(to: path)
+            try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: path.path)
+            XCTAssertThrowsError(try store!.withAccess(forUID: accounts.alice) {})
+            XCTAssertFalse(store!.isCanonicalTrusted)
+            // Explicitly repair this private fixture, but the failed runtime still requires
+            // reopen: a later poll must not decide that canonical corruption cured itself.
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
+            try original.write(to: path)
+            try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: path.path)
+            XCTAssertThrowsError(try store!.withAccess(forUID: accounts.alice) {})
+            store = nil
+            store = try open(root, accounts, .existing)
+            XCTAssertTrue(
+                try store!.withAccess(forUID: accounts.alice) { try store!.commit(request).wasReplayed })
+            store = nil
+        }
+    }
+
+    func testCompatibleUpgradeRejectsMissingWeakenedUnknownCrossStoreAndWrongOwnerFences() throws {
+        try fixture { root, accounts in
+            var store: ItemStore? = try open(root, accounts, .fresh(policy()))
+            XCTAssertTrue(store!.isCanonicalTrusted)
+            store = nil
+            let markerURL = root.appendingPathComponent(CanonicalReaderRequirement.fileName)
+            let original = try Data(contentsOf: markerURL)
+            let fence = try JSON.decode(CanonicalReaderRequirement.self, original)
+            func checkDenied() throws {
+                XCTAssertThrowsError(
+                    try CanonicalReaderRequirement.withWriterLock(root: root, ownerUID: tractanda_uid()) {
+                        try ItemStore.personalWorkgroupUpgradeRequirement(
+                            root: root, ownerUID: tractanda_uid())
+                    })
+            }
+            try FileManager.default.removeItem(at: markerURL)
+            try checkDenied()
+            XCTAssertFalse(FileManager.default.fileExists(atPath: markerURL.path))
+            for invalid in [
+                CanonicalReaderRequirement(
+                    storeID: fence.storeID, minimumReaderLevel: 2, recordFormats: [1, 2]),
+                .init(
+                    storeID: fence.storeID, minimumReaderLevel: fence.minimumReaderLevel,
+                    recordFormats: fence.recordFormats,
+                    capabilities: fence.capabilities + ["unknown.future-format"]),
+                .init(
+                    storeID: try id(), minimumReaderLevel: fence.minimumReaderLevel,
+                    recordFormats: fence.recordFormats, capabilities: fence.capabilities),
+            ] {
+                let bytes = try JSON.encode(invalid)
+                try PrivateConfiguration.write(bytes, to: markerURL)
+                try checkDenied()
+                XCTAssertEqual(try Data(contentsOf: markerURL), bytes)
+            }
+            try PrivateConfiguration.write(original, to: markerURL)
+            XCTAssertThrowsError(
+                try ItemStore.personalWorkgroupUpgradeRequirement(root: root, ownerUID: tractanda_uid() + 1))
+            XCTAssertEqual(try Data(contentsOf: markerURL), original)
+        }
+    }
+
+    /// Starts a fresh XCTest process, then exits it without Store deinitialization after
+    /// acknowledged revision/original/document writes. This proves process-crash recovery,
+    /// not the behavior of physical storage under a real power cut.
+    func testAcknowledgedOwnedContentSurvivesAbruptProcessExitAndDisposableIndexLoss() throws {
+        let environmentKey = "TRACTANDA_PRIVATE_PERSONAL_CRASH_ROOT"
+        if let path = ProcessInfo.processInfo.environment[environmentKey] {
+            let root = URL(fileURLWithPath: path)
+            let accounts = Accounts()
+            let store = try open(root, accounts, .fresh(policy()))
+            try store.withAccess(forUID: accounts.alice) {
+                let item = try create(store, operation: "abrupt-create").revision
+                let bytes = Data([137, 80, 78, 71, 13, 10, 26, 10])
+                let upload = try store.beginAttachment(
+                    .init(
+                        itemID: item.itemID, expectedRevisionID: item.revisionID,
+                        operationID: "abrupt-original", filename: "crash.png", mediaType: "image/png",
+                        byteCount: Int64(bytes.count), sha256: AuthorityRecordCodec.sha256(bytes)))
+                let uploadID = try XCTUnwrap(upload.uploadID)
+                _ = try store.appendAttachment(uploadID: uploadID, offset: 0, data: bytes)
+                let attached = try store.finishAttachment(uploadID: uploadID)
+                XCTAssertTrue(attached.warnings.isEmpty)
+                guard
+                    case .prepared(let snapshot) = try store.prepareAttachmentDocument(
+                        itemID: item.itemID, expectedRevisionID: attached.revision.revisionID,
+                        attachmentID: upload.attachment.attachmentID,
+                        operationID: "abrupt-document", identity: .init())
+                else { throw TractandaError("fixture", "Expected document preparation") }
+                _ = try store.finishAttachmentDocument(snapshot, pages: [page()])
+                // No fixture cleanup/deinit is allowed to close SQLite or release writer locks.
+                _exit(73)
+            }
+            XCTFail("The crash child did not reach its exit boundary")
+            return
+        }
+        try fixture { root, accounts in
+            let child = Process()
+            var environment = ProcessInfo.processInfo.environment
+            environment[environmentKey] = root.path
+            child.environment = environment
+            let selector =
+                "TractandaCoreTests.PersonalWorkgroupStoreTests/testAcknowledgedOwnedContentSurvivesAbruptProcessExitAndDisposableIndexLoss"
+            #if os(macOS)
+                child.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+                child.arguments = ["xctest", "-XCTest", selector, Bundle(for: Self.self).bundleURL.path]
+            #else
+                child.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+                child.arguments = [selector]
+            #endif
+            child.standardOutput = FileHandle.nullDevice
+            child.standardError = FileHandle.nullDevice
+            try child.run()
+            child.waitUntilExit()
+            XCTAssertEqual(child.terminationReason, .exit)
+            XCTAssertEqual(child.terminationStatus, 73)
+            guard child.terminationStatus == 73 else { return }
+            let before = try fingerprint(root)
+            XCTAssertEqual(before.keys.filter { $0.hasSuffix(".tractanda") }.count, 3)
+            // A corrupt ordinary item database must be as disposable as a missing one.
+            let index = root.appendingPathComponent("index/items.sqlite")
+            try Data("not a database".utf8).write(to: index)
+            var store: ItemStore? = try open(root, accounts, .existing)
+            func verify() throws {
+                try store!.withAccess(forUID: accounts.alice) {
+                    let item = try XCTUnwrap(store!.candidates().first)
+                    XCTAssertEqual(try store!.history(item.itemID).count, 3)
+                    let attachment = try XCTUnwrap(AttachmentDescriptor.descriptors(in: item.fields).first)
+                    XCTAssertEqual(
+                        try store!.attachmentContent(
+                            itemID: item.itemID, attachmentID: attachment.attachmentID
+                        ).data,
+                        Data([137, 80, 78, 71, 13, 10, 26, 10]))
+                    XCTAssertEqual(
+                        try store!.readAttachmentDocument(
+                            itemID: item.itemID, attachmentID: attachment.attachmentID, pageNumber: 1
+                        ).pages.first?.parsed.text, "ordinarydocumentneedle")
+                    XCTAssertTrue(try create(store!, operation: "abrupt-create").wasReplayed)
+                }
+                XCTAssertEqual(try fingerprint(root), before)
+            }
+            try verify()
+            store = nil
+            try FileManager.default.removeItem(at: root.appendingPathComponent("index"))
+            store = try open(root, accounts, .existing)
+            try verify()
+            store = nil
         }
     }
 

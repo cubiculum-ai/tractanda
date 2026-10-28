@@ -62,6 +62,8 @@ final class DocumentContentFiles: @unchecked Sendable {
     private let ownerUID: UInt32
     private let minimumFreeBytes: Int64
     private let availableBytes: (@Sendable () throws -> UInt64)?
+    // Instance-local private fixture fault; never configured through the environment or wire.
+    private let readFailureForTesting: Int32?
     struct FrozenPeerStage: Codable, Equatable {
         let stageID: String
         let reference: DocumentContentReference
@@ -118,7 +120,7 @@ final class DocumentContentFiles: @unchecked Sendable {
     init(
         root: URL, ownerUID: UInt32, minimumFreeBytes: Int64,
         availableBytes: (@Sendable () throws -> UInt64)? = nil, stagingQuota: StagingByteQuota? = nil,
-        rootDescriptor: Int32? = nil
+        rootDescriptor: Int32? = nil, readFailureForTesting: Int32? = nil
     ) {
         self.stagingQuota = stagingQuota
         self.root = root
@@ -126,6 +128,16 @@ final class DocumentContentFiles: @unchecked Sendable {
         self.ownerUID = ownerUID
         self.minimumFreeBytes = minimumFreeBytes
         self.availableBytes = availableBytes
+        self.readFailureForTesting = readFailureForTesting
+    }
+    private func positionalRead(
+        _ fd: Int32, _ buffer: UnsafeMutableRawPointer?, _ count: Int, _ offset: off_t
+    ) -> Int {
+        if let errorCode = readFailureForTesting {
+            errno = errorCode
+            return -1
+        }
+        return pread(fd, buffer, count, offset)
     }
     private func reserve(_ additional: Int, descriptor: Int32? = nil) throws {
         let free: UInt64
@@ -169,7 +181,7 @@ final class DocumentContentFiles: @unchecked Sendable {
                 return
             }
             guard errno == ENOENT, parent.path != "/" else {
-                throw failure("Cannot inspect document destination filesystem.")
+                throw posixFailure("Cannot inspect document destination filesystem.", errorCode: errno)
             }
             parent.deleteLastPathComponent()
         }
@@ -184,7 +196,7 @@ final class DocumentContentFiles: @unchecked Sendable {
         }
         let flags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
         let fd = rootDescriptor.map { openat($0, ".", flags) } ?? open(root.path, flags)
-        guard fd >= 0 else { throw failure("Cannot open canonical document root.") }
+        guard fd >= 0 else { throw posixFailure("Cannot open canonical document root.", errorCode: errno) }
         var chain = [fd]
         do {
             try validateDirectory(fd)
@@ -201,13 +213,15 @@ final class DocumentContentFiles: @unchecked Sendable {
                     try reserve(4096, descriptor: parent)
                     let result = name.withCString { mkdirat(parent, $0, 0o700) }
                     guard result == 0 || errno == EEXIST, fsync(parent) == 0 else {
-                        throw failure("Cannot synchronize document directory.")
+                        throw posixFailure("Cannot synchronize document directory.", errorCode: errno)
                     }
                     child = name.withCString {
                         openat(parent, $0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
                     }
                 }
-                guard child >= 0 else { throw failure("Document directory is missing or unsafe.") }
+                guard child >= 0 else {
+                    throw posixFailure("Document directory is missing or unsafe.", errorCode: errno)
+                }
                 try validateDirectory(
                     child, allowReadOnlyArchive: !create && components.starts(with: ["documents", "content"]))
                 chain.append(child)
@@ -224,7 +238,10 @@ final class DocumentContentFiles: @unchecked Sendable {
     }
     private func validateDirectory(_ fd: Int32, allowReadOnlyArchive: Bool = false) throws {
         var value = stat()
-        guard fstat(fd, &value) == 0, value.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR),
+        guard fstat(fd, &value) == 0 else {
+            throw posixFailure("Cannot inspect document metadata.", errorCode: errno)
+        }
+        guard value.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR),
             (allowReadOnlyArchive && isReadOnly(fd))
                 || (value.st_uid == ownerUID && value.st_mode & 0o077 == 0)
         else {
@@ -270,10 +287,15 @@ final class DocumentContentFiles: @unchecked Sendable {
         defer { closeAll(chain) }
         let fd = openat(chain.last!, path.last!, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
         if fd < 0 && errno == ENOENT { return nil }
-        guard fd >= 0 else { throw failure("Cannot open peer operational checkpoint.") }
+        guard fd >= 0 else {
+            throw posixFailure("Cannot open peer operational checkpoint.", errorCode: errno)
+        }
         defer { close(fd) }
         var before = stat()
-        guard fstat(fd, &before) == 0, before.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+        guard fstat(fd, &before) == 0 else {
+            throw posixFailure("Cannot inspect document metadata.", errorCode: errno)
+        }
+        guard before.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
             before.st_uid == ownerUID,
             before.st_mode & 0o777 == 0o600, before.st_size > 0, before.st_size <= 16 * 1024
         else { throw TractandaError("documentIntegrity", "Unsafe peer operational checkpoint.") }
@@ -282,15 +304,19 @@ final class DocumentContentFiles: @unchecked Sendable {
         try data.withUnsafeMutableBytes { buffer in
             var offset = 0
             while offset < buffer.count {
-                let count = pread(
+                let count = positionalRead(
                     fd, buffer.baseAddress!.advanced(by: offset), buffer.count - offset, off_t(offset))
                 if count < 0 && errno == EINTR { continue }
+                if count < 0 { throw posixFailure("Peer checkpoint read was truncated.", errorCode: errno) }
                 guard count > 0 else { throw failure("Peer checkpoint read was truncated.") }
                 offset += count
             }
         }
         var after = stat()
-        guard fstat(fd, &after) == 0, before.st_dev == after.st_dev, before.st_ino == after.st_ino,
+        guard fstat(fd, &after) == 0 else {
+            throw posixFailure("Cannot inspect document metadata.", errorCode: errno)
+        }
+        guard before.st_dev == after.st_dev, before.st_ino == after.st_ino,
             before.st_size == after.st_size, before.st_mode == after.st_mode, before.st_uid == after.st_uid,
             samePeerCheckpointTime(before, after)
         else { throw failure("Peer checkpoint changed during read.") }
@@ -311,8 +337,9 @@ final class DocumentContentFiles: @unchecked Sendable {
         let temporary = ".peer-checkpoint-" + (try UUID.makeVersion1().uuidString.lowercased()) + ".tmp"
         let fd = openat(chain.last!, temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
         guard fd >= 0 else {
+            let errorCode = errno
             stagingQuota?.refund(data.count, path: path)
-            throw failure("Cannot create peer checkpoint.")
+            throw posixFailure("Cannot create peer checkpoint.", errorCode: errorCode)
         }
         var published = false
         defer {
@@ -328,16 +355,17 @@ final class DocumentContentFiles: @unchecked Sendable {
                 try reserve(buffer.count - offset, descriptor: fd)
                 let count = write(fd, buffer.baseAddress!.advanced(by: offset), buffer.count - offset)
                 if count < 0 && errno == EINTR { continue }
+                if count < 0 { throw posixFailure("Cannot write peer checkpoint.", errorCode: errno) }
                 guard count > 0 else { throw failure("Cannot write peer checkpoint.") }
                 offset += count
             }
         }
         guard fsync(fd) == 0, renameat(chain.last!, temporary, chain.last!, path.last!) == 0 else {
-            throw failure("Cannot publish peer checkpoint.")
+            throw posixFailure("Cannot publish peer checkpoint.", errorCode: errno)
         }
         published = true
         guard fsync(chain.last!) == 0 else {
-            throw failure("Cannot synchronize peer checkpoint publication.")
+            throw posixFailure("Cannot synchronize peer checkpoint publication.", errorCode: errno)
         }
         stagingQuota?.refund(old?.count ?? 0, path: path)
     }
@@ -390,7 +418,7 @@ final class DocumentContentFiles: @unchecked Sendable {
         defer { closeAll(chain) }
         let result = path.last!.withCString { unlinkat(chain.last!, $0, AT_REMOVEDIR) }
         guard result == 0 || errno == ENOENT, fsync(chain.last!) == 0 else {
-            throw failure("Cannot synchronize private document cleanup.")
+            throw posixFailure("Cannot synchronize private document cleanup.", errorCode: errno)
         }
         return true
     }
@@ -415,8 +443,10 @@ final class DocumentContentFiles: @unchecked Sendable {
                 let chain = try directories(path, create: false)
                 defer { closeAll(chain) }
                 var info = stat()
-                guard name.withCString({ fstatat(chain.last!, $0, &info, AT_SYMLINK_NOFOLLOW) }) == 0,
-                    info.st_uid == ownerUID, info.st_mode & 0o077 == 0
+                guard name.withCString({ fstatat(chain.last!, $0, &info, AT_SYMLINK_NOFOLLOW) }) == 0 else {
+                    throw posixFailure("Cannot inspect document cleanup entry.", errorCode: errno)
+                }
+                guard info.st_uid == ownerUID, info.st_mode & 0o077 == 0
                 else {
                     throw failure("Unsafe applied document cleanup entry.")
                 }
@@ -430,7 +460,7 @@ final class DocumentContentFiles: @unchecked Sendable {
                 guard name.withCString({ unlinkat(chain.last!, $0, directory ? AT_REMOVEDIR : 0) }) == 0,
                     fsync(chain.last!) == 0
                 else {
-                    throw failure("Cannot synchronize bounded document cleanup.")
+                    throw posixFailure("Cannot synchronize bounded document cleanup.", errorCode: errno)
                 }
                 remaining -= 1
                 return remaining > 0
@@ -462,7 +492,7 @@ final class DocumentContentFiles: @unchecked Sendable {
         defer { closeAll(chain) }
         let result = marker.last!.withCString { unlinkat(chain.last!, $0, 0) }
         guard result == 0 || errno == ENOENT, fsync(chain.last!) == 0 else {
-            throw failure("Cannot synchronize completed document barrier cleanup.")
+            throw posixFailure("Cannot synchronize completed document barrier cleanup.", errorCode: errno)
         }
     }
     func removeAppliedPeerDocumentBinding(_ path: [String]) throws {
@@ -488,7 +518,7 @@ final class DocumentContentFiles: @unchecked Sendable {
         let name = path.last!
         let result = name.withCString { mkdirat(chain.last!, $0, 0o700) }
         guard result == 0, fsync(chain.last!) == 0 else {
-            throw failure("Cannot create unique document stage.")
+            throw posixFailure("Cannot create unique document stage.", errorCode: errno)
         }
     }
     func writeImmutable(
@@ -509,8 +539,9 @@ final class DocumentContentFiles: @unchecked Sendable {
             openat(chain.last!, $0, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
         }
         guard fd >= 0 else {
+            let errorCode = errno
             stagingQuota?.refund(data.count, path: path)
-            throw failure("Cannot create immutable document dependency.")
+            throw posixFailure("Cannot create immutable document dependency.", errorCode: errorCode)
         }
         defer {
             _ = close(fd)
@@ -526,19 +557,21 @@ final class DocumentContentFiles: @unchecked Sendable {
                 let written = write(
                     fd, bytes.baseAddress!.advanced(by: offset), min(262_144, bytes.count - offset))
                 if written < 0 && errno == EINTR { continue }
+                if written < 0 { throw posixFailure("Cannot write document dependency.", errorCode: errno) }
                 guard written > 0 else { throw failure("Cannot write document dependency.") }
                 offset += written
             }
         }
-        guard fchmod(fd, 0o400) == 0, fsync(fd) == 0 else {
-            throw failure("Cannot seal document dependency.")
+        guard fchmod(fd, 0o400) == 0, tractanda_durable_sync(fd) == 0 else {
+            throw posixFailure("Cannot seal document dependency.", errorCode: errno)
         }
         let published = temporary.withCString { source in
             path.last!.withCString { linkat(chain.last!, source, chain.last!, $0, 0) }
         }
         dependencyPublished = published == 0
-        guard published == 0, fsync(chain.last!) == 0 else {
-            throw failure("Cannot publish sealed document dependency without replacement.")
+        guard published == 0, fsync(chain.last!) == 0, tractanda_durable_sync(fd) == 0 else {
+            throw posixFailure(
+                "Cannot publish sealed document dependency without replacement.", errorCode: errno)
         }
     }
     /// Atomically replaces one bounded operational checkpoint; canonical dependencies stay immutable.
@@ -559,8 +592,9 @@ final class DocumentContentFiles: @unchecked Sendable {
             openat(chain.last!, $0, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
         }
         guard fd >= 0 else {
+            let errorCode = errno
             stagingQuota?.refund(data.count, path: path)
-            throw failure("Cannot create job checkpoint.")
+            throw posixFailure("Cannot create job checkpoint.", errorCode: errorCode)
         }
         var replaced = false
         defer {
@@ -575,6 +609,7 @@ final class DocumentContentFiles: @unchecked Sendable {
             while offset < bytes.count {
                 let count = write(fd, bytes.baseAddress!.advanced(by: offset), bytes.count - offset)
                 if count < 0, errno == EINTR { continue }
+                if count < 0 { throw posixFailure("Cannot write job checkpoint.", errorCode: errno) }
                 guard count > 0 else { throw failure("Cannot write job checkpoint.") }
                 offset += count
             }
@@ -583,9 +618,11 @@ final class DocumentContentFiles: @unchecked Sendable {
             temporary.withCString({ source in
                 path.last!.withCString { renameat(chain.last!, source, chain.last!, $0) }
             }) == 0
-        else { throw failure("Cannot replace job checkpoint.") }
+        else { throw posixFailure("Cannot replace job checkpoint.", errorCode: errno) }
         replaced = true
-        guard fsync(chain.last!) == 0 else { throw failure("Cannot synchronize job checkpoint.") }
+        guard fsync(chain.last!) == 0 else {
+            throw posixFailure("Cannot synchronize job checkpoint.", errorCode: errno)
+        }
         stagingQuota?.jobCheckpointReplaced(oldBytes: old?.count ?? 0, path: path)
     }
     /// Missing first-write metadata is disposable only when its owned directory is provably empty.
@@ -603,15 +640,18 @@ final class DocumentContentFiles: @unchecked Sendable {
         defer { closeAll(chain) }
         let duplicate = dup(chain.last!)
         guard duplicate >= 0, let stream = fdopendir(duplicate) else {
+            let errorCode = errno
             if duplicate >= 0 { _ = close(duplicate) }
-            throw failure("Cannot inspect failed job directory.")
+            throw posixFailure("Cannot inspect failed job directory.", errorCode: errorCode)
         }
         defer { _ = closedir(stream) }
         while true {
             try Task.checkCancellation()
             errno = 0
             guard let entry = readdir(stream) else {
-                guard errno == 0 else { throw failure("Cannot inspect failed job directory.") }
+                guard errno == 0 else {
+                    throw posixFailure("Cannot inspect failed job directory.", errorCode: errno)
+                }
                 break
             }
             let name = withUnsafePointer(to: &entry.pointee.d_name) {
@@ -623,7 +663,7 @@ final class DocumentContentFiles: @unchecked Sendable {
         let removed = id.withCString { unlinkat(parent, $0, AT_REMOVEDIR) }
         if removed < 0, errno == ENOTEMPTY || errno == EEXIST { return false }
         guard removed == 0 || errno == ENOENT, fsync(parent) == 0 else {
-            throw failure("Cannot synchronize failed empty job directory removal.")
+            throw posixFailure("Cannot synchronize failed empty job directory removal.", errorCode: errno)
         }
         stagingQuota?.release(path: ["document-jobs", id, "record.json"])
         return true
@@ -656,11 +696,16 @@ final class DocumentContentFiles: @unchecked Sendable {
         defer { closeAll(chain) }
         let result = path.last!.withCString { unlinkat(chain.last!, $0, 0) }
         guard result == 0 || errno == ENOENT, fsync(chain.last!) == 0 else {
-            throw failure("Cannot dispose job publication receipt.")
+            throw posixFailure("Cannot dispose job publication receipt.", errorCode: errno)
         }
         stagingQuota?.release(path: path)
     }
     /// Descriptor-relative, bounded-depth deletion of explicitly discarded private work.
+    /// Unaccepted JMAP operational stages only; never an Item or owned payload path.
+    func removeJMAPBlobStage(_ id: String) throws {
+        try Identifier.validate(id)
+        try removeTree(["jmap-blobs", id])
+    }
     func removePrivateTree(_ path: [String]) throws {
         guard
             (path.count == 3 && path.prefix(2) == ["documents", ".staging"])
@@ -700,7 +745,8 @@ final class DocumentContentFiles: @unchecked Sendable {
         let result = id.withCString { unlinkat(parent, $0, AT_REMOVEDIR) }
         if result < 0, errno == ENOTEMPTY || errno == EEXIST { return }
         guard result == 0 || errno == ENOENT, fsync(parent) == 0 else {
-            throw failure("Cannot synchronize empty atomic preparation directory cleanup.")
+            throw posixFailure(
+                "Cannot synchronize empty atomic preparation directory cleanup.", errorCode: errno)
         }
     }
     /// Caller has proved this exact LOCAL packet never acquired a PREPARED/ACCEPTED seal.
@@ -743,25 +789,29 @@ final class DocumentContentFiles: @unchecked Sendable {
             var info = stat()
             let result = name.withCString { fstatat(parent, $0, &info, AT_SYMLINK_NOFOLLOW) }
             if result < 0, errno == ENOENT { return }
-            guard result == 0, info.st_uid == ownerUID, info.st_mode & 0o077 == 0 else {
+            guard result == 0 else { throw posixFailure("Cannot inspect discarded stage.", errorCode: errno) }
+            guard info.st_uid == ownerUID, info.st_mode & 0o077 == 0 else {
                 throw failure("Unsafe stage disposal entry.")
             }
             if info.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) {
                 let child = name.withCString {
                     openat(parent, $0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
                 }
-                guard child >= 0 else { throw failure("Cannot open discarded stage.") }
+                guard child >= 0 else { throw posixFailure("Cannot open discarded stage.", errorCode: errno) }
                 defer { _ = close(child) }
                 let duplicate = dup(child)
                 guard duplicate >= 0, let stream = fdopendir(duplicate) else {
+                    let errorCode = errno
                     if duplicate >= 0 { _ = close(duplicate) }
-                    throw failure("Cannot enumerate discarded stage.")
+                    throw posixFailure("Cannot enumerate discarded stage.", errorCode: errorCode)
                 }
                 defer { _ = closedir(stream) }
                 while true {
                     errno = 0
                     guard let entry = readdir(stream) else {
-                        guard errno == 0 else { throw failure("Cannot enumerate discarded stage.") }
+                        guard errno == 0 else {
+                            throw posixFailure("Cannot enumerate discarded stage.", errorCode: errno)
+                        }
                         break
                     }
                     let component = withUnsafePointer(to: &entry.pointee.d_name) {
@@ -774,16 +824,18 @@ final class DocumentContentFiles: @unchecked Sendable {
                     try remove(child, component, depth: depth + 1)
                 }
                 guard fsync(child) == 0, name.withCString({ unlinkat(parent, $0, AT_REMOVEDIR) }) == 0 else {
-                    throw failure("Cannot remove discarded stage directory.")
+                    throw posixFailure("Cannot remove discarded stage directory.", errorCode: errno)
                 }
             } else {
                 guard info.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
                     name.withCString({ unlinkat(parent, $0, 0) }) == 0
                 else {
-                    throw failure("Cannot remove discarded stage file.")
+                    throw posixFailure("Cannot remove discarded stage file.", errorCode: errno)
                 }
             }
-            guard fsync(parent) == 0 else { throw failure("Cannot synchronize stage disposal.") }
+            guard fsync(parent) == 0 else {
+                throw posixFailure("Cannot synchronize stage disposal.", errorCode: errno)
+            }
         }
         try remove(chain.last!, path.last!, depth: 0)
         if releaseAccounting { stagingQuota?.release(path: path) }
@@ -791,7 +843,9 @@ final class DocumentContentFiles: @unchecked Sendable {
     func read(path: [String], maximumBytes: Int, readBudget: ((Int) throws -> Void)? = nil) throws -> Data {
         guard let bytes = try readIfPresent(path: path, maximumBytes: maximumBytes, readBudget: readBudget)
         else {
-            throw failure("Canonical document dependency is missing.")
+            // readIfPresent returns nil only for a definite ENOENT, including an absent
+            // parent. Preserve that known result for published-stage fallback callers.
+            throw posixFailure("Canonical document dependency is missing.", errorCode: ENOENT)
         }
         return bytes
     }
@@ -807,10 +861,15 @@ final class DocumentContentFiles: @unchecked Sendable {
             openat(chain.last!, $0, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
         }
         if fd < 0 && errno == ENOENT { return nil }
-        guard fd >= 0 else { throw failure("Canonical document dependency is missing or unsafe.") }
+        guard fd >= 0 else {
+            throw posixFailure("Canonical document dependency is missing or unsafe.", errorCode: errno)
+        }
         defer { _ = close(fd) }
         var before = stat()
-        guard fstat(fd, &before) == 0, before.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+        guard fstat(fd, &before) == 0 else {
+            throw posixFailure("Cannot inspect document metadata.", errorCode: errno)
+        }
+        guard before.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
             (path.starts(with: ["documents", "content"]) && isReadOnly(fd))
                 || (before.st_uid == ownerUID && before.st_mode & 0o777 == 0o400),
             before.st_size > 0, before.st_size <= maximumBytes
@@ -824,17 +883,21 @@ final class DocumentContentFiles: @unchecked Sendable {
             var offset = 0
             while offset < bytes.count {
                 try Task.checkCancellation()
-                let amount = pread(
+                let amount = positionalRead(
                     fd, bytes.baseAddress!.advanced(by: offset), min(262_144, bytes.count - offset),
                     off_t(offset))
                 if amount < 0 && errno == EINTR { continue }
+                if amount < 0 { throw posixFailure("Document dependency ended early.", errorCode: errno) }
                 guard amount > 0 else { throw failure("Document dependency ended early.") }
                 Self.recordReadForTesting(root: root, path: path, bytes: amount)
                 offset += amount
             }
         }
         var after = stat()
-        guard fstat(fd, &after) == 0, before.st_dev == after.st_dev, before.st_ino == after.st_ino,
+        guard fstat(fd, &after) == 0 else {
+            throw posixFailure("Cannot inspect document metadata.", errorCode: errno)
+        }
+        guard before.st_dev == after.st_dev, before.st_ino == after.st_ino,
             before.st_mode == after.st_mode, before.st_uid == after.st_uid, before.st_size == after.st_size,
             samePeerCheckpointTime(before, after)
         else {
@@ -863,8 +926,11 @@ final class DocumentContentFiles: @unchecked Sendable {
         defer { closeAll(staged) }
         var sourceInfo = stat()
         var targetInfo = stat()
-        guard fstat(staged.last!, &sourceInfo) == 0, fstat(target.last!, &targetInfo) == 0 else {
-            throw failure("Cannot inspect document publication filesystems.")
+        guard fstat(staged.last!, &sourceInfo) == 0 else {
+            throw posixFailure("Cannot inspect document metadata.", errorCode: errno)
+        }
+        guard fstat(target.last!, &targetInfo) == 0 else {
+            throw posixFailure("Cannot inspect document publication filesystems.", errorCode: errno)
         }
         guard sourceInfo.st_dev == targetInfo.st_dev else {
             throw TractandaError(
@@ -872,14 +938,17 @@ final class DocumentContentFiles: @unchecked Sendable {
                 "Document publication requires staging and destination on one filesystem.",
                 osError: EXDEV)
         }
-        guard fsync(staged.last!) == 0 else { throw failure("Cannot synchronize complete document stage.") }
+        guard fsync(staged.last!) == 0 else {
+            throw posixFailure("Cannot synchronize complete document stage.", errorCode: errno)
+        }
         let result = stage.last!.withCString { old in
             destination.last!.withCString {
                 tractanda_publish_directory_at(source.last!, old, target.last!, $0)
             }
         }
         guard result == 0 else {
-            throw failure("Cannot publish immutable document tree without replacement.")
+            throw posixFailure(
+                "Cannot publish immutable document tree without replacement.", errorCode: errno)
         }
         try afterDirectoryRenameForTesting?()
         try synchronizePublication(stage, to: destination)
@@ -888,7 +957,7 @@ final class DocumentContentFiles: @unchecked Sendable {
         let chain = try directories(Array(path.dropLast()), create: false)
         do {
             let fd = openat(chain.last!, path.last!, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
-            guard fd >= 0 else { throw failure("Saved document part is missing.") }
+            guard fd >= 0 else { throw posixFailure("Saved document part is missing.", errorCode: errno) }
             do {
                 let url = path.reduce(root) { $0.appendingPathComponent($1) }
                 let metadata = try FileMetadata.read(at: url)
@@ -898,7 +967,10 @@ final class DocumentContentFiles: @unchecked Sendable {
                 else { throw failure("Saved document part metadata is unsafe.") }
                 func check() throws {
                     var value = stat()
-                    guard fstat(fd, &value) == 0, UInt64(value.st_ino) == metadata.inode,
+                    guard fstat(fd, &value) == 0 else {
+                        throw posixFailure("Cannot inspect document metadata.", errorCode: errno)
+                    }
+                    guard UInt64(value.st_ino) == metadata.inode,
                         UInt64(value.st_dev) == metadata.device, UInt64(value.st_size) == metadata.size,
                         UInt32(value.st_mode) == metadata.mode, value.st_uid == metadata.uid,
                         value.st_gid == metadata.gid
@@ -920,10 +992,13 @@ final class DocumentContentFiles: @unchecked Sendable {
                         try result.withUnsafeMutableBytes { buffer in
                             var done = 0
                             while done < count {
-                                let read = pread(
+                                let read = self.positionalRead(
                                     fd, buffer.baseAddress!.advanced(by: done), count - done,
                                     off_t(offset) + off_t(done))
                                 if read < 0 && errno == EINTR { continue }
+                                if read < 0 {
+                                    throw self.posixFailure("Document part ended early.", errorCode: errno)
+                                }
                                 guard read > 0 else { throw self.failure("Document part ended early.") }
                                 done += read
                             }
@@ -960,23 +1035,34 @@ final class DocumentContentFiles: @unchecked Sendable {
             let existing = try peerDocumentPartFile(path: destination, maximumBytes: Int(bytes))
             guard existing.metadata.size == UInt64(bytes) else { throw failure("Adopted part size differs.") }
         } else {
-            guard fd >= 0 else { throw failure("Cannot retain private document part.") }
+            guard fd >= 0 else {
+                throw posixFailure("Cannot retain private document part.", errorCode: errno)
+            }
             defer { close(fd) }
             var value = stat()
             var parent = stat()
-            guard fstat(fd, &value) == 0, value.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+            guard fstat(fd, &value) == 0 else {
+                throw posixFailure("Cannot inspect document metadata.", errorCode: errno)
+            }
+            guard fstat(target.last!, &parent) == 0 else {
+                throw posixFailure("Cannot inspect document destination.", errorCode: errno)
+            }
+            guard value.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
                 value.st_uid == ownerUID, value.st_nlink == 1, value.st_size == bytes,
                 [mode_t(0o600), mode_t(0o400)].contains(value.st_mode & 0o777),
-                fstat(target.last!, &parent) == 0, value.st_dev == parent.st_dev
+                value.st_dev == parent.st_dev
             else { throw failure("Private document adoption requires safe bytes on one filesystem.") }
             guard fchmod(fd, 0o400) == 0, fsync(fd) == 0,
                 tractanda_publish_directory_at(
                     source.last!, sourcePath.last!, target.last!, destination.last!) == 0
-            else { throw failure("Cannot adopt immutable document part without replacement.") }
+            else {
+                throw posixFailure(
+                    "Cannot adopt immutable document part without replacement.", errorCode: errno)
+            }
             try afterPeerPartRenameForTesting?()
         }
         guard fsync(source.last!) == 0, fsync(target.last!) == 0 else {
-            throw failure("Cannot synchronize document-part adoption.")
+            throw posixFailure("Cannot synchronize document-part adoption.", errorCode: errno)
         }
         try stagingQuota?.movePrivateBytes(bytes, from: sourcePath, to: destination)
     }
@@ -1022,7 +1108,10 @@ final class DocumentContentFiles: @unchecked Sendable {
                 let metadata = try FileMetadata.read(
                     at: (base + suffix).reduce(files.root) { $0.appendingPathComponent($1) })
                 var opened = stat()
-                guard fstat(chain.last!, &opened) == 0,
+                guard fstat(chain.last!, &opened) == 0 else {
+                    throw files.posixFailure("Cannot inspect document metadata.", errorCode: errno)
+                }
+                guard
                     UInt64(opened.st_ino) == metadata.inode, UInt64(opened.st_dev) == metadata.device
                 else {
                     throw files.failure("Inspection directory binding changed during open.")
@@ -1065,13 +1154,19 @@ final class DocumentContentFiles: @unchecked Sendable {
             defer { files.closeAll(chain) }
             let expected = frames[index].metadata
             var opened = stat()
-            guard fstat(chain.last!, &opened) == 0,
+            guard fstat(chain.last!, &opened) == 0 else {
+                throw files.posixFailure("Cannot inspect document metadata.", errorCode: errno)
+            }
+            guard
                 UInt64(opened.st_ino) == expected.inode, UInt64(opened.st_dev) == expected.device
             else {
                 throw files.failure("Parked inspection opened a different directory.")
             }
             let value = try body(chain.last!)
-            guard fstat(chain.last!, &opened) == 0,
+            guard fstat(chain.last!, &opened) == 0 else {
+                throw files.posixFailure("Cannot inspect document metadata.", errorCode: errno)
+            }
+            guard
                 UInt64(opened.st_ino) == expected.inode, UInt64(opened.st_dev) == expected.device,
                 try FileMetadata.read(at: path.reduce(files.root) { $0.appendingPathComponent($1) })
                     == frames[index].metadata
@@ -1140,7 +1235,8 @@ final class DocumentContentFiles: @unchecked Sendable {
                             if !(base.starts(with: ["documents", "content"]) && files.isReadOnly(descriptor)),
                                 fsync(descriptor) != 0
                             {
-                                throw files.failure("Cannot synchronize inspected subtree.")
+                                throw files.posixFailure(
+                                    "Cannot synchronize inspected subtree.", errorCode: errno)
                             }
                         }
                     }
@@ -1152,7 +1248,7 @@ final class DocumentContentFiles: @unchecked Sendable {
                 var value = stat()
                 try withFrame(top) { descriptor in
                     guard fstatat(descriptor, name, &value, AT_SYMLINK_NOFOLLOW) == 0 else {
-                        throw files.failure("Cannot inspect document entry.")
+                        throw files.posixFailure("Cannot inspect document entry.", errorCode: errno)
                     }
                 }
                 if value.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) {
@@ -1218,23 +1314,29 @@ final class DocumentContentFiles: @unchecked Sendable {
                 }
                 var metadata = stat()
                 guard fstatat(parent, name, &metadata, AT_SYMLINK_NOFOLLOW) == 0 else {
-                    throw failure("Cannot inspect complete document tree.")
+                    throw posixFailure("Cannot inspect complete document tree.", errorCode: errno)
                 }
                 if expectedDirectory && metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) {
                     try walk(path)
                 } else if expectedFile && metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) {
                     let fd = openat(parent, name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
-                    guard fd >= 0 else { throw failure("Cannot retain document dependency for durability.") }
+                    guard fd >= 0 else {
+                        throw posixFailure(
+                            "Cannot retain document dependency for durability.", errorCode: errno)
+                    }
                     defer { close(fd) }
                     var actual = stat()
-                    guard fstat(fd, &actual) == 0, actual.st_dev == metadata.st_dev,
+                    guard fstat(fd, &actual) == 0 else {
+                        throw posixFailure("Cannot inspect document metadata.", errorCode: errno)
+                    }
+                    guard actual.st_dev == metadata.st_dev,
                         actual.st_ino == metadata.st_ino, actual.st_mode == metadata.st_mode,
                         actual.st_size == metadata.st_size, actual.st_size > 0,
                         (base.starts(with: ["documents", "content"]) && isReadOnly(fd))
                             || (actual.st_uid == ownerUID && actual.st_mode & 0o777 == 0o400)
                     else { throw failure("Unsafe document dependency during complete-tree inspection.") }
-                    if synchronize && !isReadOnly(fd) && fsync(fd) != 0 {
-                        throw failure("Cannot synchronize document dependency.")
+                    if synchronize && !isReadOnly(fd) && tractanda_durable_sync(fd) != 0 {
+                        throw posixFailure("Cannot synchronize document dependency.", errorCode: errno)
                     }
                     let next = count.addingReportingOverflow(1)
                     guard !next.overflow else { throw failure("Document part count overflowed.") }
@@ -1245,7 +1347,7 @@ final class DocumentContentFiles: @unchecked Sendable {
                 return true
             }
             if synchronize && !isReadOnly(parent) && fsync(parent) != 0 {
-                throw failure("Cannot synchronize complete document subtree.")
+                throw posixFailure("Cannot synchronize complete document subtree.", errorCode: errno)
             }
             guard suffix.isEmpty || count > initialCount else {
                 throw failure("Unexpected empty directory in complete document tree.")
@@ -1261,9 +1363,31 @@ final class DocumentContentFiles: @unchecked Sendable {
         defer { closeAll(target) }
         try beforePublicationSyncForTesting?()
         guard isReadOnly(target.last!) || fsync(target.last!) == 0, fsync(source.last!) == 0 else {
-            throw failure("Cannot synchronize document tree publication.")
+            throw posixFailure("Cannot synchronize document tree publication.", errorCode: errno)
         }
+        try confirmPublishedDocumentDurability(destination)
         stagingQuota?.release(path: stage)
+    }
+    /// Flush the tree's actual destination filesystem after its directory publication.
+    /// A later revision on another volume cannot supply this barrier for the document.
+    func confirmPublishedDocumentDurability(_ destination: [String]) throws {
+        let target = try directories(Array(destination.dropLast()), create: false)
+        defer { closeAll(target) }
+        if !isReadOnly(target.last!) {
+            guard fsync(target.last!) == 0 else {
+                throw posixFailure("Cannot synchronize document destination.", errorCode: errno)
+            }
+            let manifest = try directories(destination, create: false)
+            defer { closeAll(manifest) }
+            let fd = openat(manifest.last!, "manifest.json", O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+            guard fd >= 0 else {
+                throw posixFailure("Cannot open published document durability barrier.", errorCode: errno)
+            }
+            defer { close(fd) }
+            guard tractanda_durable_sync(fd) == 0 else {
+                throw posixFailure("Cannot confirm published document durability.", errorCode: errno)
+            }
+        }
     }
     func synchronizeDirectory(_ path: [String]) throws {
         let chain = try directories(path, create: false)
@@ -1271,10 +1395,96 @@ final class DocumentContentFiles: @unchecked Sendable {
         guard
             (path.starts(with: ["documents", "content"]) && isReadOnly(chain.last!))
                 || fsync(chain.last!) == 0
-        else { throw failure("Cannot synchronize private recovery directory.") }
+        else { throw posixFailure("Cannot synchronize private recovery directory.", errorCode: errno) }
     }
     private func failure(_ message: String) -> TractandaError {
-        TractandaError("documentIntegrity", "\(message) \(String(cString: strerror(errno)))", osError: errno)
+        TractandaError("documentIntegrity", message)
+    }
+    private func posixFailure(_ message: String, errorCode: Int32) -> TractandaError {
+        TractandaError(
+            "documentIntegrity", "\(message) \(String(cString: strerror(errorCode)))", osError: errorCode)
+    }
+}
+
+extension DocumentContentFiles {
+    /// One bounded current enrollment operation. This is mutable service configuration,
+    /// never canonical content, authorization history or an ordinary JSON response.
+    func readPersonalEnrollmentState() throws -> Data? {
+        let chain: [Int32]
+        do { chain = try directories([".personal-enrollment"], create: false) }
+        catch let error as TractandaError where error.osError == ENOENT { return nil }
+        defer { closeAll(chain) }
+        guard chain.allSatisfy({ tractanda_secret_file_no_acl($0) == 0 }) else {
+            throw TractandaError("invalidEnrollmentState", "Enrollment secret directories have extended ACLs.")
+        }
+        let fd = openat(chain.last!, "current.bin", O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+        if fd < 0, errno == ENOENT { return nil }
+        guard fd >= 0 else { throw posixFailure("Cannot open enrollment state.", errorCode: errno) }
+        defer { close(fd) }
+        var before = stat()
+        guard fstat(fd, &before) == 0,
+            before.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG), before.st_uid == ownerUID,
+            before.st_mode & 0o7777 == 0o600, before.st_nlink == 1,
+            before.st_size > 0, before.st_size <= PersonalEnrollmentPrivateCodec.operationHeaderBytes + 36,
+            tractanda_secret_file_no_acl(fd) == 0
+        else { throw TractandaError("invalidEnrollmentState", "Unsafe enrollment state custody.") }
+        var data = Data(count: Int(before.st_size))
+        try data.withUnsafeMutableBytes { buffer in
+            var offset = 0
+            while offset < buffer.count {
+                let count = positionalRead(fd, buffer.baseAddress!.advanced(by: offset), buffer.count - offset, off_t(offset))
+                if count < 0, errno == EINTR { continue }
+                guard count > 0 else { throw failure("Enrollment state was truncated.") }
+                offset += count
+            }
+        }
+        var after = stat()
+        guard fstat(fd, &after) == 0, before.st_dev == after.st_dev, before.st_ino == after.st_ino,
+            before.st_size == after.st_size, before.st_mode == after.st_mode,
+            before.st_uid == after.st_uid, after.st_nlink == 1, samePeerCheckpointTime(before, after)
+        else { throw failure("Enrollment state changed during capture.") }
+        return data
+    }
+
+    func replacePersonalEnrollmentState(_ data: Data, expected: Data?) throws {
+        try CanonicalMaintenanceContext.deny(root: root, path: [".personal-enrollment"], operation: "enrollment configuration")
+        guard !data.isEmpty, data.count <= PersonalEnrollmentPrivateCodec.operationHeaderBytes + 36 else {
+            throw TractandaError("resourceLimit", "Enrollment state exceeds its bound.")
+        }
+        guard try readPersonalEnrollmentState() == expected else {
+            throw TractandaError("enrollmentConflict", "Enrollment state changed before publication.")
+        }
+        let chain = try directories([".personal-enrollment"], create: true)
+        defer { closeAll(chain) }
+        guard chain.allSatisfy({ tractanda_secret_file_no_acl($0) == 0 }) else {
+            throw TractandaError("invalidEnrollmentState", "Enrollment secret directories have extended ACLs.")
+        }
+        try reserve(data.count, descriptor: chain.last!)
+        let temporary = ".state-" + UUID().uuidString.lowercased()
+        let fd = openat(chain.last!, temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { throw posixFailure("Cannot create enrollment state.", errorCode: errno) }
+        defer { close(fd); _ = unlinkat(chain.last!, temporary, 0) }
+        guard tractanda_secret_file_no_acl(fd) == 0 else {
+            throw TractandaError("invalidEnrollmentState", "Enrollment secret file has an extended ACL.")
+        }
+        try data.withUnsafeBytes { buffer in
+            var offset = 0
+            while offset < buffer.count {
+                let count = write(fd, buffer.baseAddress!.advanced(by: offset), buffer.count - offset)
+                if count < 0, errno == EINTR { continue }
+                guard count > 0 else { throw posixFailure("Cannot write enrollment state.", errorCode: errno) }
+                offset += count
+            }
+        }
+        guard fchmod(fd, 0o600) == 0, fsync(fd) == 0 else {
+            throw posixFailure("Cannot synchronize enrollment state.", errorCode: errno)
+        }
+        guard try readPersonalEnrollmentState() == expected else {
+            throw TractandaError("enrollmentConflict", "Enrollment state changed during publication.")
+        }
+        guard renameat(chain.last!, temporary, chain.last!, "current.bin") == 0,
+            fsync(chain.last!) == 0, tractanda_durable_sync(fd) == 0
+        else { throw posixFailure("Cannot commit enrollment state.", errorCode: errno) }
     }
 }
 
@@ -1312,7 +1522,9 @@ extension DocumentContentFiles {
         try reserve(data.count, descriptor: chain.last!)
         let temporary = ".metadata-" + UUID().uuidString
         let fd = openat(chain.last!, temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
-        guard fd >= 0 else { throw failure("Cannot create personal metadata replacement.") }
+        guard fd >= 0 else {
+            throw posixFailure("Cannot create personal metadata replacement.", errorCode: errno)
+        }
         defer {
             close(fd)
             _ = unlinkat(chain.last!, temporary, 0)
@@ -1322,6 +1534,7 @@ extension DocumentContentFiles {
             while offset < bytes.count {
                 let result = write(fd, bytes.baseAddress!.advanced(by: offset), bytes.count - offset)
                 if result < 0, errno == EINTR { continue }
+                if result < 0 { throw posixFailure("Cannot write personal metadata.", errorCode: errno) }
                 guard result > 0 else { throw failure("Cannot write personal metadata.") }
                 offset += result
             }
@@ -1329,7 +1542,7 @@ extension DocumentContentFiles {
         guard fchmod(fd, 0o400) == 0, fsync(fd) == 0,
             renameat(chain.last!, temporary, chain.last!, path.last!) == 0,
             fsync(chain.last!) == 0
-        else { throw failure("Cannot durably replace personal metadata.") }
+        else { throw posixFailure("Cannot durably replace personal metadata.", errorCode: errno) }
     }
 }
 
@@ -1347,9 +1560,11 @@ extension DocumentContentFiles {
         let chain = try directories([".personal-sync", "work"], create: false)
         defer { closeAll(chain) }
         if unlinkat(chain.last!, name, 0) != 0, errno != ENOENT {
-            throw failure("Cannot remove disposable personal sync work.")
+            throw posixFailure("Cannot remove disposable personal sync work.", errorCode: errno)
         }
-        guard fsync(chain.last!) == 0 else { throw failure("Cannot synchronize personal sync work removal.") }
+        guard fsync(chain.last!) == 0 else {
+            throw posixFailure("Cannot synchronize personal sync work removal.", errorCode: errno)
+        }
     }
 }
 
@@ -1369,10 +1584,10 @@ extension DocumentContentFiles {
         { return }
         defer { closeAll(chain) }
         if unlinkat(chain.last!, name, 0) != 0, errno != ENOENT {
-            throw failure("Cannot retire completed personal object metadata.")
+            throw posixFailure("Cannot retire completed personal object metadata.", errorCode: errno)
         }
         guard fsync(chain.last!) == 0 else {
-            throw failure("Cannot synchronize completed personal object cleanup.")
+            throw posixFailure("Cannot synchronize completed personal object cleanup.", errorCode: errno)
         }
     }
 }

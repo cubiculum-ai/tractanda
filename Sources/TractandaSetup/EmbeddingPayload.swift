@@ -25,7 +25,7 @@ public struct EmbeddingPayload: Codable, Equatable, Sendable {
             "44399559930365213510b1ee2eb15ded83374f0e:weights-bf16:compute-f32:dcb6431bfa6e817fe100a2b0521360cec3383963b03fa966b685de18ca310d31:vmlx-61a4b20d4ad01b10466e8fc94c50402a9f994430",
         dimensions: 768)
 
-    func validate(files: [BundleManifest.File]) throws {
+    func validate(files: [BundleManifest.File], provisioned: Bool = false) throws {
         guard self == Self.granite else {
             throw SetupError("This preview does not support the bundled embedding descriptor.")
         }
@@ -38,7 +38,7 @@ public struct EmbeddingPayload: Codable, Equatable, Sendable {
             modelDirectory + "/special_tokens_map.json", modelDirectory + "/tokenizer.json",
             modelDirectory + "/tokenizer_config.json",
         ]
-        for path in required {
+        for path in required where !provisioned || !path.hasPrefix(modelDirectory + "/") {
             guard names.contains(path) else { throw SetupError("Missing embedding payload file: \(path)") }
         }
     }

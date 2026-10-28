@@ -4,6 +4,7 @@
 Only disposable stores, terminal descriptors and recovery files are used. No GUI
 terminal application or user's open shell is controlled. Python 3.9+, no packages.
 """
+from jmap_client import query_arguments
 import argparse
 import codecs
 import contextlib
@@ -193,7 +194,7 @@ def terminal(binary, path, recovery, arguments=None, environment=None, items_onl
 
 
 def query(client, expression):
-    return client.call("TractandaItem/query", {"expression": expression})["ids"]
+    return client.call("TractandaItem/query", query_arguments({"expression": expression}))["ids"]
 
 
 def wait_item(client, expression, terminal=None):
@@ -272,7 +273,7 @@ def main():
         with wire.server(binary, root / "store", path) as client:
             with terminal(tui, path, recovery) as ui:
                 ui.wait("Store access configuration")
-                founding = client.call("TractandaItem/query", {})
+                founding = client.call("TractandaItem/query", query_arguments({}))
                 assert founding["total"] == 1
                 assert client.get(founding["ids"][0])["fields"]["classID"] == wire.text("AccessConfigurationItem")
                 assert termios.tcgetattr(ui.slave) != ui.original
@@ -319,11 +320,11 @@ def main():
                 ui.wait(wire.revision_id(item)); ui.send(ESC); ui.wait("Preview")
                 ui.send("s"); ui.wait("Save view as"); ui.paste("Family saved view"); ui.send(b"\x13")
                 view = wait_item(client, 'subject == "Family saved view"', ui)
-                assert client.call("TractandaItem/query", {"viewID": wire.item_id(view)})["ids"] == [identity]
+                assert client.call("TractandaItem/query", query_arguments({"viewID": wire.item_id(view)}))["ids"] == [identity]
                 ui.send("a"); ui.wait("All readable items")
                 choose(ui, "v", "Family saved view", "Open saved view"); ui.wait("Family saved view")
                 choose(ui, "x", "TUI Family", "Exclude item"); ui.wait("No items.")
-                assert client.call("TractandaItem/query", {"viewID": wire.item_id(view)})["ids"] == []
+                assert client.call("TractandaItem/query", query_arguments({"viewID": wire.item_id(view)}))["ids"] == []
                 ui.send("a"); ui.wait("All readable items")
                 ui.send("f"); ui.wait("Search items"); ui.send(b"\x15")
                 ui.paste("Family"); ui.send(b"\t\t")
@@ -336,7 +337,7 @@ def main():
 
                 ui.send("e"); ui.wait("Edit item"); ui.send(" stale draft")
                 before = client.get(identity)
-                external = client.commit(wire.intent("revise", "outside-edit", identity, wire.revision_id(before), changes={"body": wire.text("External revision")}))["revision"]
+                external = client.commit_with_revision(wire.intent("revise", "outside-edit", identity, wire.revision_id(before), changes={"body": wire.text("External revision")}))["revision"]
                 ui.send(b"\x13"); ui.wait("revisionConflict")
                 ui.resize(120, 35); ui.wait("stale draft")
                 assert wire.revision_id(client.get(identity)) == wire.revision_id(external)

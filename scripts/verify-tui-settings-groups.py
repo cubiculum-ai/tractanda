@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Check settings groups, focus order and discoverable RGB colors in an owned terminal."""
+from jmap_client import query_arguments
 import argparse
 import importlib.util
 import json
@@ -92,7 +93,7 @@ def main():
                 open_settings(); ui.send(b'\t' * 4 + ESC + b'[C')
                 ui.send(ESC + b'[20~'); ui.wait('Appearance changes canceled')
                 assert json.loads(settings.read_text()) == changed
-                assert not client.call('TractandaItem/query')['ids']
+                assert not client.call('TractandaItem/query', query_arguments({}))['ids']
                 checks.append('Cancel retains saved values and all settings activity remains outside canonical items')
     report = {'status': 'passed', 'platform': platform.platform(), 'checks': checks, 'snapshots': snapshots}
     args.output.parent.mkdir(parents=True, exist_ok=True)

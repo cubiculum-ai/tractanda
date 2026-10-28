@@ -109,7 +109,14 @@ final class PersonalEntrypointTests: XCTestCase, @unchecked Sendable {
         }.value
     }
     private func commit(_ socket: String, _ request: CommitRequest) async throws -> CommitResult {
-        try await Task.detached { try ItemClient(socketPath: socket).commit(request) }.value
+        try await Task.detached {
+            let client = ItemClient(socketPath: socket)
+            let receipt = try client.commit(request)
+            let revision = try client.revision(itemID: receipt.itemID, revisionID: receipt.revisionID)
+            return CommitResult(
+                revision: revision, wasReplayed: receipt.wasReplayed,
+                isIndexReady: receipt.isIndexReady, warnings: receipt.diagnostics.map(\.rawValue))
+        }.value
     }
     private func object(_ data: Data) throws -> [String: Any] {
         try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -170,9 +177,9 @@ final class PersonalEntrypointTests: XCTestCase, @unchecked Sendable {
                 .init(
                     classID: "Item", changes: ["subject": .text("socketneedle")], operationID: "socket-create"
                 ))
-            let query = try object(
-                await call(
-                    config.socketPath, "TractandaItem/query", ["expression": "subject == \"socketneedle\""]))
+            let query = try object(await Task.detached {
+                try ItemClient(socketPath: config.socketPath).query(criteria: ["expression": "subject == \"socketneedle\""])
+            }.value)
             XCTAssertEqual(query["ids"] as? [String], [first.revision.itemID])
             let changed = try await commit(
                 config.socketPath,
@@ -180,10 +187,9 @@ final class PersonalEntrypointTests: XCTestCase, @unchecked Sendable {
                     action: .revise, itemID: first.revision.itemID,
                     expectedRevisionID: first.revision.revisionID,
                     changes: ["subject": .text("socketsecond")], operationID: "socket-revise"))
-            struct History: Decodable { let list: [Revision] }
-            let history = try JSON.decode(
-                History.self,
-                await call(config.socketPath, "TractandaItem/history", ["itemID": first.revision.itemID]))
+            let history = try await Task.detached {
+                try ItemClient(socketPath: config.socketPath).history(itemID: first.revision.itemID)
+            }.value
             XCTAssertEqual(history.list, [changed.revision, first.revision])
             var rebuild = try await Task.detached {
                 try ItemClient(socketPath: config.socketPath).beginStoreRebuild(operationID: "socket-rebuild")
@@ -208,9 +214,9 @@ final class PersonalEntrypointTests: XCTestCase, @unchecked Sendable {
                 try ItemClient(socketPath: config.socketPath).revision(for: first.revision.itemID)
             }.value
             XCTAssertEqual(restored, changed.revision)
-            let restoredHistory = try JSON.decode(
-                History.self,
-                await call(config.socketPath, "TractandaItem/history", ["itemID": first.revision.itemID]))
+            let restoredHistory = try await Task.detached {
+                try ItemClient(socketPath: config.socketPath).history(itemID: first.revision.itemID)
+            }.value
             XCTAssertEqual(restoredHistory.list, [changed.revision, first.revision])
             await daemon!.close()
             daemon = nil

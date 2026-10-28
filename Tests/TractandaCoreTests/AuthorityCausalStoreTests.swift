@@ -127,7 +127,8 @@ final class AuthorityCausalStoreTests: XCTestCase {
             ],
         ])
         XCTAssertNil(
-            try ItemService(store: f.receiver).preparePooledHistory(request, peerUID: tractanda_uid()))
+            try ItemService(store: f.receiver).preparePooledHistory(
+                nativeFixtureInvocation(request), peerUID: tractanda_uid()))
         let history = try response(
             f.receiver, "TractandaItem/history",
             ["itemID": b.itemID, "position": 0, "limit": 20])

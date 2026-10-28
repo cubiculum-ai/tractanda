@@ -72,6 +72,55 @@ private final class PersonalPeerConnectOwner: Sendable {
 /// A single hostname lookup and bounded address attempts. The mesh owner schedules reconnects.
 /// Directional TLS roles concern this socket only; each member has a dialing context.
 package enum PersonalPeerConnector {
+    /// Starts alternatives in preference order without expiring a slower healthy handshake.
+    /// Responder readiness reserves exactly one same-pair channel before acknowledging it.
+    package static func connect(
+        group: MultiThreadedEventLoopGroup, endpoints: [PeerRuntimeConfiguration.Endpoint],
+        pairing: PeerPairing, operations: PersonalPeerOperations, resolver: PeerNameResolver,
+        limits: PersonalPeerLimits = .init(), connectSeconds: Double = 30,
+        staggerSeconds: Double = 0.25
+    ) async throws -> PersonalPeerConnection {
+        guard (1...PeerRuntimeConfiguration.Peer.maximumEndpoints).contains(endpoints.count),
+            staggerSeconds.isFinite, staggerSeconds >= 0, staggerSeconds <= 5
+        else { throw TractandaError("invalidConfiguration", "Invalid ordered peer destinations.") }
+        return try await withThrowingTaskGroup(of: Result<PersonalPeerConnection, Error>.self) { tasks in
+            for (index, endpoint) in endpoints.enumerated() {
+                tasks.addTask {
+                    do {
+                        if index > 0 {
+                            try await Task.sleep(for: .seconds(Double(index) * staggerSeconds))
+                        }
+                        try Task.checkCancellation()
+                        return .success(
+                            try await connect(
+                                group: group, host: endpoint.host, port: endpoint.port, pairing: pairing,
+                                operations: operations, resolver: resolver, limits: limits,
+                                connectSeconds: connectSeconds))
+                    } catch { return .failure(error) }
+                }
+            }
+            var winner: PersonalPeerConnection?
+            var failure: any Error = TractandaError("connectionFailed", "No peer destination connected.")
+            for try await result in tasks {
+                switch result {
+                case .success(let connection):
+                    if winner == nil, !Task.isCancelled {
+                        winner = connection
+                        tasks.cancelAll()
+                    } else {
+                        try? await connection.close().get()
+                    }
+                case .failure(let error): failure = error
+                }
+            }
+            if Task.isCancelled {
+                if let winner { try? await winner.close().get() }
+                throw CancellationError()
+            }
+            guard let winner else { throw failure }
+            return winner
+        }
+    }
     package static func connect(
         group: MultiThreadedEventLoopGroup, host: String, port: Int, pairing: PeerPairing,
         operations: PersonalPeerOperations, resolver: PeerNameResolver,

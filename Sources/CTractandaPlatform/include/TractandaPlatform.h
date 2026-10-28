@@ -51,6 +51,9 @@ int tractanda_lock(const char *path);
 int tractanda_lock_was_busy(void);
 int tractanda_unlock(int descriptor);
 int tractanda_publish(const char *path, const void *bytes, size_t count);
+// Durable regular-file barrier: fsync, and macOS F_FULLFSYNC to flush device caches.
+// Call after synchronizing publication directories as well as before exposing new bytes.
+int tractanda_durable_sync(int fd);
 // Atomically moves a complete private directory without replacing an existing destination.
 int tractanda_publish_directory_at(int source_parent, const char *source, int target_parent, const char *target);
 int tractanda_listen(const char *path);
@@ -72,14 +75,19 @@ int tractanda_terminate_if_stopping(void);
 int tractanda_peer_uid(int descriptor, uint32_t *uid);
 int tractanda_send_frame(int descriptor, const void *bytes, uint32_t count);
 int tractanda_receive_frame(int descriptor, void **bytes, uint32_t *count);
-// Explicit installer mutation response only: bounded reads may repeat, request is never resent.
-int tractanda_receive_installer_frame(int descriptor, void **bytes, uint32_t *count);
+// Connected IO preserves partial frames across idle timeout wakeups until cancel/disconnect/error.
+int tractanda_send_connected_frame(int descriptor, const void *bytes, uint32_t count);
+int tractanda_receive_connected_frame(int descriptor, void **bytes, uint32_t *count);
 // Fixed local enrollment launch: actual current image path; no argv/PATH fallback.
 int tractanda_current_executable(char *buffer, uint32_t capacity);
 // Fixed basename only, no-follow trusted-owner chain; reject mutation-granting ACLs.
 int tractanda_validate_enrollment_helper(const char *path, int root_only);
 int tractanda_validate_enrollment_ssh(void);
 int tractanda_peer_configuration_no_mutation_acl(int fd);
+// Secret-bearing enrollment files/directories: refuse every extended access ACL.
+int tractanda_secret_file_no_acl(int fd);
+// Scoped non-echo input, restoring terminal/handlers on input, error or cancellation.
+int tractanda_private_terminal_line(int fd, void *bytes, size_t cap, size_t *count);
 // Enrollment source socket only, CLOCK_MONOTONIC absolute deadline at most20seconds away.
 int tractanda_private_connect_until(const char *path, uint64_t deadline);
 // Private native input only: owned client socket, one monotonic 20-second IO budget.

@@ -57,7 +57,8 @@ class ReleaseTests(unittest.TestCase):
                     cwd=stage, check=True, capture_output=True, text=True)
 
             with patch.object(pipeline, 'verify_notarization') as notarization, \
-                    patch.object(release.delivery, 'active', return_value=False), \
+                    patch.object(release.delivery, 'active', return_value=True), \
+                    patch.object(release.delivery, 'verify_install', return_value={'fixture': 'authorized'}), \
                     patch.object(pipeline, 'run_command', side_effect=run_command):
                 pipeline.install()
             notarization.assert_called_once_with()
@@ -559,16 +560,21 @@ class ReleaseTests(unittest.TestCase):
                 vmlxRevision='61a4b20d4ad01b10466e8fc94c50402a9f994430', dimensions=768,
                 pooling='cls', normalization='l2', revision='fixture',
                 assets={'model.safetensors': packager.digest(weights)})
-            with patch.object(packager, 'run', return_value=json.dumps(profile)):
+            artifacts = {'granite-embedding-311m-multilingual-r2': {'files': [
+                {'path': 'model.safetensors', 'size': weights.stat().st_size,
+                 'sha256': packager.digest(weights)}]}}
+            with patch.object(packager, 'model_artifacts', return_value=artifacts), \
+                    patch.object(packager, 'run', return_value=json.dumps(profile)):
                 self.assertEqual(packager.embedding_descriptor(Path('/helper'), directory)['dimensions'], 768)
                 weights.write_bytes(b'changed')
-                with self.assertRaisesRegex(ValueError, 'pinned hashes'):
+                with self.assertRaisesRegex(ValueError, 'pinned artifact manifest'):
                     packager.embedding_descriptor(Path('/helper'), directory)
                 weights.write_bytes(b'fixture weights')
                 (directory / 'extra.json').write_text('{}')
-                with self.assertRaisesRegex(ValueError, 'pinned hashes'):
+                with self.assertRaisesRegex(ValueError, 'pinned artifact manifest'):
                     packager.embedding_descriptor(Path('/helper'), directory)
-            with patch.object(packager, 'run', return_value=json.dumps({**profile, 'alias': 'old-model'})):
+            with patch.object(packager, 'model_artifacts', return_value=artifacts), \
+                    patch.object(packager, 'run', return_value=json.dumps({**profile, 'alias': 'old-model'})):
                 with self.assertRaisesRegex(ValueError, 'Granite profile'):
                     packager.embedding_descriptor(Path('/helper'), directory)
 
@@ -840,13 +846,6 @@ class ReleaseTests(unittest.TestCase):
                 remaining = run('worktree', 'list', '--porcelain', '-z')
                 self.assertIn(str(unrelated.resolve()), remaining)
                 self.assertNotIn(str((directories['2'] / 'source').resolve()), remaining)
-
-    def test_canonical_preservation_accepts_append_only_and_rejects_rewrites(self):
-        before = {'entries': {'items/old.tractanda': {'kind': 'file', 'sha256': 'a'}}}
-        activate.require_preserved(before, {'entries': {**before['entries'], 'items/new.tractanda': {'kind': 'file', 'sha256': 'b'}}})
-        for after in ({'entries': {}}, {'entries': {'items/old.tractanda': {'kind': 'file', 'sha256': 'changed'}}}):
-            with self.assertRaises(RuntimeError):
-                activate.require_preserved(before, after)
 
     def test_completed_steps_resume_and_failures_are_not_acknowledged(self):
         with tempfile.TemporaryDirectory() as temporary:

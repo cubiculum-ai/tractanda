@@ -21,7 +21,7 @@ final class MenuTests: XCTestCase {
         }
         deinit { try? FileManager.default.removeItem(at: root) }
         func item(_ subject: String, fields: [String: ItemValue] = [:]) throws -> Revision {
-            try client.commit(
+            try client.commitFixture(
                 CommitRequest(
                     classID: "Item",
                     changes: fields.merging(["subject": .text(subject)]) { _, new in new },
@@ -276,7 +276,7 @@ final class MenuTests: XCTestCase {
         let fixture = try Fixture()
         let item = try fixture.item("Before refresh")
         let app = try fixture.app(display: .ten)
-        let revised = try fixture.client.commit(
+        let revised = try fixture.client.commitFixture(
             CommitRequest(
                 action: .revise, itemID: item.itemID, expectedRevisionID: item.revisionID,
                 changes: ["subject": .text("After refresh")], operationID: Identifier.make())

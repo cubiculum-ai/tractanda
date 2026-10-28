@@ -74,6 +74,10 @@ func daemonConfiguration(from arguments: [String]) throws -> DaemonConfiguration
     var uploadStagedBytes: Int64?
     var attachmentMinimumFreeBytes: Int64?
     var peerRuntimeConfigurationPath: String?
+    var modelManifest: String?
+    var modelStorage: String?
+    var modelAdoption: String?
+    var publicJMAP: PublicJMAPConfiguration?
     var seen: Set<String> = []
     var index = 3
     while index < arguments.count {
@@ -93,7 +97,8 @@ func daemonConfiguration(from arguments: [String]) throws -> DaemonConfiguration
             "--document-inspect-seconds", "--document-model-load-seconds", "--document-page-seconds",
             "--document-no-progress-seconds", "--document-termination-grace-seconds",
             "--attachment-upload-idle-seconds", "--attachment-staged-byte-quota",
-            "--attachment-minimum-free-bytes", "--rebuild-no-progress-seconds", "--peer-runtime-config":
+            "--attachment-minimum-free-bytes", "--rebuild-no-progress-seconds", "--peer-runtime-config",
+            "--public-jmap-config", "--model-provisioning-manifest", "--model-storage-directory", "--model-adoption-directory":
             guard index + 1 < arguments.count, !arguments[index + 1].hasPrefix("--") else {
                 throw TractandaError("usage", usage)
             }
@@ -152,6 +157,15 @@ func daemonConfiguration(from arguments: [String]) throws -> DaemonConfiguration
                 guard uploadStagedBytes == nil, let bytes = Int64(value), bytes > 0
                 else { throw TractandaError("usage", usage) }
                 uploadStagedBytes = bytes
+            case "--model-provisioning-manifest":
+                guard modelManifest == nil else { throw TractandaError("usage", usage) }; modelManifest = value
+            case "--model-storage-directory":
+                guard modelStorage == nil else { throw TractandaError("usage", usage) }; modelStorage = value
+            case "--model-adoption-directory":
+                guard modelAdoption == nil else { throw TractandaError("usage", usage) }; modelAdoption = value
+            case "--public-jmap-config":
+                guard publicJMAP == nil else { throw TractandaError("usage", usage) }
+                publicJMAP = try PublicJMAPConfiguration.load(from: value)
             case "--peer-runtime-config":
                 guard peerRuntimeConfigurationPath == nil, value.hasPrefix("/"), value != "/",
                     value.utf8.count <= 4096, !value.contains("\0")
@@ -165,9 +179,13 @@ func daemonConfiguration(from arguments: [String]) throws -> DaemonConfiguration
     }
     let documentValues = [documentExecutable, documentModel, documentScratch].compactMap { $0 }
     guard documentValues.isEmpty || documentValues.count == 3 else { throw TractandaError("usage", usage) }
+    guard (modelManifest == nil) == (modelStorage == nil), modelAdoption == nil || modelManifest != nil else { throw TractandaError("usage", usage) }
+    let provisioning = modelManifest.map { ModelProvisioningConfiguration(manifestPath: $0, storageDirectory: modelStorage!, adoptionDirectory: modelAdoption) }
+    let documentArtifact = try modelManifest.map { try ModelProvisioningCatalog.load($0).artifacts.first { $0.identifier == "granite-docling-258m-mlx" } } ?? nil
     let converter = documentExecutable.map {
         DocumentConverterConfiguration(
-            executablePath: $0, modelDirectory: documentModel!, scratchDirectory: documentScratch!)
+            executablePath: $0, modelDirectory: documentModel!, scratchDirectory: documentScratch!,
+            modelArtifact: documentArtifact, modelStorageDirectory: documentArtifact == nil ? nil : modelStorage)
     }
     let documentResources: DocumentJobResources? =
         documentResourceValues.isEmpty
@@ -187,13 +205,13 @@ func daemonConfiguration(from arguments: [String]) throws -> DaemonConfiguration
         storePath: store, indexDirectory: indexDirectory, socketPath: socket, httpPort: port,
         managed: managed, viewItemID: view,
         projectRootID: projectRoot, statusRootID: statusRoot, initialProjectID: project,
-        documentConverter: converter, documentJobResources: documentResources,
+        documentConverter: converter, documentJobResources: documentResources, modelProvisioning: provisioning,
         attachmentUploadPolicy: AttachmentUploadPolicy(
             idleRetentionSeconds: uploadIdleSeconds ?? 3600,
             maximumStagedBytes: uploadStagedBytes ?? 8 * 1024 * 1024 * 1024,
             minimumFreeBytes: attachmentMinimumFreeBytes ?? 1024 * 1024 * 1024),
         rebuildNoProgressTimeoutSeconds: rebuildNoProgressSeconds ?? 120,
-        peerRuntimeConfigurationPath: peerRuntimeConfigurationPath)
+        peerRuntimeConfigurationPath: peerRuntimeConfigurationPath, publicJMAP: publicJMAP)
     try configuration.validate()
     return configuration
 }

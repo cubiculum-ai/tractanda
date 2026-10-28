@@ -55,23 +55,14 @@ struct CategoryPreviewPage: Sendable {
             let completeness: String?
             let conflictsAvailable: Bool?
         }
-        struct GetResult: Decodable {
-            let list: [Revision]
-            let notFound: [String]
-            let unresolved: [ItemUnresolvedState]?
-            let remainingIDs: [String]?
-            let oversizedIDs: [String]?
-            let state: String
-        }
+        typealias GetResult = FullItemRead
         let sortValue = try JSONSerialization.jsonObject(with: JSON.encode(sort))
         let page = try JSON.decode(
             QueryResult.self,
-            client.call(
-                "TractandaItem/query",
-                arguments: [
-                    "categoryPath": path, "position": position, "limit": 64, "sort": sortValue,
-                    "at": Timestamp.now(),
-                ]))
+            client.query(criteria: [
+                "categoryPath": path, "position": position, "limit": 64, "sort": sortValue,
+                "at": Timestamp.now(),
+            ]))
         guard !page.ids.isEmpty || position >= page.total else {
             throw TractandaError("protocolError", "Empty non-final category preview page.")
         }
@@ -324,7 +315,7 @@ struct CaptureActionLoader: Sendable {
     }
     enum Outcome: Sendable {
         case prepared(TractandaCore.CapturePlan)
-        case committed(TractandaCore.CommitResult)
+        case committed(TractandaCore.MutationReceipt)
         case failure(Failure)
     }
     private struct Delivery: Sendable {

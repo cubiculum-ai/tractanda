@@ -31,9 +31,8 @@ extension SetupEngine {
     func quiescentCanonicalRequirement(_ receipt: InstallationReceipt) throws -> CanonicalReaderRequirement {
         let root = URL(fileURLWithPath: receipt.store).resolvingSymlinksInPath()
         let uid = try canonicalOwnerUID(root)
-        try ItemStore.verifyPersonalWorkgroupRoot(root: root, ownerUID: uid)
         return try CanonicalReaderRequirement.withWriterLock(root: root, ownerUID: uid) {
-            try CanonicalReaderRequirement.admitQuiescent(root: root, ownerUID: uid)
+            try ItemStore.personalWorkgroupUpgradeRequirement(root: root, ownerUID: uid)
         }
     }
     func requireCanonicalReader(_ receipt: InstallationReceipt, quiescent: Bool) throws {

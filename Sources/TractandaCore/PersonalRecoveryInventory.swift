@@ -91,7 +91,7 @@ enum PersonalRecoveryInventory {
         check: @escaping @Sendable () throws -> Void = {},
         activity: @escaping @Sendable () throws -> Void = {},
         originalVerified: @escaping @Sendable (Int64) throws -> Void = { _ in },
-        pageVerified: @escaping @Sendable () throws -> Void = {}
+        pageVerified: @escaping @Sendable () throws -> Void = {}, documentReadFailureForTesting: Int32? = nil
     ) throws -> Result {
         guard !sources.isEmpty, sources.count <= limits.maximumSources, limits.maximumEntries > 0,
             limits.maximumRevisions > 0,
@@ -152,7 +152,19 @@ enum PersonalRecoveryInventory {
             try check()
         }
         func mustPropagate(_ error: Error) -> Bool {
-            error is CancellationError
+            if let failure = error as? TractandaError, failure.code == "documentIntegrity",
+                failure.osError.map({
+                    [EIO, ENOSPC, EDQUOT, EBUSY, EMFILE, ENFILE, ENOMEM, EINTR].contains($0)
+                }) == true
+            {
+                return true
+            }
+            if case FileMetadataError.posix(let code) = error,
+                [EIO, ENOSPC, EDQUOT, EBUSY, EMFILE, ENFILE, ENOMEM, EINTR].contains(code)
+            {
+                return true
+            }
+            return error is CancellationError
                 || ["resourceLimit", "cancelled", "rebuildNoProgress"].contains(
                     (error as? TractandaError)?.code ?? "")
         }
@@ -403,7 +415,7 @@ enum PersonalRecoveryInventory {
                         progress: { _ in
                             try activity()
                             try pageVerified()
-                        })
+                        }, readFailureForTesting: documentReadFailureForTesting)
                     try chargeMetadata(128)
                     validatedDocumentLocations[id, default: []].append(location)
                 } catch {

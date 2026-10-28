@@ -34,7 +34,7 @@ def verify(binary):
         content = bytes(range(251)) * 1100
         source.write_bytes(content)
         with wire.server(binary, store, socket) as client:
-            base = client.commit(wire.intent("create", "fixture", class_id="Item", changes={"subject": wire.text("attachment fixture")}))["revision"]
+            base = client.commit_with_revision(wire.intent("create", "fixture", class_id="Item", changes={"subject": wire.text("attachment fixture")}))["revision"]
             item, revision = wire.item_id(base), wire.revision_id(base)
             command = [binary, "attach", str(socket), item, revision, "attach", str(source), "application/octet-stream"]
             attached = json.loads(subprocess.check_output(command))

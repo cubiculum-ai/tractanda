@@ -54,7 +54,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="trac-item-overlay-", dir="/tmp") as directory:
         root = Path(directory)
         with wire.server(str(args.native_binary.resolve()), root / "store", root / "s") as client:
-            background = client.commit(wire.intent(
+            background = client.commit_with_revision(wire.intent(
                 "create", str(uuid.uuid4()), class_id="Item",
                 changes={"subject": wire.text("Overlay background"), "body": wire.text("context remains visible")},
             ))["revision"]

@@ -6,12 +6,17 @@ import Testing
 private actor MemoryJournal: PendingEditStore {
     var edit: PendingEdit?
     var failsSaving = false
+    var failsClearing = false
     func load() -> PendingEdit? { edit }
     func save(_ edit: PendingEdit) throws {
         if failsSaving { throw TractandaError("diskFull", "Cannot record recovery.") }
         self.edit = edit
     }
-    func clear() { edit = nil }
+    func clear() throws {
+        if failsClearing { throw TractandaError("diskFull", "Cannot clear recovery.") }
+        edit = nil
+    }
+    func setClearFailure(_ fails: Bool) { failsClearing = fails }
     func setFailure(_ fails: Bool) { failsSaving = fails }
 }
 
@@ -22,6 +27,8 @@ private actor ScenarioTransport: ItemTransport {
     var uniqueCommits = 0
     var accessIsRevoked = false
     var hidesCurrent = false
+    var failsReadsAfterCommit = false
+    func failReadsAfterCommit() { failsReadsAfterCommit = true }
     func hideCurrentItem() { hidesCurrent = true }
     func revokeAccess() { accessIsRevoked = true }
     private var receipts: [String: CommitResult] = [:]
@@ -52,26 +59,46 @@ private actor ScenarioTransport: ItemTransport {
     }
 
     func send(_ data: Data) async throws -> Data {
+        let request = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        let entry = (request["methodCalls"] as! [[Any]])[0]
+        if entry[0] as? String == "TractandaSession/get" {
+            return try discoveryReply(callID: entry[2] as! String)
+        }
         if accessIsRevoked {
             return try reply("error", ["type": "accessDenied", "description": "Access was revoked."])
         }
         let envelope = try JSONSerialization.jsonObject(with: data) as! [String: Any]
         let call = (envelope["methodCalls"] as! [[Any]])[0]
         let method = call[0] as! String
-        let args = call[1] as! [String: Any]
+        var args = call[1] as! [String: Any]
+        if let changes = args["changes"] as? [String: Any] {
+            args["changes"] = try changes.mapValues { try fixtureTagged($0, toWire: false) }
+        }
+        if failsReadsAfterCommit && uniqueCommits > 0 && method != "TractandaItem/commit" {
+            return try reply(
+                "error", ["type": "accessDenied", "description": "Access was revoked after saving."])
+        }
         let state = "state-\(current?.revisionID ?? "empty")"
         switch method {
         case "TractandaItem/query":
-            let items = args["expression"] == nil && !hidesCurrent ? current.map { [$0.itemID] } ?? [] : []
+            let items =
+                (args["filter"] as? [String: Any])?["expression"] == nil && !hidesCurrent
+                ? current.map { [$0.itemID] } ?? [] : []
             return try reply(
                 method, ["ids": items, "position": 0, "total": items.count, "queryState": state])
-        case "TractandaItem/get":
+        case "TractandaItem/getBounded":
             let ids = args["ids"] as! [String]
             let list = current.flatMap { ids.contains($0.itemID) && !hidesCurrent ? [$0] : nil } ?? []
             // Every requested ID must be classified, including items hidden by current access.
             let returnedIDs = Set(list.map(\.itemID))
             let notFound = ids.filter { !returnedIDs.contains($0) }
             return try reply(method, ["list": object(list), "notFound": notFound, "state": state])
+        case "TractandaRevision/get":
+            guard let revision = current, (args["ids"] as? [String]) == [revision.revisionID]
+            else {
+                return try reply("error", ["type": "notFound", "description": "Revision missing"])
+            }
+            return try reply(method, ["revision": object(revision)])
         case "TractandaItem/commit":
             commitRequests.append(data)
             if holdsFirstCommit {
@@ -86,8 +113,10 @@ private actor ScenarioTransport: ItemTransport {
                 return try reply(
                     method,
                     object(
-                        CommitResult(
-                            revision: receipt.revision, wasReplayed: true, isIndexReady: true, warnings: [])))
+                        try MutationReceipt(
+                            CommitResult(
+                                revision: receipt.revision, wasReplayed: true, isIndexReady: true,
+                                warnings: []))))
             }
             if request.action == .revise, request.expectedRevisionID != current?.revisionID {
                 return try reply("error", ["type": "revisionConflict", "description": "Item changed."])
@@ -108,7 +137,7 @@ private actor ScenarioTransport: ItemTransport {
                 losesFirstReply = false
                 throw TractandaError("connectionClosed", "Reply lost after committing.")
             }
-            return try reply(method, object(receipt))
+            return try reply(method, object(try MutationReceipt(receipt)))
         default: throw TractandaError("unexpectedCall", method)
         }
     }
@@ -267,4 +296,87 @@ func refreshRechecksAnOpenDraftsAccessWithoutReplacingItsBase() async throws {
     #expect(workspace.lastError?.code == "notFound")
     #expect(workspace.draft == nil)
     #expect(workspace.items.isEmpty)
+}
+
+@MainActor @Test
+func confirmedSaveRefreshFailureNeverRetainsAnUncertainWrite() async throws {
+    let transport = ScenarioTransport()
+    await transport.failReadsAfterCommit()
+    let journal = MemoryJournal()
+    let workspace = ItemWorkspace(client: ItemClient(transport: transport), journal: journal)
+    await workspace.start()
+    workspace.capture()
+    workspace.draft?.subject = "Confirmed then revoked"
+    await workspace.save()
+    #expect(workspace.pendingEdit == nil)
+    #expect(workspace.draft == nil)
+    #expect(workspace.message == "Saved; refreshing the workspace failed. Access was revoked after saving.")
+    #expect(workspace.lastError?.code == "accessDenied")
+    #expect(await journal.load() == nil)
+    #expect(await transport.uniqueCommits == 1)
+    await workspace.retry()
+    #expect(await transport.commitRequests.count == 1)
+}
+
+@MainActor @Test
+func confirmedSaveCleanupRetryDoesNotResubmitAndRestartOnlyCleans() async throws {
+    let transport = ScenarioTransport()
+    let journal = MemoryJournal()
+    await journal.setClearFailure(true)
+    let workspace = ItemWorkspace(client: ItemClient(transport: transport), journal: journal)
+    await workspace.start()
+    workspace.capture()
+    workspace.draft?.subject = "Saved once"
+    await workspace.save()
+    #expect(workspace.pendingEdit?.confirmation != nil)
+    #expect(await journal.load()?.confirmation != nil)
+    #expect(workspace.message.hasPrefix("Saved;"))
+    await journal.setClearFailure(false)
+    await workspace.retry()
+    #expect(await transport.commitRequests.count == 1)
+    #expect(workspace.pendingEdit == nil)
+    #expect(await journal.load() == nil)
+}
+
+@MainActor @Test
+func confirmedSavePreservesAndRebasesNewerUnsentDraft() async throws {
+    let transport = ScenarioTransport(holdsFirstCommit: true)
+    let journal = MemoryJournal()
+    let workspace = ItemWorkspace(client: ItemClient(transport: transport), journal: journal)
+    await workspace.start()
+    workspace.capture()
+    workspace.draft?.subject = "Submitted title"
+    let saving = Task { await workspace.save() }
+    await transport.waitForCommit()
+    workspace.draft?.body = "Newer unsent body"
+    await transport.releaseCommit()
+    await saving.value
+    #expect(workspace.pendingEdit == nil)
+    #expect(workspace.draft?.body == "Newer unsent body")
+    let current = await transport.current
+    #expect(workspace.draft?.base?.revisionID == current?.revisionID)
+    let next = try workspace.draft?.makeRequest()
+    #expect(next?.changes["body"] == .text("Newer unsent body"))
+    #expect(next?.changes["subject"] == nil)
+    #expect(await transport.commitRequests.count == 1)
+}
+
+@MainActor @Test
+func confirmedSaveDoesNotReplaceAChangedWorkspaceSelection() async throws {
+    let transport = ScenarioTransport(holdsFirstCommit: true)
+    let journal = MemoryJournal()
+    let workspace = ItemWorkspace(client: ItemClient(transport: transport), journal: journal)
+    await workspace.start()
+    workspace.capture()
+    workspace.draft?.subject = "Submitted"
+    let saving = Task { await workspace.save() }
+    await transport.waitForCommit()
+    // A concurrent refresh invalidates the save's presentation generation.
+    await workspace.refresh()
+    await transport.releaseCommit()
+    await saving.value
+    #expect(workspace.pendingEdit == nil)
+    #expect(workspace.selectedItemID == nil)
+    #expect(workspace.message == "Saved; current workspace preserved.")
+    #expect(await journal.load() == nil)
 }

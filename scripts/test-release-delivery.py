@@ -250,19 +250,20 @@ class DeliveryTests(unittest.TestCase):
         Path(value['checks'][0]['evidence'][0]['path']).write_bytes(b'changed verification receipt')
         with self.assertRaises(RuntimeError): D.verify_install(self.state)
 
-    def test_later_delivery_verifies_existing_initialization_without_repeating_conversion(self):
+    def test_current_checks_do_not_require_backup_initialization_or_enrollment(self):
         self.pipeline()
-        for n in ('install-authorization', 'install', 'health'): self.state['steps'].pop(n)
-        self.state['delivery'].pop('installAuthorization')
-        path, value = self.install_acceptance()
-        original = self.write(self.root / 'old-initialization.json', {'initializedAt': '2025-01-01', 'storeID': self.raven['storeID']})
-        before = original.read_bytes()
-        self.assertEqual(value['checks'][1]['name'], 'canonical-cluster-initialization')
-        value['checks'][1]['evidence'] = [{'path': str(original), 'sha256': R.sha(original)}]
-        self.write(path, value)
-        with patch.object(R, 'command') as command:
-            D.allow_install(self.state, path, value['candidateID']); D.verify_install(self.state)
-        command.assert_not_called(); self.assertEqual(original.read_bytes(), before)
+        self.assertEqual(D.INSTALL_CHECKS, ('candidate-compatibility-and-maintenance', 'current-installation-identity'))
+        self.assertEqual(D.CHECKS, ('raven-candidate-runtime', 'stash-candidate-runtime',
+                                  'current-membership-and-peer-runtime', 'bidirectional-verification'))
+
+    def test_pending_v1_candidate_cannot_run_install_or_publish(self):
+        p = self.pipeline(); self.state['delivery']['profile'] = 'tractanda.release-delivery.v1'
+        with self.assertRaisesRegex(RuntimeError, 'legacy candidate'): p.run()
+        with patch.object(p, 'verify_notarization'), patch.object(p, 'verify_artifacts'), \
+             patch.object(p, 'run_command') as run, patch.object(R, 'release_info') as remote:
+            with self.assertRaisesRegex(RuntimeError, 'legacy candidate'): p.install()
+            with self.assertRaisesRegex(RuntimeError, 'legacy candidate'): p.publish()
+        run.assert_not_called(); remote.assert_not_called()
 
     def test_cluster_acceptance_must_keep_the_preinstall_raven_identity(self):
         self.pipeline(); path, value = self.acceptance(); value['cluster']['ravenReplicaID'] = str(uuid.uuid1())
@@ -275,7 +276,7 @@ class DeliveryTests(unittest.TestCase):
             value = copy.deepcopy(valid)
             if defect == 'pending': value['checks'][0]['status'] = 'PENDING'
             if defect == 'candidate': value['candidate']['commit'] = 'c' * 40
-            if defect == 'order': value['checks'][4], value['checks'][5] = value['checks'][5], value['checks'][4]
+            if defect == 'order': value['checks'][0], value['checks'][1] = value['checks'][1], value['checks'][0]
             if defect == 'pins': value['cluster']['storeID'] = str(uuid.uuid4())
             self.write(path, value)
             with self.subTest(defect=defect), self.assertRaises(RuntimeError): D.accept(self.state, path, valid['candidateID'])

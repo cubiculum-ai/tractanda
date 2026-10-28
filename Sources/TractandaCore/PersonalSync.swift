@@ -8,7 +8,8 @@ public struct PersonalMember: Codable, Equatable, Sendable {
     public init(replicaID: String, hostname: String) throws {
         try PersonalSyncValidation.identifier(replicaID)
         let endpoint = try PeerRuntimeConfiguration.Endpoint(host: hostname, port: 1)
-        guard !hostname.contains(":"), !hostname.allSatisfy({ $0.isNumber || $0 == "." }),
+        guard !PeerRuntimeConfiguration.Endpoint.isNumericAddress(hostname),
+            !hostname.contains(":"), !hostname.allSatisfy({ $0.isNumber || $0 == "." }),
             !["*", "0.0.0.0", "::"].contains(hostname)
         else {
             throw TractandaError("invalidPersonalMembership", "Use a DNS hostname for a member.")

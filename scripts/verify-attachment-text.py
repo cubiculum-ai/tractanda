@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Small deterministic extraction/query/citation fixture; optional child runs inside server lifetime."""
+from jmap_client import query_arguments
 import argparse
 import importlib.util
 import json
@@ -43,11 +44,11 @@ def verify(binary, child):
             assert overview["topic"] == "overview" and overview["capability"] == wire.CAPABILITY
             properties = json.loads(subprocess.check_output([binary, "describe", str(socket), "properties"]))
             assert properties["topic"] == "properties"
-            current = client.commit(wire.intent("create", "task", class_id="Item", changes={
+            current = client.commit_with_revision(wire.intent("create", "task", class_id="Item", changes={
                 "subject": wire.text("Prepare the community garden grant"),
                 "body": wire.text("Current task: prepare and submit the grant application using the attached briefing."),
             }))["revision"]
-            history = client.commit(wire.intent("create", "discussion", class_id="Item", changes={
+            history = client.commit_with_revision(wire.intent("create", "discussion", class_id="Item", changes={
                 "subject": wire.text("Archived discussion about garden fundraising"),
                 "body": wire.text("Historical discussion from 2025: someone suggested an August deadline. No current task was assigned here."),
             }))["revision"]
@@ -56,7 +57,7 @@ def verify(binary, child):
             attached = json.loads(subprocess.check_output([binary, "attach", str(socket), item_id, base_id,
                 "original", str(source), "text/markdown"]))
             descriptor = client.call("TractandaAttachment/list", {"itemID": item_id})["attachments"][0]
-            before = client.call("TractandaItem/query", {"text": "garden supplies", "limit": 16})
+            before = client.call("TractandaItem/query", query_arguments({"text": "garden supplies", "limit": 16}))
             assert before["ids"] == []
             command = [binary, "extract-attachment", str(socket), item_id, attached["revisionID"], "extract", descriptor["attachmentID"]]
             capacity(root)
@@ -64,7 +65,7 @@ def verify(binary, child):
             replay = json.loads(subprocess.check_output(command))
             assert extracted["revisionID"] == replay["revisionID"] and replay["replayed"]
             assert "revision" not in extracted
-            query = client.call("TractandaItem/query", {"text": "garden supplies", "limit": 16})
+            query = client.call("TractandaItem/query", query_arguments({"text": "garden supplies", "limit": 16}))
             assert query["ids"] == [item_id]
             diagnostic = json.loads(subprocess.check_output([binary, "extracted-text", str(socket), *query["ids"]]))
             assert diagnostic["extractionProfile"] == "tractanda.item-text.v8"
@@ -89,7 +90,7 @@ def verify(binary, child):
             assert "attachmentText" not in summary["list"][0]["fields"]
             capacity(root)
             client.rebuild("verify-attachment-text-rebuild")
-            assert client.call("TractandaItem/query", {"text": "garden supplies", "limit": 16})["ids"] == [item_id]
+            assert client.call("TractandaItem/query", query_arguments({"text": "garden supplies", "limit": 16}))["ids"] == [item_id]
             manifest = {"binary": binary, "socket": str(socket), "fixtureOnly": True,
                 "currentTaskID": item_id, "historicalDiscussionID": wire.item_id(history),
                 "attachmentID": descriptor["attachmentID"], "extractedRevisionID": extracted["revisionID"],

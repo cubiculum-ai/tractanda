@@ -158,7 +158,8 @@ final class ClusterBoundaryRepairTests: XCTestCase {
             "using": [ItemService.capability],
             "methodCalls": [["TractandaItem/history", ["itemID": record.itemID, "limit": 1], "history"]],
         ])
-        let prepared = try XCTUnwrap(service.preparePooledHistory(request, peerUID: tractanda_uid()))
+        let prepared = try XCTUnwrap(
+            service.preparePooledHistory(nativeFixtureInvocation(request), peerUID: tractanda_uid()))
         let pool = try SQLiteReadPool(
             databaseURL: store.indexDirectory.appendingPathComponent("items.sqlite"))
         defer { try? pool.shutdown() }

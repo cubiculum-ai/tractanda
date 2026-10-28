@@ -38,7 +38,7 @@ final class ItemSearchTests: XCTestCase {
         {
             var fields = extra
             fields["subject"] = .text(subject)
-            return try client.commit(
+            return try client.commitFixture(
                 CommitRequest(classID: "Item", changes: fields, operationID: Identifier.make())
             ).revision
         }
@@ -495,7 +495,7 @@ final class ItemSearchTests: XCTestCase {
         semantic(app, query: "meaning")
         try await waitScreen(app, contains: "Semantic ready")
         XCTAssertTrue(app.refreshClock(at: Date().addingTimeInterval(31)))
-        let changed = try fixture.client.commit(
+        let changed = try fixture.client.commitFixture(
             CommitRequest(
                 action: .revise, itemID: stale.itemID,
                 expectedRevisionID: stale.revisionID, changes: ["subject": .text("Changed")],

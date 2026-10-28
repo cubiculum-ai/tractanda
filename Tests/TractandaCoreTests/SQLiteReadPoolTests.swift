@@ -33,6 +33,38 @@ final class SQLiteReadPoolTests: XCTestCase {
         ReadPrincipalContext(actorUID: 42, users: [:], groups: [:])
     }
 
+    func testCompletionDrivenExclusiveDrainCancelsWithoutDiscardingAcceptedLease() throws {
+        let (_, pool) = try fixture()
+        let lease = try pool.lease(principal: emptyContext)
+        let cancellation = SQLiteReadCancellation()
+        let finished = DispatchSemaphore(value: 0)
+        let failure = NSLockBox<SQLiteReadPoolError?>(nil)
+        DispatchQueue.global().async {
+            defer { finished.signal() }
+            do { try pool.beginExclusiveAndDrain(timeout: nil, cancellation: cancellation) } catch {
+                failure.withLock { $0 = error as? SQLiteReadPoolError }
+            }
+        }
+        let waitingDeadline = Date().addingTimeInterval(3)
+        while !pool.isExclusiveWaiting, Date() < waitingDeadline { Thread.sleep(forTimeInterval: 0.01) }
+        XCTAssertTrue(pool.isExclusiveWaiting)
+        XCTAssertEqual(pool.activeLeaseCount, 1)
+        cancellation.cancel()
+        XCTAssertEqual(finished.wait(timeout: .now() + 3), .success)
+        XCTAssertEqual(failure.value, .cancelled)
+        XCTAssertFalse(pool.isExclusiveWaiting)
+        XCTAssertEqual(pool.activeLeaseCount, 1, "Cancellation must not close a healthy accepted reader")
+        XCTAssertEqual(try lease.query("SELECT value FROM durable").first?.first, .integer(7))
+        lease.finish()
+        try pool.beginExclusiveAndDrain(timeout: nil)
+        try pool.resumeAfterRebuild()
+        pool.endExclusive()
+        let reopened = try pool.lease(principal: emptyContext)
+        XCTAssertEqual(try reopened.query("SELECT value FROM durable").first?.first, .integer(7))
+        reopened.finish()
+        try pool.shutdown()
+    }
+
     func testDistinctReadOnlyConnectionsOverlapBehindGate() throws {
         let (_, pool) = try fixture()
         let entered = DispatchSemaphore(value: 0)

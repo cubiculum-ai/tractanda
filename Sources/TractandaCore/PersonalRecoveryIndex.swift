@@ -134,13 +134,13 @@ enum PersonalRecoveryIndex {
         projectCurrentItems: Bool = true,
         materialize: ((RevisionGraph, [String: Revision]) throws -> (ItemIndex.CatalogueRow, Revision))? =
             nil,
-        personalMergeObserved: () throws -> Void = {}
+        personalMergeObserved: () throws -> Void = {}, documentReadFailureForTesting: Int32? = nil
     ) throws -> String {
         index.personalContentProjectionMode = true
         let inventory = try PersonalRecoveryInventory.inspect(
             [source], limits: limits.inventory,
             check: inventoryCheck, activity: inventoryActivity, originalVerified: originalVerified,
-            pageVerified: pageVerified)
+            pageVerified: pageVerified, documentReadFailureForTesting: documentReadFailureForTesting)
         guard inventory.isStructurallyComplete else { throw Incomplete(diagnostics: inventory.diagnostics) }
         // PageCorpusInput needs an operation snapshot binding. This UUID is confined to the
         // new derived index and establishes no old logical-store identity, trust or admission.

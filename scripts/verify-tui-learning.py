@@ -19,11 +19,11 @@ def create(client, subject, category=None, label=None):
               "foreign.metadata": wire.text("preserve")}
     if label:
         fields["categoryOverrides"] = {"type": "object", "value": {category: wire.text(label)}}
-    return client.commit(wire.intent("create", "seed-" + subject, class_id="Item", changes=fields))["revision"]
+    return client.commit_with_revision(wire.intent("create", "seed-" + subject, class_id="Item", changes=fields))["revision"]
 
 
 def seed(client, candidates=1):
-    category = client.commit(wire.intent("create", "category", class_id="Item", changes={
+    category = client.commit_with_revision(wire.intent("create", "category", class_id="Item", changes={
         "subject": wire.text("Club café 文"), "foreign.category": wire.text("preserve"),
         "selection": {"type": "object", "value": {"language": wire.text("tractanda.spotlight.v0"),
                                                      "expression": wire.text('itemID == ""')}},
@@ -144,7 +144,7 @@ def main():
                 ui.send("t"); ui.wait("Training complete.")
                 ui.wait("chess tournament board 1")
                 current = client.get(other_id)
-                external = client.commit(wire.intent("revise", "concurrent", item=other_id,
+                external = client.commit_with_revision(wire.intent("revise", "concurrent", item=other_id,
                     base=wire.revision_id(current), changes={"body": wire.text("Edited elsewhere")}))["revision"]
                 ui.send("a"); ui.wait("stateChanged")
                 assert client.get(other_id) == external

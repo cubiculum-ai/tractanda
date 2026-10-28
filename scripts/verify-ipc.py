@@ -16,8 +16,15 @@ import struct
 import subprocess
 import tempfile
 import time
+# Explicit sibling loading also works with Python isolated mode (-I).
+import importlib.util
+_jmap_spec = importlib.util.spec_from_file_location("tractanda_fixture_jmap", Path(__file__).with_name("jmap_client.py"))
+_jmap_module = importlib.util.module_from_spec(_jmap_spec)
+_jmap_spec.loader.exec_module(_jmap_module)
+DiscoveryContext = _jmap_module.DiscoveryContext
+query_arguments = _jmap_module.query_arguments
 
-CAPABILITY = "https://tractanda.ai/ns/local-prototype/4"
+CAPABILITY = "https://tractanda.ai/ns/jmap/1"
 
 
 def text(value):
@@ -64,9 +71,10 @@ def wire(path, envelope):
 class Client:
     def __init__(self, path):
         self.path = path
+        self.context = DiscoveryContext(lambda envelope: wire(self.path, envelope))
 
     def batch(self, calls):
-        result = wire(self.path, {"using": [CAPABILITY], "methodCalls": calls})
+        result = self.context.request(calls)
         assert "code" not in result, result
         return result["methodResponses"]
 
@@ -82,7 +90,18 @@ class Client:
         return self.call("TractandaItem/get", {"ids": [identity]})["list"][0]
 
     def commit(self, request):
-        return self.call("TractandaItem/commit", request)
+        receipt = self.call("TractandaItem/commit", request)
+        assert receipt["operationId"] == request["operationID"], receipt
+        assert "revision" not in receipt, receipt
+        return receipt
+
+    def hydrate_mutation(self, receipt):
+        revision = self.call("TractandaRevision/get", {"ids": [receipt["revisionId"]]})["list"][0]
+        assert item_id(revision) == receipt["itemId"] and revision_id(revision) == receipt["revisionId"]
+        return dict(receipt, revision=revision)
+
+    def commit_with_revision(self, request):
+        return self.hydrate_mutation(self.commit(request))
 
 
 def wait_for_rebuild(call, operation, timeout=20):
@@ -147,7 +166,7 @@ def snapshot(client, fixture):
     }
     if "view" in fixture:
         queries["savedFamily"] = {"viewID": fixture["view"]}
-    result = {key: sorted(client.call("TractandaItem/query", args)["ids"]) for key, args in queries.items()}
+    result = {key: sorted(client.call("TractandaItem/query", query_arguments(args))["ids"]) for key, args in queries.items()}
     result["currentRevisions"] = {i: revision_id(client.get(i)) for i in result["all"]}
     result["rolePhone"] = client.call("TractandaItem/resolve", {"itemID": fixture["president"], "path": "phone"})
     result["holderPhone"] = client.call("TractandaItem/resolve", {
@@ -156,42 +175,42 @@ def snapshot(client, fixture):
 
 
 def exercise(client, fixture):
-    view = client.commit(intent("create", "ipc-saved-view", class_id="Item", changes={
+    view = client.commit_with_revision(intent("create", "ipc-saved-view", class_id="Item", changes={
         "subject": text("Family and Alice"),
         "viewDefinition": {"type": "object", "value": {"language": text("tractanda.spotlight.v0"),
             "categoryPath": {"type": "list", "value": [{"type": "reference", "value": {"itemID": fixture[k]}}
                                                        for k in ("persons", "family", "alice")]}}}}))["revision"]
     fixture["view"] = item_id(view)
-    assert client.call("TractandaItem/query", {"viewID": item_id(view)})["ids"] == [fixture["lunch"]]
+    assert client.call("TractandaItem/query", query_arguments({"viewID": item_id(view)}))["ids"] == [fixture["lunch"]]
     role = client.get(fixture["president"])
     bob = client.get(fixture["bob"])
-    new_bob = client.commit(intent("revise", "ipc-bob-phone", item_id(bob), revision_id(bob),
+    new_bob = client.commit_with_revision(intent("revise", "ipc-bob-phone", item_id(bob), revision_id(bob),
                                   changes={"mobilePhone": text("private replacement")}))["revision"]
     assert revision_id(client.get(item_id(role))) == revision_id(role)
     request = intent("revise", "ipc-role-phone", item_id(role), revision_id(role),
                      changes={"phone": text("official replacement"), "body": text("Two fields in one commit")})
-    committed = client.commit(request)["revision"]
+    committed = client.commit_with_revision(request)["revision"]
     assert revision_id(client.get(item_id(bob))) == revision_id(new_bob)
     assert client.call("TractandaItem/history", {"itemID": item_id(role)})["total"] == 2
-    assert client.commit(request)["replayed"] is True
+    assert client.commit_with_revision(request)["replayed"] is True
     conflict = dict(request, operationID="ipc-conflicting-edit")
     failed = client.batch([["TractandaItem/commit", conflict, "conflict"]])[0]
     assert failed[0] == "error" and failed[1]["type"] == "revisionConflict", failed
-    copied = client.commit(intent("copy", "ipc-copy", item_id(role), revision_id(committed)))["revision"]
+    copied = client.commit_with_revision(intent("copy", "ipc-copy", item_id(role), revision_id(committed)))["revision"]
     assert item_id(copied) != item_id(role)
     assert client.call("TractandaItem/history", {"itemID": item_id(copied)})["total"] == 1
     assert copied["fields"]["holdings"] == committed["fields"]["holdings"]
     todo = client.get(fixture["todo"])
-    appointment = client.commit(intent("retype", "ipc-retype", item_id(todo), revision_id(todo), "AppointmentItem",
+    appointment = client.commit_with_revision(intent("retype", "ipc-retype", item_id(todo), revision_id(todo), "AppointmentItem",
                                        {"subject": text("Meet with the president")}))["revision"]
     assert item_id(appointment) == item_id(todo)
     assert appointment["fields"]["classID"] == text("AppointmentItem")
-    note = client.commit(intent("create", "ipc-unicode", class_id="Item", changes={
+    note = client.commit_with_revision(intent("create", "ipc-unicode", class_id="Item", changes={
         "subject": text("Frédéric's notes"), "body": text("Quotes: \"hello\"; slash /; newline\n"),
         "custom.key": {"type": "integer", "value": 9223372036854775807}}))["revision"]
     assert note["fields"]["custom.key"]["value"] == 9223372036854775807
     responses = client.batch([
-        ["TractandaItem/query", {"expression": 'classID == "Item" && subject == "Newsletter delivery issue"'}, "q"],
+        ["TractandaItem/query", query_arguments({"expression": 'classID == "Item" && subject == "Newsletter delivery issue"'}), "q"],
         ["TractandaItem/get", {"#ids": {"resultOf": "q", "name": "TractandaItem/query", "path": "/ids"}}, "g"],
     ])
     assert len(responses[1][1]["list"]) == 1
@@ -229,12 +248,12 @@ def main():
             if args.source:
                 assert snapshot(client, fixture) == reference["snapshot"], "Transfer changed current items or query/path results"
                 assert manifest(store) == reference["manifest"], "Rebuild altered canonical files"
-                assert client.commit(request)["replayed"] is True, "Preserve/map the original numeric UID when testing retry scope"
+                assert client.commit_with_revision(request)["replayed"] is True, "Preserve/map the original numeric UID when testing retry scope"
             else:
                 request = exercise(client, fixture)
             if args.append_note:
                 request = intent("create", "debian-transfer-note", class_id="Item", changes={"subject": text("Created on Debian"), "body": text("Return this immutable revision to the Mac.")})
-                client.commit(request)
+                client.commit_with_revision(request)
             before = snapshot(client, fixture)
             previous_state = client.call("TractandaStore/info")["state"]
             client.rebuild("ipc-rebuild")
@@ -244,7 +263,7 @@ def main():
         shutil.rmtree(store / "index")
         with server(binary, store, path) as client:
             assert snapshot(client, fixture) == before
-            assert client.commit(request)["replayed"] is True
+            assert client.commit_with_revision(request)["replayed"] is True
             assert manifest(store) == canonical_before
             report = {"fixture": fixture, "replayRequest": request, "snapshot": before,
                       "manifest": canonical_before, "ownerUID": os.geteuid()}

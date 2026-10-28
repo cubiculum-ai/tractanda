@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Independent MCP stdio wire tests. Only disposable native stores; Python 3.9+."""
+from jmap_client import query_arguments, encode_arguments, decode_result
 import argparse
 import importlib.util
 import json
@@ -89,7 +90,14 @@ class MCPClient:
         return response
 
     def tool(self, name, arguments=None, error=None):
-        result = self.request("tools/call", {"name": name, "arguments": arguments or {}})
+        methods = {'tractanda_commit': 'TractandaItem/commit', 'tractanda_get': 'TractandaItem/get',
+            'tractanda_get_bounded': 'TractandaItem/getBounded', 'tractanda_history': 'TractandaItem/history',
+            'tractanda_revision': 'TractandaRevision/get', 'tractanda_resolve': 'TractandaItem/resolve',
+            'tractanda_resolve_conflict': 'TractandaItem/resolveConflict',
+            'tractanda_capture_preview': 'TractandaItem/prepareCapture', 'tractanda_capture_commit': 'TractandaItem/commitCapture',
+            'tractanda_learning_settings': 'TractandaLearning/settings'}
+        method = methods.get(name, '')
+        result = self.request("tools/call", {"name": name, "arguments": encode_arguments(method, arguments or {})})
         if self.result_format == "text":
             assert "structuredContent" not in result, result
             assert len(result["content"]) == 1, result
@@ -104,11 +112,23 @@ class MCPClient:
             assert result["isError"] and structured["code"] == error, result
         else:
             assert not result.get("isError", False), result
-        return structured
+        return decode_result(method, structured) if not error else structured
+
+    def tool_with_revision(self, name, arguments=None, error=None):
+        receipt = self.tool(name, arguments, error=error)
+        if error: return receipt
+        revision = self.tool("tractanda_revision", {"ids": [receipt["revisionId"]], "projection": "content"})["list"][0]
+        assert wire.item_id(revision) == receipt["itemId"] and wire.revision_id(revision) == receipt["revisionId"]
+        return dict(receipt, revision=revision)
 
     def resource(self, uri, error=None):
         result = self.request("resources/read", {"uri": uri}, error=error)
-        return result if error else result["contents"][0]
+        if error: return result
+        content = dict(result["contents"][0])
+        payload = json.loads(content["text"])
+        method = 'TractandaRevision/get' if '/revisions/' in uri else 'TractandaItem/get'
+        content['text'] = json.dumps(decode_result(method, payload))
+        return content
 
     def close(self):
         if not self.process.stdin.closed:
@@ -257,15 +277,15 @@ def exercise(binary, adapter, root, checks):
                 entry["name"] for entry in properties["properties"]}
             assert "Inline authoring is explicit" in client.resource("tractanda://reference/items")["text"]
             client.tool("tractanda_info", {"actor": "administrator"}, error="invalidArguments")
-            client.tool("tractanda_query", {"limit": 65}, error="invalidArguments")
-            client.tool("tractanda_query", {"limit": True}, error="invalidArguments")
+            client.tool("tractanda_query", query_arguments({"limit": -1}), error="invalidArguments")
+            client.tool("tractanda_query", query_arguments({"limit": True}), error="invalidArguments")
             client.tool("tractanda_get", {"ids": [str(uuid.uuid4())] * 65}, error="invalidArguments")
-            client.tool("tractanda_query", {"expression": "NOT subject == 'x'"}, error="unsupportedQuery")
+            client.tool("tractanda_query", query_arguments({"expression": "NOT subject == 'x'"}), error="unsupportedFilter")
             request = wire.intent("create", "mcp-create", class_id="Item", changes={
                 "subject": wire.text("MCP task"), "body": wire.text("Line one\nLine two ☃"),
                 "max": tagged("integer", 9223372036854775807), "min": tagged("integer", -9223372036854775808),
                 "unknown.key": obj({"x": wire.text("preserved")})})
-            first = client.tool("tractanda_commit", request)["revision"]
+            first = client.tool_with_revision("tractanda_commit", request)["revision"]
             assert first["fields"]["max"]["value"] == 9223372036854775807
             assert first["fields"]["min"]["value"] == -9223372036854775808
             item_id = wire.item_id(first)
@@ -274,7 +294,7 @@ def exercise(binary, adapter, root, checks):
                 "ids": [item_id], "projection": "content", "maxBytes": 524288})
             assert first == compact["list"][0]
             assert client.tool("tractanda_get", {"ids": [item_id]}) == compact
-            full = client.tool("tractanda_get", {"ids": [item_id], "projection": "full", "maxBytes": 524288})
+            full = client.tool("tractanda_get_bounded", {"ids": [item_id], "projection": "full", "maxBytes": 524288})
             assert full["list"] == [native_full]
             for projection in ("source", "fts", "summary"):
                 args = {"ids": [item_id], "projection": projection, "maxBytes": 65536}
@@ -297,52 +317,52 @@ def exercise(binary, adapter, root, checks):
             assert client.tool("tractanda_resolve", {"itemID": item_id, "segments": ["unknown.key", "x"]})["value"] == wire.text("preserved")
             query = {"expression": 'classID == "Item"', "text": "MCP task", "categoryPath": [], "limit": 32,
                      "at": "2026-09-09T12:00:00Z", "timeZone": "UTC"}
-            assert client.tool("tractanda_query", query) == native.call("TractandaItem/query", query)
+            assert client.tool("tractanda_query", query_arguments(query)) == native.call("TractandaItem/query", query_arguments(query))
             sorted_query = {"expression": 'classID == "Item"', "sort": [
                 {"property": "subject", "isAscending": True}], "limit": 32,
                 "at": "2026-09-09T12:00:00Z", "timeZone": "UTC"}
-            assert client.tool("tractanda_query", sorted_query) == native.call("TractandaItem/query", sorted_query)
+            assert client.tool("tractanda_query", query_arguments(sorted_query)) == native.call("TractandaItem/query", query_arguments(sorted_query))
             revise = wire.intent("retype", "mcp-retype", item_id, wire.revision_id(first), "AppointmentItem",
                 changes={"body": wire.text("Meeting with a person")}, unset=["min"])
-            second = client.tool("tractanda_commit", revise)["revision"]
+            second = client.tool_with_revision("tractanda_commit", revise)["revision"]
             assert wire.item_id(second) == item_id and second["fields"]["classID"] == wire.text("AppointmentItem")
             assert "min" not in second["fields"] and second["fields"]["unknown.key"] == first["fields"]["unknown.key"]
-            assert client.tool("tractanda_commit", revise)["replayed"] is True
-            client.tool("tractanda_commit", dict(revise, operationID="stale"), error="revisionConflict")
-            client.tool("tractanda_commit", dict(revise, changes={"body": wire.text("different intent")}), error="operationMismatch")
+            assert client.tool_with_revision("tractanda_commit", revise)["replayed"] is True
+            client.tool_with_revision("tractanda_commit", dict(revise, operationID="stale"), error="revisionConflict")
+            client.tool_with_revision("tractanda_commit", dict(revise, changes={"body": wire.text("different intent")}), error="operationMismatch")
             assert client.tool("tractanda_history", {"itemID": item_id}) == native.call(
                 "TractandaItem/history", {"itemID": item_id, "projection": "content", "position": 0, "limit": 32})
             assert client.tool("tractanda_history", {"itemID": item_id, "projection": "full"}) == native.call(
                 "TractandaItem/history", {"itemID": item_id, "projection": "full", "position": 0, "limit": 32})
-            assert client.tool("tractanda_revision", {"itemID": item_id, "revisionID": wire.revision_id(first)}) == native.call(
-                "TractandaRevision/get", {"itemID": item_id, "revisionID": wire.revision_id(first), "projection": "content"})
-            assert client.tool("tractanda_revision", {"itemID": item_id, "revisionID": wire.revision_id(first), "projection": "full"}) == native.call(
-                "TractandaRevision/get", {"itemID": item_id, "revisionID": wire.revision_id(first), "projection": "full"})
+            assert client.tool("tractanda_revision", {"ids": [wire.revision_id(first)]}) == native.call(
+                "TractandaRevision/get", {"ids": [wire.revision_id(first)], "projection": "content"})
+            assert client.tool("tractanda_revision", {"ids": [wire.revision_id(first)], "projection": "full"}) == native.call(
+                "TractandaRevision/get", {"ids": [wire.revision_id(first)], "projection": "full"})
             pinned = current_uri + "/revisions/" + wire.revision_id(first)
-            assert json.loads(client.resource(pinned)["text"])["revision"] == native.call(
-                "TractandaRevision/get", {"itemID": item_id, "revisionID": wire.revision_id(first), "projection": "content"})["revision"]
-            copied = client.tool("tractanda_commit", wire.intent("copy", "mcp-copy", item_id, wire.revision_id(second)))["revision"]
+            assert json.loads(client.resource(pinned)["text"])["list"][0] == native.call(
+                "TractandaRevision/get", {"ids": [wire.revision_id(first)], "projection": "content"})["list"][0]
+            copied = client.tool_with_revision("tractanda_commit", wire.intent("copy", "mcp-copy", item_id, wire.revision_id(second)))["revision"]
             assert wire.item_id(copied) != item_id
             assert client.tool("tractanda_history", {"itemID": wire.item_id(copied)})["total"] == 1
             checks.append("native full/content equivalence for writes, history, revisions and resources; 64-bit values, arbitrary keys, path resolution, whole edits, retyping, copies, conflicts and idempotent retry")
 
-            category = client.tool("tractanda_commit", wire.intent("create", "category", class_id="Item", changes={
+            category = client.tool_with_revision("tractanda_commit", wire.intent("create", "category", class_id="Item", changes={
                 "subject": wire.text("Chess category"), "selection": obj({"language": wire.text("tractanda.spotlight.v0"),
                     "expression": wire.text('subject == "not a sample"')})}))["revision"]
             category_id = wire.item_id(category)
-            parent = client.tool("tractanda_commit", wire.intent("create", "category-parent", class_id="Item", changes={
+            parent = client.tool_with_revision("tractanda_commit", wire.intent("create", "category-parent", class_id="Item", changes={
                 "subject": wire.text("Chess parent"), "selection": obj({"language": wire.text("tractanda.spotlight.v0"),
                     "expression": wire.text('subject == "not a sample"')})}))["revision"]
             parent_id = wire.item_id(parent)
-            category = client.tool("tractanda_commit", wire.intent(
+            category = client.tool_with_revision("tractanda_commit", wire.intent(
                 "revise", "category-parent-link", category_id, wire.revision_id(category),
                 changes={"categoryParents": tagged("list", [tagged("reference", {"itemID": parent_id})])}
             ))["revision"]
             for index, (subject, label) in enumerate([("chess tournament players", "include"), ("chess players board", "include"),
                     ("garden vegetables soil", "exclude"), ("garden soil flowers", "exclude")]):
-                client.tool("tractanda_commit", wire.intent("create", "example-" + str(index), class_id="Item",
+                client.tool_with_revision("tractanda_commit", wire.intent("create", "example-" + str(index), class_id="Item",
                     changes={"subject": wire.text(subject), "categoryOverrides": obj({category_id: wire.text(label)})}))
-            candidate = client.tool("tractanda_commit", wire.intent("create", "candidate", class_id="Item",
+            candidate = client.tool_with_revision("tractanda_commit", wire.intent("create", "candidate", class_id="Item",
                 changes={"subject": wire.text("chess tournament board")}))["revision"]
             candidate_id = wire.item_id(candidate)
             assert client.tool("tractanda_learning_status", {"categoryID": category_id})["status"] == "untrained"
@@ -354,7 +374,7 @@ def exercise(binary, adapter, root, checks):
             assert categories["list"][0]["categoryID"] == category_id
             feedback = {"itemID": candidate_id, "categoryID": category_id, "expectedRevisionID": wire.revision_id(candidate),
                 "operationID": "accept", "action": "accept", "modelID": trained["modelID"]}
-            accepted = client.tool("tractanda_learning_feedback", feedback)["revision"]
+            accepted = client.tool_with_revision("tractanda_learning_feedback", feedback)["revision"]
             assert accepted == native.call("TractandaItem/get", {
                 "ids": [candidate_id], "projection": "content"})["list"][0]
             assert client.tool("tractanda_get", {"ids": [candidate_id], "projection": "full"})["list"] == [native.get(candidate_id)]
@@ -364,17 +384,17 @@ def exercise(binary, adapter, root, checks):
                 "TractandaItem/explain", {"itemID": candidate_id, "categoryID": parent_id})
             assert explanation["inheritancePath"] == [parent_id, category_id]
             assert explanation["sourceReason"] == "manual include"
-            assert client.tool("tractanda_learning_feedback", feedback)["replayed"]
-            client.tool("tractanda_learning_feedback", dict(feedback, action="exclude"), error="operationMismatch")
+            assert client.tool_with_revision("tractanda_learning_feedback", feedback)["replayed"]
+            client.tool_with_revision("tractanda_learning_feedback", dict(feedback, action="exclude"), error="operationMismatch")
             client.tool("tractanda_learning_suggest", {"categoryID": category_id, "ifInState": suggestions["learning"]["queryState"]}, error="stateMismatch")
             exclude = dict(feedback, expectedRevisionID=wire.revision_id(accepted), operationID="exclude", action="exclude")
-            excluded = client.tool("tractanda_learning_feedback", exclude)["revision"]
+            excluded = client.tool_with_revision("tractanda_learning_feedback", exclude)["revision"]
             assert not client.tool("tractanda_explain", {"itemID": candidate_id, "categoryID": category_id})["included"]
-            cleared = client.tool("tractanda_learning_feedback", dict(exclude, expectedRevisionID=wire.revision_id(excluded),
+            cleared = client.tool_with_revision("tractanda_learning_feedback", dict(exclude, expectedRevisionID=wire.revision_id(excluded),
                 operationID="clear-feedback", action="clear"))["revision"]
             assert cleared["fields"]["categoryOverrides"] == excluded["fields"]["categoryOverrides"]
             assert category_id not in cleared["fields"]["learningFeedback"]["value"]
-            configured = client.tool("tractanda_learning_settings", {"categoryID": category_id,
+            configured = client.tool_with_revision("tractanda_learning_settings", {"categoryID": category_id,
                 "expectedRevisionID": wire.revision_id(category), "operationID": "settings",
                 "settings": obj({"profile": wire.text("tractanda.category-learning.v1"), "threshold": tagged("real", -0.2)})})
             assert configured["revision"]["fields"]["learningSettings"]["value"]["threshold"]["value"] == -0.2
@@ -388,21 +408,21 @@ def exercise(binary, adapter, root, checks):
             assert client.tool("tractanda_get", {"ids": [candidate_id], "projection": "full"})["list"] == [native.get(candidate_id)]
             checks.append("training from actual assignments/exclusions, suggestions in both directions, feedback/retry, manual authority, settings and reset")
 
-            section_view = client.tool("tractanda_commit", wire.intent("create", "section-view", class_id="Item", changes={
+            section_view = client.tool_with_revision("tractanda_commit", wire.intent("create", "section-view", class_id="Item", changes={
                 "viewDefinition": obj({"language": wire.text("tractanda.spotlight.v0"),
                     "text": wire.text("chess"), "presentation": obj({"profile": wire.text("tractanda.table.v0"),
                     "sections": tagged("list", [tagged("reference", {"itemID": category_id})])})})}))["revision"]
             view_id = wire.item_id(section_view)
             section_query = {"viewID": view_id, "sectionID": category_id, "limit": 32,
                 "at": "2026-09-09T12:00:00Z", "timeZone": "UTC"}
-            assert client.tool("tractanda_query", section_query) == native.call("TractandaItem/query", section_query)
-            client.tool("tractanda_query", {"sectionID": category_id}, error="invalidArguments")
-            client.tool("tractanda_query", {"viewID": view_id, "sort": []}, error="invalidArguments")
+            assert client.tool("tractanda_query", query_arguments(section_query)) == native.call("TractandaItem/query", query_arguments(section_query))
+            client.tool("tractanda_query", query_arguments({"sectionID": category_id}), error="invalidArguments")
+            client.tool("tractanda_query", query_arguments({"viewID": view_id, "sort": []}), error="invalidArguments")
             checks.append("inline ItemSort property/isAscending and saved-view sectionID semantics")
 
             realistic = []
             for index in range(64):
-                revision = native.commit(wire.intent("create", "bounded-" + str(index), class_id="Item", changes={
+                revision = native.commit_with_revision(wire.intent("create", "bounded-" + str(index), class_id="Item", changes={
                     "subject": wire.text("Bounded record %02d" % index),
                     "body": wire.text("Body %02d: " % index + "x" * 4500),
                     "rank": tagged("integer", 9223372036854775807 - index),
@@ -417,7 +437,7 @@ def exercise(binary, adapter, root, checks):
             continuation = []
             pending = realistic
             while pending:
-                page = client.tool("tractanda_get", {"ids": pending, "projection": "summary", "maxBytes": 8192})
+                page = client.tool("tractanda_get_bounded", {"ids": pending, "projection": "summary", "maxBytes": 8192})
                 continuation.extend(record["fields"]["itemID"]["value"] for record in page["list"])
                 assert page["oversizedIDs"] == [], page
                 assert page["remainingIDs"] != pending, page
@@ -426,7 +446,7 @@ def exercise(binary, adapter, root, checks):
             content_continuation = []
             pending = realistic
             while pending:
-                page = client.tool("tractanda_get", {"ids": pending, "projection": "content", "maxBytes": 16384})
+                page = client.tool("tractanda_get_bounded", {"ids": pending, "projection": "content", "maxBytes": 16384})
                 content_continuation.extend(record["fields"]["itemID"]["value"] for record in page["list"])
                 assert page["oversizedIDs"] == [], page
                 pending = page["remainingIDs"]
@@ -434,28 +454,28 @@ def exercise(binary, adapter, root, checks):
             property_continuation = []
             pending = realistic
             while pending:
-                page = client.tool("tractanda_get", {"ids": pending,
-                    "properties": ["subject", "rank", "userMetadata"], "maxBytes": 8192})
+                page = client.tool("tractanda_get_bounded", {"ids": pending,
+                    "fieldProperties": ["subject", "rank", "userMetadata"], "maxBytes": 8192})
                 property_continuation.extend(record["fields"]["itemID"]["value"] for record in page["list"])
                 assert page["oversizedIDs"] == [], page
                 pending = page["remainingIDs"]
             assert property_continuation == realistic
-            full_bounded = client.tool("tractanda_get", {"ids": realistic, "projection": "full", "maxBytes": 8192})
+            full_bounded = client.tool("tractanda_get_bounded", {"ids": realistic, "projection": "full", "maxBytes": 8192})
             assert full_bounded["list"] == [] and full_bounded["remainingIDs"] == []
             assert full_bounded["oversizedIDs"] == realistic
-            huge = native.commit(wire.intent("create", "huge-get", class_id="Item", changes={
+            huge = native.commit_with_revision(wire.intent("create", "huge-get", class_id="Item", changes={
                 "subject": wire.text("Huge but retrievable by property"), "body": wire.text("x" * 100000),
                 "customInt": tagged("integer", 9223372036854775807)}))["revision"]
             huge_id = wire.item_id(huge)
-            bounded = client.tool("tractanda_get", {"ids": [huge_id], "projection": "content", "maxBytes": 8192})
+            bounded = client.tool("tractanda_get_bounded", {"ids": [huge_id], "projection": "content", "maxBytes": 8192})
             assert bounded["list"] == [] and bounded["remainingIDs"] == [] and bounded["oversizedIDs"] == [huge_id]
-            properties = client.tool("tractanda_get", {"ids": [huge_id], "properties": ["subject", "customInt"], "maxBytes": 8192})
+            properties = client.tool("tractanda_get_bounded", {"ids": [huge_id], "fieldProperties": ["subject", "customInt"], "maxBytes": 8192})
             fields = properties["list"][0]["fields"]
             assert fields["customInt"]["value"] == 9223372036854775807 and "body" not in fields
             checks.append("64 body/metadata records whose native full result exceeds 512 KiB; default content transfer, summary/property/content continuation, oversized full records, nested requestIdentity metadata and Int64 retrieval")
 
             # Pipeline concurrent responses large enough to exercise output pipe backpressure.
-            moderate = native.commit(wire.intent("create", "moderate", class_id="Item", changes={"body": wire.text("x" * 70000)}))["revision"]
+            moderate = native.commit_with_revision(wire.intent("create", "moderate", class_id="Item", changes={"body": wire.text("x" * 70000)}))["revision"]
             for sequence in range(1000, 1008):
                 client.send({"jsonrpc": "2.0", "id": sequence, "method": "tools/call", "params": {
                     "name": "tractanda_get", "arguments": {"ids": [wire.item_id(moderate)]}}})
@@ -463,22 +483,23 @@ def exercise(binary, adapter, root, checks):
             assert {response["id"] for response in responses} == set(range(1000, 1008))
             assert all(response["result"]["structuredContent"]["list"] == native.call(
                 "TractandaItem/get", {"ids": [wire.item_id(moderate)], "projection": "content", "maxBytes": 524288})["list"] for response in responses)
-            before = native.call("TractandaItem/query")["total"]
+            before = native.call("TractandaItem/query", query_arguments({}))["total"]
             too_large = wire.intent("create", "oversized-argument", class_id="Item", changes={"body": wire.text("x" * (1024 * 1024))})
-            client.tool("tractanda_commit", too_large, error="requestTooLarge")
-            assert native.call("TractandaItem/query")["total"] == before
-            normal_large = client.tool("tractanda_commit", wire.intent("create", "normal-large-result", class_id="Item", changes={
+            client.tool_with_revision("tractanda_commit", too_large, error="requestTooLarge")
+            assert native.call("TractandaItem/query", query_arguments({}))["total"] == before
+            normal_large = client.tool_with_revision("tractanda_commit", wire.intent("create", "normal-large-result", class_id="Item", changes={
                 "subject": wire.text("Normal compact write"), "body": wire.text("x" * 300000)}))["revision"]
             assert normal_large == native.call("TractandaItem/get", {
                 "ids": [wire.item_id(normal_large)], "projection": "content"})["list"][0]
-            assert native.call("TractandaItem/query")["total"] == before + 1
+            assert native.call("TractandaItem/query", query_arguments({}))["total"] == before + 1
             oversized_result = wire.intent("create", "oversized-result", class_id="Item", changes={"subject": wire.text("Large result"), "body": wire.text("x" * 600000)})
-            failure = client.tool("tractanda_commit", oversized_result, error="responseTooLarge")
-            assert failure["operationID"] == "oversized-result"
-            assert native.call("TractandaItem/query")["total"] == before + 2
-            client.tool("tractanda_commit", oversized_result, error="responseTooLarge")
-            assert native.call("TractandaItem/query")["total"] == before + 2
-            checks.append("fragmented input, concurrent output under backpressure, request bounds, compact 300000-character write success and committed 600000-character oversized-result replay")
+            saved_receipt = client.tool("tractanda_commit", oversized_result)
+            assert saved_receipt["operationId"] == "oversized-result" and "revision" not in saved_receipt
+            assert native.call("TractandaItem/query", query_arguments({}))["total"] == before + 2
+            replay_receipt = client.tool("tractanda_commit", oversized_result)
+            assert replay_receipt["replayed"] and replay_receipt["revisionId"] == saved_receipt["revisionId"]
+            assert native.call("TractandaItem/query", query_arguments({}))["total"] == before + 2
+            checks.append("fragmented input, concurrent output under backpressure, request bounds, compact receipts for300000/600000-character writes and exact replay without content in the acknowledgement")
         # Process restart keeps native receipts; it does not depend on an adapter cache.
         with MCPClient(adapter, socket) as restarted:
             restarted.initialize()

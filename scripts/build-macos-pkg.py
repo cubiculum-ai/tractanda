@@ -141,6 +141,42 @@ def license_html(notice, markdown, model_notices=None, document_notices=None):
     return '\n'.join(parts) + '\n</html>\n'
 
 
+def make_distribution(manifest, identifier, component_name, sample_identifier, sample_component_name):
+    distribution = ET.Element('installer-gui-script', minSpecVersion='2')
+    ET.SubElement(distribution, 'title').text = 'Tractanda ' + manifest['version']
+    ET.SubElement(distribution, 'options', customize='allow', require_scripts='true', hostArchitectures='arm64')
+    ET.SubElement(distribution, 'domains', enable_anywhere='false', enable_currentUserHome='false', enable_localSystem='true')
+    volume = ET.SubElement(distribution, 'volume-check')
+    ET.SubElement(ET.SubElement(volume, 'allowed-os-versions'), 'os-version', min='15.0')
+    ET.SubElement(distribution, 'welcome', file='Welcome.html', **{'mime-type': 'text/html'})
+    ET.SubElement(distribution, 'license', file='License.html', **{'mime-type': 'text/html'})
+    ET.SubElement(distribution, 'conclusion', file='Conclusion.html', **{'mime-type': 'text/html'})
+    outline = ET.SubElement(distribution, 'choices-outline')
+    ET.SubElement(outline, 'line', choice='tractanda')
+    ET.SubElement(outline, 'line', choice='sample-store')
+    description = ('Shared server, terminal client, local embeddings and native document extraction'
+                   if manifest.get('documentExtraction') else 'Shared server, terminal client and local embeddings')
+    choice = ET.SubElement(distribution, 'choice', id='tractanda', title='Tractanda', description=description,
+                           selected='true', enabled='false')
+    ET.SubElement(choice, 'pkg-ref', id=identifier)
+    sample = ET.SubElement(distribution, 'choice', id='sample-store', title='Initialize a sample store',
+                           description='Deselect to install software only, for example before joining an existing cluster.',
+                           start_selected='true')
+    ET.SubElement(sample, 'pkg-ref', id=sample_identifier)
+    ET.SubElement(distribution, 'pkg-ref', id=identifier, version=manifest['version'], auth='Root',
+                  **{'installKBytes': str((sum(f['size'] for f in manifest['files']) + 1023) // 1024)}).text = component_name
+    ET.SubElement(distribution, 'pkg-ref', id=sample_identifier, version=manifest['version'], auth='Root').text = sample_component_name
+    return distribution
+
+
+def render_conclusion(template, release):
+    join_command = ('"' + release + '/bin/tractanda" cluster join --prepare-new production '
+                    + '--hostname HOSTNAME')
+    if template.count('@FRESH_TARGET_JOIN@') != 1:
+        raise ValueError('Conclusion must contain exactly one fresh target join placeholder.')
+    return template.replace('@FRESH_TARGET_JOIN@', html.escape(join_command))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--bundle', type=Path, required=True)
@@ -158,21 +194,25 @@ def main():
     run(bundle / 'bin/tractanda-setup', 'plan', '--bundle', bundle)
     identifier = 'ai.tractanda.preview'
     digest = hashlib.sha256((bundle / 'bundle-manifest.json').read_bytes()).hexdigest()
-    release = '/Users/Shared/Library/Application Support/Tractanda/releases/' + manifest['version'] + '-' + digest[:12]
+    release = '/Library/Tractanda/Software/releases/' + manifest['version'] + '-' + digest[:12]
     with tempfile.TemporaryDirectory(prefix='tractanda-pkg-') as directory:
         stage = Path(directory)
-        scripts, resources = stage / 'scripts', stage / 'resources'
-        scripts.mkdir(); resources.mkdir()
+        scripts, resources, sample_scripts = stage / 'scripts', stage / 'resources', stage / 'sample-scripts'
+        scripts.mkdir(); resources.mkdir(); sample_scripts.mkdir()
         payload = stage / 'payload'
         stage_payload(bundle, payload, manifest)
         for name in ('preinstall', 'postinstall'):
             shutil.copy2(root / 'scripts/macos-package' / name, scripts / name)
             (scripts / name).chmod(0o755)
         (scripts / 'release-path').write_text(release + '\n')
+        shutil.copy2(root / 'scripts/macos-package/postinstall-sample', sample_scripts / 'postinstall')
+        (sample_scripts / 'postinstall').chmod(0o755)
+        (sample_scripts / 'release-path').write_text(release + '\n')
         setup_hash = next(f['sha256'] for f in manifest['files'] if f['path'] == 'bin/tractanda-setup')
         (scripts / 'setup-sha256').write_text(setup_hash + '\n')
-        for name in ('Welcome.html', 'Conclusion.html'):
-            shutil.copy2(root / 'scripts/macos-package' / name, resources / name)
+        shutil.copy2(root / 'scripts/macos-package/Welcome.html', resources / 'Welcome.html')
+        conclusion = (root / 'scripts/macos-package/Conclusion.html').read_text()
+        (resources / 'Conclusion.html').write_text(render_conclusion(conclusion, release))
         (resources / 'License.html').write_text(license_html(
             (root / 'NOTICE').read_text(), (root / 'LICENSE').read_text(),
             bundle / 'licenses/Granite' if manifest.get('embedding') else None,
@@ -188,21 +228,12 @@ def main():
             '--component-plist', components, '--ownership', 'recommended', '--scripts', scripts,
             '--identifier', identifier, '--version', manifest['version'], component)
         remove_component_metadata(component, stage, payload, scripts)
-        distribution = ET.Element('installer-gui-script', minSpecVersion='2')
-        ET.SubElement(distribution, 'title').text = 'Tractanda ' + manifest['version']
-        ET.SubElement(distribution, 'options', customize='never', require_scripts='true', hostArchitectures='arm64')
-        ET.SubElement(distribution, 'domains', enable_anywhere='false', enable_currentUserHome='false', enable_localSystem='true')
-        volume = ET.SubElement(distribution, 'volume-check')
-        ET.SubElement(ET.SubElement(volume, 'allowed-os-versions'), 'os-version', min='15.0')
-        ET.SubElement(distribution, 'welcome', file='Welcome.html', **{'mime-type': 'text/html'})
-        ET.SubElement(distribution, 'license', file='License.html', **{'mime-type': 'text/html'})
-        ET.SubElement(distribution, 'conclusion', file='Conclusion.html', **{'mime-type': 'text/html'})
-        ET.SubElement(ET.SubElement(distribution, 'choices-outline'), 'line', choice='tractanda')
-        choice = ET.SubElement(distribution, 'choice', id='tractanda', title='Tractanda', description='Shared server, terminal client, local embeddings and native document extraction'
-                      if manifest.get('documentExtraction') else 'Shared server, terminal client and local embeddings')
-        ET.SubElement(choice, 'pkg-ref', id=identifier)
-        ET.SubElement(distribution, 'pkg-ref', id=identifier, version=manifest['version'], auth='Root',
-                      **{'installKBytes': str((sum(f['size'] for f in manifest['files']) + 1023) // 1024)}).text = component.name
+        sample_identifier = identifier + '.sample-store'
+        sample_component = stage / 'TractandaSampleStore.pkg'
+        run('/usr/bin/pkgbuild', '--nopayload', '--scripts', sample_scripts,
+            '--identifier', sample_identifier, '--version', manifest['version'], sample_component)
+        distribution = make_distribution(manifest, identifier, component.name,
+                                         sample_identifier, sample_component.name)
         xml = stage / 'Distribution.xml'
         ET.indent(distribution)
         ET.ElementTree(distribution).write(xml, encoding='utf-8', xml_declaration=True)

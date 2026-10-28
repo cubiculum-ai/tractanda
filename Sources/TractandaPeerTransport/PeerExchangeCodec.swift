@@ -13,6 +13,16 @@ enum PeerExchangeCodec {
         let kind: Kind
         let body: Data
     }
+    /// JSON's Data encoding is base64 without slash escaping. The largest control kind and
+    /// UInt64.max reserve every possible correlation/header byte before application effects.
+    static func maximumPersonalBodyBytes() throws -> Int {
+        let empty = try JSON.encode(
+            Frame(
+                version: PersonalPeerJMAP.wireVersion, requestID: UInt64.max, kind: .acknowledgement,
+                body: Data()
+            ))
+        return 3 * ((maximumFrameBytes - empty.count) / 4)
+    }
     static func encode(_ frame: Frame, allocator: ByteBufferAllocator) throws -> ByteBuffer {
         let data = try JSON.encode(frame)
         guard !data.isEmpty, data.count <= maximumFrameBytes else {

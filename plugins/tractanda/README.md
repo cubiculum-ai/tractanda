@@ -4,6 +4,8 @@ One shared skill teaches agents to discover a Tractanda store, combine category 
 
 The plugin contains guidance and examples, not executables, hooks, credentials or an automatically launched MCP connection. Install/connect Tractanda separately and select the intended database and OS identity. See [connection setup](skills/tractanda/references/connection.md).
 
+The shared skill is platform-neutral and applies to the current macOS and Debian personal/workgroup server. On a configured peer cluster, item revisions and owned attachments synchronize between current members. Pairing, current permissions, and convergence are separate from installing the skill. Older public packages may not include current features or filesystem layouts, so use `tractanda_info`, advertised server features and the installed executable's help before relying on them.
+
 Repository marketplace: `cubiculum-ai/tractanda`. Marketplace and plugin names are both `tractanda`.
 
 Claude Code:

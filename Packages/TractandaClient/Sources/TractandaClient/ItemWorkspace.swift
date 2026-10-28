@@ -4,6 +4,7 @@ import Observation
 public struct PendingEdit: Codable, Equatable, Sendable {
     public let request: CommitRequest
     public let draft: ItemEditorDraft
+    public var confirmation: MutationReceipt? = nil
 
     public init(request: CommitRequest, draft: ItemEditorDraft) throws {
         guard try draft.makeRequest(operationID: request.operationID) == request else {
@@ -12,12 +13,18 @@ public struct PendingEdit: Codable, Equatable, Sendable {
         self.request = request
         self.draft = draft
     }
-    private enum CodingKeys: String, CodingKey { case request, draft }
+    private enum CodingKeys: String, CodingKey { case request, draft, confirmation }
     public init(from decoder: any Decoder) throws {
         let fields = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(
             request: fields.decode(CommitRequest.self, forKey: .request),
             draft: fields.decode(ItemEditorDraft.self, forKey: .draft))
+        confirmation = try fields.decodeIfPresent(MutationReceipt.self, forKey: .confirmation)
+        if let confirmation {
+            guard confirmation.operationID == request.operationID,
+                request.action == .create || request.action == .copy || confirmation.itemID == request.itemID
+            else { throw TractandaError("invalidRecovery", "Confirmation does not match pending intent.") }
+        }
     }
 }
 
@@ -68,7 +75,8 @@ public final class ItemWorkspace {
     private var isDefinitivelyRejected: Bool {
         guard let code = lastError?.code else { return false }
         return [
-            "revisionConflict", "invalidArguments", "invalidValue", "invalidKey", "invalidQuery",
+            "notJSON", "notRequest", "unknownCapability", "limit", "revisionConflict", "invalidArguments",
+            "invalidValue", "invalidKey", "invalidQuery",
             "unsupportedQuery", "unknownClass", "abstractClass", "invalidClass", "invalidSelection",
         ].contains(code)
     }
@@ -76,6 +84,11 @@ public final class ItemWorkspace {
     public func start() async {
         do {
             pendingEdit = try await journal.load()
+            if pendingEdit?.confirmation != nil {
+                try await journal.clear()
+                pendingEdit = nil
+                message = "Previously saved edit confirmed"
+            }
             // Authorize referenced content before publishing a recovered draft.
             // Queries can succeed while silently omitting a newly private item.
             if let itemID = pendingEdit?.request.itemID {
@@ -246,6 +259,8 @@ public final class ItemWorkspace {
 
     private func sendPendingEdit() async {
         guard let pendingEdit else { return }
+        let saveGeneration = generation
+        let savedSelection = selectedItemID
         isSaving = true
         message = "Saving…"
         onChange?()
@@ -256,15 +271,70 @@ public final class ItemWorkspace {
         do {
             // If recovery cannot be recorded, nothing is sent.
             try await journal.save(pendingEdit)
-            let result = try await client.commit(pendingEdit.request)
-            try await journal.clear()
+            let result: MutationReceipt
+            if let receipt = pendingEdit.confirmation {
+                result = receipt
+            } else {
+                result = try await client.commit(pendingEdit.request)
+            }
+            var confirmed = pendingEdit
+            confirmed.confirmation = result
+            self.pendingEdit = confirmed
+            do {
+                try await journal.save(confirmed)
+                try await journal.clear()
+            } catch {
+                if draft == pendingEdit.draft { draft = nil }
+                lastError = nil
+                message = "Saved; recovery cleanup failed. Retry cleanup before another edit. \(error)"
+                return
+            }
             self.pendingEdit = nil
-            draft = nil
+            // A user may have changed a draft or navigated while transport was suspended.
+            // Acknowledge the frozen intent, but do not erase those newer local choices.
+            let newerDraft = draft.flatMap { $0 == pendingEdit.draft ? nil : $0 }
+            if newerDraft == nil { draft = nil }
             lastError = nil
-            selectedItemID = result.revision.itemID
+            guard generation == saveGeneration, selectedItemID == savedSelection else {
+                message = "Saved; current workspace preserved."
+                return
+            }
+            if let newerDraft {
+                do {
+                    let revision = try await client.revision(
+                        itemID: result.itemID, revisionID: result.revisionID)
+                    guard generation == saveGeneration, draft == newerDraft else {
+                        message = "Saved; newer draft preserved."
+                        return
+                    }
+                    var rebased = try ItemEditorDraft(base: revision)
+                    if newerDraft.subject != pendingEdit.draft.subject {
+                        rebased.subject = newerDraft.subject
+                    }
+                    if newerDraft.body != pendingEdit.draft.body { rebased.body = newerDraft.body }
+                    if newerDraft.rule != pendingEdit.draft.rule { rebased.rule = newerDraft.rule }
+                    if newerDraft.className != pendingEdit.draft.className {
+                        rebased.className = newerDraft.className
+                    }
+                    draft = rebased
+                    message = "Saved; newer unsent changes retained."
+                } catch {
+                    // The confirmed save remains confirmed; retain the local draft for reconciliation.
+                    message =
+                        "Saved; newer draft retained, but its exact base could not be refreshed. \(error)"
+                }
+                return
+            }
+            selectedItemID = result.itemID
             if result.isIndexReady {
+                let refreshGeneration = generation + 1
                 await refresh()
-                if lastError == nil { message = result.wasReplayed ? "Save confirmed by retry" : "Saved" }
+                guard generation == refreshGeneration else { return }
+                if let error = lastError {
+                    message = "Saved; refreshing the workspace failed. \(error.message)"
+                } else {
+                    message = result.wasReplayed ? "Save confirmed by retry" : "Saved"
+                }
             } else {
                 message = "Saved; the server index needs rebuilding before refreshing."
             }

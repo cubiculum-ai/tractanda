@@ -12,6 +12,13 @@ public enum PeerTLSError: Error, Equatable, Sendable {
 
 /// The exact profile exercised by the macOS/Linux interoperability proof.
 public struct PeerTLSProfile: Equatable, Sendable {
+    /// Cryptographic domain separation; selected by trusted host configuration, never by
+    /// an unauthenticated application request. Ordinary peer context bytes stay frozen.
+    public enum Purpose: String, Equatable, Sendable {
+        case peer
+        case enrollmentInvitation = "tractanda.enrollment.invitation.v1"
+        case enrollmentContinuation = "tractanda.enrollment.continuation.v1"
+    }
     public static let protocolName = "org.tractanda.peer-proof"
     public static let version = "1"
     public static let alpn = "tractanda-peer-proof/1"
@@ -19,8 +26,10 @@ public struct PeerTLSProfile: Equatable, Sendable {
     public let initiatorReplicaID: String
     public let responderReplicaID: String
     public let pairingID: String
+    public let purpose: Purpose
 
-    public init(storeID: String, initiatorReplicaID: String, responderReplicaID: String, pairingID: String)
+    public init(storeID: String, initiatorReplicaID: String, responderReplicaID: String, pairingID: String,
+        purpose: Purpose = .peer)
         throws
     {
         for value in [storeID, initiatorReplicaID, responderReplicaID, pairingID] {
@@ -36,14 +45,16 @@ public struct PeerTLSProfile: Equatable, Sendable {
         self.initiatorReplicaID = initiatorReplicaID
         self.responderReplicaID = responderReplicaID
         self.pairingID = pairingID
+        self.purpose = purpose
     }
 
     internal var identity: [UInt8] { Array(pairingID.utf8) }
     internal var importerContext: [UInt8] {
-        [
+        let fields = [
             Self.protocolName, Self.version, storeID, initiatorReplicaID, responderReplicaID,
             "initiator/tls-client", "responder/tls-server",
-        ].flatMap { value in
+        ] + (purpose == .peer ? [] : [purpose.rawValue])
+        return fields.flatMap { value in
             let bytes = Array(value.utf8)
             return [UInt8(bytes.count >> 8), UInt8(bytes.count & 255)] + bytes
         }

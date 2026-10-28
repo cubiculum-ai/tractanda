@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Independent CLI and real HTTP verification, using only disposable item stores."""
 import argparse
+from jmap_client import encode_arguments, decode_result
 import importlib.util
 import copy
 import contextlib
@@ -16,7 +17,7 @@ import time
 from urllib.parse import urlsplit, parse_qs
 import uuid
 
-CAPABILITY = 'https://tractanda.ai/ns/local-prototype/4'
+CAPABILITY = 'https://tractanda.ai/ns/jmap/1'
 
 
 
@@ -98,7 +99,7 @@ def main():
                 if not options.import_from:
                     spec=importlib.util.spec_from_file_location('category_fixture',Path(__file__).with_name('category-board-fixture.py'))
                     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
-                    fixture=module.create_fixture(lambda request:cli('call',socket,'TractandaItem/commit',json.dumps(request)))
+                    fixture=module.create_fixture(lambda request:cli('call',socket,'TractandaItem/commit',json.dumps(encode_arguments('TractandaItem/commit',request))))
                 board_id = fixture['viewItemID']
                 first_id = fixture['itemIDs']['TEST-1']
                 initial = cli('kanban',socket,board_id)
@@ -128,13 +129,32 @@ def main():
                     connection.close()
                     return status,response_headers,contents
 
+                local_session = None
                 def envelope(method, arguments):
-                    return json.dumps(dict(using=[CAPABILITY],methodCalls=[[method,arguments,'test']])).encode()
+                    nonlocal local_session
+                    scoped = method not in {'Core/echo', 'TractandaSession/get', 'TractandaAuth/createSession'}
+                    if scoped and local_session is None:
+                        discovery = json.dumps(dict(using=[CAPABILITY], methodCalls=[['TractandaSession/get', {}, 'discovery']])).encode()
+                        status, _, contents = send_http_request(body=discovery)
+                        check(status == 200, 'Local account discovery succeeds')
+                        response = json.loads(contents)['methodResponses'][0]
+                        check(response[0] == 'TractandaSession/get', 'Explicit local session document is returned')
+                        local_session = response[1]
+                    arguments = dict(arguments)
+                    if scoped and 'accountId' not in arguments and '#accountId' not in arguments:
+                        arguments['accountId'] = local_session['primaryAccounts'][CAPABILITY]
+                    return json.dumps(dict(using=[CAPABILITY],methodCalls=[[method,encode_arguments(method, arguments),'test']])).encode()
 
                 def method_result(method, arguments):
                     status,_,contents = send_http_request(body=envelope(method,arguments))
                     check(status == 200, f'HTTP delivers {method}')
-                    return json.loads(contents)['methodResponses'][0]
+                    nonlocal local_session
+                    response = json.loads(contents)
+                    if local_session and response.get('sessionState', local_session['state']) != local_session['state']:
+                        local_session = None
+                    call = response['methodResponses'][0]
+                    if call[0] != 'error': call[1] = decode_result(method, call[1])
+                    return call
 
                 status,headers,contents = send_http_request('GET','/',None,authenticate=False)
                 check(status == 200 and b'@@' not in contents, 'Public shell is rendered without template markers')
@@ -173,11 +193,12 @@ def main():
                 check(connection.getresponse().status == 200, 'First edit reaches the real native service')
                 connection.close()
                 replay = method_result('TractandaItem/commit',request)[1]
-                check(replay['replayed'] and replay['revision']['fields']['categoryOverrides']['value'][fixture['columns']['doing']]['value'] == 'include', 'Lost-response retry confirms the same committed revision')
+                saved_revision = method_result('TractandaRevision/get',{"ids": [replay['revisionId']]})[1]["list"][0]
+                check(replay['replayed'] and saved_revision['fields']['categoryOverrides']['value'][fixture['columns']['doing']]['value'] == 'include', 'Lost-response retry confirms the same committed revision')
                 stale = dict(request,operationID='stale-'+uuid.uuid4().hex)
                 check(method_result('TractandaItem/commit',stale)[1]['type'] == 'revisionConflict', 'Concurrent stale edit is rejected')
                 spoofed = dict(request,operationID='actor-'+uuid.uuid4().hex,
-                               expectedRevisionID=replay['revision']['fields']['revisionID']['value'],
+                               expectedRevisionID=saved_revision['fields']['revisionID']['value'],
                                changes={'actor':{'type':'text','value':'uid:0'}})
                 check(method_result('TractandaItem/commit',spoofed)[1]['type'] == 'invalidArguments', 'HTTP caller cannot choose canonical actor')
                 check(cli('get',socket,first_id)['list'][0]['fields']['categoryOverrides']['value'][fixture['columns']['doing']]['value'] == 'include', 'HTTP edit is visible through the independent CLI')

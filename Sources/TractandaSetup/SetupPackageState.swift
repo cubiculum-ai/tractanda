@@ -158,7 +158,7 @@ struct SetupPackageOwner: Codable, Equatable {
 }
 
 extension SetupEngine {
-    var packageStateURL: URL { roots.configuration.appendingPathComponent("package-transaction.json") }
+    var packageStateURL: URL { roots.installation.appendingPathComponent("package-transaction.json") }
 
     func readPackageState() throws -> SetupPackageState? {
         guard exists(packageStateURL) else { return nil }

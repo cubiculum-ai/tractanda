@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise forwarded Command, Meta, terminal function keys and the compact key bar in a real PTY."""
+from jmap_client import query_arguments
 import argparse
 import importlib.util
 import json
@@ -40,7 +41,7 @@ def main():
                 ui.wait("beta! ")
                 ui.send(command("s", release=True))
                 ui.send(ESC + b"[21~"); ui.wait("Command menu")
-                assert client.call("TractandaItem/query", {})["total"] == 0
+                assert client.call("TractandaItem/query", query_arguments({}))["total"] == 0
                 ui.send(ESC); ui.wait("Body / note", absent="Command menu")
                 assert "2Paste" not in ui.screen.splitlines()[-1] and "3Copy" not in ui.screen.splitlines()[-1]
                 ui.resize(30, 8); ui.wait("Enlarge terminal")

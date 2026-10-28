@@ -46,7 +46,7 @@ def main():
         with wire.server(str(args.native_binary.resolve()), store, path) as client:
             def create(subject, fields=None):
                 guard(root)
-                item = client.commit(wire.intent("create", "search-" + uuid.uuid4().hex, class_id="Item",
+                item = client.commit_with_revision(wire.intent("create", "search-" + uuid.uuid4().hex, class_id="Item",
                     changes={"subject": wire.text(subject), **(fields or {})}))["revision"]
                 guard(root)
                 return item

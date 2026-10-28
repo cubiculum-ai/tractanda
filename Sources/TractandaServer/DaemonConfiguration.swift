@@ -6,6 +6,7 @@ public struct DaemonConfiguration: Codable, Sendable {
     public let indexDirectory: String?
     public let socketPath: String
     public let httpPort: Int?
+    public let publicJMAP: PublicJMAPConfiguration?
     public let managed: Bool
     public let viewItemID: String?
     public let projectRootID: String?
@@ -14,6 +15,7 @@ public struct DaemonConfiguration: Codable, Sendable {
     public let rebuildNoProgressTimeoutSeconds: Double?
     public let attachmentUploadPolicy: AttachmentUploadPolicy?
     public let documentConverter: DocumentConverterConfiguration?
+    public let modelProvisioning: ModelProvisioningConfiguration?
     public let documentJobResources: DocumentJobResources?
     /// Optional explicit local peer runtime settings path; absent keeps peer networking disabled.
     public let peerRuntimeConfigurationPath: String?
@@ -23,14 +25,16 @@ public struct DaemonConfiguration: Codable, Sendable {
         managed: Bool = false,
         viewItemID: String? = nil, projectRootID: String? = nil, statusRootID: String? = nil,
         initialProjectID: String? = nil, documentConverter: DocumentConverterConfiguration? = nil,
-        documentJobResources: DocumentJobResources? = nil,
+        documentJobResources: DocumentJobResources? = nil, modelProvisioning: ModelProvisioningConfiguration? = nil,
         attachmentUploadPolicy: AttachmentUploadPolicy? = nil,
-        rebuildNoProgressTimeoutSeconds: Double? = nil, peerRuntimeConfigurationPath: String? = nil
+        rebuildNoProgressTimeoutSeconds: Double? = nil, peerRuntimeConfigurationPath: String? = nil,
+        publicJMAP: PublicJMAPConfiguration? = nil
     ) {
         self.storePath = storePath
         self.indexDirectory = indexDirectory
         self.socketPath = socketPath
         self.httpPort = httpPort
+        self.publicJMAP = publicJMAP
         self.managed = managed
         self.viewItemID = viewItemID
         self.projectRootID = projectRootID
@@ -38,11 +42,14 @@ public struct DaemonConfiguration: Codable, Sendable {
         self.initialProjectID = initialProjectID
         self.documentConverter = documentConverter
         self.documentJobResources = documentJobResources
+        self.modelProvisioning = modelProvisioning
         self.attachmentUploadPolicy = attachmentUploadPolicy
         self.rebuildNoProgressTimeoutSeconds = rebuildNoProgressTimeoutSeconds
         self.peerRuntimeConfigurationPath = peerRuntimeConfigurationPath
     }
     public func validate() throws {
+        try modelProvisioning?.validate()
+        try publicJMAP?.validate()
         try documentJobResources?.validate()
         guard
             rebuildNoProgressTimeoutSeconds == nil

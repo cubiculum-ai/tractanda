@@ -4,6 +4,12 @@ import Foundation
 /// Browser and local clients use the same method contract above this boundary.
 public protocol ItemTransport: Sendable {
     func send(_ request: Data) async throws -> Data
+    /// Change this value whenever endpoint selection or authentication changes.
+    func discoveryContext() async throws -> String
+}
+
+extension ItemTransport {
+    public func discoveryContext() async throws -> String { "transport" }
 }
 
 public struct ItemQuery: Codable, Equatable, Sendable {
@@ -17,11 +23,14 @@ public struct ItemQuery: Codable, Equatable, Sendable {
     public var cursor: String?
     public var at: String?
     public var timeZone: String?
+    public var anchor: String?
+    public var anchorOffset: Int
 
     public init(
         expression: String? = nil, text: String? = nil, categoryPath: [String] = [],
         position: Int = 0, limit: Int = 64, sort: [ItemSort] = [], excludedCategoryIDs: [String] = [],
-        cursor: String? = nil, at: String? = nil, timeZone: String? = nil
+        cursor: String? = nil, at: String? = nil, timeZone: String? = nil,
+        anchor: String? = nil, anchorOffset: Int = 0
     ) {
         self.expression = expression
         self.text = text
@@ -33,26 +42,53 @@ public struct ItemQuery: Codable, Equatable, Sendable {
         self.cursor = cursor
         self.at = at
         self.timeZone = timeZone
+        self.anchor = anchor
+        self.anchorOffset = anchorOffset
     }
 
     private enum CodingKeys: String, CodingKey {
-        case expression, text, categoryPath, excludedCategoryIDs, position, limit, sort, cursor, at, timeZone
+        case filter, position, limit, sort, cursor, calculateTotal, anchor, anchorOffset
+    }
+    private struct Filter: Codable {
+        let expression: String?
+        let text: String?
+        let categoryPath: [String]?
+        let excludedCategoryIDs: [String]?
+        let at: String?
+        let timeZone: String?
+    }
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let filter = try c.decodeIfPresent(Filter.self, forKey: .filter)
+        try self.init(
+            expression: filter?.expression, text: filter?.text, categoryPath: filter?.categoryPath ?? [],
+            position: c.decodeIfPresent(Int.self, forKey: .position) ?? 0,
+            limit: c.decodeIfPresent(Int.self, forKey: .limit) ?? 64,
+            sort: c.decodeIfPresent([JMAPReadComparator].self, forKey: .sort)?.map {
+                try $0.itemSort(supportedCollations: ["i;unicode-casemap"])
+            } ?? [],
+            excludedCategoryIDs: filter?.excludedCategoryIDs ?? [],
+            cursor: c.decodeIfPresent(String.self, forKey: .cursor),
+            at: filter?.at, timeZone: filter?.timeZone,
+            anchor: c.decodeIfPresent(String.self, forKey: .anchor),
+            anchorOffset: c.decodeIfPresent(Int.self, forKey: .anchorOffset) ?? 0)
     }
     public func encode(to encoder: any Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encodeIfPresent(expression, forKey: .expression)
-        try container.encodeIfPresent(text, forKey: .text)
-        if !categoryPath.isEmpty { try container.encode(categoryPath, forKey: .categoryPath) }
-        if !excludedCategoryIDs.isEmpty {
-            try container.encode(excludedCategoryIDs, forKey: .excludedCategoryIDs)
-        }
-        if cursor == nil { try container.encode(position, forKey: .position) }
-        try container.encode(limit, forKey: .limit)
-        if !sort.isEmpty { try container.encode(sort, forKey: .sort) }
-        try container.encodeIfPresent(cursor, forKey: .cursor)
-        try container.encodeIfPresent(at, forKey: .at)
-        try container.encodeIfPresent(timeZone, forKey: .timeZone)
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(
+            Filter(
+                expression: expression, text: text, categoryPath: categoryPath.isEmpty ? nil : categoryPath,
+                excludedCategoryIDs: excludedCategoryIDs.isEmpty ? nil : excludedCategoryIDs, at: at,
+                timeZone: timeZone), forKey: .filter)
+        if cursor == nil && anchor == nil { try c.encode(position, forKey: .position) }
+        try c.encodeIfPresent(anchor, forKey: .anchor)
+        if anchor != nil { try c.encode(anchorOffset, forKey: .anchorOffset) }
+        try c.encode(limit, forKey: .limit)
+        try c.encode(true, forKey: .calculateTotal)
+        if !sort.isEmpty { try c.encode(sort.map(JMAPReadComparator.init), forKey: .sort) }
+        try c.encodeIfPresent(cursor, forKey: .cursor)
     }
+
 }
 
 public struct ItemPage: Sendable, Equatable {
@@ -77,26 +113,43 @@ public struct ItemPage: Sendable, Equatable {
 
 /// Typed, asynchronous access to the existing native protocol. No database or OS-account dependency.
 public struct ItemClient: Sendable {
-    public static let capability = "https://tractanda.ai/ns/local-prototype/4"
+    public static let capability = TractandaJMAP.capability
     public static let queryProfile = "tractanda.spotlight.v0"
     public static let maximumMessageBytes = 8 * 1024 * 1024
-    private let transport: any ItemTransport
+    private let context: JMAPClientContext
 
-    public init(transport: any ItemTransport) { self.transport = transport }
+    public init(transport: any ItemTransport) { context = JMAPClientContext(transport: transport) }
+
+    /// Required when a transport changes authentication without a discoveryContext implementation.
+    public func invalidateSession() async { await context.invalidate() }
 
     public func call<Arguments: Encodable & Sendable, Result: Decodable & Sendable>(
         _ method: String, arguments: Arguments, returning: Result.Type
     ) async throws -> Result {
         try Task.checkCancellation()
-        let request = try JSON.encode(MethodRequest(method: method, arguments: arguments))
-        guard request.count <= Self.maximumMessageBytes else {
-            throw TractandaError("requestLimit", "Request exceeds the native message limit.")
-        }
-        let data = try await transport.send(request)
+        let wireData = try await context.send(
+            method: method, arguments: JMAPValue.decode(JSON.encode(arguments)))
+        let envelope = try JMAPValue.decode(wireData)
+        let normalized = try JMAPValue.object(
+            (envelope.members ?? []).map { member in
+                guard member.name == "methodResponses", let calls = member.value.elements else {
+                    return member
+                }
+                return JMAPMember(
+                    member.name,
+                    .array(
+                        try calls.map { call in
+                            guard let values = call.elements, values.count == 3, values[0].text == method
+                            else { return call }
+                            return .array([
+                                values[0],
+                                try TractandaJMAPCodec.extensionResultFromWire(
+                                    method: method, result: values[1]), values[2],
+                            ])
+                        }))
+            })
+        let data = try normalized.encoded()
         try Task.checkCancellation()
-        guard data.count <= Self.maximumMessageBytes else {
-            throw TractandaError("responseLimit", "Response exceeds the native message limit.")
-        }
         let response: MethodResponse<Result>
         do {
             response = try JSON.decode(MethodResponse<Result>.self, data)
@@ -129,9 +182,25 @@ public struct ItemClient: Sendable {
         return result.list[0]
     }
 
+    public func revision(itemID: String, revisionID: String) async throws -> Revision {
+        try Identifier.validate(itemID)
+        try Identifier.validate(revisionID)
+        let result = try await call(
+            "TractandaRevision/get", arguments: ["ids": [revisionID]], returning: JMAPRevisionGetResponse.self
+        )
+        guard result.notFound.isEmpty, result.list.count == 1 else {
+            throw TractandaError("notFound", "Revision is unavailable.")
+        }
+        let revision = try result.list[0].canonicalRevision()
+        guard revision.itemID == itemID, revision.revisionID == revisionID else {
+            throw TractandaError("protocolError", "Exact revision response does not match its request.")
+        }
+        return revision
+    }
+
     /// Query/get share one caller-visible state; unresolved and byte-limited outcomes remain explicit.
     public func page(matching query: ItemQuery, requiring state: String? = nil) async throws -> ItemPage {
-        guard query.position >= 0, (1...256).contains(query.limit), query.categoryPath.count <= 32,
+        guard (0...256).contains(query.limit), query.categoryPath.count <= 32,
             query.excludedCategoryIDs.count <= 32
         else {
             throw TractandaError("invalidArguments", "Invalid query page or category path.")
@@ -139,11 +208,14 @@ public struct ItemClient: Sendable {
         try ItemSort.validate(query.sort)
         let page: QueryResult = try await call(
             "TractandaItem/query", arguments: query, returning: QueryResult.self)
-        guard query.cursor != nil || page.position == query.position, page.total >= 0,
+        guard page.total >= 0,
+            query.cursor != nil || query.anchor != nil
+                || page.position
+                    == (query.position < 0 ? max(0, page.total + query.position) : query.position),
             !page.queryState.isEmpty,
             page.ids.count <= query.limit, Set(page.ids).count == page.ids.count,
             page.ids.isEmpty || (page.position <= page.total && page.ids.count <= page.total - page.position),
-            !page.ids.isEmpty || page.position >= page.total
+            query.limit == 0 || !page.ids.isEmpty || page.position >= page.total
         else { throw TractandaError("protocolError", "Invalid query result page.") }
         if let state, state != page.queryState {
             throw TractandaError("stateChanged", "Items changed; refresh from the first page.")
@@ -203,59 +275,55 @@ public struct ItemClient: Sendable {
         return result
     }
 
-    /// Partial success is explicit; callers must inspect unresolved/remaining/oversized IDs.
-    public func items(
-        ids: [String], projection: String? = nil, properties: [String]? = nil,
-        maxBytes: Int = 524_288
-    ) async throws -> ItemGetResult {
-        try Self.validateIDs(ids)
-        guard (8_192...524_288).contains(maxBytes),
-            !(projection != nil && properties != nil),
-            projection.map({ ["full", "content", "summary"].contains($0) }) ?? true,
-            (properties?.count ?? 0) <= 64,
-            properties.map({ Set($0).count == $0.count }) ?? true,
-            properties?.allSatisfy({ !$0.isEmpty && !$0.contains("\0") }) ?? true
-        else { throw TractandaError("invalidArguments", "Invalid get projection or maxBytes.") }
-        let result = try await call(
-            "TractandaItem/get",
-            arguments: GetRequest(
-                ids: ids, projection: projection, properties: properties, maxBytes: maxBytes),
-            returning: ItemGetResult.self)
-        try result.validate(requestedIDs: ids)
+    /// Full-content convenience API. Partial DTO selections remain explicit in itemRecords().
+    public func items(ids: [String], maxBytes: Int = 524_288) async throws -> ItemGetResult {
+        let wire = try await itemRecords(ids: ids, maxBytes: maxBytes)
+        let result = try wire.canonicalResult()
+        try result.validate(requestedIDs: Array(Set(ids)))
         return result
     }
 
-    /// Reads an existing paged history route and preserves disposition metadata for returned revisions.
-    public func history(
-        itemID: String, position: Int = 0, limit: Int = 100,
-        projection: String? = nil, properties: [String]? = nil
-    ) async throws -> ItemHistoryResult {
-        try Identifier.validate(itemID)
-        guard position >= 0, (1...256).contains(limit),
-            !(projection != nil && properties != nil),
-            projection.map({ ["full", "content", "summary"].contains($0) }) ?? true,
-            (properties?.count ?? 0) <= 64,
-            properties.map({ Set($0).count == $0.count }) ?? true,
-            properties?.allSatisfy({ !$0.isEmpty && !$0.contains("\0") }) ?? true
+    /// Standard get is complete; supplying maxBytes selects the named bounded extension.
+    public func itemRecords(
+        ids: [String], properties: [String]? = nil, fieldProperties: [String]? = nil,
+        projection: String? = nil, maxBytes: Int? = nil
+    ) async throws -> JMAPItemGetResponse {
+        _ = try JMAPGetIDs.normalize(ids, maximum: 64)
+        _ = try JMAPReadProperties(properties, record: .item)
+        guard !(projection != nil && fieldProperties != nil),
+            maxBytes.map({ (8_192...524_288).contains($0) }) ?? true
         else {
-            throw TractandaError("invalidArguments", "Invalid history page or projection.")
+            throw TractandaError("invalidArguments", "Invalid fields selection or maxBytes.")
         }
-        let page = try await call(
+        return try await call(
+            maxBytes == nil ? "TractandaItem/get" : "TractandaItem/getBounded",
+            arguments: GetRequest(
+                ids: ids, projection: projection, properties: properties,
+                fieldProperties: fieldProperties, maxBytes: maxBytes), returning: JMAPItemGetResponse.self)
+    }
+
+    public func history(itemID: String, position: Int = 0, limit: Int = 100) async throws -> ItemHistoryResult
+    {
+        let wire = try await historyRecords(itemID: itemID, position: position, limit: limit)
+        return try wire.canonicalResult(itemID: itemID, position: position, limit: limit)
+    }
+
+    public func historyRecords(
+        itemID: String, position: Int = 0, limit: Int = 100,
+        properties: [String]? = nil, fieldProperties: [String]? = nil, projection: String? = nil
+    ) async throws -> JMAPHistoryResponse {
+        try Identifier.validate(itemID)
+        guard position >= 0, (1...256).contains(limit), !(projection != nil && fieldProperties != nil) else {
+            throw TractandaError("invalidArguments", "Invalid history page or fields selection.")
+        }
+        _ = try JMAPReadProperties(properties, record: .revision)
+        return try await call(
             "TractandaItem/history",
             arguments: HistoryRequest(
-                itemID: itemID, position: position, limit: limit,
-                projection: projection, properties: properties),
-            returning: ItemHistoryResult.self)
-        let revisionIDs = page.list.map(\.revisionID)
-        guard page.total >= 0, position <= page.total,
-            page.list.count <= page.total - position, page.list.count <= limit,
-            page.list.allSatisfy({ $0.itemID == itemID }),
-            Set(revisionIDs).count == revisionIDs.count,
-            Set(page.historicalDispositions.keys).isSubset(of: Set(revisionIDs))
-        else {
-            throw TractandaError("protocolError", "History page contains an invalid disposition map.")
-        }
-        return page
+                itemID: itemID,
+                position: position, limit: limit, projection: projection, properties: properties,
+                fieldProperties: fieldProperties),
+            returning: JMAPHistoryResponse.self)
     }
 
     public func conflicts(limit: Int = 64, cursor: String? = nil) async throws -> ItemConflictPage {
@@ -272,7 +340,7 @@ public struct ItemClient: Sendable {
         return page
     }
 
-    public func resolveConflict(_ request: ResolveConflictRequest) async throws -> CommitResult {
+    public func resolveConflict(_ request: ResolveConflictRequest) async throws -> MutationReceipt {
         try Identifier.validate(request.itemID)
         guard !request.expectedStateToken.isEmpty, request.expectedStateToken.utf8.count <= 8_192,
             !request.reviewedFrontier.isEmpty, request.reviewedFrontier.count <= 1024,
@@ -283,10 +351,9 @@ public struct ItemClient: Sendable {
         else { throw TractandaError("invalidArguments", "Invalid conflict resolution request.") }
         for id in request.reviewedFrontier { try Identifier.validate(id) }
         let result = try await call(
-            "TractandaItem/resolveConflict", arguments: request, returning: CommitResult.self)
-        guard result.revision.itemID == request.itemID,
-            result.revision.fields["operationID"]?.string == request.operationID,
-            result.itemState == nil || result.itemState?.itemID == request.itemID
+            "TractandaItem/resolveConflict", arguments: request, returning: MutationReceipt.self)
+        guard result.itemID == request.itemID,
+            result.operationID == request.operationID
         else {
             throw TractandaError("protocolError", "Conflict resolution receipt does not match its request.")
         }
@@ -329,20 +396,20 @@ public struct ItemClient: Sendable {
         }
         return status
     }
-    public func commit(_ request: CommitRequest) async throws -> CommitResult {
-        let result: CommitResult
+    public func commit(_ request: CommitRequest) async throws -> MutationReceipt {
+        let result: MutationReceipt
         while true {
             try Task.checkCancellation()
             do {
                 result = try await call(
-                    "TractandaItem/commit", arguments: request, returning: CommitResult.self)
+                    "TractandaItem/commit", arguments: request, returning: MutationReceipt.self)
                 break
             } catch let error as TractandaError where error.code == "attachmentCopyPending" {
                 try await Task.sleep(for: .milliseconds(100))
             }
         }
-        guard result.revision.fields["operationID"]?.string == request.operationID,
-            request.action == .create || request.action == .copy || result.revision.itemID == request.itemID
+        guard result.operationID == request.operationID,
+            request.action == .create || request.action == .copy || result.itemID == request.itemID
         else { throw TractandaError("protocolError", "Commit receipt does not match the pending edit.") }
         return result
     }
@@ -466,14 +533,8 @@ private struct GetRequest: Encodable, Sendable {
     let ids: [String]
     let projection: String?
     let properties: [String]?
-    let maxBytes: Int
-
-    init(ids: [String], projection: String? = nil, properties: [String]? = nil, maxBytes: Int = 524_288) {
-        self.ids = ids
-        self.projection = projection
-        self.properties = properties
-        self.maxBytes = maxBytes
-    }
+    let fieldProperties: [String]?
+    let maxBytes: Int?
 }
 private struct HistoryRequest: Encodable, Sendable {
     let itemID: String
@@ -481,6 +542,7 @@ private struct HistoryRequest: Encodable, Sendable {
     let limit: Int
     let projection: String?
     let properties: [String]?
+    let fieldProperties: [String]?
 }
 private struct StateRequest: Encodable, Sendable {
     let ids: [String]
@@ -531,32 +593,27 @@ extension ItemStateResult {
     }
 }
 
-private struct MethodRequest<Arguments: Encodable>: Encodable {
-    let method: String
-    let arguments: Arguments
-    private enum CodingKeys: String, CodingKey { case using, methodCalls }
-    func encode(to encoder: any Encoder) throws {
-        var envelope = encoder.container(keyedBy: CodingKeys.self)
-        try envelope.encode([ItemClient.capability], forKey: .using)
-        var calls = envelope.nestedUnkeyedContainer(forKey: .methodCalls)
-        var call = calls.nestedUnkeyedContainer()
-        try call.encode(method)
-        try call.encode(arguments)
-        try call.encode("client")
-    }
-}
-
 private struct MethodResponse<Result: Decodable>: Decodable {
     let method: String
     let result: Result
     let callID: String
-    private enum CodingKeys: String, CodingKey { case methodResponses, code, message }
+    private enum CodingKeys: String, CodingKey { case methodResponses, code, message, type, status }
     private struct Failure: Decodable {
         let type: String
-        let description: String
+        let description: String?
     }
     init(from decoder: any Decoder) throws {
         let envelope = try decoder.container(keyedBy: CodingKeys.self)
+        if let type = try envelope.decodeIfPresent(String.self, forKey: .type),
+            type.hasPrefix("urn:ietf:params:jmap:error:"),
+            let status = try envelope.decodeIfPresent(Int.self, forKey: .status), (400...599).contains(status)
+        {
+            let code = String(type.dropFirst("urn:ietf:params:jmap:error:".count))
+            guard ["notJSON", "notRequest", "unknownCapability", "limit"].contains(code) else {
+                throw TractandaError("protocolError", "Unknown JMAP request problem.")
+            }
+            throw TractandaError(code, "JMAP request rejected: " + code)
+        }
         if envelope.contains(.code) {
             throw TractandaError(
                 try envelope.decode(String.self, forKey: .code),
@@ -572,7 +629,7 @@ private struct MethodResponse<Result: Decodable>: Decodable {
             guard try call.decode(String.self) == "client" else {
                 throw TractandaError("protocolError", "Error response does not match the request.")
             }
-            throw TractandaError(failure.type, failure.description)
+            throw TractandaError(failure.type, failure.description ?? "")
         }
         result = try call.decode(Result.self)
         callID = try call.decode(String.self)

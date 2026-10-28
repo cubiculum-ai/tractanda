@@ -53,7 +53,7 @@ enum LearningEdit: Codable, Equatable, Sendable {
         }
     }
 
-    func send(using client: ItemClient) throws -> CommitResult {
+    func send(using client: ItemClient) throws -> MutationReceipt {
         try validate()
         let method: String
         let data: Data
@@ -66,9 +66,9 @@ enum LearningEdit: Codable, Equatable, Sendable {
             data = try JSON.encode(request)
         }
         let arguments = try JSONSerialization.jsonObject(with: data) as! [String: Any]
-        let result = try JSON.decode(CommitResult.self, client.call(method, arguments: arguments))
-        guard result.revision.itemID == itemID,
-            result.revision.fields["operationID"]?.string == operationID
+        let result = try JSON.decode(MutationReceipt.self, client.call(method, arguments: arguments))
+        guard result.itemID == itemID,
+            result.operationID == operationID
         else { throw TractandaError("protocolError", "Learning receipt does not match the saved edit.") }
         return result
     }

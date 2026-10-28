@@ -23,8 +23,11 @@ struct InstallationReceipt: Codable, Equatable {
     var peerRuntimeConfiguration: ManagedPeerConfiguration?
     var peerRuntimePrevious: ManagedPeerConfigurationSnapshot?
     var definitionSHA256: String?
+    var runtimeDefinitionSHA256: String? = nil
     var authenticationDefinitionSHA256: String? = nil
     var packageSetupOwner: SetupPackageOwner? = nil
+    var freshTargetStoreID: String? = nil
+    var freshTargetReplicaID: String? = nil
     var preparedStoreID: String? = nil
     var preparedReplicaID: String? = nil
     /// One bounded old/desired witness per mutable systemd definition, never program bytes.
@@ -58,6 +61,9 @@ struct InstallationReceipt: Codable, Equatable {
         self.release = release.path
         self.manifestSHA256 = manifestSHA256
         state = .preparing
+        if case .freshPersonalTarget(let storeID) = options.storeSelection {
+            freshTargetStoreID = storeID
+        }
         initialized = false
         sampled = false
         board = [:]

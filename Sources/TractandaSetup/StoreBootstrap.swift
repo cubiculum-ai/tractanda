@@ -5,10 +5,11 @@ import TractandaCore
 /// current personal/workgroup access configuration it created; it never adopts historical
 /// authority/raw content. Existing roots require separately authorized in-place preparation.
 enum StoreBootstrap {
+    @discardableResult
     static func initialize(
         store root: URL, indexDirectory: URL, owner: String, instance: String,
-        accounts: any AccountDirectory = SystemAccountDirectory()
-    ) throws {
+        accounts: any AccountDirectory = SystemAccountDirectory(), commonStoreID: String? = nil
+    ) throws -> PersonalSyncIdentity? {
         _ = try accounts.user(named: owner)
         let configuration: ItemValue = .object([
             "profile": .text(AccessConfiguration.profile),
@@ -16,8 +17,15 @@ enum StoreBootstrap {
             "administration": .text("system"),
             "administratorGroup": .text(SetupPlatform.host == .macos ? "admin" : "sudo"),
         ])
+        if let commonStoreID {
+            let store = try ItemStore.createJoiningPersonalSyncReplica(
+                root: root, indexDirectory: indexDirectory, storeID: commonStoreID,
+                accessConfiguration: configuration, accounts: accounts)
+            return try store.personalSyncIdentity()
+        }
         _ = try ItemStore.initializeFresh(
             root: root, indexDirectory: indexDirectory, accounts: accounts,
             initialAccessConfiguration: configuration, initializationKey: "setup:" + instance)
+        return nil
     }
 }

@@ -27,6 +27,9 @@ F = module('linux_bundle_fixtures', 'test_package_linux.py')
 class LinuxDebTests(unittest.TestCase):
     def fixture(self, parent):
         bundle = parent / 'bundle'; bundle.mkdir(); F.payload(bundle)
+        catalog = bundle / 'models/manifest.json'; catalog.parent.mkdir(parents=True, exist_ok=True)
+        catalog.write_bytes((D.B.ROOT / D.B.MAC.MODEL_ARTIFACT_MANIFEST).read_bytes())
+        catalog.chmod(0o644)
         closure = dict(profile='fixture-runtime-closure', depends=['libc6 (>= 2.41-12)'])
         receipt = dict(profile='tractanda.linux-bundle-build.v1', baseline=dict(os='debian13', arch='amd64'),
                        input=dict(dynamicLoads=[]), runtimeClosure=closure)
@@ -36,7 +39,9 @@ class LinuxDebTests(unittest.TestCase):
         manifest = dict(profile='tractanda.bundle.v1', platform='linux', arch='x86_64', version='0.1.0-poc.14',
                         files=D.B.inventory(bundle), canonicalFormats=formats,
                         embedding={'fixture': 'Granite descriptor admission mocked'},
-                        documentExtraction={'fixture': 'Docling descriptor admission mocked'})
+                        documentExtraction={'fixture': 'Docling descriptor admission mocked'},
+                        modelProvisioningManifestPath='models/manifest.json',
+                        modelProvisioningManifestSHA256=D.B.digest(catalog))
         D.write(bundle / 'bundle-manifest.json', D.B.canonical(manifest))
         return bundle, manifest, closure
 
@@ -58,6 +63,7 @@ class LinuxDebTests(unittest.TestCase):
             self.assertIn('Pre-Depends: python3, systemd\n',control)
             self.assertIn('libc6 (>= 2.41-12)',control)
             self.assertIn('curl',control);self.assertIn('lsof',control);self.assertIn('sudo',control)
+            self.assertIn('uuid-runtime', control);self.assertIn('init-system-helpers', control)
             self.assertFalse((stage/'etc').exists());self.assertFalse((stage/'var').exists())
             self.assertTrue((stage/'opt/tractanda/current/bin/tractanda-setup').is_file())
             self.assertEqual((stage/'usr/bin/tractanda').read_text(), '#!/bin/sh\nexec /opt/tractanda/current/bin/tractanda "$@"\n')
@@ -69,8 +75,12 @@ class LinuxDebTests(unittest.TestCase):
                 self.assertEqual((stage/'DEBIAN'/hook).stat().st_mode&0o777,0o755)
             pre=(stage/'DEBIAN/preinst').read_text()
             descriptor=pre.split("<<'TRACTANDA_PACKAGE_DESCRIPTOR_EOF'\n",1)[1].split('\nTRACTANDA_PACKAGE_DESCRIPTOR_EOF',1)[0]
-            self.assertEqual(D.B.canonical(json.loads(descriptor)).decode(),descriptor)
+            parsed_descriptor=json.loads(descriptor)
+            self.assertEqual(D.B.canonical(parsed_descriptor).decode(),descriptor)
             self.assertIn('"upgrade":"compatible"',descriptor)
+            self.assertTrue((stage/'opt/tractanda/current/models/manifest.json').is_file())
+            for key in ('modelProvisioningManifestPath', 'modelProvisioningManifestSHA256', 'modelProvisioningManifest'):
+                self.assertNotIn(key, parsed_descriptor)
             self.assertTrue(all((stage/row['path']).stat().st_mtime==1_700_000_000 for row in result['inventory']))
 
     def test_identical_inputs_produce_identical_content_inventory_and_version_order(self):

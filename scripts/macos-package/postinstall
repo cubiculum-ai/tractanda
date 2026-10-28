@@ -4,8 +4,9 @@ set -eu
 [ "${3:-/}" = / ] || { echo 'Install Tractanda on the running system volume.' >&2; exit 1; }
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 IFS= read -r bundle < "$script_dir/release-path"
-base='/Users/Shared/Library/Application Support/Tractanda'
-registry="$base/connections.json"
+configuration='/Library/Tractanda/Configuration'
+installation='/Library/Tractanda/Installation'
+registry="$configuration/connections.json"
 instance=default
 
 # A reinstall may have paused peers using this exact release. Always resume them,
@@ -30,15 +31,12 @@ if [ -e "$registry" ]; then
 fi
 case "$instance" in ''|*[!a-z0-9-]*) echo 'Invalid default database name.' >&2; exit 1;; esac
 
-if [ -f "$base/receipts/$instance.json" ]; then
+if [ -f "$installation/receipts/$instance.json" ]; then
     # Existing owner, data locations, model configuration and port are preserved.
     "$bundle/bin/tractanda-setup" upgrade --bundle "$bundle" --name "$instance"
     exit 0
 fi
 
-owner=$(/usr/bin/stat -f %Su /dev/console)
-case "$owner" in ''|root|loginwindow|_mbsetupuser)
-    echo 'Log in as the intended owner before installing, or use install.sh with an explicit --owner.' >&2
-    exit 1;;
-esac
-"$bundle/bin/tractanda-setup" install --bundle "$bundle" --name "$instance" --owner "$owner" --sample
+# Fresh software-only installations deliberately leave the store unconfigured.
+# The separately selected sample component initializes a standalone instance.
+exit 0

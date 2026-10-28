@@ -185,15 +185,12 @@ extension SetupEngine {
                 close(fd)
                 fd = next
                 var metadata = stat()
-                let shared = [
-                    "/Users/Shared", "/Users/Shared/Library", "/Users/Shared/Library/Application Support",
-                ].contains(current)
                 let fixtureTemporary =
                     !trustedOwnership && ["/tmp", "/private/tmp", "/var/tmp"].contains(current)
                 guard fstat(fd, &metadata) == 0, metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR),
                     metadata.st_uid == 0 || (!trustedOwnership && metadata.st_uid == getuid()),
                     metadata.st_mode & 0o022 == 0
-                        || ((shared || fixtureTemporary) && metadata.st_uid == 0
+                        || (fixtureTemporary && metadata.st_uid == 0
                             && metadata.st_mode & mode_t(S_ISVTX) != 0),
                     tractanda_peer_configuration_no_mutation_acl(fd) == 0
                 else {
@@ -380,6 +377,19 @@ extension SetupEngine {
         case .disable:
             desired = nil
             bytes = nil
+        case .outboundOnly:
+            let configuration = try PersonalPeerRuntimeConfiguration(settings: PeerRuntimeConfiguration(
+                peers: [], synchronization: .init(enabled: true, intervalSeconds: 15)))
+            let encoded = try configuration.encoded()
+            let expected = try ManagedPeerConfiguration(path: path, bytes: encoded)
+            if let previous {
+                guard options.newInstanceOnly, previous.state == .preparing,
+                    previous.peerRuntimeConfiguration == expected else {
+                    throw SetupError("Outbound join policy cannot change an existing instance.")
+                }
+            }
+            desired = expected
+            bytes = encoded
         }
         if previous?.peerRuntimePrevious != nil, desired != previous?.peerRuntimeConfiguration {
             throw SetupError(
@@ -430,6 +440,7 @@ extension SetupEngine {
             _ = try capturePeerConfiguration(input)
             return "Replace peer runtime configuration at " + peerConfigurationURL(options.name).path
         case .disable: return "Disable peer runtime; preserve canonical pairings and private credentials"
+        case .outboundOnly: return "Enable outbound-only personal peer synchronization for a new target"
         case .preserve:
             let receipt = try readReceipt(options.name)
             if let receipt {

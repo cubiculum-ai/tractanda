@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 wire_spec = importlib.util.spec_from_file_location("ipc_fixture", Path(__file__).with_name("verify-ipc.py"))
 wire_module = importlib.util.module_from_spec(wire_spec)
 wire_spec.loader.exec_module(wire_module)
+query_arguments = wire_module.query_arguments
 
 
 def tagged(kind, value):
@@ -88,10 +89,14 @@ class Fixture:
             text=True, capture_output=True, timeout=40, **kwargs)
 
     def call(self, key, method, args=None, error=None):
-        request = {"using": [wire_module.CAPABILITY], "methodCalls": [[method, args or {}, "test"]]}
-        result = self.run(key, [sys.executable, __file__, "--wire", str(self.socket)], input=json.dumps(request))
-        assert result.returncode == 0, (key, result.stderr)
-        envelope = json.loads(result.stdout)
+        DiscoveryContext = wire_module.DiscoveryContext
+        def exchange(request):
+            result = self.run(key, [sys.executable, __file__, "--wire", str(self.socket)], input=json.dumps(request))
+            assert result.returncode == 0, (key, result.stderr)
+            return json.loads(result.stdout)
+        contexts = self.__dict__.setdefault("jmap_contexts", {})
+        context = contexts.setdefault(key, DiscoveryContext(exchange))
+        envelope = context.request([[method, args or {}, "test"]])
         if "code" in envelope:
             assert error == envelope["code"], envelope
             return envelope
@@ -109,7 +114,11 @@ class Fixture:
         request = wire_module.intent(action or ("revise" if base else "create"), operation or str(uuid.uuid4()),
             item=identity(base) if base else None, base=identity(base, "revisionID") if base else None,
             class_id=class_id or ("Item" if base is None else None), changes=fields)
-        return self.call(key, "TractandaItem/commit", request, error=error)
+        receipt = self.call(key, "TractandaItem/commit", request, error=error)
+        if error: return receipt
+        revision = self.call(key, "TractandaRevision/get", {"ids": [receipt["revisionId"]]})["list"][0]
+        assert identity(revision) == receipt["itemId"] and identity(revision, "revisionID") == receipt["revisionId"]
+        return dict(receipt, revision=revision)
 
     def permissions(self, mode=0o600, acl=None, owner=None, group=None):
         return obj({"profile": text("tractanda.permissions.posix.v1"), "owner": text(owner or self.names["alice"]),
@@ -175,7 +184,7 @@ class Fixture:
         acl = {"mask": number(6), "owningGroup": number(0), "users": obj({self.names["bob"]: number(6), self.names["agent"]: number(4)})}
         first = self.commit("alice", {"subject": text("Shared chess"), "permissions": self.permissions(0o660, acl, "former_alice")})["revision"]
         assert self.get("bob", private)["notFound"] == [identity(private)]
-        assert self.call("bob", "TractandaItem/query", {"text": "secret"})["total"] == 0
+        assert self.call("bob", "TractandaItem/query", query_arguments({"text": "secret"}))["total"] == 0
         assert self.get("agent", first)["list"]
         self.commit("agent", {"body": text("unauthorized edit")}, base=first, error="forbidden")
         second = self.commit("bob", {"body": text("Bob edited this")}, base=first, operation="bob-edit")["revision"]
@@ -205,8 +214,8 @@ class Fixture:
         overlay = self.commit("alice", {"target": tagged("reference", {"itemID": identity(second)}),
             "personalOverrides": obj({category_id: text("include")})}, class_id="PersonalStateItem")["revision"]
         assert self.call("bob", "TractandaStore/info")["state"] == before_state
-        assert identity(second) in self.call("alice", "TractandaItem/query", {"categoryPath": [category_id]})["ids"]
-        assert identity(second) not in self.call("bob", "TractandaItem/query", {"categoryPath": [category_id]})["ids"]
+        assert identity(second) in self.call("alice", "TractandaItem/query", query_arguments({"categoryPath": [category_id]}))["ids"]
+        assert identity(second) not in self.call("bob", "TractandaItem/query", query_arguments({"categoryPath": [category_id]}))["ids"]
         assert self.get("bob", overlay)["notFound"]
         for subject, label in [("chess tournament board", "include"), ("garden vegetables soil", "exclude"), ("garden flowers soil", "exclude")]:
             self.commit("alice", {"subject": text(subject), "categoryOverrides": obj({category_id: text(label)})})
@@ -242,7 +251,7 @@ class Fixture:
         assert self.call("bob", "TractandaItem/history", {"itemID": identity(self.first)})["total"] == 2
         revoked = self.commit("alice", {"permissions": self.permissions()}, base=self.second)["revision"]
         assert self.get("bob", revoked)["notFound"]
-        self.call("bob", "TractandaRevision/get", {"itemID": identity(self.first), "revisionID": identity(self.first, "revisionID")}, error="forbidden")
+        self.call("bob", "TractandaRevision/get", {"ids": [identity(self.first, "revisionID")]}, error="forbidden")
         self.call("bob", "TractandaItem/history", {"itemID": identity(self.first)}, error="forbidden")
         self.commit("bob", {"body": text("Bob edited this")}, base=self.first, operation="bob-edit", error="forbidden")
         latest = self.commit("alice", {"permissions": self.permissions(0o660, self.acl)}, base=revoked)["revision"]
@@ -296,14 +305,15 @@ class Fixture:
             client.initialize(client_name=self.names["service"])
             assert client.tool("tractanda_info")["accessScope"] == "user:" + self.names["agent"]
             client.tool("tractanda_info", {"actor": self.names["alice"]}, error="invalidArguments")
-            assert client.tool("tractanda_query", {"viewID": board_id})["ids"] == [card_id]
+            assert client.tool("tractanda_query", query_arguments({"viewID": board_id}))["ids"] == [card_id]
             assert client.tool("tractanda_get", {"ids": [private_id]})["notFound"] == [private_id]
             client.resource("tractanda://items/" + private_id, error=-32002)
             client.tool("tractanda_commit", wire_module.intent("revise", "agent-board-denied", board_id,
                 identity(board, "revisionID"), changes={"subject": text("not allowed")}), error="forbidden")
             edit = wire_module.intent("revise", "agent-card-edit", card_id, identity(card, "revisionID"),
                 changes={"categoryOverrides": obj({**card["fields"]["categoryOverrides"]["value"], mapping["columns"]["ready"]: text("exclude"), mapping["columns"]["done"]: text("include")}), "workingNotes": text("Completed by the separate OS agent through MCP.")})
-            changed = client.tool("tractanda_commit", edit)["revision"]
+            receipt = client.tool("tractanda_commit", edit)
+            changed = self.call("agent", "TractandaRevision/get", {"ids": [receipt["revisionId"]]})["list"][0]
             assert changed["fields"]["actor"] == text("user:" + self.names["agent"])
             assert client.tool("tractanda_commit", edit)["replayed"]
             human = self.run("alice", [self.binary, "kanban", str(self.socket), board_id])
@@ -315,9 +325,9 @@ class Fixture:
             assert self.call("alice", "TractandaItem/get", {"ids": [board_id]})["list"] == [board]
             self.commit("alice", {"permissions": self.permissions()}, base=changed)
             assert client.tool("tractanda_get", {"ids": [card_id]})["notFound"] == [card_id]
-            assert client.tool("tractanda_query", {"viewID": board_id})["total"] == 0
+            assert client.tool("tractanda_query", query_arguments({"viewID": board_id}))["total"] == 0
             client.tool("tractanda_history", {"itemID": card_id}, error="forbidden")
-            client.tool("tractanda_revision", {"itemID": card_id, "revisionID": identity(card, "revisionID")}, error="forbidden")
+            client.tool("tractanda_revision", {"ids": [identity(card, "revisionID")]}, error="forbidden")
             client.resource("tractanda://items/" + card_id + "/revisions/" + identity(card, "revisionID"), error=-32002)
             client.tool("tractanda_commit", edit, error="forbidden")
         with peer("outsider") as client:

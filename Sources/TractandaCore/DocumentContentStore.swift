@@ -339,23 +339,28 @@ final class DocumentContentStore: @unchecked Sendable {
         }
     }
 
-    private init(inventoryRoot: URL, ownerUID: UInt32, rootDescriptor: Int32) {
+    private init(
+        inventoryRoot: URL, ownerUID: UInt32, rootDescriptor: Int32, readFailureForTesting: Int32? = nil
+    ) {
         root = inventoryRoot
         self.ownerUID = ownerUID
         files = DocumentContentFiles(
-            root: inventoryRoot, ownerUID: ownerUID, minimumFreeBytes: 0, rootDescriptor: rootDescriptor)
+            root: inventoryRoot, ownerUID: ownerUID, minimumFreeBytes: 0, rootDescriptor: rootDescriptor,
+            readFailureForTesting: readFailureForTesting)
     }
     /// Read-only recovery borrows the selected root descriptor and never resolves placement SQLite.
     static func validateForInventory(
         _ representation: AttachmentDocumentRepresentation, path: String, root: URL,
         rootDescriptor: Int32, ownerUID: UInt32, readBudget: @escaping (Int) throws -> Void,
-        progress: (Int64) throws -> Void = { _ in }
+        progress: (Int64) throws -> Void = { _ in }, readFailureForTesting: Int32? = nil
     ) throws {
         guard let reference = representation.content else {
             throw TractandaError("documentIntegrity", "Recovery requires a saved document reference.")
         }
         try DocumentPlacement.validate(path, id: reference.contentID)
-        let validator = Self(inventoryRoot: root, ownerUID: ownerUID, rootDescriptor: rootDescriptor)
+        let validator = Self(
+            inventoryRoot: root, ownerUID: ownerUID, rootDescriptor: rootDescriptor,
+            readFailureForTesting: readFailureForTesting)
         try validator.validateStoredContent(
             reference, source: representation.source, identity: representation.identity,
             extractedAt: representation.extractedAt, base: path.split(separator: "/").map(String.init),
@@ -1017,7 +1022,7 @@ final class DocumentContentStore: @unchecked Sendable {
                 != nil
         else { return false }
         _ = try validateTree(base: base, reference: reference, synchronize: true)
-        try files.synchronizeDirectory(Array(base.dropLast()))
+        try files.confirmPublishedDocumentDurability(base)
         return true
     }
     private func recoverPlacement(_ visit: (String, String) throws -> Void) throws {
@@ -1037,7 +1042,7 @@ final class DocumentContentStore: @unchecked Sendable {
                         path: path + ["manifest.json"], maximumBytes: Self.maximumNodeBytes)
                     let reference = try recoveredReference(data, id: name)
                     _ = try validateTree(base: path, reference: reference, synchronize: true)
-                    try files.synchronizeDirectory(Array(path.dropLast()))
+                    try files.confirmPublishedDocumentDurability(path)
                     try visit(name, relative)
                 }
                 return true

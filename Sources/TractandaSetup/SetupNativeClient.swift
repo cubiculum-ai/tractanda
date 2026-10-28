@@ -1,22 +1,38 @@
 import Foundation
 import TractandaCore
 
+typealias SetupNativeSender = (Data, LocalTransport.ResponseWait) throws -> Data
+
 struct SetupNativeClient {
     let socket: String
     let serverUser: String
+    private let context: NativeClientContext
+    private let send: SetupNativeSender
+
+    init(socket: String, serverUser: String, sendForTesting: SetupNativeSender? = nil) {
+        self.socket = socket
+        self.serverUser = serverUser
+        let connection = ServerConnection(socketPath: socket, serverUser: serverUser)
+        let selected: SetupNativeSender = sendForTesting ?? { try connection.send($0, responseWait: $1) }
+        send = selected
+        context = NativeClientContext(transport: { try selected($0, .bounded) })
+    }
 
     func call(_ method: String, _ arguments: [String: Any] = [:], waitForMutation: Bool = false) throws
         -> [String: Any]
     {
         let bytes = try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability], "methodCalls": [[method, arguments, "setup"]],
+            "using": ["urn:ietf:params:jmap:core", ItemService.capability],
+            "methodCalls": [[method, arguments, "setup"]],
         ])
-        let response = try ServerConnection(socketPath: socket, serverUser: serverUser).send(
-            bytes, responseWait: waitForMutation ? .installerMutation : .bounded)
-        guard let envelope = try JSONSerialization.jsonObject(with: response) as? [String: Any],
-            let calls = envelope["methodResponses"] as? [[Any]], calls.count == 1, calls[0].count == 3,
-            let result = calls[0][1] as? [String: Any], calls[0][0] as? String == method
-        else { throw SetupError("Native installer request failed: \(method).") }
+        let sender: (Data) throws -> Data = {
+            try send($0, waitForMutation ? .untilCompletion : .bounded)
+        }
+        let response = try context.send(bytes, transport: sender)
+        let payload = try NativeMethodResult.unwrap(response, method: method, callID: "setup")
+        guard let result = try JSONSerialization.jsonObject(with: payload) as? [String: Any] else {
+            throw SetupError("Native installer returned invalid method arguments: \(method).")
+        }
         return result
     }
 

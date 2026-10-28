@@ -1,6 +1,7 @@
 import Foundation
 import NIOPosix
 import TractandaCore
+import TractandaHTTPSIdentity
 import TractandaPeerTransport
 import TractandaWeb
 
@@ -8,6 +9,7 @@ public struct DaemonEndpoints: Codable, Sendable {
     public let socketPath: String
     public let httpURL: String?
     public let mcpURL: String?
+    public let publicJMAPURL: String?
     /// A bound explicit transport endpoint, not a claim of peer admission or synchronization.
     public let peerHost: String?
     public let peerPort: Int?
@@ -21,13 +23,19 @@ public actor SharedDaemon {
     private let group: MultiThreadedEventLoopGroup
     private let unix: DaemonListener
     private let http: DaemonListener?
+    private let publicHTTP: DaemonListener?
+    private let publicApplication: PublicJMAPApplication?
+    private let publicIdentity: HTTPSIdentityContextStore?
+    private let publicConfiguration: PublicJMAPConfiguration?
     private let peer: DaemonListener?
     private let peerRuntime: PeerServiceRuntime?
     private let synchronization: PeerSyncRuntime?
     private let personalPeerRuntime: PersonalPeerRuntime?
+    private let personalEnrollment: PersonalEnrollmentRuntime?
     private let readiness: DaemonReadiness
     private let endpointsValue: DaemonEndpoints
     private var maintenance: Task<Void, Never>?
+    private var modelProvisioning: ModelProvisioningRuntime?
     private let peerClockMonitor: PeerClockMonitor
     private var closed = false
     private var closing = false
@@ -47,16 +55,19 @@ public actor SharedDaemon {
     static func startForTesting(
         configuration: DaemonConfiguration,
         makeAccountDirectory: @escaping @Sendable () -> any AccountDirectory,
+        authenticator: any PasswordAuthenticating = SystemPasswordAuthenticator(),
         peerLimits: PeerConnectionLimits = .init(),
         syncLimits: PeerSyncLimits = .init(),
         personalChunkObserverForTesting: PersonalChunkObserver? = nil,
+        modelProvisioningOriginForTesting: URL? = nil,
         claimStartupReadiness: @escaping @Sendable () -> Bool = { true }
     ) async throws -> SharedDaemon {
         try await startOwned(
-            configuration: configuration, authenticator: SystemPasswordAuthenticator(),
+            configuration: configuration, authenticator: authenticator,
             claimStartupReadiness: claimStartupReadiness, makeAccountDirectory: makeAccountDirectory,
             peerLimits: peerLimits, syncLimits: syncLimits,
-            personalChunkObserverForTesting: personalChunkObserverForTesting)
+            personalChunkObserverForTesting: personalChunkObserverForTesting,
+            modelProvisioningOriginForTesting: modelProvisioningOriginForTesting)
     }
     private static func startOwned(
         configuration: DaemonConfiguration,
@@ -64,9 +75,11 @@ public actor SharedDaemon {
         claimStartupReadiness: @Sendable () -> Bool,
         makeAccountDirectory: @escaping @Sendable () -> any AccountDirectory,
         peerLimits: PeerConnectionLimits, syncLimits: PeerSyncLimits,
-        personalChunkObserverForTesting: PersonalChunkObserver? = nil
+        personalChunkObserverForTesting: PersonalChunkObserver? = nil,
+        modelProvisioningOriginForTesting: URL? = nil
     ) async throws -> SharedDaemon {
         try configuration.validate()
+        try configuration.publicJMAP?.prepareHeadlessPolicy()
         // An explicit personal profile is decoded before opening canonical content or
         // allocating listeners. Old authority runtime JSON cannot select this gateway.
         let personalConfiguration = try configuration.peerRuntimeConfigurationPath.map {
@@ -88,18 +101,60 @@ public actor SharedDaemon {
             await coordinator.close()
             throw error
         }
+        let blobs = JMAPBlobService(
+            coordinator: coordinator,
+            limits: try configuration.publicJMAP?.blobLimits()
+                ?? JMAPBlobLimits(
+                    maxSizeUpload: 50_000_000,
+                    minimumFreeBytes: configuration.attachmentUploadPolicy?.minimumFreeBytes ?? 1024 * 1024
+                        * 1024))
         let sessions = SessionAuthority(coordinator: coordinator, authenticator: authenticator)
         let application = DaemonApplication(
             coordinator: coordinator, sessions: sessions, page: page, manual: manual, nonce: nonce)
+        await application.setBlobProvider(blobs)
         let readiness = DaemonReadiness()
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
         var unix: DaemonListener?
         var http: DaemonListener?
+        var publicHTTP: DaemonListener?
+        var publicApplication: PublicJMAPApplication?
+        var publicIdentity: HTTPSIdentityContextStore?
+        var notifications: JMAPEventHub?
         var peer: DaemonListener?
         var peerRuntime: PeerServiceRuntime?
         var synchronization: PeerSyncRuntime?
         var personalPeerRuntime: PersonalPeerRuntime?
+        var personalEnrollment: PersonalEnrollmentRuntime?
         do {
+            if let publicConfiguration = configuration.publicJMAP {
+                publicIdentity = try await withCheckedThrowingContinuation { continuation in
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        continuation.resume(with: Result { try publicConfiguration.loadIdentity() })
+                    }
+                }
+                let callbackTransport = try NIOJMAPCallbackTransport(
+                    group: group, policy: publicConfiguration.callbackPolicy)
+                let hub = try JMAPEventHub(
+                    stateProvider: { try await coordinator.jmapVisibleStates(authentication: $0) },
+                    callbackTransport: callbackTransport,
+                    credentialResolver: { [weak sessions] id in
+                        try await sessions?.authentication(credentialID: id)
+                    })
+                notifications = hub
+                publicApplication = try PublicJMAPApplication(
+                    coordinator: coordinator, sessions: sessions,
+                    blobs: blobs, notifications: hub, baseURL: publicConfiguration.baseURL)
+            }
+            let eventProvider = notifications
+            try await sessions.installResourceMethods { [blobs, weak eventProvider] authentication in
+                var methods = try await blobs.methods(authentication: authentication)
+                if let eventProvider {
+                    for (name, method) in try await eventProvider.methods(authentication: authentication) {
+                        methods[name] = method
+                    }
+                }
+                return methods
+            }
             if let peerConfiguration, let path = configuration.peerRuntimeConfigurationPath {
                 let runtime = try PersonalPeerRuntime(
                     configuration: peerConfiguration, configurationPath: path,
@@ -112,6 +167,11 @@ public actor SharedDaemon {
                         initialize: { runtime.install(on: $0) })
                 }
                 await runtime.refreshNow()
+                let enrollment = PersonalEnrollmentRuntime(coordinator: coordinator, runtime: runtime)
+                personalEnrollment = enrollment
+                await application.setPersonalEnrollmentProvider { data, uid, principal in
+                    try await enrollment.native(data, forUID: uid, principal: principal)
+                }
             }
             let statusPersonal = personalPeerRuntime
             let statusRuntime = peerRuntime
@@ -175,6 +235,11 @@ public actor SharedDaemon {
                     }
                     return try await application.beginPrivateEnrollment(
                         request, forUID: uid, control: control)
+                }, personalEnrollmentBegin: { request, uid, control in
+                    guard await readiness.isReady() else {
+                        throw TractandaError("serviceBusy", "Service is starting or stopping.")
+                    }
+                    return try await application.beginPrivatePersonalEnrollment(request, forUID: uid, control: control)
                 })
             if let port = configuration.httpPort {
                 http = try await DaemonListeners.http(
@@ -184,32 +249,58 @@ public actor SharedDaemon {
                         return try await application.http(request)
                     })
             }
+            if let publicConfiguration = configuration.publicJMAP, let publicApplication {
+                publicHTTP = try await DaemonListeners.publicJMAP(
+                    group: group, configuration: publicConfiguration,
+                    identity: publicIdentity, managed: configuration.managed,
+                    begin: { request in
+                        guard await readiness.isReady() else {
+                            throw TractandaError("serviceBusy", "Service is starting or stopping.")
+                        }
+                        return try await publicApplication.begin(request)
+                    })
+            }
             guard claimStartupReadiness() else { throw CancellationError() }
             try Task.checkCancellation()
             await personalPeerRuntime?.activate()
+            await personalEnrollment?.activate()
             await peerRuntime?.activate()
             await synchronization?.activate()
             await readiness.activate()
             await coordinator.startCanonicalVerification()
-            return SharedDaemon(
+            let daemon = SharedDaemon(
                 coordinator: coordinator, sessions: sessions, application: application, group: group,
-                unix: unix!, http: http, peer: peer, peerRuntime: peerRuntime,
+                unix: unix!, http: http, publicHTTP: publicHTTP, publicApplication: publicApplication,
+                publicIdentity: publicIdentity, publicConfiguration: configuration.publicJMAP, peer: peer,
+                peerRuntime: peerRuntime,
                 synchronization: synchronization, personalPeerRuntime: personalPeerRuntime,
+                personalEnrollment: personalEnrollment,
                 readiness: readiness,
                 endpoints: .init(
                     socketPath: configuration.socketPath,
                     httpURL: http.map { "http://127.0.0.1:\($0.port ?? 0)" },
                     mcpURL: http.map { "http://127.0.0.1:\($0.port ?? 0)/mcp" },
+                    publicJMAPURL: publicHTTP == nil ? nil : configuration.publicJMAP?.baseURL,
                     peerHost: peer == nil ? nil : peerConfiguration?.listen?.host,
                     peerPort: peer?.port, processID: getpid()))
+            if let provisioning = configuration.modelProvisioning {
+                try await daemon.startModelProvisioning(provisioning, resumeDocumentJobs: configuration.documentConverter?.modelIsReady == false,
+                    originForTesting: modelProvisioningOriginForTesting)
+            }
+            return daemon
         } catch {
             await readiness.deactivate()
+            await personalEnrollment?.beginClose()
             await personalPeerRuntime?.deactivate()
             await peerRuntime?.deactivate()
             await synchronization?.close()
             try? await peer?.close()
             await personalPeerRuntime?.close()
+            await personalEnrollment?.finishClose()
             await peerRuntime?.close()
+            try? await publicHTTP?.close()
+            await publicApplication?.close()
+            await notifications?.close()
             try? await http?.close()
             try? await unix?.close()
             await application.close()
@@ -222,8 +313,10 @@ public actor SharedDaemon {
     private init(
         coordinator: ServiceCoordinator, sessions: SessionAuthority, application: DaemonApplication,
         group: MultiThreadedEventLoopGroup, unix: DaemonListener, http: DaemonListener?,
+        publicHTTP: DaemonListener?, publicApplication: PublicJMAPApplication?,
+        publicIdentity: HTTPSIdentityContextStore?, publicConfiguration: PublicJMAPConfiguration?,
         peer: DaemonListener?, peerRuntime: PeerServiceRuntime?, synchronization: PeerSyncRuntime?,
-        personalPeerRuntime: PersonalPeerRuntime?, readiness: DaemonReadiness,
+        personalPeerRuntime: PersonalPeerRuntime?, personalEnrollment: PersonalEnrollmentRuntime?, readiness: DaemonReadiness,
         endpoints: DaemonEndpoints
     ) {
         self.coordinator = coordinator
@@ -232,10 +325,15 @@ public actor SharedDaemon {
         self.group = group
         self.unix = unix
         self.http = http
+        self.publicHTTP = publicHTTP
+        self.publicApplication = publicApplication
+        self.publicIdentity = publicIdentity
+        self.publicConfiguration = publicConfiguration
         self.peer = peer
         self.peerRuntime = peerRuntime
         self.synchronization = synchronization
         self.personalPeerRuntime = personalPeerRuntime
+        self.personalEnrollment = personalEnrollment
         self.readiness = readiness
         endpointsValue = endpoints
         let sampler = NISTTimeSampler(group: group)
@@ -260,6 +358,37 @@ public actor SharedDaemon {
                     await clockMonitor.tick()
                     try? await coordinator.maintain()
                 }
+            }
+        }
+    }
+
+    private func startModelProvisioning(_ configuration: ModelProvisioningConfiguration, resumeDocumentJobs: Bool, originForTesting: URL?) async throws {
+        let coordinator = self.coordinator
+        let runtime = try ModelProvisioningRuntime(configuration: configuration, testingOrigin: originForTesting) { artifact in
+            if resumeDocumentJobs && artifact.identifier == "granite-docling-258m-mlx" {
+                await coordinator.documentModelDidBecomeReady()
+            }
+        }
+        modelProvisioning = runtime
+        await application.setModelStatusProvider { runtime.workers.flatMap { $0.status() } }
+    }
+
+    /// Explicit management hook for externally replaced identities; no automatic CA/renewal service.
+    public func reloadPublicHTTPSIdentity() async throws {
+        guard !closed, let publicConfiguration, let publicIdentity else {
+            throw TractandaError("unsupportedFeature", "Built-in public HTTPS is not configured.")
+        }
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(
+                    with: Result {
+                        _ = try publicIdentity.reload {
+                            guard let replacement = try publicConfiguration.loadIdentity() else {
+                                throw HTTPSIdentityError.identityUnavailable
+                            }
+                            return try replacement.contextForNewConnection(now: Date())
+                        }
+                    })
             }
         }
     }
@@ -291,15 +420,20 @@ public actor SharedDaemon {
         closing = true
         await readiness.deactivate()
         maintenance?.cancel()
+        await modelProvisioning?.close()
+        await personalEnrollment?.beginClose()
         await personalPeerRuntime?.deactivate()
         await peerRuntime?.deactivate()
         await synchronization?.close()
         try? await peer?.close()
         await personalPeerRuntime?.close()
+        await personalEnrollment?.finishClose()
         await peerRuntime?.close()
         await coordinator.requestBackgroundStop()
         await peerClockMonitor.close()
         _ = await maintenance?.result
+        try? await publicHTTP?.close()
+        await publicApplication?.close()
         try? await http?.close()
         try? await unix.close()
         await application.close()

@@ -6,7 +6,7 @@ Tractanda keeps versioned items, overlapping categories and reusable views in on
 
 The terminal client offers temporary Text/Semantic item search with `F` / `Ctrl-F` from Views or Categories, across all readable items without saving a view. See the [terminal search guide](docs/terminal-search.md).
 
-The downloadable macOS preview requires Apple Silicon (M1 or later) and macOS 15 or later; 16 GiB unified memory is a provisional practical recommendation. See [macOS installation and service management](docs/install.md) and [system requirements](docs/system-requirements.md) for limitations and storage guidance. Linux packaging remains in development. The macOS package includes pinned Granite Docling 258M model assets for durable document jobs; see [installation details](docs/install.md).
+The macOS preview targets Apple Silicon (M1 or later) and macOS 15 or later; 16 GiB unified memory is a provisional practical recommendation. Existing bundled-model packages contain their selected model assets; check the particular release notes. Packages built from the current source include the model workers and pinned catalog but omit large weights by default; configured workers fetch missing files from the exact pinned revisions without blocking core service startup. A full offline package can include verified weights. See [macOS installation and service management](docs/install.md), [system requirements](docs/system-requirements.md) and the [model runtime guide](docs/embedding-runtime.md) for current source behavior and storage guidance. Linux installation availability depends on the selected release.
 
 Optional inline capture resolves authored `#categories` and category-configured dates in one reviewed edit, retaining plain text and stable references. See the [capture guide](docs/inline-capture.md). This source change awaits an explicitly requested release/deployment; the installed preview remains on its existing build.
 
@@ -19,7 +19,7 @@ This is source-available evaluation software. Formats and APIs are experimental;
 - Categories, saved/transient views, terminal and JSON clients, stdio MCP, and an example browser Kanban.
 - A shared daemon with a Unix API and optional loopback HTTP, including authenticated Streamable HTTP MCP.
 
-Synchronization, attachment workflows, a native GUI, general internet deployment, full agent accounts/homes, and Linux installation remain incomplete. The macOS installer has passed isolated launchd install/restart/rollback/uninstall tests; actual reboot validation remains open. The first two previews were signed without notarization. The current release workflow requires Apple acceptance, ticket stapling and Gatekeeper verification before publishing a new installer; each release records its actual results.
+Current source includes personal/workgroup peer synchronization, attachment/document workflows and macOS/Debian installers; live three-node qualification is distinct from the remaining broader lifecycle and fault testing. A native GUI, personal-subset mobile replication, automatic client failover and full agent-account provisioning remain future work. The macOS installer has passed isolated launchd install/restart/rollback/uninstall tests; actual reboot validation remains open. The first two previews were signed without notarization. The current release workflow requires Apple acceptance, ticket stapling and Gatekeeper verification before publishing a new installer; each release records its actual results.
 
 ## Start locally
 

@@ -703,6 +703,209 @@ final class PersonalSyncTests: XCTestCase {
                 try pair.b.applyPersonalRevision(session: pair.bindingB, descriptor: object).status, .known)
         }
     }
+
+    func testInterruptedIncomingPublicationAutomaticallyRecoversWithoutAdmittingAnotherStage() throws {
+        try fixture { pair, accounts in
+            let accepted = try create(pair.a, accounts: accounts, operation: "recover-accepted")
+            let privateRevision = try create(pair.a, accounts: accounts, operation: "remain-private")
+            let acceptedObject = try descriptor(pair.a, revision: accepted)
+            let privateObject = try descriptor(pair.a, revision: privateRevision)
+            for object in [acceptedObject, privateObject] {
+                try transfer(
+                    object, from: pair.a, to: pair.b,
+                    sourceBinding: pair.bindingA, targetBinding: pair.bindingB)
+            }
+            pair.b.personalSyncAfterRevisionPublicationForTesting = {
+                throw TractandaError("injected", "Interrupted accepted publication")
+            }
+            assertCode("injected") {
+                _ = try pair.b.applyPersonalRevision(session: pair.bindingB, descriptor: acceptedObject)
+            }
+            XCTAssertFalse(pair.b.isCanonicalTrusted)
+            pair.b.personalSyncAfterRevisionPublicationForTesting = nil
+            var recoveryAttempts = 0
+            pair.b.beforeCanonicalDurabilitySync = { recoveryAttempts += 1 }
+            let diagnostic = try pair.b.withAccess(forUID: pair.b.ownerUID, recoverPublication: false) {
+                try pair.b.personalPeerCanonicalStatus()
+            }
+            XCTAssertEqual(diagnostic.readiness, .recoveryRequired)
+            XCTAssertEqual(recoveryAttempts, 0, "Status cannot implicitly reconstruct canonical publication")
+            XCTAssertFalse(pair.b.isCanonicalTrusted)
+            let rejected = try PeerExchangeBinding(
+                peerID: pair.bindingB.peerID, storeID: pair.bindingB.storeID,
+                localReplicaID: pair.bindingB.localReplicaID,
+                remoteReplicaID: try UUID.makeVersion1().uuidString.lowercased(),
+                pairingID: pair.bindingB.pairingID, localIsInitiator: pair.bindingB.localIsInitiator,
+                configurationDigest: pair.bindingB.configurationDigest)
+            assertCode("untrustedPeer") { try pair.b.validatePersonalPeerBinding(rejected) }
+            XCTAssertEqual(recoveryAttempts, 0, "Rejected membership cannot trigger reconstruction")
+            // Binding validation triggers a canonical-only rebuild on the same live Store.
+            XCTAssertEqual(
+                try pair.b.applyPersonalRevision(session: pair.bindingB, descriptor: acceptedObject).status,
+                .known)
+            XCTAssertEqual(recoveryAttempts, 1)
+            XCTAssertTrue(pair.b.isCanonicalTrusted)
+            XCTAssertEqual(try pair.b.history(accepted.itemID), [accepted])
+            XCTAssertThrowsError(try pair.b.get(privateRevision.itemID))
+            let staged = try pair.b.preparePersonalObject(session: pair.bindingB, descriptor: privateObject)
+            XCTAssertFalse(staged.knownRevision)
+            XCTAssertEqual(staged.nextOffset, privateObject.byteCount)
+            XCTAssertEqual(
+                try pair.b.applyPersonalRevision(session: pair.bindingB, descriptor: privateObject).status,
+                .accepted)
+            XCTAssertEqual(try pair.b.history(privateRevision.itemID), [privateRevision])
+        }
+    }
+
+    func testLostOrMalformedCompletedCursorRescansWithoutDuplicateHistory() throws {
+        try fixture { pair, accounts in
+            let original = try create(pair.a, accounts: accounts, operation: "cursor-content")
+            _ = try send(
+                original, from: pair.a, to: pair.b,
+                sourceBinding: pair.bindingA, targetBinding: pair.bindingB)
+            let remote = try pair.a.capturePersonalInventory(session: pair.bindingA)
+            var cursor = try PersonalPeerBridge.loadCursor(store: pair.b, binding: pair.bindingB)
+            cursor.remoteGenerationID = remote.generationID
+            cursor.consumedRowID = remote.cutRowID
+            try PersonalPeerBridge.saveCursor(cursor, store: pair.b, binding: pair.bindingB)
+            XCTAssertEqual(
+                try PersonalPeerBridge.loadCursor(store: pair.b, binding: pair.bindingB).consumedRowID,
+                remote.cutRowID)
+            let cursorDirectory = pair.second.root.appendingPathComponent(".personal-sync/cursors")
+            let paths = try FileManager.default.contentsOfDirectory(
+                at: cursorDirectory, includingPropertiesForKeys: nil
+            ).filter { $0.pathExtension == "json" }
+            XCTAssertEqual(paths.count, 1)
+            let path = try XCTUnwrap(paths.first)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
+            try Data("interrupted cursor JSON".utf8).write(to: path)
+            try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: path.path)
+            XCTAssertEqual(
+                try PersonalPeerBridge.loadCursor(store: pair.b, binding: pair.bindingB).consumedRowID, 0)
+            try FileManager.default.removeItem(at: cursorDirectory)
+            pair.second.store = nil
+            try FileManager.default.removeItem(at: pair.second.root.appendingPathComponent("index"))
+            pair.second.store = try ItemStore(
+                personalRoot: pair.second.root, opening: .existing, accounts: accounts)
+            let rescanning = try PersonalPeerBridge.loadCursor(store: pair.b, binding: pair.bindingB)
+            XCTAssertEqual(rescanning.consumedRowID, 0)
+            XCTAssertNil(rescanning.remoteGenerationID)
+            XCTAssertEqual(
+                try send(
+                    original, from: pair.a, to: pair.b,
+                    sourceBinding: pair.bindingA, targetBinding: pair.bindingB
+                ).status, .known)
+            XCTAssertEqual(try pair.b.history(original.itemID), [original])
+            XCTAssertEqual(try pair.b.personalSyncIdentity().membership, pair.configuration)
+        }
+    }
+
+    func testCommittedMembershipCleanupRetriesAbsentLeafAndPreservesLaterPreparation() throws {
+        try fixture { pair, _ in
+            try PersonalSyncConfiguration.write(
+                pair.preparationA, root: pair.first.root, name: PersonalSyncConfiguration.pendingName)
+            var barriers = 0
+            pair.a.personalSyncAfterConfigurationUnlinkForTesting = {
+                barriers += 1
+                throw TractandaError("injected", "Interrupted cleanup acknowledgement")
+            }
+            for _ in 0..<2 {
+                assertCode("injected") {
+                    _ = try pair.a.commitPersonalMembershipChange(
+                        preparation: pair.preparationA, acknowledgements: [])
+                }
+                XCTAssertNil(
+                    try PersonalSyncConfiguration.read(
+                        PersonalMembershipPreparation.self,
+                        root: pair.first.root, name: PersonalSyncConfiguration.pendingName,
+                        ownerUID: tractanda_uid()))
+            }
+            XCTAssertEqual(barriers, 2, "An absent leaf must not skip a prior uncertain cleanup barrier")
+            pair.a.personalSyncAfterConfigurationUnlinkForTesting = nil
+            XCTAssertEqual(
+                try pair.a.commitPersonalMembershipChange(
+                    preparation: pair.preparationA, acknowledgements: []),
+                pair.configuration)
+            let laterConfiguration = try PersonalMembershipConfiguration(
+                storeID: pair.configuration.storeID, configurationID: id(),
+                members: pair.configuration.members)
+            let later = try pair.a.preparePersonalMembershipChange(
+                configuration: laterConfiguration, expectedDigest: pair.configuration.digest)
+            _ = try pair.a.commitPersonalMembershipChange(
+                preparation: pair.preparationA, acknowledgements: [])
+            XCTAssertEqual(
+                try PersonalSyncConfiguration.read(
+                    PersonalMembershipPreparation.self,
+                    root: pair.first.root, name: PersonalSyncConfiguration.pendingName,
+                    ownerUID: tractanda_uid()), later)
+        }
+    }
+
+    func testBaselineCleanupUncertaintyRetriesExactTokenWithoutManualReopen() throws {
+        try fixture { pair, accounts in
+            let revision = try create(pair.a, accounts: accounts, operation: "baseline-cleanup")
+            let token = try pair.b.startPersonalBaseline(sourceReplicaID: pair.bindingA.localReplicaID)
+            _ = try send(
+                revision, from: pair.a, to: pair.b,
+                sourceBinding: pair.bindingA, targetBinding: pair.bindingB)
+            pair.b.personalSyncAfterConfigurationUnlinkForTesting = {
+                throw TractandaError("injected", "Interrupted baseline cleanup acknowledgement")
+            }
+            assertCode("injected") { try pair.b.finishPersonalBaseline(selectionID: token) }
+            XCTAssertTrue(pair.b.isPersonalBaselinePending)
+            XCTAssertNil(
+                try PersonalSyncConfiguration.read(
+                    PersonalBaselineSelection.self,
+                    root: pair.second.root, name: PersonalSyncConfiguration.baselineName,
+                    ownerUID: tractanda_uid()))
+            assertCode("baselineConflict") { try pair.b.finishPersonalBaseline(selectionID: id()) }
+            assertCode("injected") { try pair.b.finishPersonalBaseline(selectionID: token) }
+            pair.b.personalSyncAfterConfigurationUnlinkForTesting = nil
+            try pair.b.finishPersonalBaseline(selectionID: token)
+            XCTAssertFalse(pair.b.isPersonalBaselinePending)
+            XCTAssertEqual(try pair.b.get(revision.itemID), revision)
+            XCTAssertEqual(try pair.b.history(revision.itemID), [revision])
+            pair.second.store = nil
+            pair.second.store = try ItemStore(
+                personalRoot: pair.second.root, opening: .existing, accounts: accounts)
+            XCTAssertFalse(pair.b.isPersonalBaselinePending)
+            XCTAssertEqual(try pair.b.history(revision.itemID), [revision])
+        }
+    }
+
+    func testIncomingPostCommitCleanupFailureKeepsHealthyIndexAndKnownRetry() throws {
+        try fixture { pair, accounts in
+            let accepted = try create(pair.a, accounts: accounts, operation: "post-commit-accepted")
+            let privateRevision = try create(pair.a, accounts: accounts, operation: "post-commit-private")
+            let acceptedObject = try descriptor(pair.a, revision: accepted)
+            let privateObject = try descriptor(pair.a, revision: privateRevision)
+            for object in [acceptedObject, privateObject] {
+                try transfer(
+                    object, from: pair.a, to: pair.b,
+                    sourceBinding: pair.bindingA, targetBinding: pair.bindingB)
+            }
+            pair.b.personalSyncAfterIndexCommitForTesting = {
+                throw TractandaError("injected", "Cleanup failed after successful SQLite COMMIT")
+            }
+            assertCode("injected") {
+                _ = try pair.b.applyPersonalRevision(session: pair.bindingB, descriptor: acceptedObject)
+            }
+            XCTAssertTrue(
+                pair.b.isCanonicalTrusted,
+                "A cleanup error must not roll back/quarantine an already committed healthy index")
+            XCTAssertFalse(StoreCheckpoint.isDirty(root: pair.second.root))
+            XCTAssertEqual(try pair.b.history(accepted.itemID), [accepted])
+            pair.b.personalSyncAfterIndexCommitForTesting = nil
+            XCTAssertEqual(
+                try pair.b.applyPersonalRevision(session: pair.bindingB, descriptor: acceptedObject).status,
+                .known)
+            XCTAssertThrowsError(try pair.b.get(privateRevision.itemID))
+            let retained = try pair.b.preparePersonalObject(session: pair.bindingB, descriptor: privateObject)
+            XCTAssertFalse(retained.knownRevision)
+            XCTAssertEqual(retained.nextOffset, privateObject.byteCount)
+            XCTAssertEqual(try pair.b.history(accepted.itemID).count, 1)
+        }
+    }
     func testRemovalNeedsRetainedMembersOnlyAndOmittedPeerCannotUseOldCredentials() throws {
         try fixture { pair, _ in
             let next = try PersonalMembershipConfiguration(
@@ -716,4 +919,170 @@ final class PersonalSyncTests: XCTestCase {
             XCTAssertEqual(try pair.a.personalSyncIdentity().membership?.members.count, 1)
         }
     }
+    func testNativeReviewSecondPublicationFailureIsPartialAndExactRetryAcknowledges() throws {
+        try fixture { pair, accounts in
+            let base = try create(pair.a, accounts: accounts)
+            _ = try send(
+                base, from: pair.a, to: pair.b, sourceBinding: pair.bindingA, targetBinding: pair.bindingB)
+            let offline = try pair.b.withAccess(forUID: accounts.bob) {
+                try pair.b.commit(
+                    .init(
+                        action: .revise, itemID: base.itemID,
+                        expectedRevisionID: base.revisionID,
+                        changes: ["body": .text("reviewed offline edit")],
+                        operationID: "native-offline")
+                ).revision
+            }
+            _ = try pair.a.withAccess(forUID: accounts.alice) {
+                try pair.a.commit(
+                    .init(
+                        action: .revise, itemID: base.itemID,
+                        expectedRevisionID: base.revisionID, changes: ["permissions": permissions(0o600)],
+                        operationID: "native-restrict"))
+            }
+            let proposal = try send(
+                offline, from: pair.b, to: pair.a,
+                sourceBinding: pair.bindingB, targetBinding: pair.bindingA)
+            XCTAssertEqual(proposal.status, .reviewRequired)
+            let reviewID = try XCTUnwrap(proposal.reviewItemID)
+            let stateToken = try pair.a.itemState(base.itemID).stateToken
+            let request = try JSONSerialization.data(withJSONObject: [
+                "using": ["urn:ietf:params:jmap:core", ItemService.capability],
+                "methodCalls": [
+                    [
+                        "TractandaSync/acceptReview",
+                        ["reviewID": reviewID, "expectedStateToken": stateToken], "review",
+                    ]
+                ],
+            ])
+            var publications = 0
+            pair.a.personalSyncAfterRevisionPublicationForTesting = {
+                publications += 1
+                if publications == 2 {
+                    throw TractandaError("stateMismatch", "injected after resolution publication")
+                }
+            }
+            let service = ItemService(store: pair.a)
+            let failed = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: service.handle(request, peerUID: tractanda_uid()))
+                    as? [String: Any])
+            let replies = try XCTUnwrap(failed["methodResponses"] as? [[Any]])
+            XCTAssertEqual(publications, 2)
+            XCTAssertEqual(replies[0][0] as? String, "error")
+            XCTAssertEqual((replies[0][1] as? [String: Any])?["type"] as? String, "serverPartialFail")
+            pair.a.personalSyncAfterRevisionPublicationForTesting = nil
+            try pair.a.rebuildIndex()
+            let replay = try JSON.decode(
+                MutationReceipt.self,
+                NativeMethodResult.unwrap(
+                    service.handle(request, peerUID: tractanda_uid()), method: "TractandaSync/acceptReview",
+                    callID: "review"))
+            XCTAssertTrue(replay.wasReplayed)
+            XCTAssertEqual(replay.operationID, "personal-review:" + reviewID)
+            XCTAssertEqual(
+                try pair.a.history(base.itemID).filter {
+                    $0.fields["operationID"]?.string == replay.operationID
+                }.count, 1)
+            let exact = try pair.a.get(replay.itemID, revisionID: replay.revisionID)
+            XCTAssertEqual(exact.fields["body"], .text("reviewed offline edit"))
+            XCTAssertEqual(try ItemPermissions(XCTUnwrap(exact.fields["permissions"])).mode, 0o600)
+        }
+    }
+
+    func testNativeReaderFenceFailureIsPartialBeforeAnyItemPublication() throws {
+        try fixture { pair, accounts in
+            let base = try create(pair.a, accounts: accounts)
+            _ = try send(
+                base, from: pair.a, to: pair.b, sourceBinding: pair.bindingA, targetBinding: pair.bindingB)
+            let offline = try pair.b.withAccess(forUID: accounts.bob) {
+                try pair.b.commit(
+                    .init(
+                        action: .revise, itemID: base.itemID,
+                        expectedRevisionID: base.revisionID, changes: ["body": .text("fence review")],
+                        operationID: "fence-offline")
+                ).revision
+            }
+            _ = try pair.a.withAccess(forUID: accounts.alice) {
+                try pair.a.commit(
+                    .init(
+                        action: .revise, itemID: base.itemID,
+                        expectedRevisionID: base.revisionID, changes: ["permissions": permissions(0o600)],
+                        operationID: "fence-restrict"))
+            }
+            let proposal = try send(
+                offline, from: pair.b, to: pair.a,
+                sourceBinding: pair.bindingB, targetBinding: pair.bindingA)
+            let reviewID = try XCTUnwrap(proposal.reviewItemID)
+            let root = pair.first.root
+            let current = try XCTUnwrap(
+                CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid()))
+            // Isolated fault-injection metadata only: exercise the first sync-fence raise again.
+            let prior = CanonicalReaderRequirement(
+                storeID: current.storeID, minimumReaderLevel: 16,
+                recordFormats: current.recordFormats,
+                capabilities: current.capabilities.filter {
+                    $0 != PersonalSyncValidation.capability && $0 != RevisionProvenance.personalMergeProfile
+                })
+            let fenceFile = root.appendingPathComponent(CanonicalReaderRequirement.fileName)
+            try JSON.encode(prior).write(to: fenceFile, options: [.atomic])
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fenceFile.path)
+            var publications = 0
+            pair.a.personalSyncAfterRevisionPublicationForTesting = { publications += 1 }
+            pair.a.afterCanonicalReaderRequirementForTesting = {
+                throw TractandaError("stateMismatch", "injected after durable fence update")
+            }
+            let request = try JSONSerialization.data(withJSONObject: [
+                "using": ["urn:ietf:params:jmap:core", ItemService.capability],
+                "methodCalls": [
+                    [
+                        "TractandaSync/acceptReview",
+                        [
+                            "reviewID": reviewID,
+                            "expectedStateToken": try pair.a.itemState(base.itemID).stateToken,
+                        ], "fence",
+                    ]
+                ],
+            ])
+            let response = ItemService(store: pair.a).handle(request, peerUID: tractanda_uid())
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: response) as? [String: Any])
+            let replies = try XCTUnwrap(body["methodResponses"] as? [[Any]])
+            XCTAssertEqual(publications, 0)
+            XCTAssertEqual(replies[0][0] as? String, "error")
+            XCTAssertEqual((replies[0][1] as? [String: Any])?["type"] as? String, "serverPartialFail")
+            let raised = try XCTUnwrap(CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid()))
+            XCTAssertTrue(raised.capabilities.contains(PersonalSyncValidation.capability))
+            XCTAssertGreaterThanOrEqual(raised.minimumReaderLevel, 18)
+            pair.a.afterCanonicalReaderRequirementForTesting = nil
+            pair.a.personalSyncAfterRevisionPublicationForTesting = nil
+        }
+    }
+
+    func testClusterStatusSeparatesPendingMembershipAndBaselineWithoutLoadingKeys() throws {
+        try fixture(commit: false) { pair, _ in
+            let before = try pair.b.withAccess(forUID: pair.b.ownerUID, recoverPublication: false) {
+                try pair.b.personalPeerCanonicalStatus()
+            }
+            XCTAssertNil(before.personal?.currentMembership)
+            XCTAssertEqual(before.personal?.pendingMembership, pair.configuration)
+            XCTAssertEqual(before.personal?.requiredOnlineReplicaIDs, pair.preparationB.requiredOnlineReplicaIDs.sorted())
+            XCTAssertNil(before.personal?.baselineSourceReplicaID)
+            try commitPair(pair)
+            let source = try XCTUnwrap(pair.a.replicaID)
+            _ = try pair.b.startPersonalBaseline(sourceReplicaID: source)
+            // No private credential is loaded by diagnostics, even after the key directory is removed.
+            let keys = pair.second.root.appendingPathComponent(".peer-credentials")
+            if FileManager.default.fileExists(atPath: keys.path) { try FileManager.default.removeItem(at: keys) }
+            let after = try pair.b.withAccess(forUID: pair.b.ownerUID, recoverPublication: false) {
+                try pair.b.personalPeerCanonicalStatus()
+            }
+            XCTAssertEqual(after.readiness, .pendingActivation)
+            XCTAssertEqual(after.personal?.currentMembership, pair.configuration)
+            XCTAssertNil(after.personal?.pendingMembership)
+            XCTAssertEqual(after.personal?.baselineSourceReplicaID, source)
+            let json = String(decoding: try JSON.encode(after), as: UTF8.self)
+            for field in ["selectionID", "nonce", "administrator", "secret"] { XCTAssertFalse(json.contains(field)) }
+            XCTAssertTrue(pair.b.isPersonalBaselinePending)
+        }
+    }
+
 }

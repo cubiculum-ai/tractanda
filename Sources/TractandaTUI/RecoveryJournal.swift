@@ -6,11 +6,17 @@ enum RecoveredOperation: Codable, Sendable {
     case batch(BatchOperation)
     case learning(LearningEdit)
     case capture(CapturePlan)
-    private enum CodingKeys: String, CodingKey { case batch, learning, capture }
+    case confirmed(MutationReceipt)
+    private enum CodingKeys: String, CodingKey { case batch, learning, capture, confirmed }
 
     init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        if container.contains(.capture) {
+        if container.contains(.confirmed) {
+            guard !container.contains(.capture), !container.contains(.batch), !container.contains(.learning) else {
+                throw TractandaError("invalidRecovery", "Ambiguous confirmed recovery operation.")
+            }
+            self = .confirmed(try container.decode(MutationReceipt.self, forKey: .confirmed))
+        } else if container.contains(.capture) {
             guard !container.contains(.batch), !container.contains(.learning) else {
                 throw TractandaError("invalidRecovery", "Ambiguous recovery operation.")
             }
@@ -42,6 +48,9 @@ enum RecoveredOperation: Codable, Sendable {
         case .learning(let edit):
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encode(edit, forKey: .learning)
+        case .confirmed(let receipt):
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(receipt, forKey: .confirmed)
         case .capture(let plan):
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encode(plan, forKey: .capture)
@@ -75,6 +84,11 @@ final class RecoveryJournal {
         try file.save(.learning(edit))
     }
     func save(_ plan: CapturePlan) throws { try file.save(.capture(plan)) }
+    /// Persist the proved save before cleanup; restart never offers it as an uncertain write.
+    func acknowledge(_ receipt: MutationReceipt) throws {
+        try file.save(.confirmed(receipt))
+        try file.clear()
+    }
     func clear() throws { try file.clear() }
     func releaseLock() { file.releaseLock() }
 

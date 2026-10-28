@@ -75,17 +75,13 @@ final class SemanticVec1Storage: SemanticVectorStorage {
         try index.publishGeneration(generation, expectedRecordCount: count)
     }
     func discard(_ generation: Vec1Generation) throws { try index.discardGeneration(generation) }
-    func prune(profileID: String, current: (String) throws -> Bool) throws {
-        guard index.profileID == profileID else { return }
-        var cursor: String?
-        while true {
-            let page = try index.itemMetadataPage(after: cursor)
-            guard let last = page.last else { break }
-            for metadata in page where try !current(metadata.itemID) {
-                try index.remove(itemID: metadata.itemID)
-            }
-            cursor = last.itemID
+    func prunePage(profileID: String, after: String?, current: (String) throws -> Bool) throws -> String? {
+        guard index.profileID == profileID else { return nil }
+        let page = try index.itemMetadataPage(after: after, limit: 32)
+        for metadata in page where try !current(metadata.itemID) {
+            try index.remove(itemID: metadata.itemID)
         }
+        return page.count == 32 ? page.last?.itemID : nil
     }
     func metadataPage(after itemID: String?) throws -> [Vec1ItemMetadata] {
         try index.itemMetadataPage(after: itemID)

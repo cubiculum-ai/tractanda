@@ -144,50 +144,29 @@ final class MCPTests: XCTestCase {
         XCTAssertThrowsError(try resolve.arguments(from: repeatedFrontier))
     }
 
-    func testCompactWriteRepliesMatchContentMetadataExclusions() async throws {
-        let methods = [
-            "TractandaItem/commit", "TractandaItem/commitCapture", "TractandaItem/resolveConflict",
-            "TractandaLearning/feedback", "TractandaLearning/settings",
-        ]
-        for metadata in [["requestIdentity", "revisionAncestry"], ["revisionAncestry"], ["requestIdentity"]] {
-            var fields: [String: Value] = [
-                "itemID": .string("item"), "revisionID": .string("revision"),
-                "userMetadata": .object([
-                    "requestIdentity": .string("user receipt"),
-                    "revisionAncestry": .string("user ancestry"),
-                ]),
-            ]
-            for key in metadata { fields[key] = .string("server metadata") }
-            let fullFields = fields
-            let fullResult: Value = .object([
-                "revision": .object(["formatVersion": .int(2), "fields": .object(fullFields)]),
-                "replayed": .bool(true), "itemState": .object(["stateToken": .string("ready")]),
-            ])
-            let gateway = NativeGateway(backend: { request in
-                let envelope = try JSONDecoder().decode(Value.self, from: request)
-                let call = envelope.objectValue!["methodCalls"]!.arrayValue![0].arrayValue!
-                return try JSONEncoder().encode(
-                    Value.object([
-                        "methodResponses": .array([.array([call[0], fullResult, call[2]])])
-                    ]))
-            })
-            for method in methods {
-                let data = try await gateway.call(method, arguments: [:])
-                let compact = try JSONDecoder().decode(Value.self, from: data).objectValue!
-                let compactFields = compact["revision"]!.objectValue!["fields"]!.objectValue!
-                XCTAssertNil(compactFields["requestIdentity"])
-                XCTAssertNil(compactFields["revisionAncestry"])
-                XCTAssertEqual(compactFields["userMetadata"], fullFields["userMetadata"])
-                XCTAssertEqual(compact["replayed"], .bool(true))
-                XCTAssertEqual(compact["itemState"], fullResult.objectValue!["itemState"])
-            }
-            let fullData = try await gateway.call(
-                "TractandaItem/get", arguments: ["projection": .string("full")])
-            XCTAssertEqual(try JSONDecoder().decode(Value.self, from: fullData), fullResult)
+    func testCompactMutationReceiptsPassThroughOneAPIBoundaryUnchanged() async throws {
+        let methods = ["TractandaItem/commit", "TractandaItem/commitCapture",
+            "TractandaItem/resolveConflict", "TractandaLearning/feedback", "TractandaLearning/settings"]
+        let receipt: Value = .object([
+            "itemId": .string("11111111-1111-1111-8111-111111111111"),
+            "revisionId": .string("22222222-2222-1222-8222-222222222222"),
+            "operationId": .string("frozen"), "replayed": .bool(true),
+            "indexReady": .bool(false), "diagnostics": .array([.string("indexDelayed")]),
+        ])
+        let gateway = NativeGateway(backend: { request in
+            let envelope = try JSONDecoder().decode(Value.self, from: request)
+            let call = envelope.objectValue!["methodCalls"]!.arrayValue![0].arrayValue!
+            XCTAssertTrue(envelope.objectValue!["using"]!.arrayValue!.contains(.string("urn:ietf:params:jmap:core")))
+            return try JSONEncoder().encode(Value.object([
+                "methodResponses": .array([.array([call[0], receipt, call[2]])])]))
+        })
+        for method in methods {
+            let data = try await gateway.call(method, arguments: [:])
+            XCTAssertEqual(try JSONDecoder().decode(Value.self, from: data), receipt)
         }
     }
 
-    func testResolveConflictToolGatesFeatureAndRetainsProjectionInCompactReceipt() async throws {
+    func testResolveConflictToolGatesFeatureAndReturnsCompactReceipt() async throws {
         let itemID = "11111111-1111-1111-8111-111111111111"
         let revisionID = "22222222-2222-1222-8222-222222222222"
         let frontierID = "33333333-3333-1333-8333-333333333333"
@@ -199,19 +178,9 @@ final class MCPTests: XCTestCase {
             if method == "TractandaStore/info" {
                 result = ["features": [ServerFeature.revisionProjection.rawValue]]
             } else {
-                result = [
-                    "revision": [
-                        "formatVersion": 2,
-                        "fields": [
-                            "itemID": itemID, "revisionID": revisionID, "requestIdentity": "private",
-                        ],
-                    ],
-                    "replayed": false, "indexReady": true, "warnings": [],
-                    "itemState": [
-                        "itemID": itemID, "stateToken": "ready-token", "status": "ready",
-                        "representativeRevisionID": revisionID, "detailsComplete": true,
-                    ],
-                ]
+                result = ["itemId": itemID, "revisionId": revisionID, "operationId": "resolve-op",
+                    "replayed": false, "indexReady": true, "diagnostics": []]
+
             }
             return try JSONSerialization.data(withJSONObject: [
                 "methodResponses": [[method, result, "client"]]
@@ -228,10 +197,11 @@ final class MCPTests: XCTestCase {
         let result = try await MCPAdapter.callNativeTool(
             definition: definition, supplied: arguments, gateway: backend)
         let decoded = try JSONDecoder().decode(Value.self, from: result)
-        XCTAssertNil(
-            decoded.objectValue?["revision"]?.objectValue?["fields"]?.objectValue?["requestIdentity"])
-        XCTAssertEqual(
-            decoded.objectValue?["itemState"]?.objectValue?["stateToken"]?.stringValue, "ready-token")
+        XCTAssertNil(decoded.objectValue?["revision"])
+        XCTAssertNil(decoded.objectValue?["itemState"])
+        XCTAssertEqual(decoded.objectValue?["itemId"]?.stringValue, itemID)
+        XCTAssertEqual(decoded.objectValue?["revisionId"]?.stringValue, revisionID)
+        XCTAssertEqual(decoded.objectValue?["operationId"]?.stringValue, "resolve-op")
     }
 
     func testRevisionProjectionToolsExposeFeatureAndGuardConflictCASArguments() throws {
@@ -346,9 +316,13 @@ final class MCPTests: XCTestCase {
         let result = try await MCPAdapter.callNativeTool(
             definition: commit, supplied: frozen, gateway: gateway)
         let saved = try JSONDecoder().decode(Value.self, from: result).objectValue!
-        let fields = saved["revision"]!.objectValue!["fields"]!.objectValue!
+        XCTAssertNil(saved["revision"], "Mutation acknowledgement contains no full item")
+        let itemID = try XCTUnwrap(saved["itemId"]?.stringValue)
+        let savedRevisionID = try XCTUnwrap(saved["revisionId"]?.stringValue)
+        let fetched = try await gateway.call("TractandaRevision/get", arguments: [
+            "itemID": .string(itemID), "revisionID": .string(savedRevisionID)])
+        let fields = try JSONDecoder().decode(Value.self, from: fetched).objectValue!["revision"]!.objectValue!["fields"]!.objectValue!
         XCTAssertEqual(fields["plannedDate"]?.objectValue?["value"]?.stringValue, "2026-03-29")
-        XCTAssertNil(fields["requestIdentity"], "MCP write results omit the server receipt payload")
         _ = try store.commit(
             CommitRequest(
                 action: .revise, itemID: category.itemID,
@@ -357,10 +331,8 @@ final class MCPTests: XCTestCase {
         let replayData = try await MCPAdapter.callNativeTool(
             definition: commit, supplied: frozen, gateway: gateway)
         let replay = try JSONDecoder().decode(Value.self, from: replayData).objectValue!
-        let replayFields = replay["revision"]!.objectValue!["fields"]!.objectValue!
         XCTAssertEqual(replay["replayed"]?.boolValue, true)
-        XCTAssertEqual(replayFields["revisionID"], fields["revisionID"])
-        let itemID = fields["itemID"]!.objectValue!["value"]!.stringValue!
+        XCTAssertEqual(replay["revisionId"]?.stringValue, savedRevisionID)
         XCTAssertEqual(try store.history(itemID).count, 1)
     }
 

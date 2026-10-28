@@ -2,6 +2,7 @@ import CSQLite
 import CTractandaPlatform
 import Crypto
 import Foundation
+import TractandaClient
 import TractandaVectors
 
 /// Immutable, caller-scoped input that can be handed to CPU-only query work. The byte
@@ -189,9 +190,21 @@ public final class ItemStore {
     }
     var beforeCombinationIndexUpdateForTesting: (() throws -> Void)?
     var beforeCanonicalReaderRequirementForTesting: (() throws -> Void)?
+    var afterCanonicalReaderRequirementForTesting: (() throws -> Void)?
     private var combinationPublicationAwaitingIndex = false
     private var generation = Identifier.make()
     private var accessContext: StoreAccessContext?
+    // Serialized-owner scope only; not TaskLocal, persisted policy or an actor selector.
+    private var expectedRequestPrincipal: (uid: UInt32, name: String)?
+    // Ephemeral protocol observation only; never persisted or hashed into an item intent.
+    private var nativeReplyBudget: JMAPReplyBudget?
+    var nativeInvocationBudget: JMAPReplyBudget? { nativeReplyBudget }
+    func withNativeReplyBudget<T>(_ budget: JMAPReplyBudget, _ body: () throws -> T) rethrows -> T {
+        let previous = nativeReplyBudget
+        nativeReplyBudget = budget
+        defer { nativeReplyBudget = previous }
+        return try body()
+    }
     private var accessConfiguration: AccessConfiguration?
     private var currentAccessConfigurations: [AccessConfiguration] = []
     private var accessConfigurationProofUnavailable = false
@@ -453,6 +466,26 @@ public final class ItemStore {
         guard let context = accessContext else { return "internal" }
         let groups = context.account?.groupIDs.sorted().map(String.init).joined(separator: ",") ?? ""
         return "\(context.uid):\(context.account?.name ?? "uid"):\(groups):\(context.isAdministrator)"
+    }
+    var nativeProtocolSessionBasis: NativeProtocolSessionBasis {
+        get throws {
+            .init(
+                identity: try personalProfile?.storeID
+                    ?? CanonicalReaderRequirement.storeIdentity(root: root, ownerUID: ownerUID),
+                persistenceProfile: persistenceProfile, isMultiUser: isMultiUser,
+                policy: .init(ownerUID: ownerUID, configuration: accessConfiguration),
+                isReadOnly: writer < 0 || contentRecoveryQualification || targetProvisioningPending
+                    || (!isCanonicalTrusted && !personalPublicationRecoveryPending))
+        }
+    }
+    func nativeProtocolSessionSnapshot(maximumConcurrentRequests: Int64 = 1) throws -> (
+        NativeProtocolSessionBasis, JMAPLocalSession
+    ) {
+        var basis = try nativeProtocolSessionBasis
+        basis.maximumConcurrentRequests = maximumConcurrentRequests
+        let username =
+            try accessContext?.account?.name ?? accounts.user(forUID: accessContext?.uid ?? ownerUID).name
+        return (basis, try basis.session(authenticationKey: savedViewAuthorizationKey, username: username))
     }
     /// A private edit must not change another caller's synchronization token.
     public var state: String {
@@ -1003,12 +1036,26 @@ public final class ItemStore {
     var afterCanonicalSyncEntryForTesting: (() throws -> Void)?
     var beforeCanonicalDurabilitySync: (() throws -> Void)?
     var publishResultOverrideForTesting: Int32?
+    var beforePersonalDurableAcknowledgementForTesting: (() throws -> Void)?
+    private var personalPublicationRecoveryPending = false
+    private var personalPublicationRecoveryFailure: Error?
+    private var personalPublicationRecoveryRetryAt: Double = 0
+    private var personalPublicationRecoveryRetrySeconds: Double = 30
+    private var personalBaselineFinalizingSelectionID: String?
+    var personalSyncAfterConfigurationUnlinkForTesting: (() throws -> Void)?
+    var personalSyncAfterIndexCommitForTesting: (() throws -> Void)?
+    var personalRecoveryClockForTesting: (() -> Double)?
+    var personalRecoveryDocumentReadFailureForTesting: Int32?
+    var personalRecoveryIndexWillReplace: (() throws -> Void)?
+    var personalRecoveryIndexDidReplace: ((Bool) throws -> Void)?
+    var personalRecoveryCancellation: SQLiteReadCancellation?
     var beforeCategoryGraphValidation: (() -> Void)?
     var beforeCategoryOverlayScan: (() -> Void)?
     var afterRecoveryRecordForTesting: ((URL) throws -> Void)?
     var beforeIndexQuarantineMarkerForTesting: (() throws -> Void)?
     // Deterministic collision injection in tests; production uses the UUIDv1 generator.
     var makePersistentUUID: () throws -> UUID = { try UUID.makeVersion1() }
+    private var jmapBlobs: JMAPBlobStore?
     private var stagingByteQuota: StagingByteQuota!
     private var pendingCorpusReadReleases: Set<String> = []
     var beforeCorpusReadReleaseForTesting: ((String) throws -> Void)?
@@ -1033,6 +1080,7 @@ public final class ItemStore {
     }
     private let attachmentCapacityProvider: (@Sendable () throws -> UInt64)?
     func setAttachmentReserveForTesting(_ bytes: Int64) throws {
+        jmapBlobs = nil
         attachmentPayloads = try AttachmentPayloadStore(
             root: root, ownerUID: ownerUID, reserveBytes: bytes, availableBytes: attachmentCapacityProvider,
             stagingQuota: stagingByteQuota, indexDirectory: indexDirectory, maintenance: maintenanceContext)
@@ -1232,9 +1280,14 @@ public final class ItemStore {
                 minimumFreeBytes: attachmentUploadPolicy.minimumFreeBytes,
                 availableBytes: attachmentCapacityProvider, stagingQuota: stagingByteQuota))
         documentJobs = try documentJobRecords.load()
+        jmapBlobs = try JMAPBlobStore(
+            root: root, ownerUID: ownerUID, payloads: attachmentPayloads,
+            quota: stagingByteQuota, minimumFreeBytes: attachmentUploadPolicy.minimumFreeBytes,
+            availableBytes: attachmentCapacityProvider)
     }
 
     private func requireOperationalContent() throws {
+        try recoverPersonalPublicationIfNeeded()
         guard !personalBaselineImportActive else {
             throw TractandaError(
                 "baselinePending",
@@ -1250,6 +1303,81 @@ public final class ItemStore {
                 "recoveryQualificationOnly",
                 "Selected content qualification requires fresh operational-state integration before this operation."
             )
+        }
+    }
+
+    /// The serial Store executor can reconstruct a published revision after a transient
+    /// acknowledgement/index interruption. This scans canonical content only; private intake,
+    /// current membership and ambiguous local-policy publication are never replayed here.
+    private func recoverPersonalPublicationIfNeeded() throws {
+        guard personalPublicationRecoveryPending else { return }
+        try checkPersonalRecoveryCancellation()
+        let now = personalRecoveryClockForTesting?() ?? ProcessInfo.processInfo.systemUptime
+        if let failure = personalPublicationRecoveryFailure, now < personalPublicationRecoveryRetryAt {
+            throw failure
+        }
+        do {
+            guard let profile = personalProfile, writer >= 0, !personalPolicyNeedsReopen,
+                try PersonalWorkgroupProfile.load(root, ownerUID: ownerUID) == profile
+            else {
+                throw TractandaError("recoveryRequired", "Current local policy requires an explicit reopen.")
+            }
+            _ = try Self.personalWorkgroupUpgradeRequirement(root: root, ownerUID: ownerUID)
+            try personalRecoveryIndexWillReplace?()
+            do {
+                try rebuildPersonalIndex()
+                try personalRecoveryIndexDidReplace?(true)
+            } catch {
+                try? personalRecoveryIndexDidReplace?(false)
+                throw error
+            }
+            personalPublicationRecoveryPending = false
+            personalPublicationRecoveryFailure = nil
+            personalPublicationRecoveryRetryAt = 0
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch SQLiteReadPoolError.cancelled {
+            throw CancellationError()
+        } catch {
+            personalPublicationRecoveryFailure = error
+            // Coalesce repeated polls after a failed recovery. Corrupt canonical content or
+            // identity/policy ambiguity needs explicit repair/reopen, never repeated guessing.
+            let transient: Bool
+            if let failure = error as? TractandaError {
+                transient =
+                    ["resourceLimit", "indexUnavailable"].contains(failure.code)
+                    || failure.osError.map {
+                        [EIO, ENOSPC, EDQUOT, EBUSY, EMFILE, ENFILE, ENOMEM, EINTR].contains($0)
+                    } == true
+            } else if case FileMetadataError.posix(let code) = error {
+                transient = [EIO, ENOSPC, EDQUOT, EBUSY, EMFILE, ENFILE, ENOMEM, EINTR].contains(code)
+            } else {
+                transient = error is SQLiteReadPoolError
+            }
+            let failedAt = personalRecoveryClockForTesting?() ?? ProcessInfo.processInfo.systemUptime
+            personalPublicationRecoveryRetryAt =
+                transient ? failedAt + personalPublicationRecoveryRetrySeconds : .infinity
+            throw error
+        }
+    }
+
+    /// Daemon pre-dispatch seam: recover before the service's fail-closed readiness gate,
+    /// but only after authenticating the actual OS caller against current local policy.
+    func recoverPersonalPublicationForRequest(forUID uid: UInt32) throws {
+        guard personalPublicationRecoveryPending else { return }
+        try withAccess(forUID: uid) {}
+    }
+
+    private func retainPersonalPublicationRecovery() {
+        if StoreCheckpoint.isDirty(root: root) {
+            isCanonicalReady = false
+            personalPublicationRecoveryPending = true
+        }
+    }
+
+    private func checkPersonalRecoveryCancellation() throws {
+        if personalPublicationRecoveryPending, personalRecoveryCancellation?.isCancelled == true {
+            throw CancellationError()
         }
     }
 
@@ -1282,6 +1410,14 @@ public final class ItemStore {
         usesExternalIndexDirectory = indexDirectory.path != root.appendingPathComponent("index").path
         personalIndexLimits = recoveryLimits
         personalIndexAvailableBytes = indexAvailableBytes
+        if let text = ProcessInfo.processInfo.environment["TRACTANDA_PERSONAL_RECOVERY_RETRY_SECONDS"] {
+            guard let seconds = Double(text), seconds.isFinite, seconds > 0, seconds <= 86_400 else {
+                throw TractandaError(
+                    "invalidConfiguration",
+                    "Personal recovery retry delay must be positive and at most one day.")
+            }
+            personalPublicationRecoveryRetrySeconds = seconds
+        }
         guard root.path != "/", indexDirectory.path.hasPrefix("/"),
             !Self.isDescendant(indexDirectory, of: root.appendingPathComponent("items")),
             !Self.isDescendant(indexDirectory, of: root.appendingPathComponent("attachments")),
@@ -1296,10 +1432,10 @@ public final class ItemStore {
         do {
             let record = try PersonalWorkgroupProfile.prepare(root, opening: opening, accounts: accounts)
             personalProfile = record
-            personalBaselineImportActive =
-                try PersonalSyncConfiguration.read(
+            let selectedBaseline = try PersonalSyncConfiguration.read(
                     PersonalBaselineSelection.self,
-                    root: root, name: PersonalSyncConfiguration.baselineName, ownerUID: ownerUID) != nil
+                    root: root, name: PersonalSyncConfiguration.baselineName, ownerUID: ownerUID)
+            personalBaselineImportActive = record.initialization == "freshReplicaJoining" || selectedBaseline != nil
             accessConfiguration = try AccessConfiguration(record.accessConfiguration)
             try accessConfiguration!.validate(
                 using: PrincipalResolver(directory: accounts, configuration: accessConfiguration))
@@ -1371,7 +1507,10 @@ public final class ItemStore {
         let minute = String(Timestamp.now().prefix(16)).replacingOccurrences(of: "-", with: "/")
             .replacingOccurrences(of: "T", with: "/").replacingOccurrences(of: ":", with: "/")
         let path = "items/" + minute + "/" + revision.itemID + "/" + revision.revisionID + ".tractanda"
-        try CanonicalReaderRequirement.beforePersonalMergePublication(root: root, ownerUID: ownerUID)
+        nativeReplyBudget?.markPublicationAttempt()
+        try CanonicalReaderRequirement.beforePersonalMergePublication(
+            root: root, ownerUID: ownerUID,
+            afterPersist: afterCanonicalReaderRequirementForTesting)
         guard let reserve = Int64(exactly: personalIndexLimits.minimumAvailableBytes) else {
             throw TractandaError("resourceLimit", "Personal merge reserve exceeds the supported byte range.")
         }
@@ -1408,6 +1547,7 @@ public final class ItemStore {
         limits.minimumAvailableBytes = max(
             limits.minimumAvailableBytes, UInt64(max(0, attachmentUploadPolicy.minimumFreeBytes)))
         func capacity() throws {
+            try checkPersonalRecoveryCancellation()
             try checkPersonalIndexCapacity(database: temporary, limits: limits)
             try rebuildControl?.graphProgress()
         }
@@ -1420,11 +1560,15 @@ public final class ItemStore {
         try capacity()
         try fresh.execute("BEGIN IMMEDIATE")
         let control = rebuildControl
+        let publicationCancellation = personalPublicationRecoveryPending ? personalRecoveryCancellation : nil
         _ = try PersonalRecoveryIndex.populate(
             source: .init(root: root, ownerUID: ownerUID), index: fresh, accounts: accounts,
             configuration: policy, limits: limits, rebuildContextID: profile.storeID,
             boundary: capacity,
-            inventoryCheck: { try control?.check() },
+            inventoryCheck: {
+                if publicationCancellation?.isCancelled == true { throw CancellationError() }
+                try control?.check()
+            },
             inventoryActivity: { try control?.graphProgress() },
             originalVerified: { try control?.pulse(originalBytes: $0) },
             pageVerified: { try control?.pulse(pages: 1) },
@@ -1435,7 +1579,7 @@ public final class ItemStore {
             personalMergeObserved: {
                 try CanonicalReaderRequirement.beforePersonalMergePublication(
                     root: self.root, ownerUID: self.ownerUID)
-            })
+            }, documentReadFailureForTesting: personalRecoveryDocumentReadFailureForTesting)
         try rebuildControl?.pulse(phase: "finalizingIndex")
         try fresh.sealCatalogue(identity: profile.storeID)
         try syncCanonicalForCheckpoint(index: fresh)
@@ -2092,7 +2236,41 @@ public final class ItemStore {
     private func operationKey(actor: String, id: String) -> String { actor + "\0" + id }
 
     /// No suspension is permitted inside this scope; ItemService runs on the store's serial executor.
+    package func withExpectedPrincipal<T>(forUID uid: UInt32, name: String, _ body: () throws -> T) throws
+        -> T
+    {
+        let prior = expectedRequestPrincipal
+        if let prior, prior.uid != uid || prior.name != name {
+            throw TractandaError("forbidden", "Authenticated principal changed.")
+        }
+        expectedRequestPrincipal = (uid, name)
+        defer { expectedRequestPrincipal = prior }
+        try requireExpectedPrincipal()
+        return try body()
+    }
+    private func requireExpectedPrincipal(account: AccountIdentity? = nil, scopedUID: UInt32? = nil) throws {
+        guard let expected = expectedRequestPrincipal else { return }
+        let actual =
+            scopedUID == expected.uid
+            ? try account ?? accounts.user(forUID: expected.uid) : try accounts.user(forUID: expected.uid)
+        guard actual.uid == expected.uid, actual.name == expected.name else {
+            throw TractandaError("forbidden", "Authenticated principal changed before admission.")
+        }
+    }
     public func withAccess<T>(forUID uid: UInt32, _ body: () throws -> T) throws -> T {
+        try withAccess(forUID: uid, recoverPublication: true, body)
+    }
+    /// Metadata/recovery controls use identical fresh admission without implicitly rebuilding data.
+    func withAccess<T>(
+        forUID uid: UInt32, recoverPublication: Bool, expectedPrincipalName: String? = nil,
+        _ body: () throws -> T
+    ) throws -> T {
+        if let expectedPrincipalName {
+            return try withExpectedPrincipal(forUID: uid, name: expectedPrincipalName) {
+                try withAccess(forUID: uid, recoverPublication: recoverPublication, body)
+            }
+        }
+        try requireExpectedPrincipal()
         let resolver = PrincipalResolver(directory: accounts, configuration: accessConfiguration)
         if revisionProjectionEnabled && (accessConfigurationAmbiguous || accessConfigurationProofUnavailable)
         {
@@ -2114,6 +2292,7 @@ public final class ItemStore {
             guard administrator else {
                 throw TractandaError("forbidden", "Current store authority requires administrator repair.")
             }
+            try requireExpectedPrincipal(account: account, scopedUID: uid)
             let previous = accessContext
             accessContext = StoreAccessContext(
                 uid: uid, account: account, resolver: resolver, isAdministrator: true)
@@ -2162,10 +2341,12 @@ public final class ItemStore {
                 "authorityBootstrapRequired",
                 "Existing history requires an explicit administrator bootstrap pin.")
         }
+        try requireExpectedPrincipal(account: account, scopedUID: uid)
         let previous = accessContext
         accessContext = StoreAccessContext(
             uid: uid, account: account, resolver: resolver, isAdministrator: administrator)
         defer { accessContext = previous }
+        if recoverPublication { try recoverPersonalPublicationIfNeeded() }
         return try body()
     }
 
@@ -2408,8 +2589,10 @@ public final class ItemStore {
             onSealed: { self.combinationPublicationAwaitingIndex = true })
         try CanonicalReaderRequirement.beforePublication(
             root: root, ownerUID: ownerUID, format: revision.formatVersion,
-            beforePersist: beforeCanonicalReaderRequirementForTesting)
+            beforePersist: beforeCanonicalReaderRequirementForTesting,
+            afterPersist: afterCanonicalReaderRequirementForTesting)
         try StoreCheckpoint.markDirty(root: root, maintenance: maintenanceContext)
+        nativeReplyBudget?.markPublicationAttempt()
         let published = data.withUnsafeBytes { tractanda_publish(file.path, $0.baseAddress, $0.count) }
         guard published >= 0 else {
             throw TractandaError("writeFailed", "Materialization publication failed.")
@@ -3262,11 +3445,17 @@ public final class ItemStore {
     /// Local administrator policy is current operational configuration, not a canonical item
     /// whose historical contents can reinstall admission or overwrite peer trust on rebuild.
     public func configurePersonalAccess(_ value: ItemValue) throws {
-        try requireOperationalContent()
         if accessContext == nil {
             return try withAccess(forUID: ownerUID) { try configurePersonalAccess(value) }
         }
+        try personalConfigureAccess(value, allowUnjoinedAdmission: false)
+    }
+    private func personalConfigureAccess(_ value: ItemValue, allowUnjoinedAdmission: Bool) throws {
+        if !allowUnjoinedAdmission { try requireOperationalContent() }
         try requireAdministrator()
+        try personalPersistAccess(value)
+    }
+    private func personalPersistAccess(_ value: ItemValue) throws {
         guard let prior = personalProfile else {
             throw TractandaError("personalProfileRequired", "No personal/workgroup runtime is open.")
         }
@@ -4441,6 +4630,17 @@ public final class ItemStore {
             }
         }
         return result
+    }
+    /// Disposable catalogue lookup only; get applies current Item permissions to immutable history.
+    func getRevisionForJMAP(_ revisionID: String) throws -> Revision {
+        try Identifier.validate(revisionID)
+        guard let index else {
+            throw TractandaError("indexUnavailable", "The revision catalogue is unavailable.")
+        }
+        guard let row = try index.revision(revisionID) else {
+            throw TractandaError("notFound", "Revision is unavailable.")
+        }
+        return try get(row.itemID, revisionID: revisionID)
     }
     public func get(_ itemID: String, revisionID: String? = nil) throws -> Revision {
         guard !personalBaselineImportActive else {
@@ -5781,6 +5981,7 @@ public final class ItemStore {
             if (try? FileMetadata.read(at: root.appendingPathComponent("copies/" + key + "/intent.json")))
                 != nil
             {
+                nativeReplyBudget?.markPublicationAttempt()
                 try completeAttachmentCopyQuota(key: key)
             }
             return .replay(result)
@@ -5845,6 +6046,7 @@ public final class ItemStore {
         guard prepared.signatures.count == prepared.originals.count else {
             throw TractandaError("attachmentIntegrity", "Prepared copy proof count changed.")
         }
+        nativeReplyBudget?.markPublicationAttempt()
         for (index, original) in prepared.originals.enumerated() {
             try Task.checkCancellation()
             _ = try withAccess(forUID: plan.actorUID) { try get(plan.request.itemID!) }
@@ -5982,7 +6184,6 @@ public final class ItemStore {
         preparedCopyDocuments: [AttachmentDocumentRepresentation]? = nil,
         indexedCorpus: IndexedCorpusStage? = nil
     ) throws -> CommitResult {
-        try requireOperationalContent()
         try CanonicalMaintenanceContext.deny(root: root, path: ["items"], operation: "ordinary item commit")
         if accessContext == nil {
             return try withAccess(forUID: actorUID ?? ownerUID) {
@@ -5994,6 +6195,7 @@ public final class ItemStore {
                 )
             }
         }
+        try requireOperationalContent()
         guard isCanonicalReady else {
             throw TractandaError(
                 "recoveryRequired", "Resolve canonical recovery errors before reading or writing.")
@@ -6090,6 +6292,7 @@ public final class ItemStore {
                     "attachmentCopyRequiresJob",
                     "Attached-item copies require the forthcoming bounded copy job path.")
             }
+            if !originals.isEmpty { nativeReplyBudget?.markPublicationAttempt() }
             let copies =
                 try preparedCopyOriginals
                 ?? originals.map {
@@ -6392,6 +6595,7 @@ public final class ItemStore {
                 "projectionRequired", "Accepted graph proof must be rebuilt before publication.")
         }
         let markerPreviouslyDirty = StoreCheckpoint.isDirty(root: root)
+        nativeReplyBudget?.markPublicationAttempt()
         let localAuthorityPackage = try sealLocalAuthority(
             revision, data: data, path: path, index: publicationIndex)
         let atomicLocalPublication: Bool
@@ -6406,7 +6610,8 @@ public final class ItemStore {
         } else {
             try CanonicalReaderRequirement.beforePublication(
                 root: root, ownerUID: ownerUID, format: revision.formatVersion,
-                beforePersist: beforeCanonicalReaderRequirementForTesting)
+                beforePersist: beforeCanonicalReaderRequirementForTesting,
+                afterPersist: afterCanonicalReaderRequirementForTesting)
         }
         try beforeCanonicalPublicationForTesting?()
         try StoreCheckpoint.markDirty(root: root, maintenance: maintenanceContext)
@@ -6415,6 +6620,10 @@ public final class ItemStore {
         guard published >= 0 else {
             throw TractandaError(
                 "writeFailed", "Revision publication failed: \(String(cString: strerror(errno)))")
+        }
+        var publicationReturned = false
+        defer {
+            if !publicationReturned, personalProfile != nil { retainPersonalPublicationRecovery() }
         }
         let publishedURL = URL(fileURLWithPath: path)
         let publishedMetadata = try FileMetadata.read(at: publishedURL)
@@ -6471,10 +6680,10 @@ public final class ItemStore {
                 broad: broadSavedViewInvalidation)
             generation = Identifier.make()
         }
-        if !atomicLocalPublication { try installResidentCommit() }
         var warnings = published == 1 ? ["Committed; directory durability could not be confirmed."] : []
         // Persist the new date-directory entries as well as the leaf publication.
-        // This is fsync-based durability; actual power-loss behavior still needs hardware testing.
+        // The personal path also performs a full device flush after these directory barriers.
+        // Actual power-loss behavior still depends on the storage honoring flush requests.
         var directoryDurabilityConfirmed = published == 0
         var directory = folder
         while directory.path.hasPrefix(root.path + "/") || directory == root {
@@ -6486,6 +6695,30 @@ public final class ItemStore {
             if descriptor >= 0 { close(descriptor) }
             directory.deleteLastPathComponent()
         }
+        if personalProfile != nil {
+            do {
+                guard directoryDurabilityConfirmed else {
+                    throw TractandaError("writeFailed", "Canonical directory durability is uncertain.")
+                }
+                try beforePersonalDurableAcknowledgementForTesting?()
+                let descriptor = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+                guard descriptor >= 0 else { throw FileMetadataError.posix(errno) }
+                defer { close(descriptor) }
+                guard tractanda_durable_sync(descriptor) == 0 else {
+                    throw FileMetadataError.posix(errno)
+                }
+            } catch {
+                // Bytes may already be canonical. Keep the dirty marker and exact operation
+                // identity; canonical-only recovery precedes the next request's exact retry.
+                isCanonicalReady = false
+                personalPublicationRecoveryPending = true
+                throw TractandaError(
+                    "uncertainCommit",
+                    "Revision may be committed but durable acknowledgement failed. Retry the exact operation ID; canonical recovery runs before the next request."
+                )
+            }
+        }
+        if !atomicLocalPublication { try installResidentCommit() }
         do {
             try beforeIndexUpdate?()
             guard let index else { throw TractandaError("indexUnavailable", "Index requires rebuilding.") }
@@ -6546,7 +6779,11 @@ public final class ItemStore {
                 }
             }
             isCanonicalReady = false
-            warnings.append("Committed to files; index update failed. Rebuild before querying.")
+            if personalProfile != nil { personalPublicationRecoveryPending = true }
+            warnings.append(
+                personalProfile != nil
+                    ? "Committed to files; the disposable index will recover before the next request."
+                    : "Committed to files; index update failed. Rebuild before querying.")
         }
         if index != nil, isCanonicalReady, directoryDurabilityConfirmed, !markerPreviouslyDirty {
             do {
@@ -6556,6 +6793,7 @@ public final class ItemStore {
                 warnings.append("Committed; checkpoint marker remains and startup will recover fully.")
             }
         }
+        publicationReturned = true
         return CommitResult(
             revision: revision, wasReplayed: false, isIndexReady: index != nil && isCanonicalReady,
             warnings: warnings, itemState: revisionProjectionEnabled ? (try? itemState(revision.itemID)) : nil
@@ -6759,10 +6997,12 @@ public final class ItemStore {
         try rebuildControl?.pulse(phase: "synchronizingCanonicalDurability")
         try beforeCanonicalDurabilitySync?()
         func confirmedEntry() throws {
+            try checkPersonalRecoveryCancellation()
             try rebuildControl?.pulse(durabilityEntries: 1)
             try afterCanonicalSyncEntryForTesting?()
         }
         let itemsRoot = root.appendingPathComponent("items")
+        var durabilityVolumes: [UInt64: URL] = [:]
         var cursor: String?
         while true {
             let rows = try index.recoveryRowPage(after: cursor, limit: 128)
@@ -6786,6 +7026,11 @@ public final class ItemStore {
                     guard result == 0 else {
                         throw TractandaError("recoveryError", "Cannot synchronize canonical record.")
                     }
+                    var metadata = stat()
+                    guard fstat(descriptor, &metadata) == 0 else {
+                        throw TractandaError("recoveryError", "Cannot inspect canonical durability volume.")
+                    }
+                    durabilityVolumes[UInt64(metadata.st_dev)] = locationURL
                 }
                 try confirmedEntry()
                 var directory = locationURL.deletingLastPathComponent()
@@ -6806,6 +7051,20 @@ public final class ItemStore {
         try rebuildControl?.check()
         if tractanda_path_read_only(root.path) != 1 { try StoreCheckpoint.syncDirectory(root) }
         try confirmedEntry()
+        // Every file and directory was synchronized first. Flush each actual writable
+        // canonical volume, including mounted item archives, before acknowledging replay.
+        for location in durabilityVolumes.values {
+            try rebuildControl?.check()
+            let descriptor = open(location.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+            guard descriptor >= 0 else {
+                throw TractandaError("recoveryError", "Cannot open canonical durability barrier.")
+            }
+            defer { close(descriptor) }
+            guard tractanda_durable_sync(descriptor) == 0 else {
+                throw TractandaError("recoveryError", "Cannot confirm canonical volume durability.")
+            }
+            try confirmedEntry()
+        }
     }
 }
 
@@ -17232,20 +17491,188 @@ extension ItemStore {
 
 // MARK: Personal current membership and fresh replica configuration
 extension ItemStore {
+    /// Identity mapping for a scoped trusted-server decision; deliberately does not imply
+    /// receiver-local administrator status or grant ordinary item access.
+    package func personalEnrollmentResolvePrincipal(_ name: String) throws -> AccountIdentity {
+        let named = try accounts.user(named: name)
+        let mapped = try accounts.user(forUID: named.uid)
+        guard mapped.name == name, named.name == name else {
+            throw TractandaError("principalMappingChanged", "Cluster administrator identity mapping changed.")
+        }
+        return mapped
+    }
+    package func personalEnrollmentAdmission(forUID uid: UInt32) throws -> PersonalEnrollmentAdmission {
+        try withAccess(forUID: uid) {
+            try requireAdministrator()
+            guard let accessConfiguration else { throw PersonalEnrollmentError.invalid() }
+            return try PersonalEnrollmentAdmission(configuration: accessConfiguration)
+        }
+    }
+    package func personalEnrollmentCurrentAdmission() throws -> PersonalEnrollmentAdmission {
+        guard let accessConfiguration else { throw PersonalEnrollmentError.invalid() }
+        return try PersonalEnrollmentAdmission(configuration: accessConfiguration)
+    }
+    package func personalEnrollmentValidateRetainedAdmission(_ shared: PersonalEnrollmentAdmission) throws {
+        guard let accessConfiguration, let profile = personalProfile else { throw PersonalEnrollmentError.invalid() }
+        try shared.requireSameLogicalPolicy(accessConfiguration)
+        _ = try shared.applying(to: profile.accessConfiguration, accounts: accounts)
+    }
+    private func personalEnrollmentAdoptAdmission(_ shared: PersonalEnrollmentAdmission,
+        expectedLocalDigest: String, forUID uid: UInt32) throws {
+        try withAccess(forUID: uid) {
+            try requireAdministrator()
+            guard let profile = personalProfile, profile.initialization == "freshReplicaJoining",
+                let accessConfiguration,
+                try PersonalEnrollmentAdmission(configuration: accessConfiguration).digest == expectedLocalDigest,
+                try personalConfiguredIdentity().membership == nil, try index?.catalogueCount() == 0,
+                try PersonalSyncConfiguration.read(PersonalBaselineSelection.self, root: root,
+                    name: PersonalSyncConfiguration.baselineName, ownerUID: ownerUID) == nil
+            else { throw TractandaError("configurationDrift", "Shared admission adoption requires the exact empty provisional target policy.") }
+            let next = try shared.applying(to: profile.accessConfiguration, accounts: accounts)
+            // The content fence remains active, but this exact empty provisional target's
+            // locally authorized configuration is allowed before baseline selection.
+            try personalConfigureAccess(next, allowUnjoinedAdmission: true)
+        }
+    }
+    package func personalEnrollmentAuthorizeFreshTarget(forUID uid: UInt32, commonStoreID: String) throws
+        -> PersonalEnrollmentLocalAuthorization {
+        let authorization = try PersonalEnrollmentLocalAuthorization.authorize(store: self, forUID: uid)
+        try personalEnrollmentRequireEmptyUnjoinedTarget(commonStoreID: commonStoreID)
+        return authorization
+    }
+    package func personalEnrollmentRequireEmptyUnjoinedTarget(commonStoreID: String) throws {
+        let identity = try personalSyncIdentity()
+        guard identity.storeID == commonStoreID, identity.membership == nil,
+            personalProfile?.initialization == "freshReplicaJoining", try index?.catalogueCount() == 0,
+            try PersonalSyncConfiguration.read(PersonalBaselineSelection.self, root: root,
+                name: PersonalSyncConfiguration.baselineName, ownerUID: ownerUID) == nil else {
+            throw TractandaError("invalidEnrollmentTarget", "Join requires the selected empty unjoined target; existing content was not adopted.")
+        }
+    }
+    package func personalEnrollmentAdoptAcceptedAdmission(_ shared: PersonalEnrollmentAdmission,
+        operationID: String, forUID uid: UInt32) throws {
+        let (target, accepted) = try PersonalEnrollmentTargetRegistry(root: root).acceptedAdmission(operationID: operationID)
+        let authorization = try PersonalEnrollmentLocalAuthorization.authorize(store: self, forUID: uid)
+        guard shared == accepted, authorization.administrator == target.administrator,
+            authorization.identity.storeID == target.invitation.storeID,
+            authorization.identity.replicaID == target.claim.targetReplicaID,
+            let accessConfiguration else { throw PersonalEnrollmentError.conflict() }
+        if try PersonalEnrollmentAdmission(configuration: accessConfiguration) == accepted { return }
+        try personalEnrollmentAdoptAdmission(accepted, expectedLocalDigest: target.provisionalAdmissionDigest, forUID: uid)
+    }
+    package func personalEnrollmentAdoptAcceptedAdmission(_ shared: PersonalEnrollmentAdmission,
+        authorization: PersonalEnrollmentMembershipAuthorization) throws {
+        try authorization.revalidate(store: self)
+        let (target, accepted) = try PersonalEnrollmentTargetRegistry(root: root)
+            .acceptedAdmission(operationID: authorization.plan.operationID)
+        guard shared == accepted, target.plan == authorization.plan,
+            let profile = personalProfile, let accessConfiguration else { throw PersonalEnrollmentError.conflict() }
+        let current = try PersonalEnrollmentAdmission(configuration: accessConfiguration)
+        if current == accepted { return }
+        guard profile.initialization == "freshReplicaJoining", try current.digest == target.provisionalAdmissionDigest,
+            try personalConfiguredIdentity().membership == nil, try index?.catalogueCount() == 0,
+            try PersonalSyncConfiguration.read(PersonalBaselineSelection.self, root: root,
+                name: PersonalSyncConfiguration.baselineName, ownerUID: ownerUID) == nil else { throw PersonalEnrollmentError.conflict() }
+        let next = try accepted.applying(to: profile.accessConfiguration, accounts: accounts)
+        // This explicit operation-only proof authorizes only the accepted admission set.
+        // It does not enter or alter ordinary item access context.
+        try personalPersistAccess(next)
+    }
+    package func personalEnrollmentValidateOperationBinding(_ binding: PeerExchangeBinding,
+        plan: PersonalEnrollmentPlan) throws {
+        let identity = try personalSyncIdentity()
+        guard binding.storeID == identity.storeID, binding.localReplicaID == identity.replicaID,
+            identity.membership == plan.previousMembership || identity.membership == plan.configuration,
+            let configuration = try [plan.previousMembership, plan.configuration].compactMap({ $0 }).first(where: {
+                try $0.digest == binding.configurationDigest
+            }), configuration.members.contains(where: { $0.replicaID == binding.remoteReplicaID }),
+            try personalEnrollmentCredentials(configuration: configuration).contains(where: { $0.binding == binding }) else {
+            throw TractandaError("untrustedPeer", "No exact current enrollment control credential is retained.")
+        }
+    }
+    package func personalEnrollmentPendingConfiguration() throws -> PersonalMembershipConfiguration? {
+        let pending = try PersonalSyncConfiguration.read(PersonalMembershipPreparation.self, root: root,
+            name: PersonalSyncConfiguration.pendingName, ownerUID: ownerUID)
+        try pending?.configuration.validate()
+        return pending?.configuration
+    }
+    package func personalEnrollmentValidateRetainedControlBinding(_ binding: PeerExchangeBinding) throws {
+        guard let state = try PersonalEnrollmentMemberRegistry(root: root).state(), state.phase != .complete else {
+            throw TractandaError("untrustedPeer", "No current enrollment operation retains this control binding.")
+        }
+        try personalEnrollmentValidateOperationBinding(binding, plan: state.plan)
+    }
+    package func personalEnrollmentRetainedCredentials() throws -> [PeerCredential] {
+        guard let state = try PersonalEnrollmentMemberRegistry(root: root).state(), state.phase != .complete,
+            let old = state.plan.previousMembership else { return [] }
+        let identity = try personalSyncIdentity()
+        guard identity.membership == old || identity.membership == state.plan.configuration else { throw PersonalEnrollmentError.conflict() }
+        return try personalEnrollmentCredentials(configuration: old)
+    }
+    private func personalEnrollmentAuthorizesReady(_ preparation: PersonalMembershipPreparation,
+        identity: PersonalSyncIdentity) throws -> Bool {
+        var plans: [(PersonalEnrollmentPlan, Bool)] = []
+        if let member = try PersonalEnrollmentMemberRegistry(root: root).state(), member.phase != .complete {
+            plans.append((member.plan, false))
+        }
+        if let (target, _, _) = try PersonalEnrollmentTargetRegistry(root: root).runtimeMaterial(store: self),
+            target.phase != .complete, let plan = target.plan { plans.append((plan, true)) }
+        return plans.contains { plan, target in
+            plan.configuration == preparation.configuration && plan.nonce == preparation.nonce
+                && plan.administrator == preparation.administrator
+                && plan.configuration.members.contains(where: { $0.replicaID == identity.replicaID })
+                && (identity.membership == plan.configuration || identity.membership == plan.previousMembership
+                    || (target && identity.membership == nil))
+        }
+    }
+    private func personalEnrollmentCredentials(configuration: PersonalMembershipConfiguration) throws -> [PeerCredential] {
+        let digest = try configuration.digest
+        guard let aliases = try PersonalSyncConfiguration.read(PersonalCredentialAliases.self, root: root,
+            name: ".personal-credentials-" + digest + ".json", ownerUID: ownerUID) else { return [] }
+        guard aliases.configurationDigest == digest, aliases.aliases.count <= 512,
+            aliases.aliases == Array(Set(aliases.aliases)).sorted() else { throw PersonalEnrollmentError.invalid() }
+        let registry = PeerCredentialStore(files: DocumentContentFiles(root: root, ownerUID: ownerUID, minimumFreeBytes: 0))
+        return try aliases.aliases.map { alias in
+            let credential = try registry.load(peerID: alias, configurationDigest: digest)
+            guard credential.binding.storeID == configuration.storeID, credential.binding.localReplicaID == replicaID,
+                configuration.members.contains(where: { $0.replicaID == credential.binding.remoteReplicaID }) else {
+                throw PersonalEnrollmentError.invalid()
+            }
+            return credential
+        }
+    }
     public static func createPersonalSyncReplica(
-        root: URL, storeID: String, accessConfiguration: ItemValue,
+        root: URL, indexDirectory: URL? = nil, storeID: String, accessConfiguration: ItemValue,
         accounts: any AccountDirectory = SystemAccountDirectory()
     ) throws -> ItemStore {
         let store = try ItemStore(
-            personalRoot: root,
+            personalRoot: root, indexDirectory: indexDirectory,
             opening: .freshReplica(storeID: storeID, configuration: accessConfiguration), accounts: accounts)
         try CanonicalReaderRequirement.beforePersonalSyncPublication(
             root: store.root, ownerUID: store.ownerUID)
         return store
     }
+    /// Native join lifecycle: the durable pending profile fences ordinary content before
+    /// the first StoreID/ReplicaID is published, including interruption and .existing open.
+    public static func createJoiningPersonalSyncReplica(
+        root: URL, indexDirectory: URL? = nil, storeID: String, accessConfiguration: ItemValue,
+        accounts: any AccountDirectory = SystemAccountDirectory()
+    ) throws -> ItemStore {
+        let store = try ItemStore(personalRoot: root, indexDirectory: indexDirectory,
+            opening: .joiningReplica(storeID: storeID, configuration: accessConfiguration), accounts: accounts)
+        try CanonicalReaderRequirement.beforePersonalSyncPublication(root: store.root, ownerUID: store.ownerUID)
+        return store
+    }
     public func personalSyncIdentity() throws -> PersonalSyncIdentity {
-        guard let profile = personalProfile, isCanonicalReady else {
+        try recoverPersonalPublicationIfNeeded()
+        guard isCanonicalReady else {
             throw TractandaError("personalProfileRequired", "A ready personal store is required.")
+        }
+        return try personalConfiguredIdentity()
+    }
+    private func personalConfiguredIdentity() throws -> PersonalSyncIdentity {
+        guard let profile = personalProfile else {
+            throw TractandaError("personalProfileRequired", "A current personal profile is required.")
         }
         let membership = try PersonalSyncConfiguration.membership(root: root, ownerUID: ownerUID)
         guard membership == nil || membership?.storeID == profile.storeID else {
@@ -17266,12 +17693,44 @@ extension ItemStore {
             }
         }
         try requireAdministrator()
+        guard let administrator = accessContext?.account?.name else {
+            throw TractandaError("membershipConflict", "Current administrator identity changed.")
+        }
+        return try personalPrepareMembershipChange(configuration: configuration, expectedDigest: expectedDigest,
+            nonce: nonce, readmission: readmission, administrator: administrator)
+    }
+    /// This narrow explicit witness is constructed only from an authenticated current
+    /// server's scoped administrator decision. It never changes ordinary access context.
+    package func preparePersonalMembershipChange(authorization: PersonalEnrollmentScopedAuthorization) throws
+        -> PersonalMembershipPreparation {
+        try authorization.revalidate(store: self)
+        let decision = authorization.decision
+        return try personalPrepareMembershipChange(configuration: decision.configuration,
+            expectedDigest: decision.expectedMembershipDigest, nonce: decision.nonce,
+            readmission: false, administrator: authorization.localName)
+    }
+    package func preparePersonalMembershipChange(authorization: PersonalEnrollmentMembershipAuthorization) throws
+        -> PersonalMembershipPreparation {
+        try authorization.revalidate(store: self)
+        let plan = authorization.plan
+        let identity = try personalConfiguredIdentity()
+        let expected = try identity.replicaID == plan.issuerReplicaID || plan.previousMembership?.members.contains(where: { $0.replicaID == identity.replicaID }) == true
+            ? plan.previousMembership?.digest : nil
+        if identity.membership == plan.configuration {
+            return .init(configuration: plan.configuration, expectedDigest: expected, nonce: plan.nonce,
+                administrator: plan.administrator, requiredOnlineReplicaIDs: plan.configuration.members.map(\.replicaID), readmission: false)
+        }
+        return try personalPrepareMembershipChange(configuration: plan.configuration, expectedDigest: expected,
+            nonce: plan.nonce, readmission: false, administrator: plan.administrator)
+    }
+    private func personalPrepareMembershipChange(configuration: PersonalMembershipConfiguration,
+        expectedDigest: String?, nonce: String?, readmission: Bool, administrator: String) throws
+        -> PersonalMembershipPreparation {
         let identity = try personalSyncIdentity()
         try configuration.validate()
         guard configuration.storeID == identity.storeID,
             configuration.members.contains(where: { $0.replicaID == identity.replicaID }),
-            try identity.membership?.digest == expectedDigest,
-            let administrator = accessContext?.account?.name
+            try identity.membership?.digest == expectedDigest
         else {
             throw TractandaError("membershipConflict", "Current membership or administrator changed.")
         }
@@ -17297,7 +17756,9 @@ extension ItemStore {
                     "membershipConflict", "Resume or explicitly cancel the pending membership operation.")
             }
         } else {
-            try CanonicalReaderRequirement.beforePersonalSyncPublication(root: root, ownerUID: ownerUID)
+            try CanonicalReaderRequirement.beforePersonalSyncPublication(
+                root: root, ownerUID: ownerUID,
+                afterPersist: afterCanonicalReaderRequirementForTesting)
             try PersonalSyncConfiguration.write(
                 preparation, root: root, name: PersonalSyncConfiguration.pendingName)
         }
@@ -17314,6 +17775,15 @@ extension ItemStore {
             }
         }
         try requireAdministrator()
+        try personalRegisterPeerCredentials(credentials, configuration: configuration)
+    }
+    package func registerPersonalPeerCredentials(_ credentials: [PeerCredential],
+        authorization: PersonalEnrollmentMembershipAuthorization) throws {
+        try authorization.revalidate(store: self)
+        try personalRegisterPeerCredentials(credentials, configuration: authorization.plan.configuration)
+    }
+    private func personalRegisterPeerCredentials(_ credentials: [PeerCredential],
+        configuration: PersonalMembershipConfiguration) throws {
         let identity = try personalSyncIdentity()
         let digest = try configuration.digest
         let pending = try PersonalSyncConfiguration.read(
@@ -17346,7 +17816,7 @@ extension ItemStore {
             root: root, name: ".personal-credentials-" + digest + ".json")
     }
     package func loadPersonalPeerCredentials(includePending: Bool = false) throws -> [PeerCredential] {
-        let identity = try personalSyncIdentity()
+        let identity = try personalConfiguredIdentity()
         var configurations = identity.membership.map { [$0] } ?? []
         if includePending,
             let pending = try PersonalSyncConfiguration.read(
@@ -17389,7 +17859,7 @@ extension ItemStore {
     }
     package func validatePersonalPeerBinding(_ binding: PeerExchangeBinding, controlOnly: Bool = false) throws
     {
-        let identity = try personalSyncIdentity()
+        let identity = try personalConfiguredIdentity()
         guard binding.storeID == identity.storeID, binding.localReplicaID == identity.replicaID else {
             throw TractandaError("untrustedPeer", "Peer belongs to another store or local replica.")
         }
@@ -17411,6 +17881,7 @@ extension ItemStore {
         else {
             throw TractandaError("untrustedPeer", "Peer membership or credential is no longer current.")
         }
+        _ = try personalSyncIdentity()
     }
     package func personalMembershipReady(
         session: PeerExchangeBinding, preparation: PersonalMembershipPreparation
@@ -17433,7 +17904,9 @@ extension ItemStore {
         let administratorUID = try PrincipalResolver(directory: accounts, configuration: accessConfiguration)
             .userID(preparation.administrator)
         let administrator = try accounts.user(forUID: administratorUID)
-        try withAccess(forUID: administrator.uid) { try requireAdministrator() }
+        if !(try personalEnrollmentAuthorizesReady(preparation, identity: identity)) {
+            try withAccess(forUID: administrator.uid) { try requireAdministrator() }
+        }
         return .init(
             configurationDigest: try preparation.configuration.digest, nonce: preparation.nonce,
             replicaID: session.localReplicaID, administrator: preparation.administrator)
@@ -17450,15 +17923,43 @@ extension ItemStore {
             }
         }
         try requireAdministrator()
+        guard let administrator = accessContext?.account?.name else { throw PersonalEnrollmentError.conflict() }
+        return try personalCommitMembershipChange(preparation: preparation, acknowledgements: acknowledgements,
+            administrator: administrator)
+    }
+    package func commitPersonalMembershipChange(preparation: PersonalMembershipPreparation,
+        acknowledgements: [PersonalMembershipOnlineAcknowledgement],
+        authorization: PersonalEnrollmentMembershipAuthorization) throws -> PersonalMembershipConfiguration {
+        try authorization.revalidate(store: self)
+        let exact = try preparePersonalMembershipChange(authorization: authorization)
+        guard exact == preparation else { throw PersonalEnrollmentError.conflict() }
+        return try personalCommitMembershipChange(preparation: preparation, acknowledgements: acknowledgements,
+            administrator: authorization.plan.administrator)
+    }
+    private func personalCommitMembershipChange(preparation: PersonalMembershipPreparation,
+        acknowledgements: [PersonalMembershipOnlineAcknowledgement], administrator: String) throws
+        -> PersonalMembershipConfiguration {
         let identity = try personalSyncIdentity()
         let digest = try preparation.configuration.digest
-        if identity.membership == preparation.configuration { return preparation.configuration }
+        if identity.membership == preparation.configuration {
+            let pending = try PersonalSyncConfiguration.read(
+                PersonalMembershipPreparation.self,
+                root: root, name: PersonalSyncConfiguration.pendingName, ownerUID: ownerUID)
+            // Retire only this completed plan; a later administrator preparation is distinct.
+            // ENOENT still needs the completion barrier after an uncertain previous unlink.
+            if pending == nil || pending == preparation {
+                try PersonalSyncConfiguration.remove(
+                    root: root, name: PersonalSyncConfiguration.pendingName,
+                    afterUnlink: { try self.personalSyncAfterConfigurationUnlinkForTesting?() })
+            }
+            return preparation.configuration
+        }
         guard
             let pending = try PersonalSyncConfiguration.read(
                 PersonalMembershipPreparation.self,
                 root: root, name: PersonalSyncConfiguration.pendingName, ownerUID: ownerUID),
             pending == preparation, try identity.membership?.digest == preparation.expectedDigest,
-            accessContext?.account?.name == preparation.administrator
+            administrator == preparation.administrator
         else {
             throw TractandaError(
                 "membershipConflict", "Membership commit lost its exact administrator/CAS plan.")
@@ -17485,7 +17986,9 @@ extension ItemStore {
         try CanonicalReaderRequirement.beforePersonalSyncPublication(root: root, ownerUID: ownerUID)
         try PersonalSyncConfiguration.write(
             preparation.configuration, root: root, name: PersonalSyncConfiguration.membershipName)
-        try PersonalSyncConfiguration.remove(root: root, name: PersonalSyncConfiguration.pendingName)
+        try PersonalSyncConfiguration.remove(
+            root: root, name: PersonalSyncConfiguration.pendingName,
+            afterUnlink: { try self.personalSyncAfterConfigurationUnlinkForTesting?() })
         personalSyncInventories.removeAll()
         personalSyncInventoryOrder.removeAll()
         return preparation.configuration
@@ -17497,6 +18000,13 @@ extension ItemStore {
             }
         }
         try requireAdministrator()
+        return try personalStartBaseline(sourceReplicaID: sourceReplicaID)
+    }
+    package func startPersonalBaseline(authorization: PersonalEnrollmentMembershipAuthorization) throws -> String {
+        try authorization.revalidate(store: self)
+        return try personalStartBaseline(sourceReplicaID: authorization.plan.issuerReplicaID)
+    }
+    private func personalStartBaseline(sourceReplicaID: String) throws -> String {
         try PersonalSyncValidation.identifier(sourceReplicaID)
         let identity = try personalSyncIdentity()
         if let current = try PersonalSyncConfiguration.read(
@@ -17508,7 +18018,7 @@ extension ItemStore {
             }
             return current.selectionID
         }
-        guard personalProfile?.initialization == "freshReplica", try index?.catalogueCount() == 0,
+        guard ["freshReplica", "freshReplicaJoining"].contains(personalProfile?.initialization ?? ""), try index?.catalogueCount() == 0,
             sourceReplicaID != identity.replicaID
         else {
             throw TractandaError(
@@ -17524,12 +18034,55 @@ extension ItemStore {
         return token
     }
     public func finishPersonalBaseline(selectionID: String, actorUID: UInt32? = nil) throws {
-        if accessContext == nil {
+        try personalFinishBaseline(selectionID: selectionID, actorUID: actorUID, readiness: nil)
+    }
+    package func finishPersonalBaseline(selectionID: String, actorUID: UInt32,
+        readiness: PersonalEnrollmentBaselineReadiness) throws {
+        try personalFinishBaseline(selectionID: selectionID, actorUID: actorUID, readiness: readiness)
+    }
+    package func finishPersonalBaseline(selectionID: String, readiness: PersonalEnrollmentBaselineReadiness,
+        authorization: PersonalEnrollmentMembershipAuthorization) throws {
+        try authorization.revalidate(store: self)
+        guard authorization.plan.configuration.storeID == readiness.storeID,
+            authorization.plan.issuerReplicaID == readiness.sourceReplicaID,
+            try authorization.plan.configuration.digest == readiness.configurationDigest else { throw PersonalEnrollmentError.conflict() }
+        try personalFinishBaseline(selectionID: selectionID, actorUID: nil, readiness: readiness, authorization: authorization)
+    }
+    private func personalFinishBaseline(selectionID: String, actorUID: UInt32?,
+        readiness: PersonalEnrollmentBaselineReadiness?, authorization: PersonalEnrollmentMembershipAuthorization? = nil) throws {
+        if let authorization { try authorization.revalidate(store: self) }
+        if accessContext == nil && authorization == nil {
             return try withAccess(forUID: actorUID ?? ownerUID) {
-                try finishPersonalBaseline(selectionID: selectionID, actorUID: actorUID)
+                try personalFinishBaseline(selectionID: selectionID, actorUID: actorUID, readiness: readiness)
             }
         }
-        try requireAdministrator()
+        if authorization == nil { try requireAdministrator() }
+        if personalProfile?.initialization == "freshReplicaJoining" {
+            guard let readiness, let membership = try personalConfiguredIdentity().membership,
+                readiness.selectionID == selectionID, readiness.storeID == membership.storeID,
+                readiness.targetReplicaID == replicaID, try membership.digest == readiness.configurationDigest,
+                membership.members.contains(where: { $0.replicaID == readiness.sourceReplicaID }),
+                let selection = try PersonalSyncConfiguration.read(PersonalBaselineSelection.self, root: root,
+                    name: PersonalSyncConfiguration.baselineName, ownerUID: ownerUID),
+                selection.selectionID == selectionID, selection.sourceReplicaID == readiness.sourceReplicaID,
+                try personalIncomingReviewRecords().allSatisfy({ $0.sourceReplicaID != readiness.sourceReplicaID })
+            else { throw TractandaError("baselineNotReady", "The joining target requires its exact current runtime baseline cut and rescan.") }
+        }
+        if personalBaselineFinalizingSelectionID == selectionID {
+            let retained = try PersonalSyncConfiguration.read(
+                PersonalBaselineSelection.self,
+                root: root, name: PersonalSyncConfiguration.baselineName, ownerUID: ownerUID)
+            guard retained == nil || retained?.selectionID == selectionID else {
+                throw TractandaError(
+                    "baselineConflict", "A different baseline selection replaced finalization.")
+            }
+            try PersonalSyncConfiguration.remove(
+                root: root, name: PersonalSyncConfiguration.baselineName,
+                afterUnlink: { try self.personalSyncAfterConfigurationUnlinkForTesting?() })
+            personalBaselineImportActive = false
+            personalBaselineFinalizingSelectionID = nil
+            return
+        }
         guard
             let selection = try PersonalSyncConfiguration.read(
                 PersonalBaselineSelection.self,
@@ -17543,6 +18096,7 @@ extension ItemStore {
         // refer to it. Current projections are derived only after the selected raw cut arrived.
         try StoreCheckpoint.markDirty(root: root)
         try index.execute("BEGIN IMMEDIATE")
+        var transactionOpen = true
         do {
             var afterItem: String?
             while true {
@@ -17555,11 +18109,24 @@ extension ItemStore {
             }
             try index.finalizeSavedViewMaterializations()
             try index.execute("COMMIT")
+            transactionOpen = false
             try StoreCheckpoint.clear(root: root)
-            try PersonalSyncConfiguration.remove(root: root, name: PersonalSyncConfiguration.baselineName)
+            if let prior = personalProfile, prior.initialization == "freshReplicaJoining" {
+                let next = PersonalWorkgroupProfile.Record(profile: prior.profile, storeID: prior.storeID,
+                    replicaID: prior.replicaID, accessConfiguration: prior.accessConfiguration, initialization: "freshReplica")
+                // Profile publication precedes selection removal. Any crash leaves either
+                // the joining profile or retained selection fencing normal content.
+                try PersonalWorkgroupProfile.persist(next, root: root)
+                personalProfile = next
+            }
+            personalBaselineFinalizingSelectionID = selectionID
+            try PersonalSyncConfiguration.remove(
+                root: root, name: PersonalSyncConfiguration.baselineName,
+                afterUnlink: { try self.personalSyncAfterConfigurationUnlinkForTesting?() })
             personalBaselineImportActive = false
+            personalBaselineFinalizingSelectionID = nil
         } catch {
-            try? index.execute("ROLLBACK")
+            if transactionOpen { try? index.execute("ROLLBACK") }
             personalBaselineImportActive = true
             throw error
         }
@@ -18115,6 +18682,7 @@ extension ItemStore {
             let file = try attachmentPayloads.peerStage(stage.stageID, maximumBytes: descriptor.byteCount)
             try personalVerifiedObjectFile(file, descriptor: descriptor)
             if publish {
+                nativeReplyBudget?.markPublicationAttempt()
                 attachmentPayloads.rememberPeerVerification(attachment, metadata: file.metadata)
                 try attachmentPayloads.publish(
                     descriptor: attachment, requireVerifiedStage: true, stageID: stage.stageID)
@@ -18138,6 +18706,7 @@ extension ItemStore {
                 let manifest = try personalSyncFiles.read(
                     path: stage + ["manifest.json"],
                     maximumBytes: DocumentContentStore.maximumNodeBytes)
+                nativeReplyBudget?.markPublicationAttempt()
                 try documentContents.publishExact(stage: stage, reference: reference, manifestBytes: manifest)
                 try personalSyncFiles.removePersonalSyncDocumentBinding(reference.contentID)
             }
@@ -18155,9 +18724,14 @@ extension ItemStore {
             throw TractandaError("peerObjectCollision", "Publication repeats another immutable identity.")
         }
         try requirePersonalWriteCapacity()
-        try CanonicalReaderRequirement.beforePersonalSyncPublication(root: root, ownerUID: ownerUID)
+        nativeReplyBudget?.markPublicationAttempt()
+        try CanonicalReaderRequirement.beforePersonalSyncPublication(
+            root: root, ownerUID: ownerUID,
+            afterPersist: afterCanonicalReaderRequirementForTesting)
         if try revision.provenance?.mergeProfile == RevisionMerge.personalProfile {
-            try CanonicalReaderRequirement.beforePersonalMergePublication(root: root, ownerUID: ownerUID)
+            try CanonicalReaderRequirement.beforePersonalMergePublication(
+                root: root, ownerUID: ownerUID,
+                afterPersist: afterCanonicalReaderRequirementForTesting)
         }
         let minute = String(Timestamp.now().prefix(16)).replacingOccurrences(of: "-", with: "/")
             .replacingOccurrences(of: "T", with: "/").replacingOccurrences(of: ":", with: "/")
@@ -18414,6 +18988,7 @@ extension ItemStore {
             try personalAuthorizeIncoming(revision, parent: parent)
         }
         try index.execute("BEGIN IMMEDIATE")
+        var transactionOpen = true
         do {
             let row = try personalPublishBytes(bytes, revision: revision)
             try index.insertGraphCatalogueRow(row, graphFields: revision.fields)
@@ -18424,7 +18999,9 @@ extension ItemStore {
                 state = try personalRefreshItem(revision.itemID, causalRow: causal ? row : nil)
             }
             try index.execute("COMMIT")
+            transactionOpen = false
             try StoreCheckpoint.clear(root: root)
+            try personalSyncAfterIndexCommitForTesting?()
             try personalRetireAcceptedRevisionStage(descriptor)
             personalInvalidateCaches()
             let status: PersonalApplyResult.Status =
@@ -18436,8 +19013,8 @@ extension ItemStore {
                 status: status, revisionID: revision.revisionID, itemID: revision.itemID,
                 currentState: state, reviewItemID: nil)
         } catch {
-            try? index.execute("ROLLBACK")
-            if StoreCheckpoint.isDirty(root: root) { isCanonicalReady = false }
+            if transactionOpen { try? index.execute("ROLLBACK") }
+            retainPersonalPublicationRecovery()
             throw error
         }
     }
@@ -18543,20 +19120,23 @@ extension ItemStore {
             }
         }
         try index.execute("BEGIN IMMEDIATE")
+        var transactionOpen = true
         do {
             let row = try personalPublishBytes(RecordCodec.encode(revision), revision: revision)
             try index.insertGraphCatalogueRow(row, graphFields: revision.fields)
             _ = try personalRefreshItem(itemID, causalRow: row)
             try index.execute("COMMIT")
+            transactionOpen = false
             try StoreCheckpoint.clear(root: root)
+            try personalSyncAfterIndexCommitForTesting?()
             // Return metadata only: the authenticated owner may have no content read/write rights.
             return .init(
                 itemID: itemID, revisionID: revision.revisionID,
                 stateToken: try index.currentProjection(itemID: itemID)!.state.stateToken,
                 permissions: permissions)
         } catch {
-            try? index.execute("ROLLBACK")
-            if StoreCheckpoint.isDirty(root: root) { isCanonicalReady = false }
+            if transactionOpen { try? index.execute("ROLLBACK") }
+            retainPersonalPublicationRecovery()
             throw error
         }
     }
@@ -18681,17 +19261,20 @@ extension ItemStore {
                 request.itemID, changesPermissions: request.changes["permissions"] != nil)
         }
         try index.execute("BEGIN IMMEDIATE")
+        var transactionOpen = true
         do {
             let row = try personalPublishBytes(RecordCodec.encode(revision), revision: revision)
             try index.insertGraphCatalogueRow(row, graphFields: revision.fields)
             let state = try personalRefreshItem(revision.itemID)
             try index.execute("COMMIT")
+            transactionOpen = false
             try StoreCheckpoint.clear(root: root)
+            try personalSyncAfterIndexCommitForTesting?()
             return CommitResult(
                 revision: revision, wasReplayed: false, isIndexReady: true, warnings: [], itemState: state)
         } catch {
-            try? index.execute("ROLLBACK")
-            if StoreCheckpoint.isDirty(root: root) { isCanonicalReady = false }
+            if transactionOpen { try? index.execute("ROLLBACK") }
+            retainPersonalPublicationRecovery()
             throw error
         }
     }
@@ -18702,6 +19285,9 @@ extension ItemStore {
             }
         }
         try requireAdministrator()
+        return try personalIncomingReviewRecords()
+    }
+    private func personalIncomingReviewRecords() throws -> [PersonalIncomingReview] {
         var result: [PersonalIncomingReview] = []
         var total = 0
         do {
@@ -18772,6 +19358,7 @@ extension ItemStore {
             guard prior.fields["requestIdentity"]?.string == identity else {
                 throw TractandaError("operationMismatch", "Review resolution already names another intent.")
             }
+            nativeReplyBudget?.markPublicationAttempt()
             try personalRetireAcceptedRevisionStage(review.descriptor)
             review.disposition = "accepted"
             try personalSyncFiles.replacePersonalSyncMetadata(
@@ -18802,6 +19389,7 @@ extension ItemStore {
         try personalVerifyRevisionDependencies(incoming)
         try personalVerifyRevisionDependencies(resolution)
         try index.execute("BEGIN IMMEDIATE")
+        var transactionOpen = true
         do {
             if try index.revision(incoming.revisionID) == nil {
                 let row = try personalPublishBytes(bytes, revision: incoming)
@@ -18811,7 +19399,10 @@ extension ItemStore {
             try index.insertGraphCatalogueRow(row, graphFields: resolution.fields)
             let state = try personalRefreshItem(incoming.itemID)
             try index.execute("COMMIT")
+            transactionOpen = false
             try StoreCheckpoint.clear(root: root)
+            try personalSyncAfterIndexCommitForTesting?()
+            nativeReplyBudget?.markPublicationAttempt()
             try personalRetireAcceptedRevisionStage(review.descriptor)
             review.disposition = "accepted"
             try personalSyncFiles.replacePersonalSyncMetadata(
@@ -18820,8 +19411,8 @@ extension ItemStore {
             return CommitResult(
                 revision: resolution, wasReplayed: false, isIndexReady: true, warnings: [], itemState: state)
         } catch {
-            try? index.execute("ROLLBACK")
-            if StoreCheckpoint.isDirty(root: root) { isCanonicalReady = false }
+            if transactionOpen { try? index.execute("ROLLBACK") }
+            retainPersonalPublicationRecovery()
             throw error
         }
     }
@@ -18838,5 +19429,250 @@ extension ItemStore {
             "membershipDigest": try membership?.digest as Any? ?? NSNull(),
             "baselinePending": personalBaselineImportActive,
         ]
+    }
+}
+
+// MARK: - Account-scoped JMAP blobs (private unaccepted stages and disposable owned references)
+extension ItemStore {
+    private func jmapBlobPrincipal(accountID: String? = nil) throws -> AccountIdentity {
+        guard let context = accessContext else {
+            throw TractandaError("forbidden", "Authenticated blob admission is required.")
+        }
+        if let accountID, accountID != (try canonicalStoreIdentity(creatingIfMissing: false)) {
+            throw TractandaError("accountNotFound", "Account is unavailable.")
+        }
+        let principal = try accounts.user(forUID: context.uid)
+        guard context.account == nil || context.account?.name == principal.name else {
+            throw TractandaError("forbidden", "OS identity mapping changed.")
+        }
+        return principal
+    }
+    private func blobStorage() throws -> JMAPBlobStore {
+        if let jmapBlobs { return jmapBlobs }
+        let value = try JMAPBlobStore(
+            root: root, ownerUID: ownerUID, payloads: attachmentPayloads,
+            quota: stagingByteQuota, minimumFreeBytes: attachmentUploadPolicy.minimumFreeBytes,
+            availableBytes: attachmentCapacityProvider)
+        jmapBlobs = value
+        return value
+    }
+    public func beginBlobUpload(
+        accountID: String, mediaType: String, declaredSize: Int64? = nil,
+        limits: JMAPBlobLimits
+    ) throws -> JMAPBlobUploadHandle {
+        let principal = try jmapBlobPrincipal(accountID: accountID)
+        try requireOperationalContent()
+        try attachmentPayloads.requireBlobReserve(
+            minimumFreeBytes: limits.minimumFreeBytes, additionalBytes: 4096)
+        return try blobStorage().begin(
+            accountID: accountID, principal: principal, mediaType: mediaType,
+            declaredSize: declaredSize, limits: limits,
+            id: makePersistentUUID().uuidString.lowercased())
+    }
+    public func appendBlobUpload(uploadID: String, offset: Int64, data: Data) throws -> Int64 {
+        let principal = try jmapBlobPrincipal()
+        let storage = try blobStorage()
+        guard let limits = storage.stages[uploadID]?.limits else {
+            throw TractandaError("notFound", "Upload is unavailable.")
+        }
+        try attachmentPayloads.requireBlobReserve(
+            minimumFreeBytes: limits.minimumFreeBytes, additionalBytes: data.count)
+        return try storage.append(id: uploadID, principal: principal, offset: offset, data: data)
+    }
+    public func finishBlobUpload(uploadID: String) throws -> JMAPBlobReceipt {
+        let storage = try blobStorage()
+        if let limits = storage.stages[uploadID]?.limits {
+            try attachmentPayloads.requireBlobReserve(
+                minimumFreeBytes: limits.minimumFreeBytes, additionalBytes: 4096)
+        }
+        return try storage.finish(id: uploadID, principal: jmapBlobPrincipal())
+    }
+    public func cancelBlobUpload(uploadID: String) throws {
+        let principal = try jmapBlobPrincipal()
+        let storage = try blobStorage()
+        guard let stage = storage.stages[uploadID] else { return }
+        try storage.requireOwner(stage, principal)
+        // Completion is retained for its ordinary lifetime; cancellation concerns incomplete bodies.
+        if stage.completion == nil { try storage.discard(uploadID) }
+    }
+    public func beginBlobDownload(accountID: String, blobID: String) throws -> JMAPBlobDownloadHandle {
+        let principal = try jmapBlobPrincipal(accountID: accountID)
+        let storage = try blobStorage()
+        try JMAPBlobStore.validateBlobID(blobID)
+        guard storage.downloads.count < 64,
+            storage.downloads.values.filter({ $0.uid == principal.uid && $0.principalName == principal.name })
+                .count < 8
+        else {
+            throw TractandaError("resourceLimit", "Too many open blob downloads.")
+        }
+        let source: JMAPBlobPinnedSource
+        let descriptor: AttachmentDescriptor
+        var reference: ItemIndex.BlobReference?
+        var stageID: String?
+        var mediaType: String?
+        if let (id, stage) = try storage.ownStage(accountID: accountID, blobID: blobID, principal: principal),
+            let completion = stage.completion
+        {
+            stageID = id
+            mediaType = completion.receipt.type
+            descriptor = try AttachmentDescriptor(
+                attachmentID: id, filename: "blob", mediaType: "application/octet-stream",
+                byteCount: completion.receipt.size, sha256: blobID)
+            source = try attachmentPayloads.pinBlob(descriptor, staged: true)
+        } else {
+            guard let index else {
+                throw TractandaError("indexUnavailable", "Blob reference index is unavailable.")
+            }
+            var after: String?
+            var found: (ItemIndex.BlobReference, AttachmentDescriptor)?
+            search: while true {
+                let page = try index.blobReferences(sha256: blobID, after: after)
+                if page.isEmpty { break }
+                for candidate in page {
+                    do {
+                        let revision = try get(candidate.itemID, revisionID: candidate.revisionID)
+                        guard
+                            let owned = try AttachmentDescriptor.descriptors(in: revision.fields).first(
+                                where: {
+                                    $0.attachmentID == candidate.attachmentID && $0.sha256 == blobID
+                                })
+                        else {
+                            throw TractandaError(
+                                "attachmentIntegrity", "Blob locator differs from canonical descriptor.")
+                        }
+                        found = (candidate, owned)
+                        break search
+                    } catch let error as TractandaError where ["notFound", "forbidden"].contains(error.code) {
+                        continue
+                    }
+                }
+                after = page.last?.revisionID
+            }
+            guard let found else { throw TractandaError("notFound", "Blob is unavailable.") }
+            reference = found.0
+            descriptor = found.1
+            source = try attachmentPayloads.pinBlob(descriptor, staged: false)
+        }
+        let id = try makePersistentUUID().uuidString.lowercased()
+        let handle = JMAPBlobDownloadHandle(
+            downloadID: id, blobID: blobID, mediaType: mediaType ?? descriptor.mediaType,
+            size: descriptor.byteCount, source: source)
+        storage.downloads[id] = .init(
+            uid: principal.uid, principalName: principal.name,
+            itemID: reference?.itemID, revisionID: reference?.revisionID,
+            attachmentID: reference?.attachmentID, stageID: stageID, handle: handle)
+        return handle
+    }
+    public func authorizeBlobDownload(downloadID: String) throws {
+        let principal = try jmapBlobPrincipal()
+        let storage = try blobStorage()
+        guard let download = storage.downloads[downloadID], download.uid == principal.uid,
+            download.principalName == principal.name
+        else { throw TractandaError("notFound", "Blob download is unavailable.") }
+        if let itemID = download.itemID, let revisionID = download.revisionID,
+            let attachmentID = download.attachmentID
+        {
+            let revision = try get(itemID, revisionID: revisionID)
+            guard
+                try AttachmentDescriptor.descriptors(in: revision.fields).contains(where: {
+                    $0.attachmentID == attachmentID && $0.sha256 == download.handle.blobID
+                })
+            else { throw TractandaError("notFound", "Blob is unavailable.") }
+        } else if let stageID = download.stageID {
+            // A pinned download may finish after ordinary retention/eviction removes the stage's
+            // pathname; its bound uploader identity and already-open bytes remain private.
+            if let stage = storage.stages[stageID] { try storage.requireOwner(stage, principal) }
+        } else {
+            throw TractandaError("notFound", "Blob is unavailable.")
+        }
+    }
+    public func closeBlobDownload(downloadID: String) throws {
+        let principal = try jmapBlobPrincipal()
+        let storage = try blobStorage()
+        guard let value = storage.downloads[downloadID] else { return }
+        guard value.uid == principal.uid, value.principalName == principal.name else {
+            throw TractandaError("notFound", "Blob download is unavailable.")
+        }
+        storage.downloads.removeValue(forKey: downloadID)?.handle.source.close()
+    }
+    /// Same-account copy has no content effect. It never publishes another uploader's private stage.
+    public func copyBlob(accountID: String, fromAccountID: String, blobID: String) throws -> JMAPBlobReceipt {
+        _ = try jmapBlobPrincipal(accountID: accountID)
+        guard fromAccountID == accountID else {
+            throw TractandaError("fromAccountNotFound", "Source account is unavailable.")
+        }
+        let handle = try beginBlobDownload(accountID: accountID, blobID: blobID)
+        defer { try? closeBlobDownload(downloadID: handle.downloadID) }
+        return JMAPBlobReceipt(
+            accountId: accountID, blobId: blobID, type: handle.mediaType, size: handle.size)
+    }
+    /// Native guarded attachment intake owns all CAS/publication/retry semantics. A committed exact
+    /// replay is resolved before a temporary uploader stage is required, including after rebuild.
+    public func prepareBlobAttachment(_ request: JMAPAttachBlobRequest) throws -> AttachmentUploadResult {
+        _ = try jmapBlobPrincipal(accountID: request.accountID)
+        try JMAPBlobStore.validateBlobID(request.blobID)
+        try Identifier.validate(request.itemID)
+        try Identifier.validate(request.expectedRevisionID)
+        guard !request.operationID.isEmpty, request.operationID.utf8.count <= 200,
+            !request.operationID.contains("\0")
+        else {
+            throw TractandaError("invalidArguments", "Supply a bounded attachment operationID.")
+        }
+        _ = try AttachmentDescriptor(
+            attachmentID: request.itemID, filename: request.filename,
+            mediaType: request.mediaType, byteCount: 0, sha256: request.blobID)
+        let size: Int64
+        if let prior = try priorOperation(request.operationID, uid: accessContext!.uid) {
+            guard let encoded = prior.fields["requestIdentity"]?.string,
+                let data = Data(base64Encoded: encoded),
+                let original = try? JSON.decode(CommitRequest.self, data),
+                let descriptor = try AttachmentDescriptor.descriptors(in: original.changes).last,
+                descriptor.sha256 == request.blobID
+            else {
+                throw TractandaError("operationMismatch", "Operation already committed a different blob.")
+            }
+            size = descriptor.byteCount
+        } else {
+            size = try copyBlob(
+                accountID: request.accountID, fromAccountID: request.accountID, blobID: request.blobID
+            ).size
+        }
+        return try beginAttachment(
+            AttachmentUploadRequest(
+                itemID: request.itemID,
+                expectedRevisionID: request.expectedRevisionID, operationID: request.operationID,
+                filename: request.filename, mediaType: request.mediaType, byteCount: size,
+                sha256: request.blobID))
+    }
+    func expireJMAPBlobsForTesting(now: Date) throws {
+        let storage = try blobStorage()
+        storage.clock = { now }
+        try storage.expire()
+    }
+}
+
+extension ItemStore {
+    public func validateBlobCopyAccounts(accountID: String, fromAccountID: String) throws {
+        _ = try jmapBlobPrincipal(accountID: accountID)
+        guard fromAccountID == accountID else {
+            throw TractandaError("fromAccountNotFound", "Source account is unavailable.")
+        }
+    }
+}
+
+extension ItemStore {
+    /// Disposal-only trusted coordinator entry points remain usable after bearer revocation.
+    /// Captured identity can remove only its own operational object; no content is read or published.
+    package func cancelBlobUploadForCleanup(id: String, uid: UInt32, principalName: String) throws {
+        guard let storage = jmapBlobs, let stage = storage.stages[id], stage.intent.uid == uid,
+            stage.intent.principalName == principalName, stage.completion == nil
+        else { return }
+        try storage.discard(id)
+    }
+    package func closeBlobDownloadForCleanup(id: String, uid: UInt32, principalName: String) throws {
+        guard let storage = jmapBlobs, let download = storage.downloads[id], download.uid == uid,
+            download.principalName == principalName
+        else { return }
+        storage.downloads.removeValue(forKey: id)?.handle.source.close()
     }
 }

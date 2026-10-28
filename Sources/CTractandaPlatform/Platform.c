@@ -16,6 +16,7 @@
 #include <signal.h>
 #include <stdatomic.h>
 #include <poll.h>
+#include <termios.h>
 #include <spawn.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
@@ -507,6 +508,18 @@ static int write_bytes(int fd, const void *data, size_t count, int is_socket) {
     return 0;
 }
 
+int tractanda_durable_sync(int fd) {
+    int result;
+    do { result = fsync(fd); } while (result != 0 && errno == EINTR);
+    if (result != 0) return -1;
+#ifdef __APPLE__
+    // fsync alone may leave acknowledged data in a drive's volatile write cache.
+    // Do not silently weaken the contract if the filesystem refuses a full flush.
+    do { result = fcntl(fd, F_FULLFSYNC); } while (result != 0 && errno == EINTR);
+#endif
+    return result;
+}
+
 // Hard-link publication never replaces an existing revision. Staging is on
 // the destination filesystem so publication is one directory operation.
 int tractanda_publish(const char *path, const void *bytes, size_t count) {
@@ -518,7 +531,7 @@ int tractanda_publish(const char *path, const void *bytes, size_t count) {
     if (fd < 0) { free(temporary); return -1; }
     int result = write_bytes(fd, bytes, count, 0);
     if (result == 0) result = fchmod(fd, 0400);
-    if (result == 0) result = fsync(fd);
+    if (result == 0) result = tractanda_durable_sync(fd);
     int saved = errno;
     close(fd);
     errno = saved;
@@ -648,28 +661,51 @@ int tractanda_receive_frame(int fd, void **bytes, uint32_t *count) {
     *bytes = buffer; *count = length; return 0;
 }
 
-/* Installer mutations only: preserve partial header/body bytes across bounded socket waits.
- * The request is sent once. EOF, cancellation and other transport failures still terminate. */
-static int read_installer_response(int fd, void *data, size_t count) {
-    char *cursor = data;
+/* Connected client IO: socket timeouts are cancellation wakeups, not operation deadlines.
+ * Preserve each partial header/body; never resend a complete request. */
+static int write_connected_bytes(int fd, const void *data, size_t count) {
+    const char *cursor = data;
     while (count) {
         if (tractanda_stopping()) { errno = ECANCELED; return -1; }
-        ssize_t amount = read(fd, cursor, count);
-        if (amount < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT)) continue;
+#ifdef MSG_NOSIGNAL
+        ssize_t amount = send(fd, cursor, count, MSG_NOSIGNAL);
+#else
+        ssize_t amount = write(fd, cursor, count);
+#endif
+        if (amount < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) continue;
         if (amount == 0) { errno = ECONNRESET; return -1; }
         if (amount < 0) return -1;
         cursor += amount; count -= (size_t)amount;
     }
     return 0;
 }
-int tractanda_receive_installer_frame(int fd, void **bytes, uint32_t *count) {
+int tractanda_send_connected_frame(int fd, const void *bytes, uint32_t count) {
+    if (!count || count > 8 * 1024 * 1024) { errno = EMSGSIZE; return -1; }
+    uint32_t length = htonl(count);
+    if (write_connected_bytes(fd, &length, sizeof(length)) != 0) return -1;
+    return write_connected_bytes(fd, bytes, count);
+}
+
+static int read_connected_response(int fd, void *data, size_t count) {
+    char *cursor = data;
+    while (count) {
+        if (tractanda_stopping()) { errno = ECANCELED; return -1; }
+        ssize_t amount = read(fd, cursor, count);
+        if (amount < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+        if (amount == 0) { errno = ECONNRESET; return -1; }
+        if (amount < 0) return -1;
+        cursor += amount; count -= (size_t)amount;
+    }
+    return 0;
+}
+int tractanda_receive_connected_frame(int fd, void **bytes, uint32_t *count) {
     uint32_t length;
-    if (read_installer_response(fd, &length, sizeof(length)) != 0) return -1;
+    if (read_connected_response(fd, &length, sizeof(length)) != 0) return -1;
     length = ntohl(length);
     if (!length || length > 8 * 1024 * 1024) { errno = EMSGSIZE; return -1; }
     void *buffer = malloc(length);
     if (!buffer) return -1;
-    if (read_installer_response(fd, buffer, length) != 0) {
+    if (read_connected_response(fd, buffer, length) != 0) {
         int saved = errno; free(buffer); errno = saved; return -1;
     }
     *bytes = buffer; *count = length; return 0;
@@ -852,6 +888,94 @@ denied:
 }
 /* Read-only ACL gate for an already opened managed peer configuration/parent. */
 int tractanda_peer_configuration_no_mutation_acl(int fd) { return helper_no_write_acl(fd); }
+int tractanda_secret_file_no_acl(int fd) { return private_no_acl(fd); }
+static atomic_flag private_terminal_active = ATOMIC_FLAG_INIT;
+static volatile sig_atomic_t private_terminal_stopping = 0;
+// One fixed process-lifetime wakeup pipe: no fd reuse race with a signal handler running
+// on another thread, no per-entry fd growth, and no secret bytes enter this pipe.
+static int private_terminal_wake[2] = {-1, -1};
+static void private_terminal_stop(int number) {
+    int saved = errno;
+    private_terminal_stopping = number;
+    if (private_terminal_wake[1] >= 0) {
+        unsigned char byte = 1;
+        ssize_t ignored = write(private_terminal_wake[1], &byte, 1);
+        (void)ignored;
+    }
+    errno = saved;
+}
+int tractanda_private_terminal_line(int fd, void *bytes, size_t cap, size_t *count) {
+    if (!bytes || !count || !cap || cap > 12288 || !isatty(fd)) { errno = EINVAL; return -1; }
+    if (atomic_flag_test_and_set(&private_terminal_active)) { errno = EBUSY; return -1; }
+    const int signals[] = { SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGTSTP };
+    struct sigaction previous[5], action = {0};
+    struct termios original, hidden;
+    sigset_t terminal_signals, original_mask;
+    size_t installed = 0, length = 0;
+    int changed = 0, flags_changed = 0, mask_changed = 0, original_flags = -1, result = -1, saved = 0;
+    *count = 0; private_terminal_stopping = 0;
+    if (private_terminal_wake[0] < 0) {
+        int wake[2];
+        if (pipe(wake) != 0) goto done;
+        if (fcntl(wake[0], F_SETFL, O_NONBLOCK) != 0 || fcntl(wake[1], F_SETFL, O_NONBLOCK) != 0 ||
+            fcntl(wake[0], F_SETFD, FD_CLOEXEC) != 0 || fcntl(wake[1], F_SETFD, FD_CLOEXEC) != 0) {
+            saved = errno; close(wake[0]); close(wake[1]); errno = saved; goto done;
+        }
+        private_terminal_wake[0] = wake[0]; private_terminal_wake[1] = wake[1];
+    }
+    unsigned char drained[32];
+    while (read(private_terminal_wake[0], drained, sizeof(drained)) > 0) {}
+    original_flags = fcntl(fd, F_GETFL);
+    if (original_flags < 0) goto done;
+    if (tcgetattr(fd, &original) != 0) goto done;
+    action.sa_handler = private_terminal_stop; sigemptyset(&action.sa_mask);
+    for (; installed < 5; installed++) {
+        if (sigaction(signals[installed], &action, &previous[installed]) != 0) goto done;
+    }
+    sigemptyset(&terminal_signals);
+    for (size_t i = 0; i < 5; i++) sigaddset(&terminal_signals, signals[i]);
+    int mask_result = pthread_sigmask(SIG_UNBLOCK, &terminal_signals, &original_mask);
+    if (mask_result != 0) { errno = mask_result; goto done; }
+    mask_changed = 1;
+    hidden = original;
+    hidden.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG);
+    hidden.c_cc[VMIN] = 1; hidden.c_cc[VTIME] = 0;
+    if (tcsetattr(fd, TCSANOW, &hidden) != 0) goto done;
+    changed = 1;
+    if (fcntl(fd, F_SETFL, original_flags | O_NONBLOCK) != 0) goto done;
+    flags_changed = 1;
+    while (!private_terminal_stopping) {
+        struct pollfd descriptors[2] = { { fd, POLLIN, 0 }, { private_terminal_wake[0], POLLIN, 0 } };
+        int ready = poll(descriptors, 2, -1);
+        if (ready < 0 && errno == EINTR) continue;
+        if (ready < 0) goto done;
+        if (private_terminal_stopping || descriptors[1].revents) { errno = ECANCELED; goto done; }
+        unsigned char byte;
+        ssize_t n = read(fd, &byte, 1);
+        if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+        if (n != 1) { if (n == 0) errno = ECANCELED; goto done; }
+        if (byte == 3 || byte == 4 || byte == 27) { errno = ECANCELED; goto done; }
+        if (byte == '\n' || byte == '\r') { *count = length; result = 0; goto done; }
+        if (length == cap) { errno = EMSGSIZE; goto done; }
+        ((unsigned char *)bytes)[length++] = byte;
+    }
+    errno = ECANCELED;
+done:
+    saved = errno;
+    if (changed) {
+        int restore;
+        do { restore = tcsetattr(fd, TCSAFLUSH, &original); } while (restore < 0 && errno == EINTR);
+        if (restore < 0) { result = -1; saved = errno; }
+    }
+    if (flags_changed && fcntl(fd, F_SETFL, original_flags) != 0) { result = -1; saved = errno; }
+    if (mask_changed) {
+        int mask_result = pthread_sigmask(SIG_SETMASK, &original_mask, NULL);
+        if (mask_result != 0) { result = -1; saved = mask_result; }
+    }
+    while (installed) { installed--; sigaction(signals[installed], &previous[installed], NULL); }
+    if (result != 0) { memset(bytes, 0, cap); *count = 0; }
+    atomic_flag_clear(&private_terminal_active); errno = saved; return result;
+}
 static int validate_enrollment_executable(const char *path, int root_only, const char *basename) {
     size_t length;
     if (!path || path[0] != '/' || !(length = strnlen(path, 4097)) || length > 4096) { errno = EINVAL; return -1; }

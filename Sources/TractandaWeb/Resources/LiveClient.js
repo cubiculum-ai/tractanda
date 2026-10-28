@@ -8,7 +8,7 @@
   const sessionStorageKey = 'tractanda.web-session';
   const browserStorageKey = 'tractanda.browser-session';
   var isSigningIn = false, resumeEditorAfterSignIn = false;
-  const nativeCapability = 'https://tractanda.ai/ns/local-prototype/4';
+  const nativeCapability = 'https://tractanda.ai/ns/jmap/1';
   const typedText = value => ({type:'text',value});
   const fieldText = (fields, key) => fields[key]?.type === 'text' ? fields[key].value : '';
 
@@ -178,33 +178,73 @@
 
   async function nativeCalls(calls) {
     if(!calls.length||calls.length>8)throw apiError('invalidRequest','A native read batch must contain one to eight calls.');
-    let response, envelope;
     const requestToken=accessToken;
-    try {
-      response = await fetch('/api', {
-        method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+requestToken},
-        body:JSON.stringify({using:[nativeCapability],methodCalls:calls.map(([method,args],index)=>[method,args,'web-'+index])}),
-        signal:AbortSignal.timeout(Math.min(18000*calls.length,60000)), cache:'no-store', credentials:'omit'
-      });
-      envelope = await response.json();
-    } catch {
-      throw apiError('connectionLost','No confirmed response from the server. The edit may have committed; retry the same edit.');
+    let context=nativeCalls.context;
+    if(!context || context.token!==requestToken) {
+      context={token:requestToken,session:null,pending:null};nativeCalls.context=context;
     }
-    if (!response.ok) {
-      if (response.status===401 && accessToken===requestToken) {
-        forgetAccessToken(requestToken);showSignIn(pendingWrite?'Sign in again to retry your retained edit.':'Your session has expired. Sign in again.');
+    const sessionScoped=new Set(['Core/echo','TractandaSession/get','TractandaAuth/createSession']);
+    const needsAccount=method=>method.startsWith('Tractanda')&&!sessionScoped.has(method);
+    async function exchange(entries) {
+      const selectedAccountID=context.session?.accountID;
+      let response, envelope;
+
+      try {
+        response = await fetch('/api', {
+          method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+requestToken},
+          body:JSON.stringify({using:["urn:ietf:params:jmap:core",nativeCapability],methodCalls:entries.map(([method,args],index)=>[method,args,'web-'+index])}),
+          signal:AbortSignal.timeout(Math.min(18000*entries.length,60000)), cache:'no-store', credentials:'omit'
+        });
+        envelope = await response.json();
+      } catch {
+        throw apiError('connectionLost','No confirmed response from the server. The edit may have committed; retry the same edit.');
       }
-      throw apiError(envelope.code || 'httpError', envelope.message || 'The web connection failed.');
+      if (typeof envelope.type==='string' && envelope.type.startsWith('urn:ietf:params:jmap:error:') && Number.isInteger(envelope.status) && envelope.status>=400 && envelope.status<=599) {
+        const code=envelope.type.slice('urn:ietf:params:jmap:error:'.length);
+        if (!['notJSON','notRequest','unknownCapability','limit'].includes(code)) throw apiError('invalidResponse','Unknown JMAP request problem.');
+        throw apiError(code,'JMAP request rejected: '+code,true);
+      }
+      if (!response.ok) {
+        if (response.status===401 && accessToken===requestToken) {
+          forgetAccessToken(requestToken);showSignIn(pendingWrite?'Sign in again to retry your retained edit.':'Your session has expired. Sign in again.');
+        }
+        throw apiError(envelope.code || 'httpError', envelope.message || 'The web connection failed.');
+      }
+      if(typeof envelope.sessionState==='string' && context.session && envelope.sessionState!==context.session.state) context.session=null;
+      if (envelope.code) throw apiError(envelope.code,envelope.message,envelope.code !== 'responseTooLarge');
+      if(!Array.isArray(envelope.methodResponses)||envelope.methodResponses.length!==entries.length)throw apiError('invalidResponse','The server response could not be matched to this request.');
+      return envelope.methodResponses.map((call,index)=>{
+        if (!call || call[2] !== 'web-'+index) throw apiError('invalidResponse','The server response could not be matched to this request.');
+        if (call[0] === 'error') {
+          const definitive=['accountNotFound','accountReadOnly','accountNotSupportedByMethod','revisionConflict','stateConflict','forbidden','notFound','operationMismatch','invalidArguments','invalidRecord','invalidValue','invalidKey','invalidID','unknownClass','abstractClass','invalidClass','invalidView','invalidSelection','invalidHolder','invalidPermissions','invalidRole','invalidPendency','categoryCycle','invalidCategory','invalidReferenceLabel','invalidLearningSettings','invalidLearningFeedback','itemDeleted','invalidCapture','captureLimit','captureReviewRequired','captureChanged','dateOverrideConflict','unknownMethod','invalidResultReference'];
+          throw apiError(call[1].type,call[1].description,definitive.includes(call[1].type));
+        }
+        if(['TractandaItem/get','TractandaRevision/get'].includes(call[0]) &&
+           ['remainingIDs','oversizedIDs','unresolved'].some(key=>Object.hasOwn(call[1],key)))
+          throw apiError('invalidResponse','Standard get returned unsupported continuation fields.');
+        if(['TractandaItem/get','TractandaItem/getBounded','TractandaRevision/get','TractandaItem/history','TractandaItem/query'].includes(call[0]) && call[1]?.accountId!==(entries[index][1].accountId??selectedAccountID))
+          throw apiError('invalidResponse','Read response account does not match this request.');
+        if (call[0] !== entries[index][0]) throw apiError('invalidResponse','The server returned an unexpected method.');
+        if (call[0]==='TractandaStore/info') showServerVersion(call[1]?.server?.version);
+        return call[1];
+      });
     }
-    if (envelope.code) throw apiError(envelope.code,envelope.message,envelope.code !== 'responseTooLarge');
-    if(!Array.isArray(envelope.methodResponses)||envelope.methodResponses.length!==calls.length)throw apiError('invalidResponse','The server response could not be matched to this request.');
-    return envelope.methodResponses.map((call,index)=>{
-      if (!call || call[2] !== 'web-'+index) throw apiError('invalidResponse','The server response could not be matched to this request.');
-      if (call[0] === 'error') throw apiError(call[1].type,call[1].description,true);
-      if (call[0] !== calls[index][0]) throw apiError('invalidResponse','The server returned an unexpected method.');
-      if (call[0]==='TractandaStore/info') showServerVersion(call[1]?.server?.version);
-      return call[1];
-    });
+
+    if(calls.some(([method])=>needsAccount(method)) && !context.session) {
+      if(!context.pending) context.pending=(async()=>{
+        const [document]=await exchange([['TractandaSession/get',{}]]);
+        const accountID=document?.primaryAccounts?.[nativeCapability];
+        if(document?.profile!=='tractanda.local-session.v1' || typeof document.state!=='string' || !document.state ||
+           typeof accountID!=='string' || !accountID || !document.accounts?.[accountID]?.accountCapabilities?.[nativeCapability])
+          throw apiError('invalidResponse','Invalid local session discovery.');
+        context.session={accountID,state:document.state};
+      })();
+      try {await context.pending;} finally {context.pending=null;}
+    }
+    if(accessToken!==requestToken || nativeCalls.context!==context)
+      throw apiError('contextChanged','Authentication changed; prepare the request again.');
+    return exchange(calls.map(([method,args])=>[method,needsAccount(method)&&!Object.hasOwn(args,'accountId')&&!Object.hasOwn(args,'#accountId')?
+      {...args,accountId:context.session.accountID}:args]));
   }
 
   async function nativeCall(method, argumentsObject = {}) {
@@ -257,7 +297,7 @@
   }
   function categoryOrder(revision) {
     const value=revision?.fields?.categoryOrder;
-    return value?.type==='integer' ? value.value : 0;
+    return value?.type==='integer' ? BigInt(value.value) : 0n;
   }
   function categoryGraph(revisions) {
     const categories=new Map(revisions.filter(r=>!r.fields.isDeleted?.value&&r.fields.selection).map(r=>[fieldText(r.fields,'itemID'),r]));
@@ -265,7 +305,7 @@
     for(const [id,category] of categories) for(const parent of categoryReferences(category.fields.categoryParents)) {
       if(categories.has(parent)) children.set(parent,[...(children.get(parent)||[]),id]);
     }
-    const compare=(left,right)=>categoryOrder(categories.get(left))-categoryOrder(categories.get(right))||fieldText(categories.get(left).fields,'subject').localeCompare(fieldText(categories.get(right).fields,'subject'))||left.localeCompare(right);
+    const compare=(left,right)=>{const a=categoryOrder(categories.get(left)),b=categoryOrder(categories.get(right));return (a<b?-1:a>b?1:0)||fieldText(categories.get(left).fields,'subject').localeCompare(fieldText(categories.get(right).fields,'subject'))||left.localeCompare(right);};
     for(const [id,values] of children) children.set(id,[...new Set(values)].sort(compare));
     return {categories,children};
   }
@@ -279,15 +319,25 @@
     visit(rootID,[fieldText(graph.categories.get(rootID).fields,'subject')||'Category']);
     return result;
   }
+  function queryArguments(criteria) {
+    const {expression,text,categoryPath,excludedCategoryIDs,viewID,sectionID,at,timeZone,sort,...paging}=criteria;
+    const filter=Object.fromEntries(Object.entries({expression,text,categoryPath,excludedCategoryIDs,viewID,sectionID,at,timeZone}).filter(([,value])=>value!==undefined));
+    return {filter,...paging,calculateTotal:true,...(sort?{sort:sort.map(entry=>entry.categoryRootID?
+      {property:'categoryMembership',categoryRootId:entry.categoryRootID,isAscending:entry.isAscending??true}:
+      {property:entry.property,isAscending:entry.isAscending??true,...(entry.collation?{collation:entry.collation}:{})})}:{})};
+  }
+  function unresolvedReadItems(page) {return page.list.filter(item=>item.resolution&&item.resolution.status!=='ready').map(item=>item.resolution);}
+  function readyReadItems(page) {return page.list.filter(item=>!item.resolution||item.resolution.status==='ready');}
+
   async function queryIDGroups(argumentsList,state) {
     const positions=argumentsList.map(()=>0),groups=argumentsList.map(()=>[]),at=currentDate();
     let pending=argumentsList.map((_,index)=>index);
     while(pending.length) {
       const current=pending.slice(0,8);
       pending=pending.slice(8);
-      const pages=await nativeCalls(current.map(index=>['TractandaItem/query',{
+      const pages=await nativeCalls(current.map(index=>['TractandaItem/query',queryArguments({
         ...argumentsList[index],at:argumentsList[index].at||at,position:positions[index],limit:64
-      }]));
+      })]));
       for(let offset=0;offset<current.length;offset++) {
         const index=current[offset],page=pages[offset];
         if(page.queryState!==state)return null;
@@ -305,8 +355,8 @@
     while(true) {
       try {
         return await nativeCalls([
-          ['TractandaItem/query',{...argumentsObject,...(cursor?{cursor}:{position}),limit}],
-          ['TractandaItem/get',{'#ids':{resultOf:'web-0',name:'TractandaItem/query',path:'/ids'},...projection}]
+          ['TractandaItem/query',queryArguments({...argumentsObject,...(cursor?{cursor}:{position}),limit})],
+          ['TractandaItem/getBounded',{maxBytes:524288,'#ids':{resultOf:'web-0',name:'TractandaItem/query',path:'/ids'},...projection}]
         ]);
       } catch(error) {
         if(error.code!=='responseTooLarge'||limit===1)throw error;
@@ -319,7 +369,7 @@
     for(let position=0;;) {
       // The get uses this request's query IDs, so each page is coherent and keeps
       // full editor content without the server's replay receipt.
-      const projection=properties?{properties}:{projection:'content'};
+      const projection=properties?{fieldProperties:properties}:{projection:'content'};
       let pair;
       try { pair=await queryPageWithRevisions({...argumentsObject,at},position,projection,cursor); }
       catch(error) {
@@ -329,11 +379,11 @@
       }
       const [query,page]=pair;
       if(query.queryState!==state||page.state!==state||page.notFound.length)return null;
-      const pageUnresolved=page.unresolved||[];
-      const classified=[...page.list.map(item=>item.fields?.itemID?.value||item.itemID),...pageUnresolved.map(item=>item.itemID),...(page.remainingIDs||[]),...(page.oversizedIDs||[])];
+      const pageUnresolved=unresolvedReadItems(page);
+      const classified=[...page.list.map(item=>item.id),...(page.remainingIDs||[]),...(page.oversizedIDs||[])];
       if(new Set(classified).size!==classified.length||classified.length!==query.ids.length||query.ids.some(id=>!classified.includes(id)))
         throw apiError('invalidResponse','The server omitted or repeated item projection results.');
-      revisions.push(...page.list);unresolved.push(...pageUnresolved);unhydratedIDs.push(...(page.remainingIDs||[]),...(page.oversizedIDs||[]));
+      revisions.push(...readyReadItems(page));unresolved.push(...pageUnresolved);unhydratedIDs.push(...(page.remainingIDs||[]),...(page.oversizedIDs||[]));
       conflictsAvailable=conflictsAvailable||!!query.conflictsAvailable||pageUnresolved.length>0;
       if(query.completeness==='unresolvedItems'||pageUnresolved.length)completeness='unresolvedItems';
       position=query.position+query.ids.length;cursor=query.nextCursor||null;
@@ -420,9 +470,9 @@
     for (let attempt=0;attempt<3;attempt++) {
       const info=await nativeCall('TractandaStore/info'),at=currentDate();
       const result=await nativeCall('TractandaItem/get',{ids:[viewID]});
-      if((result.unresolved||[]).length)throw apiError('itemUnresolved','This saved view needs projection review.');
+      if(unresolvedReadItems(result).length)throw apiError('itemUnresolved','This saved view needs projection review.');
       if((result.remainingIDs||[]).length||(result.oversizedIDs||[]).length)throw apiError('viewUnavailable','This saved view could not be completely loaded.');
-      const view=result.list[0], fields=view?.fields;
+      const view=readyReadItems(result)[0], fields=view?.fields;
       if (!fields || fields.isDeleted?.value || !fields.viewDefinition) throw apiError('viewUnavailable','This saved view is unavailable.');
       if (result.state!==info.state) continue;
       const definition=fields.viewDefinition.value;
@@ -432,11 +482,11 @@
       const categoryResult=await nativeCall('TractandaItem/get',{ids:[...new Set([...columnIDs,...filterIDs])]});
       if (categoryResult.state!==info.state) continue;
       const requiredCategories=[...new Set([...columnIDs,...filterIDs])];
-      if((categoryResult.unresolved||[]).length)throw apiError('itemUnresolved','A saved-view section or filter category needs review.');
+      if(unresolvedReadItems(categoryResult).length)throw apiError('itemUnresolved','A saved-view section or filter category needs review.');
       if((categoryResult.remainingIDs||[]).length||(categoryResult.oversizedIDs||[]).length)
         throw apiError('categoryUnavailable','The saved-view categories could not be completely loaded. Retry this board refresh.');
       if((categoryResult.notFound||[]).length)throw apiError('categoryUnavailable','A required saved-view category is unavailable.');
-      const categories=new Map(categoryResult.list.filter(r=>!r.fields.isDeleted?.value && r.fields.selection).map(r=>[fieldText(r.fields,'itemID'),r]));
+      const categories=new Map(readyReadItems(categoryResult).filter(r=>!r.fields.isDeleted?.value && r.fields.selection).map(r=>[fieldText(r.fields,'itemID'),r]));
       if(requiredCategories.some(id=>!categories.has(id)))throw apiError('categoryUnavailable','The complete saved-view category definition is unavailable.');
       let hasChanged=false,projectionNotice=false;
       const unhydratedIDs=[];
@@ -444,11 +494,11 @@
       for(let position=0;;){
         const [query,page]=await queryPageWithRevisions({viewID,at},position,{projection:'content'});
         if(query.queryState!==info.state||page.state!==info.state||page.notFound.length){hasChanged=true;break;}
-        const unresolved=page.unresolved||[];
-        const classified=[...page.list.map(item=>item.fields?.itemID?.value||item.itemID),...unresolved.map(item=>item.itemID),...(page.remainingIDs||[]),...(page.oversizedIDs||[])];
+        const unresolved=unresolvedReadItems(page);
+        const classified=[...page.list.map(item=>item.id),...(page.remainingIDs||[]),...(page.oversizedIDs||[])];
         if(new Set(classified).size!==classified.length||classified.length!==query.ids.length||query.ids.some(id=>!classified.includes(id)))
           throw apiError('invalidResponse','The server omitted or repeated item projection results.');
-        revisions.push(...page.list);unhydratedIDs.push(...(page.remainingIDs||[]),...(page.oversizedIDs||[]));
+        revisions.push(...readyReadItems(page));unhydratedIDs.push(...(page.remainingIDs||[]),...(page.oversizedIDs||[]));
         projectionNotice=projectionNotice||unresolved.length>0||query.completeness==='unresolvedItems'||!!query.conflictsAvailable||unhydratedIDs.length>0;position=query.position+query.ids.length;
         if(position>=query.total)break;
         if(!query.ids.length)throw apiError('invalidResponse','An incomplete query page was empty.');
@@ -673,21 +723,35 @@
     if (!pendingWrite || isSaving) return;
     const write=pendingWrite;
     if (write.viewItemID!==selectedViewID) {toast('Return to the project / view that owns this pending edit.',true);return;}
-    const writeGeneration=viewGeneration;isSaving=true;updateConnectionState();
+    const writeGeneration=viewGeneration;let confirmed=false;isSaving=true;updateConnectionState();
     $('connection-message').textContent='Saving to Tractanda…';
     try {
-      const result=await nativeCall(write.method || 'TractandaItem/commit',write.request);
-      if (!result.revision?.fields?.revisionID) throw apiError('invalidResponse','The commit response is incomplete; retry the same edit.');
-      clearPendingWrite();$('task-dialog').close();
+      const result=write.confirmation || await nativeCall(write.method || 'TractandaItem/commit',write.request);
+      const intent=write.request.commitRequest||write.request;
+      if (!result.itemId || !result.revisionId || result.operationId!==intent.operationID ||
+          (!['create','copy'].includes(intent.action) && result.itemId!==(intent.itemID||intent.categoryID)) ||
+          !Array.isArray(result.diagnostics) || result.diagnostics.some(code=>!['indexDelayed','checkpointPending','additionalDiagnostics'].includes(code)))
+        throw apiError('invalidResponse','The save receipt does not match this edit; retry the same intent.');
+      confirmed=true;
+      write.confirmation=result;
+      sessionStorage.setItem(pendingStorageKey(write.viewItemID),JSON.stringify(write));
+      clearPendingWrite();
+      if (!selectionIsCurrent(write.viewItemID,writeGeneration)) return;
+      $('task-dialog').close();
       const refreshed=await refreshLiveBoard();
       if (!refreshed) $('connection-message').textContent='The edit was saved. '+$('connection-message').textContent;
       toast(result.indexReady===false?'Saved; the index needs rebuilding before further queries.':result.replayed?'Original edit confirmed; no duplicate revision.':'Saved as a new item revision.');
       if (write.context==='learning') {
-        learningCategoryID=write.categoryID || fieldText(result.revision.fields,'itemID');
+        learningCategoryID=write.categoryID || result.itemId;
         learningNotice='Saved. Train again when you are ready to use the updated examples.';
         await refreshLearningPanel();
       }
     } catch(error) {
+      if (confirmed) {
+        $('connection-message').textContent='Saved. Refresh or local recovery cleanup failed: '+error.message;
+        toast('The edit was saved. '+error.message,true);
+        return;
+      }
       if (write.context==='learning') learningNotice=error.message;
       if (error.isDefinitive) {
         clearPendingWrite();

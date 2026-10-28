@@ -20,7 +20,7 @@ final class KanbanTests: XCTestCase {
         func item(_ name: String, type: String = "Item", fields: [String: ItemValue] = [:]) throws
             -> Revision
         {
-            try client.commit(
+            try client.commitFixture(
                 CommitRequest(
                     classID: type, changes: fields.merging(["subject": .text(name)]) { _, b in b },
                     operationID: Identifier.make())
@@ -98,14 +98,14 @@ final class KanbanTests: XCTestCase {
         }
         var definition = view.fields["viewDefinition"]!.map!
         definition["sort"] = .list([.object(["property": .text("subject"), "isAscending": .boolean(true)])])
-        _ = try f.client.commit(
+        _ = try f.client.commitFixture(
             CommitRequest(
                 action: .revise, itemID: view.itemID,
                 expectedRevisionID: view.revisionID, changes: ["viewDefinition": .object(definition)],
                 operationID: Identifier.make()))
         // Optional project-view criteria must not replace the project/status intersection.
         definition["expression"] = .text("itemID == \"\"")
-        _ = try f.client.commit(
+        _ = try f.client.commitFixture(
             CommitRequest(
                 action: .revise, itemID: project.itemID,
                 expectedRevisionID: project.revisionID, changes: ["viewDefinition": .object(definition)],
@@ -175,11 +175,11 @@ final class KanbanTests: XCTestCase {
         var assignments = original.fields["categoryOverrides"]!.map!
         assignments[a.itemID] = .text("exclude")
         assignments[b.itemID] = .text("include")
-        let moved = try f.client.commit(
+        let moved = try f.client.commitFixture(
             CommitRequest(
                 action: .revise, itemID: original.itemID, expectedRevisionID: original.revisionID,
                 changes: ["categoryOverrides": .object(assignments)], operationID: "move-category"))
-        _ = try f.client.commit(
+        _ = try f.client.commitFixture(
             CommitRequest(
                 action: .revise, itemID: b.itemID, expectedRevisionID: b.revisionID,
                 changes: ["subject": .text("Renamed")], operationID: "rename-category"))
@@ -273,7 +273,7 @@ final class KanbanTests: XCTestCase {
         let betaReady = try f.assigned("Beta ready", categories: [beta, status, ready])
         let rootOnly = try f.assigned("Status root only", categories: [alpha, status])
         _ = try f.assigned("No status", categories: [alpha])
-        _ = try f.client.commit(
+        _ = try f.client.commitFixture(
             CommitRequest(
                 action: .revise, itemID: alpha.itemID, expectedRevisionID: alpha.revisionID,
                 changes: ["filterCategories": .list([.reference(ItemReference(workstream.itemID))])],
@@ -317,7 +317,7 @@ final class KanbanTests: XCTestCase {
         let ready = try f.category("Ready", parents: [status])
         let done = try f.category("Done", parents: [status])
         let invalid = try f.category("Other")
-        _ = try f.client.commit(
+        _ = try f.client.commitFixture(
             CommitRequest(
                 action: .revise, itemID: status.itemID, expectedRevisionID: status.revisionID,
                 changes: [
@@ -326,7 +326,7 @@ final class KanbanTests: XCTestCase {
                 ],
                 operationID: "status-defaults"))
         let alphaCurrent = try f.client.revision(for: alpha.itemID)
-        _ = try f.client.commit(
+        _ = try f.client.commitFixture(
             CommitRequest(
                 action: .revise, itemID: alpha.itemID, expectedRevisionID: alphaCurrent.revisionID,
                 changes: [
@@ -372,12 +372,12 @@ final class KanbanTests: XCTestCase {
             "expression": .text("itemID == \"\""),
         ])
         let projectsCurrent = try f.client.revision(for: projects.itemID)
-        _ = try f.client.commit(
+        _ = try f.client.commitFixture(
             CommitRequest(
                 action: .revise, itemID: projects.itemID, expectedRevisionID: projectsCurrent.revisionID,
                 changes: ["viewDefinition": rootDefinition], operationID: "root-axis-defaults"))
         let alphaCurrent = try f.client.revision(for: alpha.itemID)
-        _ = try f.client.commit(
+        _ = try f.client.commitFixture(
             CommitRequest(
                 action: .revise, itemID: alpha.itemID, expectedRevisionID: alphaCurrent.revisionID,
                 changes: [

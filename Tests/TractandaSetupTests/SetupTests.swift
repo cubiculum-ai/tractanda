@@ -12,6 +12,7 @@ final class SetupTests: XCTestCase {
         var jobs = Set<String>()
         var loaded: Bool { !jobs.isEmpty }
         var failNextBootstrap = false
+        var failAfterStoreBootstrap = false
         var observedProcessAlive = false
         var beforeRun: ((String, [String]) throws -> Void)?
         func run(_ executable: String, _ arguments: [String], environment: [String: String]) throws
@@ -47,10 +48,16 @@ final class SetupTests: XCTestCase {
             if let bootstrap = arguments.firstIndex(of: "--bootstrap-store") {
                 // Real tiny canonical root; privileged process/service calls remain mocked.
                 do {
-                    try StoreBootstrap.initialize(
+                    let identity = try StoreBootstrap.initialize(
                         store: URL(fileURLWithPath: arguments[bootstrap + 1]),
                         indexDirectory: URL(fileURLWithPath: arguments[bootstrap + 2]),
-                        owner: arguments[bootstrap + 3], instance: arguments[bootstrap + 4])
+                        owner: arguments[bootstrap + 3], instance: arguments[bootstrap + 4],
+                        commonStoreID: arguments.count > bootstrap + 5 ? arguments[bootstrap + 5] : nil)
+                    if failAfterStoreBootstrap {
+                        failAfterStoreBootstrap = false
+                        return ProcessResult(status: 1, output: "fixture interrupted")
+                    }
+                    return ProcessResult(status: 0, output: identity.map { $0.replicaID + "\n" } ?? "")
                 }
             }
             if executable == "/usr/sbin/lsof" {
@@ -289,6 +296,250 @@ final class SetupTests: XCTestCase {
             runner.calls.contains {
                 $0.0 == "/usr/bin/sudo" && $0.1.contains("daemon") && $0.1.contains("--bootstrap-store")
             })
+    }
+
+    func testNewOutboundTargetRefusesOccupiedStoreWithoutChangingIt() throws {
+        let f = try fixture()
+        try rewriteCanonicalSupport(f, support: .current)
+        let path = f.roots.data.appendingPathComponent("preview")
+        try FileManager.default.createDirectory(at: path, withIntermediateDirectories: true)
+        let marker = path.appendingPathComponent("owned-content")
+        let original = Data("preserve-existing-content".utf8)
+        try original.write(to: marker)
+        let storeID = try UUID.makeVersion1().uuidString.lowercased()
+        let options = SetupOptions(name: "preview", owner: f.owner, bundle: f.bundle,
+            peerRuntime: .outboundOnly, storeSelection: .freshPersonalTarget(storeID: storeID), newInstanceOnly: true)
+        XCTAssertThrowsError(try engine(f).install(options))
+        XCTAssertEqual(try Data(contentsOf: marker), original)
+    }
+
+    func testNewOutboundTargetResumesOnlyExactPreparingReceiptAfterLostBootstrapReply() throws {
+        let f = try fixture()
+        try rewriteCanonicalSupport(f, support: .current)
+        let runner = Runner()
+        let settings = try PersonalPeerRuntimeConfiguration(settings: PeerRuntimeConfiguration(
+            peers: [], synchronization: .init(enabled: true, intervalSeconds: 15)))
+        let path = f.roots.configuration.appendingPathComponent("peer-runtime/preview.json").path
+        let installer = SetupEngine(roots: f.roots, runner: runner, rootCheck: { true }, trustedOwnership: false,
+            peerStatusCall: { _, _ in
+                try .init(state: .active, configurationPath: path, settingsDigest: settings.settings.settingsDigest,
+                    synchronizationEnabled: true, listenerConfigured: false, synchronization: .init(state: .active))
+            }, readinessCheck: { _, _, _ in })
+        let storeID = try UUID.makeVersion1().uuidString.lowercased()
+        let options = SetupOptions(name: "preview", owner: f.owner, bundle: f.bundle, peerRuntime: .outboundOnly,
+            storeSelection: .freshPersonalTarget(storeID: storeID), newInstanceOnly: true)
+        runner.failAfterStoreBootstrap = true
+        XCTAssertThrowsError(try installer.install(options))
+        let partial = try XCTUnwrap(installer.readReceipt("preview"))
+        XCTAssertEqual(partial.state, .preparing)
+        XCTAssertFalse(partial.initialized)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: f.roots.configuration.appendingPathComponent("connections.json").path))
+        let originalID = try {
+            let store = try ItemStore.openInitialized(root: URL(fileURLWithPath: partial.store),
+                indexDirectory: URL(fileURLWithPath: partial.indexDirectory))
+            XCTAssertTrue(store.isPersonalBaselinePending)
+            return try store.personalSyncIdentity().replicaID
+        }()
+        let receiptURL = installer.receiptURL("preview")
+        let retained = try Data(contentsOf: receiptURL)
+        let wrongStore = try UUID.makeVersion1().uuidString.lowercased()
+        for changed in [
+            SetupOptions(name: "preview", owner: f.owner, bundle: f.bundle, peerRuntime: .outboundOnly,
+                storeSelection: .freshPersonalTarget(storeID: wrongStore), newInstanceOnly: true),
+            SetupOptions(name: "preview", owner: f.owner + "x", bundle: f.bundle, peerRuntime: .outboundOnly,
+                storeSelection: .freshPersonalTarget(storeID: storeID), newInstanceOnly: true),
+            SetupOptions(name: "preview", owner: f.owner, port: 48729, bundle: f.bundle, peerRuntime: .outboundOnly,
+                storeSelection: .freshPersonalTarget(storeID: storeID), newInstanceOnly: true),
+        ] {
+            XCTAssertThrowsError(try installer.install(changed))
+            XCTAssertEqual(try Data(contentsOf: receiptURL), retained)
+        }
+        let manifestPath = f.bundle.appendingPathComponent("bundle-manifest.json")
+        let originalManifest = try Data(contentsOf: manifestPath)
+        let manifest = try JSONDecoder().decode(BundleManifest.self, from: originalManifest)
+        let changedManifest = BundleManifest(version: manifest.version + "-changed", platform: manifest.platform,
+            arch: manifest.arch, files: manifest.files, embedding: manifest.embedding,
+            documentExtraction: manifest.documentExtraction, canonicalFormats: manifest.canonicalFormats)
+        try JSONEncoder().encode(changedManifest).write(to: manifestPath)
+        _ = try installer.plan(options)  // The changed bundle is valid, but not this receipt's bundle.
+        XCTAssertThrowsError(try installer.install(options))
+        XCTAssertEqual(try Data(contentsOf: receiptURL), retained)
+        try originalManifest.write(to: manifestPath)
+        // A shared profile published after an interrupted transaction must not be reconfigured.
+        try installer.writeGlobalProfile(partial)
+        let profileURL = f.roots.configuration.appendingPathComponent("connections.json")
+        let published = try Data(contentsOf: profileURL)
+        XCTAssertThrowsError(try installer.install(options))
+        XCTAssertEqual(try Data(contentsOf: profileURL), published)
+        XCTAssertEqual(try Data(contentsOf: receiptURL), retained)
+        try installer.removeGlobalProfile(partial)  // Private fixture returns to its pre-publication state.
+        var mismatched = partial
+        mismatched.freshTargetReplicaID = try UUID.makeVersion1().uuidString.lowercased()
+        try installer.writeReceipt(mismatched)
+        XCTAssertThrowsError(try installer.install(options))
+        XCTAssertEqual(try installer.readReceipt("preview")?.freshTargetReplicaID, mismatched.freshTargetReplicaID)
+        try installer.writeReceipt(partial)
+        try installer.install(options)
+        let final = try XCTUnwrap(installer.readReceipt("preview"))
+        XCTAssertEqual(final.state, .active)
+        XCTAssertEqual(final.freshTargetReplicaID, originalID)
+        XCTAssertEqual(final.peerRuntimeConfiguration?.listenerConfigured, false)
+        XCTAssertEqual(final.peerRuntimeConfiguration?.synchronizationEnabled, true)
+        XCTAssertThrowsError(try installer.install(options), "An active receipt is never adopted by prepare-new.")
+    }
+
+    func testNewOutboundTargetResumesPinnedIdentityAfterStartupFailureBeforeProfilePublication() throws {
+        let f = try fixture()
+        try rewriteCanonicalSupport(f, support: .current)
+        let runner = Runner()
+        let settings = try PersonalPeerRuntimeConfiguration(settings: PeerRuntimeConfiguration(
+            peers: [], synchronization: .init(enabled: true, intervalSeconds: 15)))
+        let path = f.roots.configuration.appendingPathComponent("peer-runtime/preview.json").path
+        let installer = SetupEngine(roots: f.roots, runner: runner, rootCheck: { true }, trustedOwnership: false,
+            peerStatusCall: { _, _ in
+                try .init(state: .active, configurationPath: path, settingsDigest: settings.settings.settingsDigest,
+                    synchronizationEnabled: true, listenerConfigured: false, synchronization: .init(state: .active))
+            }, readinessCheck: { _, _, _ in })
+        let storeID = try UUID.makeVersion1().uuidString.lowercased()
+        let options = SetupOptions(name: "preview", owner: f.owner, bundle: f.bundle, peerRuntime: .outboundOnly,
+            storeSelection: .freshPersonalTarget(storeID: storeID), newInstanceOnly: true)
+        runner.failNextBootstrap = true
+        XCTAssertThrowsError(try installer.install(options))
+        let partial = try XCTUnwrap(installer.readReceipt("preview"))
+        XCTAssertEqual(partial.state, .preparing)
+        XCTAssertTrue(partial.initialized)
+        let originalID = try XCTUnwrap(partial.freshTargetReplicaID)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: f.roots.configuration.appendingPathComponent("connections.json").path))
+        let storeRoot = URL(fileURLWithPath: partial.store)
+        let membership = try PersonalMembershipConfiguration(storeID: storeID,
+            configurationID: UUID.makeVersion1().uuidString.lowercased(),
+            members: [.init(replicaID: originalID, hostname: "target.fixture")])
+        try PersonalSyncConfiguration.write(membership, root: storeRoot, name: PersonalSyncConfiguration.membershipName)
+        let membershipPath = storeRoot.appendingPathComponent(PersonalSyncConfiguration.membershipName)
+        let retainedMembership = try Data(contentsOf: membershipPath)
+        XCTAssertThrowsError(try installer.install(options))
+        XCTAssertEqual(try Data(contentsOf: membershipPath), retainedMembership)
+        try PersonalSyncConfiguration.remove(root: storeRoot, name: PersonalSyncConfiguration.membershipName)
+        let selection = try PersonalBaselineSelection(selectionID: UUID.makeVersion1().uuidString.lowercased(),
+            storeID: storeID, sourceReplicaID: UUID.makeVersion1().uuidString.lowercased())
+        try PersonalSyncConfiguration.write(selection, root: storeRoot, name: PersonalSyncConfiguration.baselineName)
+        let baselinePath = storeRoot.appendingPathComponent(PersonalSyncConfiguration.baselineName)
+        let retainedBaseline = try Data(contentsOf: baselinePath)
+        XCTAssertThrowsError(try installer.install(options))
+        XCTAssertEqual(try Data(contentsOf: baselinePath), retainedBaseline)
+        try PersonalSyncConfiguration.remove(root: storeRoot, name: PersonalSyncConfiguration.baselineName)
+        let operationDirectory = storeRoot.appendingPathComponent(".personal-enrollment")
+        try FileManager.default.createDirectory(at: operationDirectory, withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700])
+        let operation = operationDirectory.appendingPathComponent("target.bin")
+        let inProgress = Data("unaccepted-existing-operation".utf8)
+        try inProgress.write(to: operation)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: operation.path)
+        XCTAssertThrowsError(try installer.install(options))
+        XCTAssertEqual(try Data(contentsOf: operation), inProgress)
+        try FileManager.default.removeItem(at: operationDirectory)  // Remove only this synthetic fixture.
+        let beforeCount = runner.calls.filter { $0.1.contains("--bootstrap-store") }.count
+        try installer.install(options)
+        XCTAssertEqual(runner.calls.filter { $0.1.contains("--bootstrap-store") }.count, beforeCount)
+        let final = try XCTUnwrap(installer.readReceipt("preview"))
+        XCTAssertEqual(final.state, .active)
+        XCTAssertEqual(final.freshTargetReplicaID, originalID)
+        let observed = try ItemStore.openInitialized(root: URL(fileURLWithPath: final.store),
+            indexDirectory: URL(fileURLWithPath: final.indexDirectory))
+        XCTAssertTrue(observed.isPersonalBaselinePending)
+        XCTAssertEqual(try observed.personalSyncIdentity().replicaID, originalID)
+    }
+
+    func testNewTargetOutboundPolicyIsManagedAndNeverReusesExistingReceipt() throws {
+        let f = try fixture()
+        try rewriteCanonicalSupport(f, support: .current)
+        let runner = Runner()
+        let settings = try PersonalPeerRuntimeConfiguration(settings: PeerRuntimeConfiguration(
+            peers: [], synchronization: .init(enabled: true, intervalSeconds: 15)))
+        let path = f.roots.configuration.appendingPathComponent("peer-runtime/preview.json").path
+        let installer = SetupEngine(roots: f.roots, runner: runner, rootCheck: { true }, trustedOwnership: false,
+            peerStatusCall: { _, _ in
+                try .init(state: .active, configurationPath: path, settingsDigest: settings.settings.settingsDigest,
+                    synchronizationEnabled: true, listenerConfigured: false,
+                    synchronization: .init(state: .active))
+            }, readinessCheck: { _, _, _ in })
+        let storeID = try UUID.makeVersion1().uuidString.lowercased()
+        let options = SetupOptions(name: "preview", owner: f.owner, bundle: f.bundle, peerRuntime: .outboundOnly,
+            storeSelection: .freshPersonalTarget(storeID: storeID), newInstanceOnly: true)
+        try installer.install(options)
+        let receipt = try XCTUnwrap(installer.readReceipt("preview"))
+        XCTAssertEqual(receipt.freshTargetStoreID, storeID)
+        XCTAssertEqual(receipt.peerRuntimeConfiguration?.listenerConfigured, false)
+        XCTAssertEqual(receipt.peerRuntimeConfiguration?.synchronizationEnabled, true)
+        let configuration = try PersonalPeerRuntimeConfiguration.decode(Data(contentsOf: URL(fileURLWithPath: path)))
+        XCTAssertNil(configuration.settings.listen)
+        XCTAssertTrue(configuration.settings.peers.isEmpty)
+        XCTAssertTrue(configuration.settings.synchronization.enabled)
+        let before = try Data(contentsOf: URL(fileURLWithPath: path))
+        let callCount = runner.calls.count
+        XCTAssertThrowsError(try installer.install(options))
+        XCTAssertEqual(runner.calls.count, callCount)
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), before)
+        XCTAssertEqual(try installer.readReceipt("preview")?.freshTargetReplicaID, receipt.freshTargetReplicaID)
+        XCTAssertThrowsError(try SetupOptions(name: "other", owner: f.owner, bundle: f.bundle,
+            peerRuntime: .outboundOnly, storeSelection: .standalone, newInstanceOnly: true).validate())
+        XCTAssertThrowsError(try SetupOptions(name: "other", owner: f.owner, bundle: f.bundle,
+            peerRuntime: .outboundOnly, storeSelection: .freshPersonalTarget(storeID: storeID)).validate())
+    }
+
+    func testFreshPersonalTargetSetupResumesItsIdentityAndRejectsExistingInstance() throws {
+        let f = try fixture()
+        try rewriteCanonicalSupport(f, support: .current)
+        let runner = Runner()
+        let installer = engine(f, runner: runner)
+        let storeID = try UUID.makeVersion1().uuidString.lowercased()
+        let selection = SetupOptions.StoreSelection.freshPersonalTarget(storeID: storeID)
+        let options = SetupOptions(name: "preview", owner: f.owner, bundle: f.bundle, storeSelection: selection)
+        runner.failAfterStoreBootstrap = true
+        XCTAssertThrowsError(try installer.install(options))
+        let partial = try XCTUnwrap(installer.readReceipt("preview"))
+        XCTAssertFalse(partial.initialized)
+        XCTAssertEqual(partial.freshTargetStoreID, storeID)
+        let originalReplicaID = try {
+            let store = try ItemStore.openInitialized(
+                root: URL(fileURLWithPath: partial.store),
+                indexDirectory: URL(fileURLWithPath: partial.indexDirectory))
+            XCTAssertTrue(store.isPersonalBaselinePending)
+            return try store.personalSyncIdentity().replicaID
+        }()
+        try installer.install(options)
+        let receipt = try XCTUnwrap(installer.readReceipt("preview"))
+        XCTAssertTrue(receipt.initialized)
+        XCTAssertEqual(receipt.freshTargetStoreID, storeID)
+        XCTAssertEqual(receipt.freshTargetReplicaID, originalReplicaID)
+        let identity = try {
+            let store = try ItemStore.openInitialized(
+                root: URL(fileURLWithPath: receipt.store),
+                indexDirectory: URL(fileURLWithPath: receipt.indexDirectory))
+            XCTAssertTrue(store.isPersonalBaselinePending)
+            return try store.personalSyncIdentity()
+        }()
+        XCTAssertEqual(identity.replicaID, receipt.freshTargetReplicaID)
+        XCTAssertEqual(identity.storeID, storeID)
+        let different = try UUID.makeVersion1().uuidString.lowercased()
+        XCTAssertThrowsError(try installer.install(SetupOptions(
+            name: "preview", owner: f.owner, bundle: f.bundle,
+            storeSelection: .freshPersonalTarget(storeID: different))))
+    }
+
+    func testFreshTargetRefusesOccupiedPathWithoutChangingItsBytes() throws {
+        let f = try fixture()
+        try rewriteCanonicalSupport(f, support: .current)
+        let store = f.roots.data.appendingPathComponent("preview")
+        try FileManager.default.createDirectory(at: store, withIntermediateDirectories: true)
+        let marker = store.appendingPathComponent("retain")
+        try Data("keep".utf8).write(to: marker)
+        let storeID = try UUID.makeVersion1().uuidString.lowercased()
+        let options = SetupOptions(
+            name: "preview", owner: f.owner, bundle: f.bundle,
+            storeSelection: .freshPersonalTarget(storeID: storeID))
+        XCTAssertThrowsError(try engine(f).install(options))
+        XCTAssertEqual(try Data(contentsOf: marker), Data("keep".utf8))
     }
 
     func testUnmanagedExistingDataAndChangedDefinitionsAreNotAdoptedOrRemoved() throws {

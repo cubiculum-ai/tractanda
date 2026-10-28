@@ -4,6 +4,7 @@
 The forwarding fixture delays/reorders native replies without touching the real service.
 It records query bounds as well as what the user sees; no GUI app is controlled.
 """
+from jmap_client import query_arguments
 import argparse
 import importlib.util
 import json
@@ -112,10 +113,10 @@ class ReplyProxy:
                 with self.lock:
                     for method, args, _ in request['methodCalls']:
                         self.calls.append({'method': method, 'arguments': args})
-                        if method == 'TractandaItem/query' and 'categoryPath' in args:
-                            if self.delay_path is not None and args['categoryPath'] == self.delay_path:
+                        if method == 'TractandaItem/query' and 'categoryPath' in args.get('filter', {}):
+                            if self.delay_path is not None and args['filter']['categoryPath'] == self.delay_path:
                                 delay, self.delay_path = True, None
-                            if self.drop_path is not None and args['categoryPath'] == self.drop_path:
+                            if self.drop_path is not None and args['filter']['categoryPath'] == self.drop_path:
                                 drop, self.drop_path = True, None
                 response = wire.wire(self.target, request)
                 if delay:
@@ -157,7 +158,7 @@ def main():
         root = Path(directory)
         with wire.server(str(args.native_binary.resolve()), root / 'store', root / 's') as client:
             def create(name, fields=None):
-                return client.commit(wire.intent('create', 'seed-' + name, class_id='Item',
+                return client.commit_with_revision(wire.intent('create', 'seed-' + name, class_id='Item',
                     changes={'subject': wire.text(name), **(fields or {})}))['revision']
 
             def category(name, expression, parents=()):
@@ -196,7 +197,7 @@ def main():
                         find_category(ui, 'Alpha')
                         ui.wait('AlphaOnly')
                         assert 'SharedBoth' in ui.screen and 'ExceptAlpha' not in ui.screen
-                        expected = client.call('TractandaItem/query', {'categoryPath': [wire.item_id(alpha)]})['ids']
+                        expected = client.call('TractandaItem/query', query_arguments({'categoryPath': [wire.item_id(alpha)]}))['ids']
                         assert len(expected) == 2, expected
                         find_category(ui, 'Beta')
                         ui.wait('BetaOnly')
@@ -280,7 +281,7 @@ def main():
                         ui.send(ESC); ui.settle(); ui.close()
                     assert wire.manifest(root / 'store') == before
                     bounded = [row['arguments'] for row in proxy.calls
-                               if row['method'] == 'TractandaItem/query' and 'categoryPath' in row['arguments']]
+                               if row['method'] == 'TractandaItem/query' and 'categoryPath' in row['arguments'].get('filter', {})]
                     assert bounded and all(row.get('limit', 0) <= 64 for row in bounded), bounded
                     assert any(row.get('position') == 64 for row in bounded), bounded
                     checks.append('All read-only navigation preserves canonical files and every preview request stays within a 64-item page')
@@ -325,7 +326,7 @@ def main():
 
                 find_category(ui, 'Alpha revised saved'); ui.send(F2); ui.wait('Edit item')
                 ui.paste(' from TUI')
-                external = client.commit(wire.intent('revise', 'outside-editor', wire.item_id(saved),
+                external = client.commit_with_revision(wire.intent('revise', 'outside-editor', wire.item_id(saved),
                     wire.revision_id(saved), changes={'body': wire.text('Concurrent change')}))['revision']
                 ui.send(F8); ui.wait('Draft retained')
                 assert 'from TUI' in ui.screen

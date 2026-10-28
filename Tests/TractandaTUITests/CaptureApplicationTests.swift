@@ -78,7 +78,7 @@ final class CaptureApplicationTests: XCTestCase {
                 captureActionLoader: transport.map { CaptureActionLoader(transport: $0) })
         }
         func category() throws -> TractandaCore.Revision {
-            try client.commit(
+            try client.commitFixture(
                 TractandaCore.CommitRequest(
                     classID: "Item",
                     changes: [

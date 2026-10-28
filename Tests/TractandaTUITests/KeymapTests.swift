@@ -21,7 +21,7 @@ final class KeymapTests: XCTestCase {
         }
         deinit { try? FileManager.default.removeItem(at: root) }
         func item(_ name: String, fields: [String: ItemValue] = [:]) throws -> Revision {
-            try client.commit(
+            try client.commitFixture(
                 CommitRequest(
                     classID: "Item", changes: fields.merging(["subject": .text(name)]) { _, new in new },
                     operationID: Identifier.make())

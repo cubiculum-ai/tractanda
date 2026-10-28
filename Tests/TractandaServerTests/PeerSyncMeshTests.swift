@@ -102,8 +102,11 @@ final class PeerSyncMeshTests: XCTestCase {
         func commit(_ node: String, _ request: CommitRequest) async throws -> Revision {
             let arguments = try XCTUnwrap(
                 JSONSerialization.jsonObject(with: JSON.encode(request)) as? [String: Any])
-            return try JSON.decode(CommitResult.self, await call(node, "TractandaItem/commit", arguments))
-                .revision
+            let receipt = try JSON.decode(
+                MutationReceipt.self, await call(node, "TractandaItem/commit", arguments))
+            let pinned = try await call(
+                node, "TractandaRevision/get", ["itemID": receipt.itemID, "revisionID": receipt.revisionID])
+            return try JSON.decode(RevisionGetResult.self, pinned).revision
         }
         func round(_ nodes: [String] = ["a", "b", "c"]) async throws -> [PeerSyncDriver.Report] {
             var reports: [PeerSyncDriver.Report] = []

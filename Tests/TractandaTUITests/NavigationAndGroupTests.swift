@@ -22,7 +22,7 @@ final class NavigationAndGroupTests: XCTestCase {
         }
         deinit { try? FileManager.default.removeItem(at: root) }
         func item(_ name: String, _ fields: [String: ItemValue] = [:]) throws -> Revision {
-            try client.commit(
+            try client.commitFixture(
                 CommitRequest(
                     classID: "Item", changes: fields.merging(["subject": .text(name)]) { _, new in new },
                     operationID: Identifier.make())
@@ -38,7 +38,7 @@ final class NavigationAndGroupTests: XCTestCase {
             return try item(name, fields)
         }
         func revise(_ item: Revision, _ fields: [String: ItemValue]) throws -> Revision {
-            try client.commit(
+            try client.commitFixture(
                 CommitRequest(
                     action: .revise, itemID: item.itemID, expectedRevisionID: item.revisionID,
                     changes: fields, operationID: Identifier.make())
@@ -83,7 +83,7 @@ final class NavigationAndGroupTests: XCTestCase {
         workspace.text = "Both"
         workspace.sectionCategories = [family]
         workspace.collapsedSectionIDs = [family.itemID]
-        let saved = try fixture.client.commit(workspace.viewRequest(name: "Saved selection")).revision
+        let saved = try fixture.client.commitFixture(workspace.viewRequest(name: "Saved selection")).revision
         try workspace.openView(saved)
         try workspace.browse(path: [root])
         XCTAssertEqual(workspace.total, 7)

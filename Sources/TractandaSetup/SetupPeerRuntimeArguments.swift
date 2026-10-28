@@ -30,6 +30,14 @@ struct SetupPeerRuntimeArguments: Equatable, Sendable {
                 seen = true
                 index += 2
 
+            case "--outbound-peer-sync":
+                guard !seen, command == "install" || command == "plan" else {
+                    throw SetupError("Outbound peer sync is only available for new target installation.")
+                }
+                action = .outboundOnly
+                seen = true
+                index += 1
+
             case "--disable-peer-runtime":
                 guard !seen else {
                     throw SetupError("Specify only one peer runtime configuration action.")

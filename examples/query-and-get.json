@@ -1,9 +1,31 @@
 {
-  "using": ["https://tractanda.ai/ns/local-prototype/4"],
+  "using": [
+    "urn:ietf:params:jmap:core",
+    "https://tractanda.ai/ns/jmap/1"
+  ],
   "methodCalls": [
-    ["TractandaItem/query", {"expression": "kMDItemContentTypeTree == \"MessageItem\""}, "q"],
-    ["TractandaItem/get", {
-      "#ids": {"resultOf": "q", "name": "TractandaItem/query", "path": "/ids"}
-    }, "g"]
+    [
+      "TractandaItem/query",
+      {
+        "accountId": "REPLACE_WITH_DISCOVERED_ACCOUNT_ID",
+        "filter": {
+          "expression": "kMDItemContentTypeTree == \"MessageItem\""
+        },
+        "calculateTotal": true
+      },
+      "q"
+    ],
+    [
+      "TractandaItem/get",
+      {
+        "#ids": {
+          "resultOf": "q",
+          "name": "TractandaItem/query",
+          "path": "/ids"
+        },
+        "accountId": "REPLACE_WITH_DISCOVERED_ACCOUNT_ID"
+      },
+      "g"
+    ]
   ]
 }

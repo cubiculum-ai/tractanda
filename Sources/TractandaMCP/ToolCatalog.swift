@@ -63,7 +63,7 @@ struct ToolDefinition: Sendable {
             throw TractandaError("invalidArguments", problems.joined(separator: " "))
         }
         var arguments = input
-        if isPaged {
+        if isPaged && nativeMethod != "TractandaItem/query" {
             if let limit = arguments["limit"] {
                 guard let count = limit.intValue, (1...64).contains(count) else {
                     throw TractandaError(
@@ -80,7 +80,11 @@ struct ToolDefinition: Sendable {
             arguments["limit"] = .int(64)
         }
         for name in ["ids", "categoryIDs"] where arguments[name] != nil {
-            guard let values = arguments[name]?.arrayValue, !values.isEmpty, values.count <= 64,
+            guard let values = arguments[name]?.arrayValue,
+                !values.isEmpty
+                    || ["TractandaItem/get", "TractandaItem/getBounded", "TractandaRevision/get"].contains(
+                        nativeMethod),
+                values.count <= 64,
                 values.allSatisfy({ $0.stringValue != nil })
             else {
                 throw TractandaError("invalidArguments", "\(name) must contain 1 through 64 string IDs.")
@@ -111,7 +115,7 @@ struct ToolDefinition: Sendable {
                 }
             }
         }
-        if nativeMethod == "TractandaItem/state" || nativeMethod == "TractandaItem/get" {
+        if nativeMethod == "TractandaItem/state" {
             if let ids = arguments["ids"]?.arrayValue {
                 guard Set(ids.compactMap(\.stringValue)).count == ids.count else {
                     throw TractandaError("invalidArguments", "ids must be distinct.")
@@ -160,8 +164,8 @@ struct ToolDefinition: Sendable {
                     "invalidArguments", "properties must contain up to 64 distinct, nonempty field names.")
             }
         }
-        if arguments["projection"] != nil && arguments["properties"] != nil {
-            throw TractandaError("invalidArguments", "projection and properties are mutually exclusive.")
+        if arguments["projection"] != nil && arguments["fieldProperties"] != nil {
+            throw TractandaError("invalidArguments", "projection and fieldProperties are mutually exclusive.")
         }
         if let maxBytes = arguments["maxBytes"] {
             let allowedBytes =
@@ -180,17 +184,12 @@ struct ToolDefinition: Sendable {
             }
             for value in values {
                 guard let object = value.objectValue,
-                    Set(object.keys).isSubset(of: ["property", "categoryRootID", "isAscending"])
-                else { throw TractandaError("invalidArguments", "sort contains an unknown comparator key.") }
+                    Set(object.keys).isSubset(of: ["property", "categoryRootId", "isAscending", "collation"])
+                else {
+                    throw TractandaError("invalidArguments", "sort contains an unknown comparator key.")
+                }
             }
-            do {
-                let order = try JSONDecoder().decode([ItemSort].self, from: JSONEncoder().encode(sort))
-                try ItemSort.validate(order)
-            } catch {
-                throw TractandaError(
-                    "invalidArguments",
-                    "sort requires distinct property or categoryRootID targets and a Boolean isAscending.")
-            }
+            _ = try JSONDecoder().decode([JMAPReadComparator].self, from: JSONEncoder().encode(sort))
         }
         if arguments["sectionID"] != nil && arguments["viewID"] == nil {
             throw TractandaError("invalidArguments", "sectionID requires viewID.")
@@ -335,10 +334,14 @@ enum ToolCatalog {
         "type": .string("array"), "items": identifier,
         "minItems": .int(1), "maxItems": .int(64),
     ])
+    private static let readIdentifiers: Value = .object([
+        "type": .string("array"), "items": identifier,
+        "minItems": .int(0), "maxItems": .int(64),
+    ])
     private static let projection: Value = .object([
         "type": .string("string"), "enum": .array(["full", "content", "summary"].map(Value.string)),
         "description": .string(
-            "full is native complete output; MCP defaults to content when omitted. Mutually exclusive with properties."
+            "full is native complete output; MCP defaults to content when omitted. Mutually exclusive with fieldProperties."
         ),
     ])
     private static let propertyNames: Value = .object([
@@ -348,6 +351,12 @@ enum ToolCatalog {
             "Literal top-level field names; always retains available record identity fields. Mutually exclusive with projection."
         ),
     ])
+    private static let dtoProperties: Value = .object([
+        "type": .string("array"), "items": text,
+        "description": .string(
+            "DTO properties only: Item id/revisionId/formatVersion/fields/resolution; Revision id/itemId/formatVersion/fields. id is always returned. fieldProperties selects interior fields separately."
+        ),
+    ])
     private static let sort: Value = .object([
         "type": .string("array"), "maxItems": .int(4),
         "items": .object([
@@ -355,22 +364,19 @@ enum ToolCatalog {
             "properties": .object([
                 "property": .object(["type": .string("string"), "minLength": .int(1), "maxLength": .int(256)]
                 ),
-                "categoryRootID": identifier,
+                "categoryRootId": identifier, "collation": text,
                 "isAscending": .object(["type": .string("boolean"), "default": .bool(true)]),
             ]),
-            "oneOf": .array([
-                .object(["required": .array([.string("property")])]),
-                .object(["required": .array([.string("categoryRootID")])]),
-            ]),
+            "required": .array([.string("property")]),
         ]),
         "description": .string(
-            "Up to four distinct targets: property for owned metadata, or categoryRootID for effective membership ordered by that root’s immediate children. Unranked items remain last in either direction."
+            "Up to four distinct targets: property for owned metadata, or property=categoryMembership plus categoryRootId for effective membership ordered by that root’s immediate children. Unranked items remain last in either direction."
         ),
     ])
     private static let tagged: Value = .object([
         "type": .string("object"),
         "description": .string(
-            "Native tagged value: {type, value}. Types: text, integer, real, boolean, date (ISO 8601), bytes (base64), reference ({itemID, optional revisionID}), list (tagged values), object (key to tagged value)."
+            "Native tagged value: {type, value}. Every integer value is a canonical base-10 Int64 decimal string, including small integers; real/protocol numbers remain JSON numbers. Types: text, integer, real, boolean, date (ISO 8601), bytes (base64), reference ({itemID, optional revisionID}), list (tagged values), object (key to tagged value)."
         ),
         "properties": .object([
             "type": .object([
@@ -425,25 +431,31 @@ enum ToolCatalog {
         .init(
             "tractanda_query", method: "TractandaItem/query",
             description:
-                "Find readable item IDs with the portable Spotlight expression, literal FTS text and cumulative categoryPath, or a saved viewID. A viewID cannot be combined with inline criteria. With tractanda.live-seek-cursor.v1, cursor paging is available for descending modifiedAt/createdAt order with no filter or a bounded indexed typed scalar/list predicate, including administrator raw-item queries. Category, personal and saved-view results remain on position paging. Cursor binds the live query, actor, store, state and clock; it is not an access grant. Do not send position with cursor. Other query shapes use position. Query results explicitly report unresolved completeness and whether authorized conflicts are available; get contents separately and do not treat omitted item bodies as notFound. Read tractanda://reference/query for the supported grammar.",
-            properties: page([
-                "expression": text, "text": text, "at": text, "timeZone": text,
-                "cursor": text,
-                "categoryPath": .object(["type": .string("array"), "items": identifier, "maxItems": .int(32)]
-                ),
-                "excludedCategoryIDs": .object([
-                    "type": .string("array"), "items": identifier, "maxItems": .int(32),
-                ]), "viewID": identifier, "sectionID": identifier, "sort": sort,
-            ]), isPaged: true),
+                "Query readable IDs using filter criteria (expression/text/categoryPath/excludedCategoryIDs/viewID/sectionID/at/timeZone), standard comparators and position or anchor. calculateTotal defaults false; request it explicitly when needed. Advance by consumed IDs and fetch content separately. Query never calculates deltas.",
+            properties: [
+                "filter": .object(["type": .string("object")]), "sort": sort,
+                "position": .object(["type": .string("integer")]), "anchor": identifier,
+                "anchorOffset": .object(["type": .string("integer")]), "cursor": text,
+                "limit": .object(["type": .string("integer"), "minimum": .int(0), "maximum": .int(256)]),
+                "calculateTotal": .object(["type": .string("boolean"), "default": .bool(false)]),
+            ], isPaged: true),
         .init(
             "tractanda_get", method: "TractandaItem/get",
             description:
-                "Batch-fetch current revisions with ids (an array, even for one item); do not use itemID or itemIDs. Accepts up to 64 IDs. projection and properties are mutually exclusive; choose one or omit both. notFound are unreadable/missing IDs; unresolved contains readable items without a current representative; remainingIDs are unprocessed IDs to fetch next with the same projection; compare state between pages. oversizedIDs require a narrower projection. Item count and maxBytes are independent; fields are not silently truncated.",
+                "Complete collection get for zero through 64 Item IDs. DTO id is stable ItemID; unresolved readable objects remain in list with resolution and null content. properties selects DTO keys; fieldProperties/projection selects inner fields. No continuations; oversized complete replies fail.",
             properties: [
-                "ids": identifiers, "projection": projection, "properties": propertyNames,
+                "ids": readIdentifiers, "projection": projection, "properties": dtoProperties,
+                "fieldProperties": propertyNames,
+            ], required: ["ids"]),
+        .init(
+            "tractanda_get_bounded", method: "TractandaItem/getBounded",
+            description:
+                "Explicit bounded Item get. Same DTOs as get; follow remainingIDs and handle oversizedIDs, comparing state. Unresolved readable objects are list entries with null content; never select a diagnostic head as content.",
+            properties: [
+                "ids": readIdentifiers, "projection": projection, "properties": dtoProperties,
+                "fieldProperties": propertyNames,
                 "maxBytes": .object([
-                    "type": .string("integer"), "minimum": .int(8_192), "maximum": .int(524_288),
-                    "default": .int(524_288),
+                    "type": .string("integer"), "minimum": .int(8192), "maximum": .int(524288),
                 ]),
             ], required: ["ids"]),
         .init(
@@ -473,7 +485,7 @@ enum ToolCatalog {
         .init(
             "tractanda_resolve_conflict", method: "TractandaItem/resolveConflict",
             description:
-                "Explicitly resolve the complete reviewed frontier with top-level changes/unsets. The expected itemState token fences stale review. This does not edit one branch in place; it creates a separate authored resolution. Retry with the same operationID. Requires tractanda.revision-projection.v1.",
+                "Explicitly resolve the complete reviewed frontier with top-level changes/unsets. The expected itemState token fences stale review. This does not edit one branch in place; it creates a separate authored resolution. Retry with the same operationID. Requires tractanda.revision-projection.v1. Success returns a compact confirmed receipt (itemId, revisionId, operationId, replayed, indexReady, diagnostics). To read saved content, use tractanda_revision with ids:[revisionId] and verify the returned itemId; a read failure does not undo the saved edit.",
             properties: [
                 "itemID": uuidV1Identifier,
                 "expectedStateToken": .object([
@@ -653,17 +665,19 @@ enum ToolCatalog {
         .init(
             "tractanda_history", method: "TractandaItem/history",
             description:
-                "Read immutable revisions newest first, under the item's current permissions. projection and properties are mutually exclusive; choose one or omit both.",
-            properties: page(["itemID": identifier, "projection": projection, "properties": propertyNames]),
-            required: ["itemID"], isPaged: true),
+                "Paged immutable Revision DTOs under current item permissions. properties selects DTO keys; fieldProperties/projection selects inner fields.",
+            properties: page([
+                "itemID": identifier, "projection": projection, "properties": dtoProperties,
+                "fieldProperties": propertyNames,
+            ]), required: ["itemID"], isPaged: true),
         .init(
             "tractanda_revision", method: "TractandaRevision/get",
             description:
-                "Read one revision belonging to an item. Current item permissions also govern old revisions. projection and properties are mutually exclusive; choose one or omit both.",
+                "Collection get keyed by Revision IDs. Current item permissions govern every historical record. Returns accountId/state/list/notFound; id is RevisionID and itemId identifies its item.",
             properties: [
-                "itemID": identifier, "revisionID": identifier, "projection": projection,
-                "properties": propertyNames,
-            ], required: ["itemID", "revisionID"]),
+                "ids": readIdentifiers, "projection": projection, "properties": dtoProperties,
+                "fieldProperties": propertyNames,
+            ], required: ["ids"]),
         .init(
             "tractanda_resolve", method: "TractandaItem/resolve",
             description:
@@ -681,7 +695,7 @@ enum ToolCatalog {
         .init(
             "tractanda_commit", method: "TractandaItem/commit",
             description:
-                "Commit one whole edit. Create needs classID; revise/retype/copy need itemID and expectedRevisionID; retype also needs classID. changes is a dictionary of native tagged values; unset is required and removes named keys (send [] when removing nothing). All writes require operationID. Deletes/restores revise isDeleted; copies start a new private history. Preserve unknown properties. Read tractanda://reference/items first.",
+                "Commit one whole edit. Create needs classID; revise/retype/copy need itemID and expectedRevisionID; retype also needs classID. changes is a dictionary of native tagged values; unset is required and removes named keys (send [] when removing nothing). All writes require operationID. Deletes/restores revise isDeleted; copies start a new private history. Preserve unknown properties. Read tractanda://reference/items first. Success returns a compact confirmed receipt (itemId, revisionId, operationId, replayed, indexReady, diagnostics). To read saved content, use tractanda_revision with ids:[revisionId] and verify the returned itemId; a read failure does not undo the saved edit.",
             properties: [
                 "action": .object([
                     "type": .string("string"),
@@ -703,7 +717,7 @@ enum ToolCatalog {
         .init(
             "tractanda_capture_commit", method: "TractandaItem/commitCapture",
             description:
-                "Commit the exact complete plan from tractanda_capture_preview after resolving all issues. Revalidates current item/category permissions, revisions and frozen interpretation, then publishes body, assignments and dates in one revision. Retry the identical plan after uncertainty; never generate a fresh operationID for the same edit.",
+                "Commit the exact complete plan from tractanda_capture_preview after resolving all issues. Revalidates current item/category permissions, revisions and frozen interpretation, then publishes body, assignments and dates in one revision. Retry the identical plan after uncertainty; never generate a fresh operationID for the same edit. Success returns a compact confirmed receipt (itemId, revisionId, operationId, replayed, indexReady, diagnostics). To read saved content, use tractanda_revision with ids:[revisionId] and verify the returned itemId; a read failure does not undo the saved edit.",
             properties: [
                 "request": .object(["type": .string("object")]), "evaluatedAt": text,
                 "commitRequest": .object(["type": .string("object")]),
@@ -786,7 +800,7 @@ enum ToolCatalog {
         .init(
             "tractanda_learning_feedback", method: "TractandaLearning/feedback",
             description:
-                "Record versioned feedback: accept includes; exclude forbids membership; negative trains a negative without overriding membership; dismiss hides the suggestion; clear removes only feedback, preserving manual overrides. Native item write permission, expectedRevisionID and operationID are required. This edits shared item state; private categories use PersonalStateItem instead.",
+                "Record versioned feedback: accept includes; exclude forbids membership; negative trains a negative without overriding membership; dismiss hides the suggestion; clear removes only feedback, preserving manual overrides. Native item write permission, expectedRevisionID and operationID are required. This edits shared item state; private categories use PersonalStateItem instead. Success returns a compact confirmed receipt (itemId, revisionId, operationId, replayed, indexReady, diagnostics). To read saved content, use tractanda_revision with ids:[revisionId] and verify the returned itemId; a read failure does not undo the saved edit.",
             properties: [
                 "itemID": identifier, "categoryID": identifier, "expectedRevisionID": identifier,
                 "operationID": operation,
@@ -800,7 +814,7 @@ enum ToolCatalog {
         .init(
             "tractanda_learning_settings", method: "TractandaLearning/settings",
             description:
-                "Revise a category's shared learning settings with a native tagged object and revision guard. Read tractanda://reference/learning for the settings profile.",
+                "Revise a category's shared learning settings with a native tagged object and revision guard. Read tractanda://reference/learning for the settings profile. Success returns a compact confirmed receipt (itemId, revisionId, operationId, replayed, indexReady, diagnostics). To read saved content, use tractanda_revision with ids:[revisionId] and verify the returned itemId; a read failure does not undo the saved edit.",
             properties: [
                 "categoryID": identifier, "expectedRevisionID": identifier, "operationID": operation,
                 "settings": tagged,

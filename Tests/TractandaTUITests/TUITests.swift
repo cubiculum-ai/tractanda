@@ -969,17 +969,17 @@ final class TUITests: XCTestCase {
         XCTAssertThrowsError(try workspace.enter(family))
         var draft = try ItemDraft(categories: workspace.categoryPath.map(\.itemID))
         draft.subject = TextBuffer("An explicit exception")
-        let item = try client.commit(XCTUnwrap(draft.request())).revision
+        let item = try client.commitFixture(XCTUnwrap(draft.request())).revision
         try workspace.refresh(position: 0)
         XCTAssertEqual(workspace.items.map(\.itemID), [item.itemID])
-        let view = try client.commit(workspace.viewRequest(name: "Family chess")).revision
+        let view = try client.commitFixture(workspace.viewRequest(name: "Family chess")).revision
         // A saved-view item is still an item: its own title can match the category rules.
         XCTAssertEqual(
             Set(try client.revisions(viewID: view.itemID).map(\.itemID)), [item.itemID, view.itemID])
-        let excluded = try client.commit(workspace.assignment("exclude", item: item, category: chess))
+        let excluded = try client.commitFixture(workspace.assignment("exclude", item: item, category: chess))
             .revision
         XCTAssertEqual(try client.revisions(viewID: view.itemID).map(\.itemID), [view.itemID])
-        _ = try client.commit(workspace.assignment(nil, item: excluded, category: chess))
+        _ = try client.commitFixture(workspace.assignment(nil, item: excluded, category: chess))
         XCTAssertEqual(try client.revisions(viewID: view.itemID).map(\.itemID), [view.itemID])
         let opened = Workspace(client: client)
         try opened.openView(view)

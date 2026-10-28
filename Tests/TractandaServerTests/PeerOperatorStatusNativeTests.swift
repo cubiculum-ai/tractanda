@@ -2,6 +2,7 @@ import CTractandaPlatform
 import Foundation
 import Synchronization
 import XCTest
+import TractandaClient
 
 @testable import TractandaCore
 @testable import TractandaServer
@@ -23,24 +24,84 @@ private actor PeerStatusPause {
     }
 }
 private final class PeerStatusAccounts: AccountDirectory, @unchecked Sendable {
-    let base: PeerServiceFixture.Accounts
+    let humanUID = tractanda_uid()
+    let serviceOwnerUID = PeerServiceFixture.Accounts().human
     private let demoted = Mutex(false)
-    init(_ base: PeerServiceFixture.Accounts) { self.base = base }
+    init() {}
     func demote() { demoted.withLock { $0 = true } }
     func user(forUID uid: UInt32) throws -> AccountIdentity {
-        let value = try base.user(forUID: uid)
-        guard uid == base.human, demoted.withLock({ $0 }) else { return value }
-        return .init(uid: uid, name: value.name, primaryGroupName: value.primaryGroupName, groupIDs: [])
+        if uid == humanUID {
+            return .init(
+                uid: uid, name: "human", primaryGroupName: "staff",
+                groupIDs: demoted.withLock({ $0 }) ? [] : [71001])
+        }
+        if uid == serviceOwnerUID {
+            return .init(uid: uid, name: "daemon", primaryGroupName: "service", groupIDs: [71002])
+        }
+        throw TractandaError("unresolvedPrincipal", "Unknown personal status fixture account.")
     }
-    func user(named name: String) throws -> AccountIdentity { try user(forUID: base.user(named: name).uid) }
-    func groupID(named name: String) throws -> UInt32 { try base.groupID(named: name) }
+    func user(named name: String) throws -> AccountIdentity {
+        switch name {
+        case "human": try user(forUID: humanUID)
+        case "daemon": try user(forUID: serviceOwnerUID)
+        default: throw TractandaError("unresolvedPrincipal", "Unknown personal status fixture account.")
+        }
+    }
+    func groupID(named name: String) throws -> UInt32 {
+        switch name {
+        case "staff": 71001
+        case "service": 71002
+        default: throw TractandaError("unresolvedPrincipal", "Unknown personal status fixture group.")
+        }
+    }
 }
 
 final class PeerOperatorStatusNativeTests: XCTestCase {
+    private var accountID = "fixture-account"
+    private func invocation(_ data: Data) throws -> NativeMethodInvocation {
+        let request = try JMAPRequest.decode(data)
+        let definitions: [String: JMAPMethodDefinition] = [
+            PeerOperatorStatus.nativeMethod: .init(capability: ItemService.capability,
+                effect: .readOnly, maximumResponseBytes: PeerOperatorStatus.maximumResponseBytes) { _, _ in
+                    .failure(.init("serverFail"), effects: .none)
+                },
+        ]
+        var execution = try JMAPKernel(methods: definitions, accounts: [
+            .init(accountID: accountID, capabilities: [ItemService.capability], isReadOnly: false)
+        ], sessionState: { try! .init("fixture") }).begin(request)
+        guard let call = try execution.next() else {
+            throw TractandaError("invalidArguments", "Fixture needs one yielded account-scoped invocation.")
+        }
+        return NativeMethodInvocation(call.invocation, context: call.context)
+    }
+    private func personalStore(root: URL, accounts: PeerStatusAccounts) throws -> URL {
+        let access = ItemValue.object([
+            "profile": .text(AccessConfiguration.profile), "users": .list([.text("human")]),
+            "administration": .text("system"), "administratorGroup": .text("staff"),
+        ])
+        let path = root.appendingPathComponent("store")
+        var store: ItemStore? = try ItemStore.initializePersonalWorkgroup(
+            root: path, accounts: accounts, accessConfiguration: access)
+        accountID = try store!.personalSyncIdentity().storeID
+        XCTAssertNil(try store!.personalSyncIdentity().membership)
+        store = nil
+        return path
+    }
+
+    private func runtimeConfiguration(root: URL) throws -> (URL, PersonalPeerRuntimeConfiguration) {
+        let settings = try PeerRuntimeConfiguration()
+        let runtime = try PersonalPeerRuntimeConfiguration(settings: settings)
+        let path = root.appendingPathComponent("personal-runtime.json")
+        try PrivateConfiguration.write(runtime.encoded(), to: path)
+        return (path, runtime)
+    }
+
     private func request(_ arguments: [String: Any] = [:], id: String = "status") throws -> Data {
-        try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability],
-            "methodCalls": [[PeerOperatorStatus.nativeMethod, arguments, id]],
+        var selected = arguments
+        selected["accountId"] = accountID
+        return try JSONSerialization.data(withJSONObject: [
+            "using": ["urn:ietf:params:jmap:core", ItemService.capability],
+            "methodCalls": [[PeerOperatorStatus.nativeMethod, selected, id]],
         ])
     }
     private func status(_ data: Data) throws -> PeerOperatorStatus {
@@ -50,11 +111,20 @@ final class PeerOperatorStatusNativeTests: XCTestCase {
         return try JSON.decode(
             PeerOperatorStatus.self, JSONSerialization.data(withJSONObject: XCTUnwrap(calls.first?[1])))
     }
-    private func assertError(_ data: Data, _ code: String, file: StaticString = #filePath, line: UInt = #line)
+    private func assertError(
+        _ data: Data, _ code: String, allowBindingDenial: Bool = false, file: StaticString = #filePath,
+        line: UInt = #line
+    )
         throws
     {
         let object = try XCTUnwrap(
             JSONSerialization.jsonObject(with: data) as? [String: Any], file: file, line: line)
+        if allowBindingDenial, let denied = object["code"] as? String {
+            XCTAssertEqual(denied, code, file: file, line: line)
+            XCTAssertNil(object["methodResponses"], file: file, line: line)
+            XCTAssertNil(object["canonical"], file: file, line: line)
+            return
+        }
         let calls = try XCTUnwrap(object["methodResponses"] as? [[Any]], file: file, line: line)
         XCTAssertEqual(calls.first?.first as? String, "error", file: file, line: line)
         XCTAssertEqual((calls.first?[1] as? [String: Any])?["type"] as? String, code, file: file, line: line)
@@ -62,21 +132,23 @@ final class PeerOperatorStatusNativeTests: XCTestCase {
     }
     func testStrictNativeStatusSchemaBoundsAndNoCallerAssertion() throws {
         let valid = try request()
-        XCTAssertNotNil(try PeerOperatorStatusNativeCall.parse(valid))
+        XCTAssertNotNil(try PeerOperatorStatusNativeCall.parse(invocation(valid)))
         for data in [
             try request(["uid": 0]), try request(["administrator": true]),
-            try request(id: String(repeating: "a", count: 129)), try request(id: "bad\nid"),
             try request(["private": String(repeating: "x", count: 8192)]),
         ] {
-            XCTAssertThrowsError(try PeerOperatorStatusNativeCall.parse(data))
+            XCTAssertThrowsError(try PeerOperatorStatusNativeCall.parse(invocation(data)))
+        }
+        for id in ["a", String(repeating: "a", count: 128), "arbitrary-id"] {
+            XCTAssertNotNil(try PeerOperatorStatusNativeCall.parse(invocation(request(id: id))))
         }
         let mixed = try JSONSerialization.data(withJSONObject: [
             "using": [ItemService.capability],
             "methodCalls": [
-                [PeerOperatorStatus.nativeMethod, [:], "a"], ["TractandaStore/info", [:], "b"],
+                [PeerOperatorStatus.nativeMethod, ["accountId": accountID], "a"], ["TractandaStore/info", [:], "b"],
             ],
         ])
-        XCTAssertThrowsError(try PeerOperatorStatusNativeCall.parse(mixed))
+        XCTAssertThrowsError(try PeerOperatorStatusNativeCall.parse(invocation(mixed)))
     }
     func testKernelAuthenticatedNativeStatusDisabledAndConnectionDown() async throws {
         try PeerFixtureCapacity.requireFree()
@@ -103,12 +175,16 @@ final class PeerOperatorStatusNativeTests: XCTestCase {
                 }
             }
         }
-        let store = root.appendingPathComponent("store")
+        let accounts = PeerStatusAccounts()
+        let store = try personalStore(root: root, accounts: accounts)
         let socket = root.appendingPathComponent("s")
-        do { _ = try ItemStore.initializeFresh(root: store) }
+        let (runtimePath, _) = try runtimeConfiguration(root: root)
         try capacity()
-        let daemon = try await SharedDaemon.start(
-            configuration: .init(storePath: store.path, socketPath: socket.path, httpPort: nil))
+        let daemon = try await SharedDaemon.startForTesting(
+            configuration: .init(
+                storePath: store.path, socketPath: socket.path, httpPort: nil,
+                peerRuntimeConfigurationPath: runtimePath.path),
+            makeAccountDirectory: { accounts })
         defer { await daemon.close() }
         try capacity()
         let bytes = try request()
@@ -117,7 +193,8 @@ final class PeerOperatorStatusNativeTests: XCTestCase {
         XCTAssertLessThanOrEqual(response.count, 16 * 1024)
         let value = try status(response)
         XCTAssertEqual(value.canonical.readiness, .ready)
-        XCTAssertEqual(value.runtime.state, .disabled)
+        XCTAssertEqual(value.runtime.state, .active)
+        XCTAssertEqual(value.runtime.listenerConfigured, false)
         XCTAssertEqual(value.runtime.synchronization.state, .disabled)
         await daemon.close()
         do {
@@ -127,58 +204,67 @@ final class PeerOperatorStatusNativeTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: socket.path))
         try capacity()
     }
-    func testKernelUIDServiceOwnerCannotAssertCanonicalAdministrator() async throws {
-        guard tractanda_uid() != 0 else {
-            throw XCTSkip("Existing explicit host-root repair authority is a separate policy path.")
-        }
+    func testPersonalServiceOwnerCannotAssertCanonicalAdministrator() async throws {
         let root = try GuardedFixtureDirectory.create(
             prefix: "o", source: "PeerOperatorStatusNativeTests", test: name, socket: "s")
         defer { try? FileManager.default.removeItem(at: root) }
-        let fixture = try PeerServiceFixture(root: root)
-        let accounts = fixture.accounts
-        fixture.releaseWriter()
-        let socket = root.appendingPathComponent("s")
-        let daemon = try await SharedDaemon.startForTesting(
-            configuration: .init(
-                storePath: fixture.sourceRoot.path,
-                socketPath: socket.path, httpPort: nil), makeAccountDirectory: { accounts })
-        defer { await daemon.close() }
-        let connection = ServerConnection(socketPath: socket.path)
+        let accounts = PeerStatusAccounts()
+        let store = try personalStore(root: root, accounts: accounts)
+        let (runtimePath, runtime) = try runtimeConfiguration(root: root)
+        let coordinator = try await ServiceCoordinator(
+            opening: store, embeddingProviderForTesting: nil,
+            requireInitializedStore: true, makeAccountDirectory: { accounts })
+        defer { await coordinator.close() }
+        let app = DaemonApplication(
+            coordinator: coordinator, sessions: SessionAuthority(coordinator: coordinator),
+            page: Data(), manual: Data(), nonce: "status")
+        defer { await app.close() }
+        await app.setPeerStatusProvider {
+            try .init(
+                state: .unavailable, configurationPath: runtimePath.path,
+                settingsDigest: runtime.settings.settingsDigest,
+                synchronization: .init(state: .unavailable))
+        }
         let query = try request()
-        let denied = try await Task.detached { try connection.send(query) }.value
-        try assertError(denied, "forbidden")
-        let forged = try request(["uid": accounts.human, "administrator": true])
-        let reply = try await Task.detached { try connection.send(forged) }.value
-        let error = try JSON.decode(TractandaError.self, reply)
-        XCTAssertEqual(error.code, "invalidArguments")
-        XCTAssertFalse(String(decoding: reply, as: UTF8.self).contains("storeID"))
-        try fixture.capacity()
+        try assertError(
+            await app.native(query, forUID: accounts.serviceOwnerUID), "forbidden", allowBindingDenial: true)
+        let forged = try request(["uid": accounts.humanUID, "administrator": true])
+        try assertError(await app.native(forged, forUID: accounts.humanUID), "invalidArguments")
+        try PeerFixtureCapacity.requireFree(at: root)
     }
     func testCurrentAdminNativeOnlyRuntimeUnavailableAndPostAwaitRevocation() async throws {
         let root = try GuardedFixtureDirectory.create(
             prefix: "o", source: "PeerOperatorStatusNativeTests", test: name)
         defer { try? FileManager.default.removeItem(at: root) }
-        let fixture = try PeerServiceFixture(root: root)
-        let accounts = PeerStatusAccounts(fixture.accounts)
-        fixture.releaseWriter()
+        let accounts = PeerStatusAccounts()
+        let store = try personalStore(root: root, accounts: accounts)
+        let (runtimePath, runtimeConfiguration) = try runtimeConfiguration(root: root)
         let coordinator = try await ServiceCoordinator(
-            opening: fixture.sourceRoot, embeddingProviderForTesting: nil,
+            opening: store, embeddingProviderForTesting: nil,
             requireInitializedStore: true, makeAccountDirectory: { accounts })
         defer { await coordinator.close() }
         let sessions = SessionAuthority(coordinator: coordinator)
         let app = DaemonApplication(
             coordinator: coordinator, sessions: sessions, page: Data(), manual: Data(), nonce: "status")
         defer { await app.close() }
+        await app.setPeerStatusProvider {
+            try .init(
+                state: .unavailable, configurationPath: runtimePath.path,
+                settingsDigest: runtimeConfiguration.settings.settingsDigest,
+                synchronization: .init(state: .unavailable))
+        }
         let query = try request()
-        let unknownRuntime = try status(await app.native(query, forUID: accounts.base.human))
+        let unknownRuntime = try status(await app.native(query, forUID: accounts.humanUID))
         XCTAssertEqual(unknownRuntime.canonical.readiness, .ready)
         XCTAssertEqual(unknownRuntime.runtime.state, .unavailable)
+        XCTAssertEqual(unknownRuntime.runtime.configurationPath, runtimePath.path)
+        XCTAssertEqual(unknownRuntime.runtime.settingsDigest, runtimeConfiguration.settings.settingsDigest)
         if tractanda_uid() != 0 {
-            let denied = try await app.native(query, forUID: tractanda_uid())
+            let denied = try await app.native(query, forUID: accounts.serviceOwnerUID)
             // Service ownership supplies no canonical administrator grant.
-            try assertError(denied, "forbidden")
+            try assertError(denied, "forbidden", allowBindingDenial: true)
         }
-        let token = try await sessions.issue(forUID: accounts.base.human).token
+        let token = try await sessions.issue(forUID: accounts.humanUID).token
         try assertError(await sessions.dispatch(query, token: token), "unknownMethod")
         let http = try await app.http(
             .init(
@@ -194,17 +280,18 @@ final class PeerOperatorStatusNativeTests: XCTestCase {
         await app.setPeerStatusProvider {
             await gate.wait(entered)
             return try .init(
-                state: .active, responderPublished: true,
+                state: .active, configurationPath: runtimePath.path,
+                settingsDigest: runtimeConfiguration.settings.settingsDigest, responderPublished: true,
                 incomingConnectionCount: 0, outgoingConnectionCount: 0, pendingConnectionCount: 0,
                 synchronization: .init(state: .disabled))
         }
         defer { await gate.release() }
-        let loading = Task { try await app.native(query, forUID: accounts.base.human) }
+        let loading = Task { try await app.native(query, forUID: accounts.humanUID) }
         await fulfillment(of: [entered], timeout: 5)
         accounts.demote()
         await gate.release()
         try assertError(await loading.value, "forbidden")
-        try fixture.capacity()
+        try PeerFixtureCapacity.requireFree(at: root)
     }
 }
 
@@ -217,17 +304,15 @@ extension PeerOperatorStatusNativeTests {
         let root = try GuardedFixtureDirectory.create(
             prefix: "o", source: "PeerOperatorStatusNativeTests", test: name, socket: "s")
         defer { try? FileManager.default.removeItem(at: root) }
-        let store = root.appendingPathComponent("store")
+        let accounts = PeerStatusAccounts()
+        let store = try personalStore(root: root, accounts: accounts)
         let socket = root.appendingPathComponent("s")
-        do { _ = try ItemStore.initializeFresh(root: store) }
-        let configuration = try PeerRuntimeConfiguration()
-        let path = root.appendingPathComponent("peer.json")
-        try configuration.encoded().write(to: path)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
-        let daemon = try await SharedDaemon.start(
+        let (path, configuration) = try runtimeConfiguration(root: root)
+        let daemon = try await SharedDaemon.startForTesting(
             configuration: .init(
                 storePath: store.path, socketPath: socket.path,
-                httpPort: nil, peerRuntimeConfigurationPath: path.path))
+                httpPort: nil, peerRuntimeConfigurationPath: path.path),
+            makeAccountDirectory: { accounts })
         defer { await daemon.close() }
         // Later file edits are not facts about the running process's immutable load.
         try Data("invalid later contents".utf8).write(to: path)
@@ -238,7 +323,7 @@ extension PeerOperatorStatusNativeTests {
         let runtime = try status(response).runtime
         XCTAssertEqual(runtime.state, .active)
         XCTAssertEqual(runtime.configurationPath, path.path)
-        XCTAssertEqual(runtime.settingsDigest, configuration.settingsDigest)
+        XCTAssertEqual(runtime.settingsDigest, configuration.settings.settingsDigest)
         XCTAssertEqual(runtime.listenerConfigured, false)
         XCTAssertFalse(runtime.synchronizationEnabled)
         XCTAssertEqual(runtime.synchronization.state, .disabled)

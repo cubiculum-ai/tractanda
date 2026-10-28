@@ -1,5 +1,12 @@
 import XCTest
 
+import struct TractandaClient.JMAPKernel
+import struct TractandaClient.JMAPLocalSession
+import struct TractandaClient.JMAPProblem
+import enum TractandaClient.JMAPValue
+import enum TractandaClient.TractandaJMAP
+import enum TractandaClient.TractandaJMAPCodec
+
 @testable import TractandaCore
 
 #if canImport(Darwin)
@@ -907,6 +914,69 @@ final class ServiceCoordinatorTests: XCTestCase {
         }
     }
 
+    func testPersonalAutomaticRecoveryRetiresPooledIndexAndExactRetrySeesPublishedItem() async throws {
+        try await fixture(initialize: false) { root, accounts in
+            try AttachmentFixtureCapacity.requireFree()
+            let itemPermissions = ItemValue.object([
+                "profile": .text(ItemPermissions.profile), "owner": .text("alice"),
+                "group": .text("staff"), "mode": .integer(0o600), "acl": .object([:]),
+            ])
+            var seed: ItemStore? = try ItemStore.initializePersonalWorkgroup(
+                root: root, accounts: accounts,
+                accessConfiguration: .object([
+                    "profile": .text(AccessConfiguration.profile), "users": .list([.text("alice")]),
+                ]))
+            _ = try seed!.withAccess(forUID: accounts.alice) {
+                try seed!.commit(
+                    .init(
+                        classID: "Item",
+                        changes: ["subject": .text("before"), "permissions": itemPermissions],
+                        operationID: "before-auto-recovery"))
+            }
+            seed = nil
+            let coordinator = try await ServiceCoordinator(
+                opening: root, makeAccountDirectory: { accounts })
+            let query = try nativeRequest("TractandaItem/query", ["limit": 10])
+            func ids(_ data: Data) throws -> [String] {
+                let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+                let body = try XCTUnwrap((object["methodResponses"] as? [[Any]])?.first?[1] as? [String: Any])
+                return try XCTUnwrap(body["ids"] as? [String])
+            }
+            let initial = try await coordinator.handle(query, forUID: accounts.alice)
+            XCTAssertEqual(try ids(initial).count, 1)
+            try await coordinator.setPersonalDurableAcknowledgementHookForTesting {
+                throw TractandaError("injected", "Uncertain live device flush")
+            }
+            let request = CommitRequest(
+                classID: "Item", changes: ["subject": .text("after"), "permissions": itemPermissions],
+                operationID: "after-auto-recovery")
+            let arguments = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: JSON.encode(request)) as? [String: Any])
+            let commit = try nativeRequest("TractandaItem/commit", arguments, id: "write")
+            let uncertain = try await coordinator.handle(commit, forUID: accounts.alice)
+            XCTAssertTrue(String(decoding: uncertain, as: UTF8.self).contains("uncertainCommit"))
+            try await coordinator.setPersonalDurableAcknowledgementHookForTesting(nil)
+            let retried = try await coordinator.handle(commit, forUID: accounts.alice)
+            let retryObject = try XCTUnwrap(JSONSerialization.jsonObject(with: retried) as? [String: Any])
+            let retryCall = try XCTUnwrap((retryObject["methodResponses"] as? [[Any]])?.first)
+            XCTAssertEqual(retryCall[0] as? String, "TractandaItem/commit")
+            let retryBody = try XCTUnwrap(retryCall[1] as? [String: Any])
+            XCTAssertEqual(retryBody["replayed"] as? Bool, true)
+            XCTAssertEqual(retryBody["indexReady"] as? Bool, true)
+            for _ in 0..<2 {
+                let recovered = try await coordinator.handle(query, forUID: accounts.alice)
+                XCTAssertEqual(
+                    try ids(recovered).count, 2,
+                    "An idle old-inode pooled handle must not hide the recovered item")
+            }
+            let repeated = try await coordinator.handle(commit, forUID: accounts.alice)
+            XCTAssertFalse(String(decoding: repeated, as: UTF8.self).contains("uncertainCommit"))
+            let final = try await coordinator.handle(query, forUID: accounts.alice)
+            XCTAssertEqual(try ids(final).count, 2)
+            await coordinator.close()
+        }
+    }
+
     func testPooledFinalRecheckAllowsRebuildAndCloseToDrain() async throws {
         try await fixture { root, accounts in
             var seed: ItemStore? = try ItemStore(
@@ -1707,4 +1777,284 @@ final class ServiceCoordinatorTests: XCTestCase {
             await coordinator.close()
         }
     }
+}
+
+final class JMAPSessionAccountTests: XCTestCase {
+    private final class RebuildGate: @unchecked Sendable {
+        let entered: XCTestExpectation
+        let release = DispatchSemaphore(value: 0)
+        private let lock = NSLock()
+        private var first = true
+        init(_ entered: XCTestExpectation) { self.entered = entered }
+        func blockOnce() {
+            let block = lock.withLock {
+                let value = first
+                first = false
+                return value
+            }
+            if block {
+                entered.fulfill()
+                release.wait()
+            }
+        }
+    }
+    private func root() throws -> URL {
+        try AttachmentFixtureCapacity.requireFree()
+        XCTAssertLessThan(16 * 1024 * 1024, Int(AttachmentFixtureCapacity.fixtureCapBytes))
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "jmap-account-" + Identifier.make())
+        try PrivateConfiguration.makeDirectory(root)
+        return root
+    }
+    private func makeStore(_ root: URL) throws -> ItemStore {
+        let account = try SystemAccountDirectory().user(forUID: geteuid())
+        return try ItemStore(
+            personalRoot: root,
+            opening: .fresh(
+                .object([
+                    "profile": .text(AccessConfiguration.profile), "users": .list([.text(account.name)]),
+                ])), accounts: SystemAccountDirectory(),
+            attachmentUploadPolicy: .init(minimumFreeBytes: Int64(AttachmentFixtureCapacity.reserveBytes)))
+    }
+    private func request(_ calls: [[Any]], using: [String] = TractandaJMAP.using) throws -> Data {
+        try JSONSerialization.data(withJSONObject: ["using": using, "methodCalls": calls])
+    }
+    private func calls(_ data: Data) throws -> [[Any]] {
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        return try XCTUnwrap(body["methodResponses"] as? [[Any]])
+    }
+    private func discovery(_ service: ItemService) throws -> JMAPLocalSession {
+        try JMAPLocalSession(
+            data: NativeMethodResult.unwrap(
+                service.handle(
+                    request([[TractandaJMAP.discoveryMethod, [:], "session"]]), peerUID: geteuid()),
+                method: TractandaJMAP.discoveryMethod, callID: "session"))
+    }
+    private func args(_ input: CommitRequest) throws -> [String: Any] {
+        let wire = try TractandaJMAPCodec.argumentsToWire(
+            method: "TractandaItem/commit", arguments: JMAPValue.decode(JSON.encode(input)))
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: wire.encoded()) as? [String: Any])
+    }
+    func testLocalDiscoveryUsesDurableStoreIdentityAndExactlyTheResponseMetadataState() throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try makeStore(root)
+        let service = ItemService(store: store)
+        let bytes = service.handle(
+            try request([[TractandaJMAP.discoveryMethod, [:], "session"]]), peerUID: geteuid())
+        let local = try JMAPLocalSession(
+            data: NativeMethodResult.unwrap(bytes, method: TractandaJMAP.discoveryMethod, callID: "session"))
+        XCTAssertEqual(
+            local.accountID,
+            try CanonicalReaderRequirement.storeIdentity(root: root, ownerUID: geteuid()))
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        XCTAssertEqual(body["sessionState"] as? String, local.state.value)
+        for name in ["apiUrl", "uploadUrl", "downloadUrl", "eventSourceUrl"] {
+            XCTAssertNil(local.value[name])
+        }
+        XCTAssertEqual(local.value["profile"]?.text, "tractanda.local-session.v1")
+        let old = service.handle(
+            try request(
+                [["Core/echo", [:], "old"]],
+                using: [JMAPKernel.core, "https://tractanda.ai/ns/local-prototype/4"]),
+            peerUID: geteuid())
+        XCTAssertEqual(JMAPProblem.decode(old)?.type, "urn:ietf:params:jmap:error:unknownCapability")
+    }
+    func testMissingAndForeignAccountsAreRejectedBeforeAnyCommit() throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try makeStore(root)
+        let service = ItemService(store: store)
+        let base = try args(
+            .init(
+                classID: "Item", changes: ["subject": .text("not written")], operationID: "account-rejection")
+        )
+        for (account, expected) in [
+            (Optional<String>.none, "invalidArguments"), ("foreign", "accountNotFound"),
+        ] {
+            var input = base
+            if let account { input["accountId"] = account }
+            let result = try calls(
+                service.handle(request([["TractandaItem/commit", input, "save"]]), peerUID: geteuid()))
+            XCTAssertEqual((result[0][1] as? [String: Any])?["type"] as? String, expected)
+        }
+        XCTAssertTrue(try store.candidates().isEmpty)
+    }
+    func testReferencedDiscoveredAccountIsRemovedBeforeDomainIntentHashing() throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try makeStore(root)
+        let service = ItemService(store: store)
+        let input = CommitRequest(
+            classID: "Item", changes: ["subject": .text("same domain intent"), "n": .integer(Int64.max)],
+            operationID: "exact-account-save")
+        var wire = try args(input)
+        let pointer =
+            "/primaryAccounts/"
+            + TractandaJMAP.capability.replacingOccurrences(of: "~", with: "~0").replacingOccurrences(
+                of: "/", with: "~1")
+        wire["#accountId"] = ["resultOf": "session", "name": TractandaJMAP.discoveryMethod, "path": pointer]
+        let response = service.handle(
+            try request([
+                [TractandaJMAP.discoveryMethod, [:], "session"], ["TractandaItem/commit", wire, "save"],
+            ]), peerUID: geteuid())
+        let replies = try calls(response)
+        let receipt = try JSON.decode(
+            MutationReceipt.self, JSONSerialization.data(withJSONObject: replies[1][1]))
+        let revision = try store.get(receipt.itemID, revisionID: receipt.revisionID)
+        XCTAssertEqual(
+            revision.fields["requestIdentity"]?.string, try JSON.encode(input).base64EncodedString())
+        XCTAssertNil(revision.fields["accountId"])
+        XCTAssertEqual(revision.fields["n"], .integer(Int64.max))
+    }
+    func testContentEditDoesNotInvalidateDiscoveryAndEchoDoesNotInterpretAccountArguments() throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try makeStore(root)
+        let service = ItemService(store: store)
+        let before = try discovery(service)
+        var input = try args(
+            .init(classID: "Item", changes: ["subject": .text("edit")], operationID: "session-stable"))
+        input["accountId"] = before.accountID
+        _ = try NativeMethodResult.unwrap(
+            service.handle(request([["TractandaItem/commit", input, "save"]]), peerUID: geteuid()),
+            method: "TractandaItem/commit", callID: "save")
+        XCTAssertEqual(try discovery(service).state.value, before.state.value)
+        let echo = try calls(
+            service.handle(
+                request(
+                    [["Core/echo", ["accountId": ["arbitrary": true]], "echo"]], using: [JMAPKernel.core]),
+                peerUID: geteuid()))
+        XCTAssertEqual((echo[0][1] as? [String: Any])?["accountId"] as? [String: Bool], ["arbitrary": true])
+    }
+    func testRecoverableIndexInterruptionKeepsOrdinaryRecoveryAndAdminControlAdmission() throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try makeStore(root)
+        let service = ItemService(store: store)
+        let session = try discovery(service)
+        store.beforeIndexUpdate = { throw TractandaError("indexUnavailable", "fixture index failure") }
+        var input = try args(
+            .init(classID: "Item", changes: ["subject": .text("durable")], operationID: "readonly-base"))
+        input["accountId"] = session.accountID
+        let saved = try JSON.decode(
+            MutationReceipt.self,
+            NativeMethodResult.unwrap(
+                service.handle(request([["TractandaItem/commit", input, "save"]]), peerUID: geteuid()),
+                method: "TractandaItem/commit", callID: "save"))
+        XCTAssertFalse(saved.isIndexReady)
+        store.beforeIndexUpdate = nil
+        var recoveryAttempts = 0
+        store.personalRecoveryIndexWillReplace = {
+            recoveryAttempts += 1
+            throw TractandaError(
+                "indexUnavailable", "must not rebuild during metadata or wrong-account admission")
+        }
+        let blocked = try discovery(service)
+        XCTAssertEqual(blocked.value["accounts"]?[blocked.accountID]?["isReadOnly"], .bool(false))
+        let definitions = NativeMethodCatalog.definitions { _, _ in
+            .failure(.init("serverFail"), effects: .none)
+        }
+        XCTAssertEqual(definitions["TractandaItem/commit"]?.requiresWritableAccount, true)
+        XCTAssertEqual(definitions["TractandaStore/rebuild"]?.requiresWritableAccount, false)
+        var foreign = try args(.init(classID: "Item", operationID: "foreign-pending"))
+        foreign["accountId"] = "foreign"
+        let rejected = try calls(
+            service.handle(request([["TractandaItem/commit", foreign, "foreign"]]), peerUID: geteuid()))
+        XCTAssertEqual((rejected[0][1] as? [String: Any])?["type"] as? String, "accountNotFound")
+        XCTAssertEqual(recoveryAttempts, 0)
+        store.personalRecoveryIndexWillReplace = nil
+        var second = try args(.init(classID: "Item", operationID: "auto-recovered-write"))
+        second["accountId"] = blocked.accountID
+        let accepted = try calls(
+            service.handle(request([["TractandaItem/commit", second, "write"]]), peerUID: geteuid()))
+        XCTAssertEqual(accepted[0][0] as? String, "TractandaItem/commit")
+        let recovered = try calls(
+            service.handle(
+                request([["TractandaStore/rebuild", ["accountId": blocked.accountID], "rebuild"]]),
+                peerUID: geteuid()))
+        XCTAssertEqual(recovered[0][0] as? String, "TractandaStore/rebuild")
+        XCTAssertEqual(
+            try discovery(service).value["accounts"]?[blocked.accountID]?["isReadOnly"], .bool(false))
+        XCTAssertEqual(try store.history(saved.itemID).count, 1)
+    }
+
+    func testAsyncCoordinatorUsesSameDiscoveryStateAndStrictAccountContext() async throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        func initialize() throws { _ = try makeStore(root) }
+        try initialize()
+        let coordinator = try await ServiceCoordinator(opening: root)
+        let discoveryBytes = try await coordinator.handle(
+            request([[TractandaJMAP.discoveryMethod, [:], "session"]]), forUID: geteuid())
+        let session = try JMAPLocalSession(
+            data: NativeMethodResult.unwrap(
+                discoveryBytes, method: TractandaJMAP.discoveryMethod, callID: "session"))
+        let envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: discoveryBytes) as? [String: Any])
+        XCTAssertEqual(envelope["sessionState"] as? String, session.state.value)
+        let input = CommitRequest(
+            classID: "Item", changes: ["subject": .text("async")], operationID: "async-account-save")
+        let missing = try await coordinator.handle(
+            request([["TractandaItem/commit", try args(input), "save"]]), forUID: geteuid())
+        XCTAssertEqual((try calls(missing)[0][1] as? [String: Any])?["type"] as? String, "invalidArguments")
+        var arguments = try args(input)
+        arguments["accountId"] = session.accountID
+        let saved = try await coordinator.handle(
+            request([["TractandaItem/commit", arguments, "save"]]), forUID: geteuid())
+        let receipt = try JSON.decode(
+            MutationReceipt.self,
+            NativeMethodResult.unwrap(saved, method: "TractandaItem/commit", callID: "save"))
+        XCTAssertEqual(receipt.operationID, input.operationID)
+        await coordinator.close()
+    }
+
+    func testDiscoveryAndAuthorizedStatusStayResponsiveOutsideBlockedRebuildQueue() async throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        func initialize() throws {
+            let store = try makeStore(root)
+            _ = try store.commit(
+                .init(classID: "Item", changes: ["subject": .text("rebuild")], operationID: "rebuild-seed"))
+        }
+        try initialize()
+        let coordinator = try await ServiceCoordinator(opening: root)
+        let localBytes = try await coordinator.handle(
+            request([[TractandaJMAP.discoveryMethod, [:], "s"]]), forUID: geteuid())
+        let local = try JMAPLocalSession(
+            data: NativeMethodResult.unwrap(localBytes, method: TractandaJMAP.discoveryMethod, callID: "s"))
+        let entered = expectation(description: "actual rebuild Store queue held")
+        let gate = RebuildGate(entered)
+        defer { gate.release.signal() }
+        await coordinator.setRebuildStoreQueueHookForTesting { gate.blockOnce() }
+        let start = try await coordinator.handle(
+            request([
+                [
+                    "TractandaStore/rebuild", ["accountId": local.accountID, "operationID": "held-rebuild"],
+                    "r",
+                ]
+            ]), forUID: geteuid())
+        XCTAssertEqual(try calls(start)[0][0] as? String, "TractandaStore/rebuild")
+        await fulfillment(of: [entered], timeout: 15)
+        let returned = expectation(description: "discovery and singleton status return before store release")
+        let discoveryRequest = try request([[TractandaJMAP.discoveryMethod, [:], "s"]])
+        let statusRequest = try request([
+            ["TractandaStore/rebuildStatus", ["accountId": local.accountID], "status"]
+        ])
+        let task = Task {
+            let metadata = try await coordinator.handle(discoveryRequest, forUID: geteuid())
+            let status = try await coordinator.handle(statusRequest, forUID: geteuid())
+            returned.fulfill()
+            return (metadata, status)
+        }
+        await fulfillment(of: [returned], timeout: 15)
+        gate.release.signal()
+        let result = try await task.value
+        let metadata = try JMAPLocalSession(
+            data: NativeMethodResult.unwrap(result.0, method: TractandaJMAP.discoveryMethod, callID: "s"))
+        XCTAssertEqual(metadata.accountID, local.accountID)
+        XCTAssertEqual(metadata.value["accounts"]?[local.accountID]?["isReadOnly"], .bool(true))
+        XCTAssertEqual(try calls(result.1)[0][0] as? String, "TractandaStore/rebuildStatus")
+        await coordinator.close()
+    }
+
 }

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise a dense category DAG in the real TUI, using an isolated store and owned PTY."""
+from jmap_client import query_arguments
 import argparse
 import importlib.util
 import json
@@ -36,7 +37,7 @@ def main():
                     ]}
                 else:
                     fields['isAction'] = {'type': 'boolean', 'value': True}
-                return client.commit(wire.intent('create', 'seed-' + name, class_id='Item', changes=fields))['revision']
+                return client.commit_with_revision(wire.intent('create', 'seed-' + name, class_id='Item', changes=fields))['revision']
 
             start = create('Category root', [])
             parents, categories = [start], [start]
@@ -46,7 +47,7 @@ def main():
                 parents = pair
             action = create('Only matching action')
             before = wire.manifest(root / 'store')
-            state = client.call('TractandaItem/query', {'limit': 256})['queryState']
+            state = client.call('TractandaItem/query', query_arguments({'limit': 256}))['queryState']
             with tui.terminal(str(args.tui_binary.resolve()), root / 's', root / 'pending.json') as ui:
                 ui.wait('All items')
                 ui.resize(132, 30)
@@ -86,7 +87,7 @@ def main():
                 ui.send(b'\x1b\r')
                 ui.wait('Added category filter')
                 ui.wait('Only matching action')
-                assert client.call('TractandaItem/query', {'categoryPath': [wire.item_id(categories[-1])]})['ids'] == [wire.item_id(action)]
+                assert client.call('TractandaItem/query', query_arguments({'categoryPath': [wire.item_id(categories[-1])]}))['ids'] == [wire.item_id(action)]
                 # Meta-Return opened the explicit Views report.  F9 returns to
                 # retained Categories before replacing its Find text.
                 ui.send(ESC + b'[20~')
@@ -102,7 +103,7 @@ def main():
                 checks.append('Opening a search result uses a valid native path; Right reveals a searched branch without losing its selection')
                 ui.close()
             assert wire.manifest(root / 'store') == before
-            assert client.call('TractandaItem/query', {'limit': 256})['queryState'] == state
+            assert client.call('TractandaItem/query', query_arguments({'limit': 256}))['queryState'] == state
             assert not (root / 'pending.json').exists()
             checks.append('Browsing/searching leaves all canonical files, query state and recovery state unchanged; terminal restored')
     report = {

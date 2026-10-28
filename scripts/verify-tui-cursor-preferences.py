@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Check real cursor output, the preferences overlay and guarded class choices in owned PTYs."""
+from jmap_client import query_arguments
 import argparse
 import importlib.util
 import json
@@ -83,7 +84,7 @@ def main():
                 ui.wait('Appearance changes canceled')
                 assert appearance.read_bytes() == saved
                 assert ui.cursor['shape'] == 1 and ui.cursor['color'] == '#33ccaa'
-                assert not client.call('TractandaItem/query')['ids']
+                assert not client.call('TractandaItem/query', query_arguments({}))['ids']
                 checks.append('Table preferences, live preview, independent cursor options, Save/Cancel, private settings and zero canonical writes')
 
                 # Standard cursor moves without a redraw or shifted glyphs. The content
@@ -166,7 +167,7 @@ def main():
                 assert len(ui.answered_queries) == 2
                 checks.append('Bounded terminal queries, exact original restore on signal, literal caret glyphs and delayed/fragmented replies excluded from item text')
 
-            future = client.commit(wire.intent('create', str(uuid.uuid4()), class_id='org.example.FutureItem', changes={
+            future = client.commit_with_revision(wire.intent('create', str(uuid.uuid4()), class_id='org.example.FutureItem', changes={
                 'subject': wire.text('Unknown class fixture'), 'opaque': wire.text('preserve me')}))['revision']
             with tui.terminal(binary, root / 's', root / 'unknown.json') as ui:
                 ui.wait('Unknown class fixture'); ui.send(F2); ui.wait('Edit item')
@@ -176,7 +177,7 @@ def main():
                 assert updated['fields']['opaque'] == wire.text('preserve me')
                 checks.append('Editing an existing unknown class preserves its identifier and opaque metadata')
 
-            invalid = client.commit(wire.intent('create', str(uuid.uuid4()), class_id='Item', changes={
+            invalid = client.commit_with_revision(wire.intent('create', str(uuid.uuid4()), class_id='Item', changes={
                 'subject': wire.text('Retype validation fixture'), 'holdings': wire.text('opaque note value')}))['revision']
             with tui.terminal(binary, root / 's', root / 'validation.json') as ui:
                 ui.wait('Retype validation fixture'); ui.send(F2); ui.wait('Edit item')

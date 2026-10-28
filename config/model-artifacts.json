@@ -1,0 +1,134 @@
+{
+  "schemaVersion": 1,
+  "artifacts": [
+    {
+      "identifier": "granite-embedding-311m-multilingual-r2",
+      "repository": "ibm-granite/granite-embedding-311m-multilingual-r2",
+      "revision": "44399559930365213510b1ee2eb15ded83374f0e",
+      "files": [
+        {
+          "path": "1_Pooling/config.json",
+          "size": 313,
+          "sha256": "781299da695e58439d70d491840da22ea0935d1d57d9646eb9725f1f19754e89"
+        },
+        {
+          "path": "config.json",
+          "size": 1191,
+          "sha256": "e1e3fc842a8e0537e25d6e4c93879698b92ae96722e8c162bef334b57978a3b0"
+        },
+        {
+          "path": "config_sentence_transformers.json",
+          "size": 283,
+          "sha256": "f09adf93fcf868bb2fc3976a435d810b2ecdffa953d1da091d2a91168abab44b"
+        },
+        {
+          "path": "model.safetensors",
+          "size": 623341952,
+          "sha256": "dcb6431bfa6e817fe100a2b0521360cec3383963b03fa966b685de18ca310d31"
+        },
+        {
+          "path": "modules.json",
+          "size": 349,
+          "sha256": "84e40c8e006c9b1d6c122e02cba9b02458120b5fb0c87b746c41e0207cf642cf"
+        },
+        {
+          "path": "sentence_bert_config.json",
+          "size": 60,
+          "sha256": "967ef958285e4a7a37d8ff1832473d967edd913b4e48572f31c3d3ea361d5327"
+        },
+        {
+          "path": "special_tokens_map.json",
+          "size": 694,
+          "sha256": "cb9e60dcf4d8d314315cb3e761fe4c2e664fda8dbf66d7815372b2639e381182"
+        },
+        {
+          "path": "tokenizer.json",
+          "size": 33384821,
+          "sha256": "0087c868b33bad550a78a08d19798cfd7f713cde4f020803b8f51f405503e15f"
+        },
+        {
+          "path": "tokenizer_config.json",
+          "size": 1155500,
+          "sha256": "7947bdf0378520e69ca412b8c4dacd1cffa8aef099f851fdd5c65aa27c6b36a0"
+        }
+      ]
+    },
+    {
+      "identifier": "granite-docling-258m-mlx",
+      "repository": "ibm-granite/granite-docling-258M-mlx",
+      "revision": "a8b999991fe8c521a0cec749973414eaaf823731",
+      "files": [
+        {
+          "path": "README.md",
+          "size": 31,
+          "sha256": "4bcf87ecfbbb8e07a01b21415a970c8b53a5283bf6872b657040d3f45c9241f7"
+        },
+        {
+          "path": "added_tokens.json",
+          "size": 35,
+          "sha256": "882e49757a3bea90e00df1d2dc8c18b2b526ff77380db20439feeb1f053a63cd"
+        },
+        {
+          "path": "chat_template.jinja",
+          "size": 588,
+          "sha256": "a4b0bf4348b014acca131da664d05b61e39d5dc8af980f1913846a57ccc6d289"
+        },
+        {
+          "path": "config.json",
+          "size": 6873,
+          "sha256": "e5bfa734fb892953ee7eb69a378ad7cb52a66e046d46efc8987c450cfa122009"
+        },
+        {
+          "path": "generation_config.json",
+          "size": 169,
+          "sha256": "e90fc149327adfa563401b852408345a7f8415e576878e016de778b38818cac0"
+        },
+        {
+          "path": "merges.txt",
+          "size": 916646,
+          "sha256": "b6fe424e334903f7fb84d3a106d9730455f4744b9fe3c21ee136d97a00e72502"
+        },
+        {
+          "path": "model.safetensors",
+          "size": 630696724,
+          "sha256": "b0891fbbf7a634d3e778e2dadb9c972fa1a516eff88cb1b09452ed7f32c962ae"
+        },
+        {
+          "path": "model.safetensors.index.json",
+          "size": 38105,
+          "sha256": "576c0aaed5b79fc9d6dda76a5388c42026c4e9176f196c6df68f512a84a42f7c"
+        },
+        {
+          "path": "preprocessor_config.json",
+          "size": 486,
+          "sha256": "6cb6e36d6fcb88ca1502c4a26750715dc3e7dedddc9a8f17b27d8d167d1457e7"
+        },
+        {
+          "path": "processor_config.json",
+          "size": 68,
+          "sha256": "e7bff42da73ae9eec9042ef20e066e11f1ee20f025358ff79131e3c0fb549b46"
+        },
+        {
+          "path": "special_tokens_map.json",
+          "size": 1078,
+          "sha256": "3e1c6950fd5624d1e6d60eea7110882c9743e37fa643364e17094466331e1cb5"
+        },
+        {
+          "path": "tokenizer.json",
+          "size": 7153329,
+          "sha256": "43de7f0b77e8ac9d1d39f21780281e209f6d4c3b2b18ab4c5c8eba66827ce8cd"
+        },
+        {
+          "path": "tokenizer_config.json",
+          "size": 17985,
+          "sha256": "ef21bfa4e14b96b54e9358a4a8e48a0aa1e07256304c9f51a088ce13dfd3105b"
+        },
+        {
+          "path": "vocab.json",
+          "size": 1612698,
+          "sha256": "e2bad0ce74e6ddfece426ef99e18067f4a6c3d4e65bb6dd9cfd638450cca0142"
+        }
+      ]
+    }
+  ]
+}

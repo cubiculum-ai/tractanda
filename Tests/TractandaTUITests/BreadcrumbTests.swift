@@ -19,7 +19,7 @@ final class BreadcrumbTests: XCTestCase {
         }
         deinit { try? FileManager.default.removeItem(at: directory) }
         func item(_ title: String, _ fields: [String: ItemValue] = [:]) throws -> Revision {
-            try client.commit(
+            try client.commitFixture(
                 CommitRequest(
                     classID: "Item", changes: fields.merging(["subject": .text(title)]) { _, new in new },
                     operationID: Identifier.make())
@@ -106,7 +106,7 @@ final class BreadcrumbTests: XCTestCase {
         workspace.collapsedSectionIDs = [child.itemID]
         workspace.columns = [try ViewColumn(property: "subject", title: "Name", width: 32)]
         workspace.sort = [try ItemSort(property: "subject", isAscending: false)]
-        let saved = try f.client.commit(workspace.viewRequest(name: "Narrow saved view")).revision
+        let saved = try f.client.commitFixture(workspace.viewRequest(name: "Narrow saved view")).revision
         try workspace.openView(saved)
         let before = f.store.state
         try workspace.browse(toCategoryAt: 1, expectedPath: [root.itemID, parent.itemID, child.itemID])
@@ -188,7 +188,7 @@ final class BreadcrumbTests: XCTestCase {
         let workspace = Workspace(client: client)
         let ids = [root.itemID, parent.itemID, child.itemID]
         try workspace.browse(path: [root, parent, child])
-        _ = try f.client.commit(
+        _ = try f.client.commitFixture(
             CommitRequest(
                 action: .revise, itemID: parent.itemID, expectedRevisionID: parent.revisionID,
                 changes: ["subject": .text("Renamed")], operationID: Identifier.make()))

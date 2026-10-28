@@ -23,7 +23,7 @@ final class ViewDefinitionEditorTests: XCTestCase {
         deinit { try? FileManager.default.removeItem(at: root) }
 
         func item(_ fields: [String: ItemValue]) throws -> Revision {
-            try client.commit(
+            try client.commitFixture(
                 CommitRequest(classID: "Item", changes: fields, operationID: Identifier.make())
             ).revision
         }
@@ -161,7 +161,7 @@ final class ViewDefinitionEditorTests: XCTestCase {
         app.handle(.modified(.text("e"), .command))
         app.handle(.control(21))
         app.handle(.paste("Local name"))
-        _ = try fixture.client.commit(
+        _ = try fixture.client.commitFixture(
             CommitRequest(
                 action: .revise, itemID: original.itemID, expectedRevisionID: original.revisionID,
                 changes: ["subject": .text("Elsewhere")], operationID: Identifier.make()))
@@ -260,7 +260,7 @@ final class ViewDefinitionEditorTests: XCTestCase {
             "viewDefinition": .object(["language": .text(SpotlightQuery.profile)]),
         ])
         let app = try fixture.app()
-        _ = try fixture.client.commit(
+        _ = try fixture.client.commitFixture(
             CommitRequest(
                 action: .revise, itemID: view.itemID, expectedRevisionID: view.revisionID,
                 unset: ["viewDefinition"], operationID: Identifier.make()))
@@ -283,7 +283,7 @@ final class ViewDefinitionEditorTests: XCTestCase {
         XCTAssertTrue(screen(app).contains("View definition · Immediate view"))
         app.handle(.escape)
         let saved = try XCTUnwrap(fixture.client.revisions(matching: "subject == \"Immediate view\"").first)
-        _ = try fixture.client.commit(
+        _ = try fixture.client.commitFixture(
             CommitRequest(
                 action: .revise, itemID: saved.itemID, expectedRevisionID: saved.revisionID,
                 changes: ["subject": .text("Fresh head")], operationID: Identifier.make()))
@@ -300,7 +300,7 @@ final class ViewDefinitionEditorTests: XCTestCase {
         let app = try fixture.app()
         app.handle(.down)
         app.handle(.enter)
-        _ = try fixture.client.commit(
+        _ = try fixture.client.commitFixture(
             CommitRequest(
                 action: .revise, itemID: view.itemID, expectedRevisionID: view.revisionID,
                 changes: ["subject": .text("New name")], operationID: Identifier.make()))
@@ -378,7 +378,7 @@ final class ViewDefinitionEditorTests: XCTestCase {
         app.handle(.down)
         app.handle(.modified(.text("e"), .command))
         app.handle(.paste(" local"))
-        _ = try fixture.client.commit(
+        _ = try fixture.client.commitFixture(
             CommitRequest(
                 action: .revise, itemID: original.itemID, expectedRevisionID: original.revisionID,
                 changes: ["isDeleted": .boolean(true)], operationID: Identifier.make()))

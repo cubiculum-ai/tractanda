@@ -22,7 +22,7 @@ func personalPeerCommand(
         personal-peer pair-files CONFIG_JSON LEFT_REPLICA RIGHT_REPLICA LEFT_PRIVATE_DIR RIGHT_PRIVATE_DIR
         personal-peer local-register ROOT CONFIG_JSON ACTOR CREDENTIAL_FILE...
         personal-peer local-baseline-begin ROOT SOURCE_REPLICA ACTOR
-        personal-peer runtime-file CONFIG_JSON LOCAL_REPLICA PORT OUTPUT_PRIVATE_JSON
+        personal-peer runtime-file CONFIG_JSON LOCAL_REPLICA PORT OUTPUT_PRIVATE_JSON [ENDPOINTS_JSON]
         [--profile NAME | --socket PATH] personal-peer identity|sync-status
         [--profile NAME | --socket PATH] personal-peer prepare CONFIG_JSON EXPECTED_DIGEST_OR_- NONCE
         [--profile NAME | --socket PATH] personal-peer register CONFIG_JSON CREDENTIAL_FILE...
@@ -75,15 +75,19 @@ func personalPeerCommand(
                 rightDirectory: URL(fileURLWithPath: arguments[6], isDirectory: true))
             output(try JSON.encode(["created": true]))
         case "runtime-file":
-            try require(6)
+            guard arguments.count == 6 || arguments.count == 7 else {
+                throw TractandaError("usage", help)
+            }
             let config = try configuration(arguments[2])
             guard config.members.contains(where: { $0.replicaID == arguments[3] }),
                 let port = Int(arguments[4])
             else { throw TractandaError("usage", help) }
-            let peers = try config.members.filter { $0.replicaID != arguments[3] }.map {
-                try PeerRuntimeConfiguration.Peer(
-                    alias: $0.replicaID + "-dial", host: $0.hostname, port: port)
-            }
+            let overrides =
+                arguments.count == 7
+                ? try JSON.decode([String: [PeerRuntimeConfiguration.Endpoint]].self, bytes(arguments[6]))
+                : [:]
+            let peers = try PersonalPeerRuntimeConfiguration.configuredPeers(
+                membership: config, localReplicaID: arguments[3], port: port, endpointOverrides: overrides)
             let settings = try PersonalPeerRuntimeConfiguration(
                 settings: PeerRuntimeConfiguration(
                     listen: .init(host: "0.0.0.0", port: port), peers: peers,
@@ -167,7 +171,7 @@ func personalPeerCommand(
     output(
         try call(
             selected.resolve(), "TractandaPeerPersonal/admin", object,
-            responseWait: .installerMutation, sendForTesting: sendForTesting))
+            responseWait: .untilCompletion, sendForTesting: sendForTesting))
     return true
 }
 

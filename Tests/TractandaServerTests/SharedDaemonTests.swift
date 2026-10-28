@@ -161,6 +161,11 @@ enum GuardedFixtureDirectory {
 }
 
 final class SharedDaemonTests: XCTestCase {
+    private struct TestAuthenticator: PasswordAuthenticating {
+        let uid: UInt32
+        func authenticate(username: String, password: String) throws -> UInt32 { uid }
+    }
+
     private func directory() throws -> URL {
         try GuardedFixtureDirectory.create(prefix: "t", source: "SharedDaemonTests", test: name, socket: "s")
     }
@@ -182,6 +187,63 @@ final class SharedDaemonTests: XCTestCase {
 
     private func canonicalPath(_ url: URL) -> String {
         url.standardizedFileURL.resolvingSymlinksInPath().path
+    }
+
+    func testHTTPRequestProblemsAndMethodFailuresKeepDistinctShapes() async throws {
+        let root = try directory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storeRoot = root.appendingPathComponent("store")
+        _ = try ItemStore.initializeFresh(root: storeRoot)
+        let coordinator = try await ServiceCoordinator(opening: storeRoot)
+        let uid = getuid()
+        let sessions = SessionAuthority(
+            coordinator: coordinator, authenticator: TestAuthenticator(uid: uid))
+        let token = try await sessions.issue(forUID: uid).token
+        let app = DaemonApplication(
+            coordinator: coordinator, sessions: sessions, page: Data(), manual: Data(), nonce: "test")
+        defer {
+            Task {
+                await app.close()
+                await coordinator.close()
+            }
+        }
+
+        func api(_ body: Data, contentType: String = "application/json") -> DaemonHTTPRequest {
+            DaemonHTTPRequest(
+                method: "POST", uri: "/api",
+                headers: [
+                    "host": ["127.0.0.1:48730"], "authorization": ["Bearer " + token],
+                    "content-type": [contentType],
+                ], body: body, localPort: 48730)
+        }
+        let malformed = try await app.http(api(Data("not-json".utf8)))
+        XCTAssertEqual(malformed.status, 400)
+        XCTAssertEqual(malformed.headers["Content-Type"], "application/problem+json")
+        let malformedObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: malformed.body) as? [String: Any])
+        XCTAssertEqual(malformedObject["type"] as? String, "urn:ietf:params:jmap:error:notJSON")
+        XCTAssertEqual(malformedObject["status"] as? Int, 400)
+
+        let unsupportedMedia = try await app.http(api(Data("{}".utf8), contentType: "text/plain"))
+        XCTAssertEqual(unsupportedMedia.status, 415)
+        XCTAssertEqual(unsupportedMedia.headers["Content-Type"], "application/problem+json")
+        let mediaObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: unsupportedMedia.body) as? [String: Any])
+        XCTAssertEqual(mediaObject["type"] as? String, "urn:ietf:params:jmap:error:notJSON")
+        XCTAssertEqual(mediaObject["status"] as? Int, 415)
+
+        let methodFailure = try JSONSerialization.data(withJSONObject: [
+            "using": ["urn:ietf:params:jmap:core"],
+            "methodCalls": [["Unknown/method", [:], "failure"]],
+        ])
+        let methodResponse = try await app.http(api(methodFailure))
+        XCTAssertEqual(methodResponse.status, 200)
+        XCTAssertEqual(methodResponse.headers["Content-Type"], "application/json")
+        let responseObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: methodResponse.body) as? [String: Any])
+        let calls = try XCTUnwrap(responseObject["methodResponses"] as? [[Any]])
+        XCTAssertEqual(calls.first?.first as? String, "error")
+        XCTAssertEqual((calls.first?[1] as? [String: Any])?["type"] as? String, "unknownMethod")
     }
 
     func testCloseRequestsRebuildStopBeforeQueuedMaintenanceDrain() async throws {

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Build the fixed core, merge admitted local ML components, invoke the full D3 gate.
 
-No downloads, installation, model inference, release or incomplete-output mode. The
-tracked input registry deliberately starts unadmitted. See linux-payload-producer.md.
+No network downloads, installation, model inference or release. Model weights are
+omitted by default; --include-model-weights admits only complete pinned local snapshots.
+The tracked input registry deliberately starts unadmitted. See linux-payload-producer.md.
 """
 import argparse
 import math
@@ -38,7 +39,7 @@ SKIP = {'.git', '.build', '.swiftpm', '__pycache__'}
 SOURCE_ROOTS = ('Sources', 'Tests', 'Packages', 'scripts')
 SOURCE_FILES = ('Package.swift', 'Package.resolved', 'VERSION', 'scripts/produce-linux-payload.py',
                 'scripts/package-linux.py', 'scripts/package-macos.py', 'scripts/validate-docling-model.py',
-                'debian/linux-runtime-inputs.json')
+                'config/model-artifacts.json', 'debian/linux-runtime-inputs.json')
 
 
 def sha(value):
@@ -523,8 +524,10 @@ def produce(args):
         for commitment in [value['recipe'], *value['patches']]:
             if frozen_hashes.get(commitment['path']) != commitment['sha256']:
                 raise ValueError('Component recipe/patch changed before the frozen source snapshot.')
-    models = {role: rows(getattr(args, role + '_model'), maximum=args.max_work_bytes) for role in COMPONENTS}
-    B.MAC.validate_docling_model(args.documents_model)
+    models = ({role: rows(getattr(args, role + '_model'), maximum=args.max_work_bytes) for role in COMPONENTS}
+              if args.include_model_weights else {role: [] for role in COMPONENTS})
+    if args.include_model_weights:
+        B.MAC.validate_docling_model(args.documents_model)
     source_bytes = sum(v['size'] for v in original)
     payload_bytes = sum(v['size'] for entries in models.values() for v in entries)
     payload_bytes += sum(v['size'] for value in components.values() for v in value['files']) + source_bytes
@@ -535,8 +538,9 @@ def produce(args):
         raise ValueError('A positive explicit compiler allocation estimate is required.')
     work = args.work.parent.resolve(strict=True) / args.work.name
     output = args.output.parent.resolve(strict=True) / args.output.name
-    inputs = [ROOT.resolve(), *(getattr(args, role + suffix).resolve(strict=True)
-              for role in COMPONENTS for suffix in ('_root', '_model'))]
+    inputs = [ROOT.resolve(), *(getattr(args, role + '_root').resolve(strict=True) for role in COMPONENTS)]
+    if args.include_model_weights:
+        inputs.extend(getattr(args, role + '_model').resolve(strict=True) for role in COMPONENTS)
     overlaps = lambda a, b: a.is_relative_to(b) or b.is_relative_to(a)
     if (work.exists() or work.is_symlink() or output.exists() or output.is_symlink()
             or overlaps(work, output) or any(overlaps(p, source) for p in (work, output) for source in inputs)):
@@ -553,7 +557,8 @@ def produce(args):
     write_json(work / 'operation.json', {'state': 'preparing', 'estimatedAdditionalBytes': estimate})
     environment = controlled_environment(work, swift.parent)
     embedding_runner = descriptor_runner(work, environment, work_limit, storage_guard=build_storage)
-    B.MAC.embedding_descriptor(args.embeddings_root / 'bin/tractanda-embeddings', args.embeddings_model,
+    B.MAC.embedding_descriptor(args.embeddings_root / 'bin/tractanda-embeddings',
+                               args.embeddings_model if args.include_model_weights else None,
                                runner=embedding_runner)
     merge_files(ROOT, work / 'source', original, work_limit)
     write_json(work / 'source/.swiftpm/configuration/mirrors.json', mirrored_pins(work / 'source', args.mirrors))
@@ -592,8 +597,12 @@ def produce(args):
     model_projection = {}
     for role, value in components.items():
         merge_files(getattr(args, role + '_root'), payload, value['files'], work_limit)
-        model_projection[role] = merge_model_files(
-            getattr(args, role + '_model'), payload / MODEL_DIRS[role], models[role], work_limit)
+        if args.include_model_weights:
+            model_projection[role] = merge_model_files(
+                getattr(args, role + '_model'), payload / MODEL_DIRS[role], models[role], work_limit)
+        else:
+            model_projection[role] = {'inputFiles': [], 'payloadFiles': [], 'sourceMetadataUnchanged': True,
+                                      'included': False}
     write_json(work / 'model-mode-projection.json', model_projection)
     # Copy public assets by reviewed index identity, using bounded copies from the frozen source.
     indexed = B.run(['git', '-C', ROOT, 'ls-files', '-z', '--', *B.PUBLIC]).split('\0')
@@ -622,7 +631,7 @@ def produce(args):
     write_json(work / 'bundle-input.json', spec)
     build_storage(work, work_limit)
     result = B.assemble(payload, work / 'bundle-input.json', output, args.arch, args.max_work_bytes,
-                        embedding_runner=embedding_runner)
+                        embedding_runner=embedding_runner, include_model_weights=args.include_model_weights)
     used = build_storage(work, work_limit) + B.owned_storage(output, args.max_work_bytes)
     if used > args.max_work_bytes:
         raise ValueError('Combined compiler/work/bundle allocation exceeded the declared budget.')
@@ -649,6 +658,8 @@ def main():
             parser.add_argument('--' + role + '-' + suffix, type=Path)
     parser.add_argument('--swift', type=Path)
     parser.add_argument('--mirrors', type=Path)
+    parser.add_argument('--include-model-weights', action='store_true',
+                        help='Stage both complete pinned model directories for offline operation.')
     parser.add_argument('--work', type=Path)
     parser.add_argument('--output', type=Path)
     parser.add_argument('--max-work-bytes', type=int)
@@ -663,9 +674,13 @@ def main():
               toolchainProbeTimeoutSeconds=args.toolchain_probe_timeout_seconds), indent=2))
         return
     required = ('swift', 'mirrors', 'work', 'output', 'max_work_bytes', 'build_allowance_bytes') + tuple(
-        role + '_' + suffix for role in COMPONENTS for suffix in ('manifest', 'root', 'model'))
+        role + '_' + suffix for role in COMPONENTS for suffix in ('manifest', 'root'))
+    if args.include_model_weights:
+        required += tuple(role + '_model' for role in COMPONENTS)
+    elif any(getattr(args, role + '_model') is not None for role in COMPONENTS):
+        parser.error('Model directories require --include-model-weights; omit them for the standard slim package.')
     if any(getattr(args, name) is None for name in required):
-        parser.error('produce requires both complete component manifests/trees/models, concrete Swift, offline mirrors, work/output and budgets')
+        parser.error('produce requires both component manifests/trees, concrete Swift, offline mirrors, work/output and budgets; model roots are required only with --include-model-weights')
     try:
         def interrupted(signum, frame):
             raise InterruptedError('Interrupted producer; owned child will be reaped.')

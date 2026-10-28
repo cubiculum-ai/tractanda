@@ -4,6 +4,7 @@
 Requires TRACTANDA_DISPOSABLE_CONTAINER=1 and runs only against accounts provisioned by
 verify-multi-user.py. It never creates host accounts or opens a production store.
 """
+from jmap_client import query_arguments
 import argparse
 import hashlib
 import importlib.util
@@ -86,12 +87,12 @@ def main():
             assert [row["itemID"] for row in agent_result["results"]] == [wire.item_id(shared)], agent_result
             checks.append("OS-peer scoped query IDs, private-count isolation, and filtered Vec1 search prevent hidden nearest chunks from starving readable top-K")
 
-            fts_before = fixture.call("bob", "TractandaItem/query", {"text": "team"})["ids"]
+            fts_before = fixture.call("bob", "TractandaItem/query", query_arguments({"text": "team"}))["ids"]
             revised = revision(fixture.commit("alice", {"privateFixtureField": wire.text("metadata only")}, base=shared))
             wait(lambda: fixture.call("bob", "TractandaSemantic/status"), lambda r: r["coverage"] == "complete")
             current = wait(lambda: fixture.call("bob", "TractandaSemantic/results", {"queryID": q["queryID"]}), lambda r: r["state"] == "ready")
             assert current["results"][0]["revisionID"] == wire.revision_id(revised), current
-            assert fixture.call("bob", "TractandaItem/query", {"text": "team"})["ids"] == fts_before
+            assert fixture.call("bob", "TractandaItem/query", query_arguments({"text": "team"}))["ids"] == fts_before
             checks.append("Metadata-only revisions relabel current semantic references without changing FTS")
 
             revoked = revision(fixture.commit("alice", {"permissions": fixture.permissions()}, base=revised))

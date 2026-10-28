@@ -570,7 +570,8 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
     }
     /// Caller owns the Store root lock. Complete this fsync before immutable record publication.
     public static func beforePublication(
-        root: URL, ownerUID: UInt32, format: Int, beforePersist: (() throws -> Void)? = nil
+        root: URL, ownerUID: UInt32, format: Int, beforePersist: (() throws -> Void)? = nil,
+        afterPersist: (() throws -> Void)? = nil
     ) throws {
         var previous = try load(root: root, ownerUID: ownerUID)
         if previous == nil || previous!.minimumReaderLevel < format {
@@ -584,6 +585,7 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
         if raised != (try load(root: root, ownerUID: ownerUID)) {
             try beforePersist?()
             try raised.persist(root: root, ownerUID: ownerUID)
+            try afterPersist?()
         }
     }
     /// Authority-aware callers hold the writer lock and enforce sealed controls before serving.
@@ -601,7 +603,9 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
         try support.require(raised)
         if raised != prior { try raised.persist(root: root, ownerUID: ownerUID) }
     }
-    static func beforePersonalSyncPublication(root: URL, ownerUID: UInt32) throws {
+    static func beforePersonalSyncPublication(
+        root: URL, ownerUID: UInt32, afterPersist: (() throws -> Void)? = nil
+    ) throws {
         guard let prior = try load(root: root, ownerUID: ownerUID),
             prior.capabilities.contains(PersonalWorkgroupProfile.capability)
         else {
@@ -612,12 +616,17 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
             recordFormats: prior.recordFormats,
             capabilities: Set(prior.capabilities + [PersonalSyncValidation.capability]).sorted())
         try CanonicalFormatSupport.personalWorkgroup.require(raised)
-        if raised != prior { try raised.persist(root: root, ownerUID: ownerUID) }
+        if raised != prior {
+            try raised.persist(root: root, ownerUID: ownerUID)
+            try afterPersist?()
+        }
     }
 
     /// Personal writer owns its lifetime lock; peer runtime is still rejected by this profile.
     /// Fence new merge meaning before the first record using it becomes visible.
-    static func beforePersonalMergePublication(root: URL, ownerUID: UInt32) throws {
+    static func beforePersonalMergePublication(
+        root: URL, ownerUID: UInt32, afterPersist: (() throws -> Void)? = nil
+    ) throws {
         guard let prior = try load(root: root, ownerUID: ownerUID),
             prior.capabilities.contains(PersonalWorkgroupProfile.capability)
         else { throw TractandaError("invalidPersonalProfile", "Personal reader fence is required.") }
@@ -626,7 +635,10 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
             recordFormats: prior.recordFormats,
             capabilities: Set(prior.capabilities + [RevisionProvenance.personalMergeProfile]).sorted())
         try CanonicalFormatSupport.personalWorkgroup.require(raised)
-        if raised != prior { try raised.persist(root: root, ownerUID: ownerUID) }
+        if raised != prior {
+            try raised.persist(root: root, ownerUID: ownerUID)
+            try afterPersist?()
+        }
     }
 
     static func beforePayloadPlacementPublication(root: URL, ownerUID: UInt32) throws {
@@ -901,14 +913,14 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
                 offset += written
             }
         }
-        guard fsync(descriptor) == 0 else {
+        guard tractanda_durable_sync(descriptor) == 0 else {
             throw TractandaError(
                 "canonicalCompatibilityWriteFailed", "Cannot synchronize reader requirement.")
         }
         let renamed = temporary.withCString { source in
             Self.fileName.withCString { renameat(directory, source, directory, $0) }
         }
-        guard renamed == 0, fsync(directory) == 0 else {
+        guard renamed == 0, fsync(directory) == 0, tractanda_durable_sync(descriptor) == 0 else {
             throw TractandaError(
                 "canonicalCompatibilityWriteFailed",
                 "Requirement durability is uncertain; no newer record may be published.")

@@ -1,5 +1,6 @@
 import Crypto
 import Foundation
+import TractandaCore
 
 /// The bounded operational configuration that a managed installer may recognize and restore.
 /// It is deliberately separate from canonical items and is only used for an installer-owned bundled
@@ -51,20 +52,29 @@ extension SetupEngine {
             throw SetupError("A bundled embedding service needs a port after the HTTP port.")
         }
         let release = URL(fileURLWithPath: receipt.release)
-        let arguments = [
+        let artifact = try modelArtifact("granite-embedding-311m-multilingual-r2", release: release)
+        var arguments: [String] = []
+        if artifact != nil {
+            arguments = [release.appendingPathComponent("bin/tractanda").path, "models", "run",
+                "--manifest", release.appendingPathComponent("models/manifest.json").path,
+                "--storage", roots.models.path, "--artifact", "granite-embedding-311m-multilingual-r2"]
+            if let adoption = try modelAdoptionDirectory(receipt) { arguments += ["--adopt", adoption] }
+            arguments += ["--"]
+        }
+        arguments += [
             release.appendingPathComponent("bin/tractanda-embeddings").path,
-            "--model", release.appendingPathComponent(payload.modelDirectory).path,
+            "--model", artifact?.directory(in: roots.models).path ?? release.appendingPathComponent(payload.modelDirectory).path,
             "--port", String(receipt.port + 1),
         ]
         let dictionary: [String: Any] = [
             "Label": "ai.tractanda.embeddings." + receipt.instance, "ProgramArguments": arguments,
             "UserName": roots.platform.serviceUser, "RunAtLoad": true,
             "KeepAlive": ["SuccessfulExit": false], "ThrottleInterval": 5, "Umask": 0o077,
-            "StandardOutPath": roots.configuration.appendingPathComponent(
-                "logs/" + receipt.instance + "-embeddings.log"
+            "StandardOutPath": roots.logs.appendingPathComponent(
+                receipt.instance + "-embeddings.log"
             ).path,
-            "StandardErrorPath": roots.configuration.appendingPathComponent(
-                "logs/" + receipt.instance + "-embeddings.log"
+            "StandardErrorPath": roots.logs.appendingPathComponent(
+                receipt.instance + "-embeddings.log"
             ).path,
         ]
         let bytes =
@@ -86,6 +96,8 @@ extension SetupEngine {
     }
     func waitForEmbedding(_ receipt: InstallationReceipt) throws {
         guard let payload = receipt.embedding else { return }
+        // Provisioning is asynchronous. Core install/start never waits for a model or inference.
+        if try modelCatalog(URL(fileURLWithPath: receipt.release)) != nil { return }
         try SetupStartupWait.run(
             observe: {
                 try self.serviceBackend.startupObservation(receipt.instance, role: .embeddings)

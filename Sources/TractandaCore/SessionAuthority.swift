@@ -1,4 +1,5 @@
 import Foundation
+import TractandaClient
 
 public struct AuthenticationSession: Codable, Sendable {
     public let token: String
@@ -15,6 +16,7 @@ public struct AuthenticationProfile: Codable, Sendable {
 
 public actor SessionAuthority {
     private struct Grant: Sendable {
+        let credentialID: String
         let uid: UInt32
         let username: String
         let expires: Date
@@ -23,6 +25,11 @@ public actor SessionAuthority {
     private let authenticator: any PasswordAuthenticating
     private let identity: @Sendable (UInt32) async throws -> AccountIdentity
     private let handle: @Sendable (Data, UInt32) async throws -> Data
+    private let authenticatedHandle:
+        (@Sendable (Data, JMAPHTTPAuthentication, [String: JMAPMethodDefinition]) async throws -> Data)?
+    private var resourceMethods:
+        @Sendable (JMAPHTTPAuthentication) async throws -> [String: JMAPMethodDefinition] = { _ in [:] }
+    private var configuredResources = false
     private let now: @Sendable () -> Date
     private let token: @Sendable () -> String
     private var grants: [String: Grant] = [:]
@@ -38,6 +45,9 @@ public actor SessionAuthority {
         self.authenticator = authenticator
         identity = { try await coordinator.accountIdentity(forUID: $0) }
         handle = { try await coordinator.handle($0, forUID: $1) }
+        authenticatedHandle = {
+            try await coordinator.handleAuthenticatedJMAP($0, authentication: $1, additionalMethods: $2)
+        }
         now = { Date() }
         token = Self.makeToken
     }
@@ -52,6 +62,7 @@ public actor SessionAuthority {
         self.authenticator = authenticator
         self.identity = identity
         self.handle = handle
+        authenticatedHandle = nil
         self.now = now
         self.token = token
     }
@@ -99,9 +110,76 @@ public actor SessionAuthority {
         return account
     }
 
-    public func dispatch(_ request: Data, token: String) async throws -> Data {
+    /// Credential identity is distinct from the user and is never accepted from HTTP input.
+    public func authenticateHTTP(_ token: String) async throws -> JMAPHTTPAuthentication {
         let account = try await authorize(token)
-        return try await handle(request, account.uid)
+        let grant = try active(token)
+        return context(token: token, grant: grant, account: account)
+    }
+    public func authentication(credentialID: String) async throws -> JMAPHTTPAuthentication? {
+        reclaim()
+        guard let (token, grant) = grants.first(where: { $0.value.credentialID == credentialID }) else {
+            return nil
+        }
+        let account = try await inspectHTTP(token, credentialID: credentialID)
+        guard grants[token]?.credentialID == credentialID else { return nil }
+        return context(token: token, grant: grant, account: account)
+    }
+    private func context(token: String, grant: Grant, account: AccountIdentity) -> JMAPHTTPAuthentication {
+        JMAPHTTPAuthentication(
+            credentialID: grant.credentialID, uid: account.uid, principalName: account.name,
+            expiresAt: grant.expires,
+            checkCurrent: { [weak self] in
+                guard let self else {
+                    throw TractandaError("invalidSession", "Session authority is unavailable.")
+                }
+                return try await self.inspectHTTP(token, credentialID: grant.credentialID)
+            }
+        ) { [weak self] in
+            guard let self else {
+                throw TractandaError("invalidSession", "Session authority is unavailable.")
+            }
+            return try await self.revalidateHTTP(token, credentialID: grant.credentialID)
+        }
+    }
+    private func inspectHTTP(_ token: String, credentialID: String) async throws -> AccountIdentity {
+        let grant = try active(token)
+        guard grant.credentialID == credentialID else {
+            throw TractandaError("invalidSession", "Credential was replaced.")
+        }
+        let account = try await identity(grant.uid)
+        guard try active(token).credentialID == credentialID, account.uid == grant.uid,
+            account.name == grant.username
+        else { throw TractandaError("invalidSession", "Authenticated identity changed.") }
+        return account
+    }
+    private func revalidateHTTP(_ token: String, credentialID: String) async throws -> AccountIdentity {
+        guard try active(token).credentialID == credentialID else {
+            throw TractandaError("invalidSession", "Credential was replaced.")
+        }
+        let current = try await authorize(token)
+        guard try active(token).credentialID == credentialID else {
+            throw TractandaError("invalidSession", "Credential was replaced.")
+        }
+        return current
+    }
+
+    /// Host-only startup injection; a request cannot install providers or renew this registry.
+    package func installResourceMethods(
+        _ methods: @escaping @Sendable (JMAPHTTPAuthentication) async throws -> [String: JMAPMethodDefinition]
+    ) throws {
+        guard !configuredResources, grants.isEmpty, !closed else {
+            throw TractandaError("invalidConfiguration", "Session resource registry is already active.")
+        }
+        configuredResources = true
+        resourceMethods = methods
+    }
+    public func dispatch(_ request: Data, token: String) async throws -> Data {
+        let authentication = try await authenticateHTTP(token)
+        if let authenticatedHandle {
+            return try await authenticatedHandle(request, authentication, resourceMethods(authentication))
+        }
+        return try await handle(request, authentication.uid)
     }
 
     public func profile(for token: String?) async -> AuthenticationProfile {
@@ -135,7 +213,9 @@ public actor SessionAuthority {
         let value = token()
         guard grants[value] == nil else { throw TractandaError("sessionBusy", "Session token collision.") }
         let expiry = now().addingTimeInterval(12 * 3600)
-        grants[value] = .init(uid: account.uid, username: account.name, expires: expiry, idle: now())
+        grants[value] = .init(
+            credentialID: Identifier.make(), uid: account.uid, username: account.name, expires: expiry,
+            idle: now())
         return .init(token: value, username: account.name, expiresAt: Timestamp.format(expiry))
     }
     private func active(_ value: String) throws -> Grant {

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Verify native category/template/time behavior, PTY navigation, and canonical-only transfers."""
+from jmap_client import query_arguments
 import argparse
 import importlib.util
 import json
@@ -25,7 +26,7 @@ def snapshot(client, ids):
         'today': {'categoryPath': [ids['when.deadlines.today']]},
         'tomorrow': {'categoryPath': [ids['when.deadlines.tomorrow']]},
     }
-    result = {name: client.call('TractandaItem/query', dict(args, at='2026-09-09T12:00:00Z'))['ids']
+    result = {name: client.call('TractandaItem/query', query_arguments(dict(args, at='2026-09-09T12:00:00Z')))['ids']
               for name, args in queries.items()}
     result['heads'] = {key: wire.revision_id(client.get(identity)) for key, identity in ids.items()}
     return result
@@ -62,7 +63,7 @@ def main():
                 for key in ['who','what','when','where','means','priority','urgency']:
                     assert client.get(ids[key])['fields']['categoryParents']['value'] == []
                 def create(key, fields):
-                    result = client.commit(wire.intent('create', str(uuid.uuid4()), class_id='Item', changes=fields))
+                    result = client.commit_with_revision(wire.intent('create', str(uuid.uuid4()), class_id='Item', changes=fields))
                     ids[key] = wire.item_id(result['revision'])
                 create('call-note', {'subject': wire.text('Talk to Pat about chess')})
                 create('site-note', {'subject': wire.text('Talk to Alex about an inspection'), 'location': wire.text('building')})
@@ -79,7 +80,7 @@ def main():
             result = snapshot(client, ids)
             client.rebuild("verify-category-hierarchy-rebuild")
             assert snapshot(client, ids) == result and wire.manifest(store) == before
-            midnight = client.call('TractandaItem/query', {'categoryPath': [ids['when.deadlines.today']], 'at': '2026-09-10T00:00:00Z'})
+            midnight = client.call('TractandaItem/query', query_arguments({'categoryPath': [ids['when.deadlines.today']], 'at': '2026-09-10T00:00:00Z'}))
             assert midnight['ids'] == [ids['due-note']]
             assert wire.manifest(store) == before
             checks.append('index rebuild and clock advance preserve canonical bytes')
@@ -109,7 +110,7 @@ def main():
                 checks.append('actual terminal tree search, cumulative path, resizing and saved Phone view')
             if args.append_revision:
                 note = client.get(ids['call-note'])
-                client.commit(wire.intent('revise', str(uuid.uuid4()), item=wire.item_id(note),
+                client.commit_with_revision(wire.intent('revise', str(uuid.uuid4()), item=wire.item_id(note),
                     base=wire.revision_id(note), changes={'body': wire.text('Portable category fixture revision')}))
                 checks.append('new platform revision appended without rewriting earlier files')
             exported = {'ids': ids, 'snapshot': snapshot(client, ids), 'manifest': wire.manifest(store)}

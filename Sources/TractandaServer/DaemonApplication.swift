@@ -1,5 +1,6 @@
 import Foundation
 import MCP
+import TractandaClient
 import TractandaCore
 import TractandaMCP
 
@@ -10,11 +11,38 @@ public actor DaemonApplication {
     private let manual: Data
     private let nonce: String
     private let mcp: MCPHTTPService
+    private var blobProvider: (any JMAPBlobHTTPProvider)?
+    func setBlobProvider(_ provider: any JMAPBlobHTTPProvider) { blobProvider = provider }
     private var closed = false
     private var privateEnrollmentControls: [UUID: PeerExchangeControl] = [:]
+    private var modelStatusProvider: (@Sendable () -> [ModelProvisioningStatus])?
+    func setModelStatusProvider(_ provider: @escaping @Sendable () -> [ModelProvisioningStatus]) { modelStatusProvider = provider }
     private var peerStatusProvider: (@Sendable () async throws -> PeerOperatorRuntimeStatus)?
 
     private var personalPeerAdminProvider: (@Sendable (PeerExchangeRequest, UInt32) async throws -> Data)?
+    private var personalEnrollmentProvider: (@Sendable (Data, UInt32, NativePrincipalPin) async throws -> Data)?
+    func setPersonalEnrollmentProvider(_ provider: @escaping @Sendable (Data, UInt32, NativePrincipalPin) async throws -> Data) {
+        personalEnrollmentProvider = provider
+    }
+    func makePrivatePersonalEnrollmentSession(_ request: NativePersonalEnrollment.Begin,
+        forUID uid: UInt32, control: PeerExchangeControl) async throws -> NativePersonalEnrollmentSession {
+        guard !closed, let provider = personalEnrollmentProvider else {
+            throw TractandaError("peerRuntimeUnavailable", "Explicit peer runtime policy is required before native pairing.")
+        }
+        // This actual Unix peer UID is never supplied by the private JMAP body.
+        let authentication = try await coordinator.localJMAPAuthentication(forUID: uid)
+        let principal = NativePrincipalPin(authentication)
+        _ = try await coordinator.personalPeerLocalRequest(.init("identity"), forUID: uid, principal: principal)
+        try control.check()
+        return .init(byteCount: request.byteCount, commit: { data in
+            try control.check()
+            guard data.count == request.byteCount else { throw NativePersonalEnrollment.failure() }
+            _ = try await self.coordinator.personalPeerLocalRequest(.init("identity"), forUID: uid, principal: principal)
+            // Once accepted, the independent daemon job owns its lifetime. Disconnect
+            // cancels delivery, not a successfully persisted join or membership decision.
+            return try await provider(data, uid, principal)
+        }, cancel: { control.cancel() }, control: control)
+    }
     func setPersonalPeerAdminProvider(
         _ provider: @escaping @Sendable (PeerExchangeRequest, UInt32) async throws -> Data
     ) {
@@ -38,75 +66,112 @@ public actor DaemonApplication {
             dispatch: { try await sessions.dispatch($0, token: $1) })
     }
 
-    public func native(_ request: Data, forUID uid: UInt32) async throws -> Data {
+    public func native(_ data: Data, forUID uid: UInt32) async throws -> Data {
         do {
-            if let call = try PersonalPeerAdminCall.parse(request) {
-                do {
-                    guard !closed, let provider = personalPeerAdminProvider else {
+            let request = try JMAPRequest.decode(data)
+            var methods: [String: JMAPMethodDefinition] = [:]
+            if let blobProvider {
+                let authentication = try await coordinator.localJMAPAuthentication(forUID: uid)
+                methods = try await blobProvider.methods(authentication: authentication)
+            }
+            let names = [
+                "TractandaModel/status", PersonalPeerAdminCall.method, PeerOperatorStatus.nativeMethod,
+                "TractandaAuth/createSession", "TractandaPeerEnrollment/step",
+                "TractandaPeerEnrollment/status",
+                "TractandaPeerEnrollment/accept", "TractandaPeerEnrollment/register",
+                "TractandaPeerEnrollment/read",
+            ]
+            for method in names {
+                let readOnly =
+                    method == "TractandaModel/status" || method == PeerOperatorStatus.nativeMethod || method == "TractandaPeerEnrollment/status"
+                    || method == "TractandaPeerEnrollment/read"
+                methods[method] = .init(
+                    capability: ItemService.capability, effect: readOnly ? .readOnly : .mayMutate,
+                    scope: TractandaJMAP.scope(of: method) ?? .account,
+                    maximumResponseBytes: 8 * 1024 * 1024 - 16 * 1024,
+                    requiresMutationAdmission: !readOnly
+                ) { args, context in
+                    await self.nativeControl(
+                        NativeMethodInvocation(
+                            .init(name: method, arguments: args, callID: context.callID), context: context),
+                        forUID: uid)
+                }
+            }
+            return try await coordinator.handle(request, forUID: uid, additionalMethods: methods)
+        } catch let problem as JMAPProblem { return try problem.value.encoded() } catch {
+            return try JSON.encode(
+                error as? TractandaError
+                    ?? TractandaError("serverFail", "Native request could not be completed."))
+        }
+    }
+
+    private func nativeControl(_ invocation: NativeMethodInvocation, forUID uid: UInt32) async
+        -> NativeMethodOutcome
+    {
+        await NativeInvocationScope.$budget.withValue(invocation.replyBudget) {
+            do {
+                let invocation = try invocation.normalizedForDomain()
+                guard !closed else { throw TractandaError("serviceClosed", "Native application is closed.") }
+                if invocation.method == "TractandaModel/status" {
+                    guard invocation.arguments.members?.isEmpty == true else { throw TractandaError("invalidArguments", "Model status takes no arguments.") }
+                    _ = try await coordinator.localJMAPAuthentication(forUID: uid)
+                    let statuses = try JSONSerialization.jsonObject(with: JSONEncoder().encode(modelStatusProvider?() ?? []))
+                    return try .nativeSuccess(invocation.method, ["artifacts": statuses])
+                }
+                if let call = try PeerOperatorStatusNativeCall.parse(invocation) {
+                    do {
+                        _ = try await coordinator.peerOperatorCanonicalStatus(forUID: uid)
+                        let runtime: PeerOperatorRuntimeStatus
+                        do { runtime = try await peerStatusProvider?() ?? .unavailable } catch {
+                            runtime = .unavailable
+                        }
+                        let canonical = try await coordinator.peerOperatorCanonicalStatus(forUID: uid)
+                        guard !closed else {
+                            throw TractandaError("serviceClosed", "Native application is closed.")
+                        }
+                        return try call.response(.init(canonical: canonical, runtime: runtime))
+                    } catch { return call.failure(error) }
+                }
+                let overhead =
+                    try JMAPInvocation(
+                        name: invocation.method, arguments: .object([]), callID: invocation.callID
+                    ).value.encoded().count - 2
+                if let call = try PersonalPeerAdminCall.parse(invocation) {
+                    guard let provider = personalPeerAdminProvider else {
                         throw TractandaError("serviceClosed", "Personal peer administration is unavailable.")
                     }
+                    try invocation.replyBudget?.reserveMutationResponse(
+                        maximumResponseBytes: overhead + 256 * 1024)
+                    invocation.replyBudget?.markDomainOperationBegan()
                     return try call.response(await provider(call.request, uid))
-                } catch { return call.failure(error) }
-            }
-        } catch {
-            return try JSON.encode(
-                TractandaError("invalidArguments", "Invalid personal native administration request."))
+                }
+                if let call = try PeerEnrollmentNativeCall.parse(invocation) {
+                    if invocation.method != "TractandaPeerEnrollment/status"
+                        && invocation.method != "TractandaPeerEnrollment/read"
+                    {
+                        try invocation.replyBudget?.reserveMutationResponse(
+                            maximumResponseBytes: overhead + NativePeerEnrollment.maximumMetadata)
+                        invocation.replyBudget?.markDomainOperationBegan()
+                    }
+                    let data = try await coordinator.nativeEnrollmentCall(call, forUID: uid)
+                    guard !closed else {
+                        throw TractandaError("serviceClosed", "Native application is closed.")
+                    }
+                    return try .nativeSuccess(invocation.method, JSONSerialization.jsonObject(with: data))
+                }
+                if invocation.method == "TractandaAuth/createSession" {
+                    guard invocation.callCount == 1, invocation.arguments.members?.isEmpty == true else {
+                        throw TractandaError(
+                            "invalidArguments", "Use one session-creation invocation with empty arguments.")
+                    }
+                    // Bounded native session schema: random32-byte token, validated OS name, ISO timestamp.
+                    try invocation.replyBudget?.reserveMutationResponse(maximumResponseBytes: overhead + 8192)
+                    invocation.replyBudget?.markDomainOperationBegan()
+                    return try .nativeEncodedSuccess(invocation.method, await sessions.issue(forUID: uid))
+                }
+                return .failure(.init("unknownMethod"), effects: .none)
+            } catch { return .nativeFailure(error, budget: invocation.replyBudget) }
         }
-        do {
-            if let call = try PeerEnrollmentNativeCall.parse(request) {
-                do {
-                    guard !closed else {
-                        throw TractandaError("serviceClosed", "Native application is closed.")
-                    }
-                    let result = try await coordinator.nativeEnrollmentCall(call, forUID: uid)
-                    guard !closed else {
-                        throw TractandaError("serviceClosed", "Native application is closed.")
-                    }
-                    return result
-                } catch { return NativePeerEnrollment.failure(error) }
-            }
-        } catch { return NativePeerEnrollment.failure(error) }
-        do {
-            if let call = try PeerOperatorStatusNativeCall.parse(request) {
-                do {
-                    guard !closed else {
-                        throw TractandaError("serviceClosed", "Native application is closed.")
-                    }
-                    _ = try await coordinator.peerOperatorCanonicalStatus(forUID: uid)
-                    let runtime: PeerOperatorRuntimeStatus
-                    do { runtime = try await peerStatusProvider?() ?? .unavailable } catch {
-                        runtime = .unavailable
-                    }
-                    // Runtime reads suspend. Reauthorize and refresh canonical facts before delivery.
-                    let canonical = try await coordinator.peerOperatorCanonicalStatus(forUID: uid)
-                    guard !closed else {
-                        throw TractandaError("serviceClosed", "Native application is closed.")
-                    }
-                    return try call.response(.init(canonical: canonical, runtime: runtime))
-                } catch { return call.failure(error) }
-            }
-        } catch {
-            return try JSON.encode(
-                TractandaError("invalidArguments", "Use one native peer status call with empty arguments."))
-        }
-        guard let object = try? JSONSerialization.jsonObject(with: request) as? [String: Any],
-            Set(object.keys) == ["using", "methodCalls"],
-            let using = object["using"] as? [String], using == [ItemService.capability],
-            let calls = object["methodCalls"] as? [[Any]], calls.count == 1,
-            calls[0].count == 3, let method = calls[0][0] as? String,
-            method == "TractandaAuth/createSession", let args = calls[0][1] as? [String: Any], args.isEmpty,
-            let callID = calls[0][2] as? String, !callID.isEmpty
-        else { return try await coordinator.handle(request, forUID: uid) }
-        let session = try await sessions.issue(forUID: uid)
-        return try JSONSerialization.data(withJSONObject: [
-            "methodResponses": [
-                [
-                    method,
-                    ["token": session.token, "username": session.username, "expiresAt": session.expiresAt],
-                    callID,
-                ]
-            ]
-        ])
     }
     func makePrivateCredentialSession(
         _ request: NativePeerCredentialRegistration.Begin,
@@ -266,16 +331,18 @@ public actor DaemonApplication {
     }
     private func api(_ request: DaemonHTTPRequest) async -> DaemonHTTPResponse {
         guard request.body.count <= 8 * 1024 * 1024 else {
-            return failure(413, "requestTooLarge", "Request too large")
+            return problem(JMAPProblem("limit", status: 413, limit: "maxSizeRequest"))
         }
         guard jsonContentType(request) else {
-            return failure(415, "unsupportedMediaType", "Content-Type must be application/json")
+            return problem(JMAPProblem("notJSON", status: 415))
         }
         guard let token = bearer(request) else { return failure(401, "unauthorized", "Unauthorized") }
         do {
             return DaemonHTTPResponse(
                 status: 200, headers: security(["Content-Type": "application/json"]),
                 body: try await sessions.dispatch(request.body, token: token))
+        } catch let failure as JMAPProblem {
+            return problem(failure)
         } catch let error as TractandaError {
             return failure(
                 error.code == "serviceClosed" || error.code == "serviceBusy" ? 503 : 401, error.code,
@@ -318,6 +385,11 @@ public actor DaemonApplication {
         DaemonHTTPResponse(
             status: status, headers: security(["Content-Type": "application/json"]),
             body: try JSONEncoder().encode(value))
+    }
+    private func problem(_ failure: JMAPProblem) -> DaemonHTTPResponse {
+        .init(
+            status: failure.status, headers: security(["Content-Type": "application/problem+json"]),
+            body: (try? failure.value.encoded()) ?? Data())
     }
     private func failure(_ status: Int, _ code: String, _ message: String) -> DaemonHTTPResponse {
         DaemonHTTPResponse(

@@ -197,16 +197,27 @@ def make_mixed_fields(index, rng, body_bytes, private_every):
     return fields
 
 
+DiscoveryContext = wire.DiscoveryContext
+query_arguments = wire.query_arguments
+
+
 class MeteredClient:
     def __init__(self, path):
         self.path = path
         self.bytes_sent = 0
         self.bytes_received = 0
         self.lock = threading.Lock()
+        self.context = DiscoveryContext(self.exchange)
 
     def call(self, method, args=None):
-        request = json.dumps({"using": [wire.CAPABILITY],
-            "methodCalls": [[method, args or {}, "scale"]]}, ensure_ascii=False).encode()
+        envelope = self.context.request([[method, args or {}, "scale"]])
+        assert "code" not in envelope, envelope
+        name, result, _ = envelope["methodResponses"][0]
+        assert name == method, envelope
+        return result
+
+    def exchange(self, envelope):
+        request = json.dumps(envelope, ensure_ascii=False).encode()
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
             conn.settimeout(60)
             conn.connect(str(self.path))
@@ -217,11 +228,7 @@ class MeteredClient:
         with self.lock:
             self.bytes_sent += len(request) + 4
             self.bytes_received += len(response) + 4
-        envelope = json.loads(response)
-        assert "code" not in envelope, envelope
-        name, result, _ = envelope["methodResponses"][0]
-        assert name == method, envelope
-        return result
+        return json.loads(response)
 
 
 def rss_kib(pid):
@@ -503,13 +510,13 @@ def main():
                 seed_write_timings.extend([elapsed / len(calls)] * len(calls))
                 for name, value, _ in response:
                     assert name == "TractandaItem/commit", name
-                    ids.append(wire.item_id(value["revision"]))
+                    ids.append(value["itemId"])
                 if first % (batch_size * 16) == 0 and time.perf_counter() - seed_started > args.max_seconds:
                     raise RuntimeError("head seeding exceeded --max-seconds; disposable fixture will be removed")
                 if first % (batch_size * 1024) == 0:
                     check_limits("head seeding")
             check_limits("category and saved-view fixture writes", auxiliary_items)
-            category_revision = boot_client.commit(wire.intent("create", str(uuid.uuid4()), class_id="Item",
+            category_revision = boot_client.commit_with_revision(wire.intent("create", str(uuid.uuid4()), class_id="Item",
                 changes={"subject": wire.text("Scale sender category"), "selection": {
                     "type": "object", "value": {"language": wire.text("tractanda.spotlight.v0"),
                         "expression": wire.text('sender == "person7@example.invalid"')}}}))
@@ -518,7 +525,7 @@ def main():
             if args.preset == "mixed":
                 for name in ("Mixed project", "Mixed status", "Mixed ready"):
                     parent_ids = mixed_category_ids[-1:] if mixed_category_ids else []
-                    result = boot_client.commit(wire.intent("create", str(uuid.uuid4()), class_id="Item",
+                    result = boot_client.commit_with_revision(wire.intent("create", str(uuid.uuid4()), class_id="Item",
                         changes={"subject": wire.text(name),
                             "selection": {"type": "object", "value": {
                                 "language": wire.text("tractanda.spotlight.v0"),
@@ -534,14 +541,14 @@ def main():
                     current = boot_client.get(item_id)
                     assignments = mixed_category_ids[:]
                     overrides = {category: wire.text("include") for category in assignments}
-                    boot_client.commit(wire.intent("revise", str(uuid.uuid4()), item_id,
+                    boot_client.commit_with_revision(wire.intent("revise", str(uuid.uuid4()), item_id,
                         wire.revision_id(current), changes={"categoryOverrides":
                             {"type": "object", "value": overrides}}))
                     accounted_store_bytes += (args.body_bytes + ESTIMATED_REVISION_OVERHEAD
                                               + ESTIMATED_HEAD_INDEX_OVERHEAD) * ESTIMATE_SAFETY_FACTOR
                     writes_since_size_scan += 1
             saved_view_path = mixed_category_ids if mixed_category_ids else [category_id]
-            view_revision = boot_client.commit(wire.intent("create", str(uuid.uuid4()), class_id="Item",
+            view_revision = boot_client.commit_with_revision(wire.intent("create", str(uuid.uuid4()), class_id="Item",
                 changes={"subject": wire.text("Scale sender saved view"), "viewDefinition": {
                     "type": "object", "value": {"language": wire.text("tractanda.spotlight.v0"),
                         "categoryPath": {"type": "list", "value": [{"type": "reference",
@@ -558,7 +565,7 @@ def main():
                     fields = {"body": tagged("text", f"History revision {revision} for logical item {index}. "
                                                 + ("context " * (args.body_bytes // 8)))}
                     started = time.perf_counter()
-                    boot_client.commit(wire.intent("revise", str(uuid.uuid4()), ids[index],
+                    boot_client.commit_with_revision(wire.intent("revise", str(uuid.uuid4()), ids[index],
                         wire.revision_id(current), changes=fields))
                     accounted_store_bytes += (args.body_bytes + ESTIMATED_REVISION_OVERHEAD
                                               + ESTIMATED_HEAD_INDEX_OVERHEAD) * ESTIMATE_SAFETY_FACTOR
@@ -611,12 +618,12 @@ def main():
                                          else sum(1 for index in range(count) if index % 97 == 7))
             view_args = {"viewID": view_id, "position": 0, "limit": args.page_size}
             first_view_started = time.perf_counter()
-            first_view_result = client.call("TractandaItem/query", view_args)
+            first_view_result = client.call("TractandaItem/query", query_arguments(view_args))
             first_saved_view_seconds = time.perf_counter() - first_view_started
             assert first_view_result["total"] == expected_saved_view_total, (
                 first_view_result["total"], expected_saved_view_total)
             warm_view_started = time.perf_counter()
-            warm_view_result = client.call("TractandaItem/query", view_args)
+            warm_view_result = client.call("TractandaItem/query", query_arguments(view_args))
             warm_saved_view_seconds = time.perf_counter() - warm_view_started
             assert warm_view_result["ids"] == first_view_result["ids"]
             mixed_query_evidence = []
@@ -630,8 +637,8 @@ def main():
                 ]
                 for name, expression, expected in cases:
                     started = time.perf_counter()
-                    result = client.call("TractandaItem/query", {"expression": expression,
-                                                                     "position": 0, "limit": 1})
+                    result = client.call("TractandaItem/query", query_arguments({"expression": expression,
+                                                                     "position": 0, "limit": 1}))
                     elapsed = time.perf_counter() - started
                     assert result["total"] == expected, (name, result["total"], expected)
                     mixed_query_evidence.append({"shape": name, "expression": expression,
@@ -640,7 +647,7 @@ def main():
             query_args = {"limit": args.page_size, "position": 0}
             for _ in range(args.read_rounds):
                 started = time.perf_counter()
-                result = client.call("TractandaItem/query", query_args)
+                result = client.call("TractandaItem/query", query_arguments(query_args))
                 pages.append(time.perf_counter() - started)
                 assert len(result["ids"]) == min(args.page_size, count)
             def read_loop(worker):
@@ -649,7 +656,7 @@ def main():
                 for turn in range(args.read_rounds):
                     pos = ((worker * args.read_rounds + turn) * args.page_size) % max(count, 1)
                     start = time.perf_counter()
-                    local.call("TractandaItem/query", {"limit": args.page_size, "position": pos})
+                    local.call("TractandaItem/query", query_arguments({"limit": args.page_size, "position": pos}))
                     measurements.append(time.perf_counter() - start)
                 return measurements, local.bytes_sent, local.bytes_received
             concurrent_started = time.perf_counter()

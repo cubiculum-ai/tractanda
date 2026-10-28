@@ -130,15 +130,11 @@ struct ItemSearchLoader: Sendable {
         let timeZone: String
     }
     private struct ResultsRequest: Encodable, Sendable { let queryID: String }
-    private struct GetRequest: Encodable, Sendable { let ids: [String] }
-    private struct GetResponse: Decodable, Sendable {
-        let list: [TractandaCore.Revision]
-        let notFound: [String]?
-        let unresolved: [TractandaCore.ItemUnresolvedState]?
-        let state: String?
-        let remainingIDs: [String]?
-        let oversizedIDs: [String]?
+    private struct GetRequest: Encodable, Sendable {
+        let ids: [String]
+        let maxBytes = 524_288
     }
+    typealias GetResponse = FullItemRead
     private let mailbox = Mailbox()
     private let client: TractandaClient.ItemClient
 
@@ -193,13 +189,13 @@ struct ItemSearchLoader: Sendable {
         while !remaining.isEmpty, attempts < Self.limit {
             attempts += 1
             let current = try await client.call(
-                "TractandaItem/get", arguments: GetRequest(ids: remaining),
+                "TractandaItem/getBounded", arguments: GetRequest(ids: remaining),
                 returning: GetResponse.self)
             try Task.checkCancellation()
             guard Date() < expiry else {
                 throw TractandaCore.TractandaError("notFound", "Semantic query expired.")
             }
-            if let prior = state, let next = current.state, prior != next {
+            if let prior = state, prior != current.state {
                 throw TractandaCore.TractandaError(
                     "stateChanged", "Items changed while fetching semantic results. Refresh search.")
             }
@@ -208,7 +204,7 @@ struct ItemSearchLoader: Sendable {
             let remainingIDs = current.remainingIDs ?? []
             let oversizedIDs = current.oversizedIDs ?? []
             let classified =
-                current.list.map(\.itemID) + (current.notFound ?? [])
+                current.list.map(\.itemID) + current.notFound
                 + unresolved.map(\.itemID) + remainingIDs + oversizedIDs
             guard Set(classified).count == classified.count, Set(classified) == Set(remaining) else {
                 throw TractandaCore.TractandaError(

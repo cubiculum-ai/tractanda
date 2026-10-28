@@ -53,6 +53,7 @@ final class StagingByteQuota: @unchecked Sendable {
         }
         for prefix in [
             ["attachments", ".staging"], ["attachments", ".uploads"], ["documents", ".staging"], ["copies"],
+            ["jmap-blobs"],
             ["document-jobs"], ["authority", "payloads"], ["authority", "payload-work"],
             ["authority", "document-transfers"],
         ] {
@@ -454,6 +455,7 @@ final class StagingByteQuota: @unchecked Sendable {
         for key in copyGroups.keys { copyGroups[key]?.remove(old) }
     }
     static func group(_ path: [String]) -> String? {
+        if path.count >= 2, path[0] == "jmap-blobs" { return path.prefix(2).joined(separator: "/") }
         if path.count >= 3, path[0] == "attachments", [".staging", ".uploads"].contains(path[1]) {
             return path.prefix(3).joined(separator: "/")
         }

@@ -174,7 +174,7 @@ final class SemanticServiceTests: XCTestCase {
         func append(_ generation: Vec1Generation, chunks: [SemanticChunk], vectors: [[Double]]) throws {}
         func publish(_ generation: Vec1Generation, count: Int64) throws {}
         func discard(_ generation: Vec1Generation) throws {}
-        func prune(profileID: String, current: (String) throws -> Bool) throws {}
+        func prunePage(profileID: String, after: String?, current: (String) throws -> Bool) throws -> String? { nil }
         func cleanup() throws {}
         func search(
             vector: [Double], profileID: String, limit: Int,
@@ -215,9 +215,9 @@ final class SemanticServiceTests: XCTestCase {
             try backing.publish(generation, count: count)
         }
         func discard(_ generation: Vec1Generation) throws { try backing.discard(generation) }
-        func prune(profileID: String, current: (String) throws -> Bool) throws {
+        func prunePage(profileID: String, after: String?, current: (String) throws -> Bool) throws -> String? {
             pruneCalls += 1
-            try backing.prune(profileID: profileID, current: current)
+            return try backing.prunePage(profileID: profileID, after: after, current: current)
         }
         func cleanup() throws { try backing.cleanup() }
         func search(
@@ -267,7 +267,10 @@ final class SemanticServiceTests: XCTestCase {
             }
             _ = try service.configure(config, expectedConfigurationID: nil)
             service.maintain()
+            XCTAssertEqual(storage.identityCalls, 32)
             XCTAssertEqual(storage.pruneCalls, 1)
+            for _ in 0..<3 { service.maintain() }
+            XCTAssertEqual(storage.pruneCalls, 4)
             XCTAssertEqual(storage.identityCalls, 100)
 
             storage.resetCounts()
@@ -284,8 +287,8 @@ final class SemanticServiceTests: XCTestCase {
                     changes: ["dueAt": .date("2030-01-01T00:00:00Z")], operationID: "metadata-head")
             )
             .revision
-            service.maintain()
-            XCTAssertEqual(storage.pruneCalls, 1)
+            for _ in 0..<4 { service.maintain() }
+            XCTAssertEqual(storage.pruneCalls, 4)
             XCTAssertEqual(storage.identityCalls, 100)
             XCTAssertEqual(storage.rebindCalls, 1)
             XCTAssertEqual(storage.replaceCalls, 0)
@@ -338,6 +341,91 @@ final class SemanticServiceTests: XCTestCase {
             let status = try store.withAccess(forUID: store.ownerUID) { try service.status() }
             XCTAssertEqual(status["indexableItems"] as? Int, 1)
             XCTAssertEqual(status["indexedItems"] as? Int, 1)
+        }
+    }
+
+    func testContinuousWritesDoNotStarveLaterHeadsAndEarlierChangesAreRevisited() throws {
+        try fixture { store, _ in
+            let storage = CountingStorage()
+            let service = SemanticService(store: store, storage: storage) { _, inputs, _ in
+                inputs.map { _ in [1, 0] }
+            }
+            let config = configuration(operationID: "round-robin")
+            let profile = try SemanticSource.profileID(config)
+            var revisions: [Revision] = []
+            for index in 0..<100 {
+                revisions.append(try note(
+                    store, subject: "Item \(index)", body: "body \(index)", operation: "round-item-\(index)"))
+            }
+            revisions.sort { $0.itemID < $1.itemID }
+            let late = try XCTUnwrap(revisions.last)
+            for revision in revisions.dropLast() {
+                try seed(storage, store: store, revision: revision, configuration: config)
+            }
+            _ = try service.configure(config, expectedConfigurationID: nil)
+            var early = try XCTUnwrap(revisions.first)
+            for index in 0..<20 {
+                early = try store.commit(CommitRequest(
+                    action: .revise, itemID: early.itemID, expectedRevisionID: early.revisionID,
+                    changes: ["dueAt": .date(index.isMultiple(of: 2)
+                        ? "2030-01-01T00:00:00Z" : "2031-01-01T00:00:00Z")],
+                    operationID: "round-write-\(index)")).revision
+                service.maintain()
+                usleep(10_000)
+                if try storage.identity(itemID: late.itemID, profileID: profile) != nil { break }
+            }
+            XCTAssertNotNil(try storage.identity(itemID: late.itemID, profileID: profile))
+            drain(service)
+            XCTAssertEqual(try storage.identity(itemID: early.itemID, profileID: profile)?.revisionID,
+                early.revisionID)
+        }
+    }
+
+    func testUnavailableProviderRecoversLatestHeadsAfterServiceRestart() throws {
+        try fixture { store, _ in
+            let gate = EmbeddingGate()
+            let calls = Counter()
+            let provider: @Sendable (SemanticConfiguration, [String], Bool) async throws -> [[Double]] = {
+                _, inputs, _ in
+                calls.increment()
+                guard gate.isReleased() else { throw TractandaError("semanticProvider", "offline") }
+                return inputs.map { _ in [1, 0] }
+            }
+            let config = configuration(operationID: "catchup-restart")
+            let first = try note(store, subject: "old", body: "old content", operation: "catchup-first")
+            let deleted = try note(store, subject: "delete", body: "delete content", operation: "catchup-delete")
+            let service = SemanticService(store: store, retryDelayForTesting: 0.05, embed: provider)
+            _ = try service.configure(config, expectedConfigurationID: nil)
+            service.maintain()
+            for _ in 0..<30 {
+                usleep(5_000)
+                service.maintain()
+                if calls.read() > 0 && !service.hasPendingDocumentWork { break }
+            }
+            XCTAssertFalse(service.hasPendingDocumentWork)
+            let failedCalls = calls.read()
+            for _ in 0..<5 { service.maintain() }
+            XCTAssertEqual(calls.read(), failedCalls)
+            _ = try store.commit(CommitRequest(
+                action: .revise, itemID: first.itemID, expectedRevisionID: first.revisionID,
+                changes: ["body": .text("latest content")], operationID: "catchup-revise"))
+            _ = try store.commit(CommitRequest(
+                action: .revise, itemID: deleted.itemID, expectedRevisionID: deleted.revisionID,
+                changes: ["isDeleted": .boolean(true)], operationID: "catchup-deleted"))
+            let restarted = SemanticService(store: store, retryDelayForTesting: 0.05, embed: provider)
+            restarted.maintain()
+            let pending = try store.withAccess(forUID: store.ownerUID) { try restarted.status() }
+            XCTAssertEqual(pending["indexableItems"] as? Int, 1)
+            XCTAssertEqual(pending["pendingItems"] as? Int, 1)
+            gate.release()
+            for _ in 0..<100 {
+                restarted.maintain()
+                usleep(10_000)
+            }
+            let ready = try store.withAccess(forUID: store.ownerUID) { try restarted.status() }
+            XCTAssertEqual(ready["indexedItems"] as? Int, 1)
+            XCTAssertEqual(ready["pendingItems"] as? Int, 0)
+            XCTAssertEqual(ready["coverage"] as? String, "complete")
         }
     }
 
@@ -763,6 +851,7 @@ final class SemanticServiceTests: XCTestCase {
             XCTAssertEqual(counter.read(), 0)
             let status = try store.withAccess(forUID: store.ownerUID) { try service.status() }
             XCTAssertEqual(status["indexableItems"] as? Int, 0)
+            XCTAssertEqual(status["pendingItems"] as? Int, 0)
         }
     }
 
@@ -868,10 +957,14 @@ final class SemanticServiceTests: XCTestCase {
             try store.withAccess(forUID: store.ownerUID) {
                 _ = try service.configure(configuration(), expectedConfigurationID: nil)
             }
+            let bobPending = try store.withAccess(forUID: accounts.bob) { try service.status() }
+            XCTAssertEqual(bobPending["indexableItems"] as? Int, 1)
+            XCTAssertEqual(bobPending["pendingItems"] as? Int, 1)
             drain(service)
             let bobStatus = try store.withAccess(forUID: accounts.bob) { try service.status() }
             XCTAssertEqual(bobStatus["indexableItems"] as? Int, 1)
             XCTAssertEqual(bobStatus["indexedItems"] as? Int, 1)
+            XCTAssertEqual(bobStatus["pendingItems"] as? Int, 0)
             let queryID = try store.withAccess(forUID: accounts.bob) {
                 try service.search(
                     text: "private", expression: nil, categoryPath: [], excludedCategoryIDs: [], viewID: nil,

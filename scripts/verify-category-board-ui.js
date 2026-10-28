@@ -7,9 +7,18 @@ async (page) => {
   await page.goto('__URL__#token='+token);
   await page.locator('.card-title').first().waitFor();
   const origin=await page.evaluate(()=>location.origin);
+  let rpcSession=null;
   async function rpc(method,args) {
-    const response=await page.request.post(origin+'/api',{headers:{Authorization:'Bearer '+token,'Content-Type':'application/json',Origin:origin},data:{using:['https://tractanda.ai/ns/local-prototype/4'],methodCalls:[[method,args,'ui']]}});
-    const data=await response.json();const result=data.methodResponses[0];if(result[0]!==method)throw new Error(JSON.stringify(result));return result[1];
+    if(method==='TractandaItem/query') {
+      const {expression,text,categoryPath,excludedCategoryIDs,viewID,sectionID,at,timeZone,sort,...paging}=args;
+      args={filter:Object.fromEntries(Object.entries({expression,text,categoryPath,excludedCategoryIDs,viewID,sectionID,at,timeZone}).filter(([,value])=>value!==undefined)),...paging,calculateTotal:true,...(sort?{sort:sort.map(entry=>entry.categoryRootID?{property:'categoryMembership',categoryRootId:entry.categoryRootID,isAscending:entry.isAscending??true}:entry)}:{})};
+    }
+    const scoped=!['Core/echo','TractandaSession/get','TractandaAuth/createSession'].includes(method);
+    if(scoped&&!rpcSession)rpcSession=await rpc('TractandaSession/get',{});
+    if(scoped&&!Object.hasOwn(args,'accountId')&&!Object.hasOwn(args,'#accountId'))
+      args={...args,accountId:rpcSession.primaryAccounts['https://tractanda.ai/ns/jmap/1']};
+    const response=await page.request.post(origin+'/api',{headers:{Authorization:'Bearer '+token,'Content-Type':'application/json',Origin:origin},data:{using:['https://tractanda.ai/ns/jmap/1'],methodCalls:[[method,args,'ui']]}});
+    const data=await response.json();if(rpcSession&&data.sessionState&&data.sessionState!==rpcSession.state)rpcSession=null;const result=data.methodResponses[0];if(result[0]!==method)throw new Error(JSON.stringify(result));return result[1];
   }
   async function item(id){return (await rpc('TractandaItem/get',{ids:[id]})).list[0];}
   async function history(id){return (await rpc('TractandaItem/history',{itemID:id})).total;}

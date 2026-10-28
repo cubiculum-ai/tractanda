@@ -196,9 +196,9 @@ class Validation:
         self.command_timeout_seconds = min(command_timeout_seconds, timeout_seconds)
         self.deadline = time.monotonic() + timeout_seconds
         self.name = 'd5-' + context['runID']
-        self.store = Path('/var/lib/tractanda/stores') / self.name
-        self.index = Path('/var/cache/tractanda/indexes') / self.name
-        self.private = Path('/etc/tractanda/peer-runtime') / (self.name + '.json')
+        self.store = Path('/opt/tractanda/var/lib/tractanda/Stores') / self.name
+        self.index = Path('/opt/tractanda/var/lib/tractanda/StoreIndices') / self.name
+        self.private = Path('/opt/tractanda/etc/tractanda/peer-runtime') / (self.name + '.json')
         self.units = ['tractanda-' + role + '-' + self.name + '.service'
                       for role in ('server', 'embeddings', 'authentication')]
         self.result = {'schema': 'tractanda.package-validation-result.v1', 'status': 'RUNNING', 'commands': [], 'cases': {},
@@ -350,7 +350,7 @@ def execute(args):
     require((args.older_refusal is None) == (args.older_manifest is None), 'Older refusal needs its actual hash-bound bundle manifest')
     require(all(p['receipt']['arch'] == arch for p in packages), 'Package/native architecture mismatch')
     require(all(not path.exists() and not path.is_symlink() for path in
-                (PAYLOAD, Path('/etc/tractanda/receipts'), Path('/usr/sbin/policy-rc.d'))),
+                (PAYLOAD, Path('/opt/tractanda/var/lib/tractanda/Installation/receipts'), Path('/usr/sbin/policy-rc.d'))),
             'Use a fresh isolated image without another installation/policy fixture or dangling link')
     pwd.getpwnam('daemon'); pwd.getpwnam(context['owner'])  # Never provision an account.
     work = Path('/var/tmp/tractanda-package-validation-' + context['runID']); work.mkdir(mode=0o700)

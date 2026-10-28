@@ -6,8 +6,15 @@ import Testing
 private actor ScriptedTransport: ItemTransport {
     var responses: [Data]
     var requests: [Data] = []
+    var discoveryRequests: [Data] = []
     init(_ responses: [Data]) { self.responses = responses }
     func send(_ request: Data) async throws -> Data {
+        let envelope = try JSONSerialization.jsonObject(with: request) as! [String: Any]
+        let call = (envelope["methodCalls"] as! [[Any]])[0]
+        if call[0] as? String == "TractandaSession/get" {
+            discoveryRequests.append(request)
+            return try discoveryReply(callID: call[2] as! String)
+        }
         requests.append(request)
         return responses.removeFirst()
     }
@@ -39,7 +46,7 @@ func revision(_ subject: String, itemID: String? = nil) throws -> Revision {
     let response = ItemGetResult(
         list: [resolved], notFound: [missingID], unresolved: [unresolved], state: "store-state",
         remainingIDs: [remainingID], oversizedIDs: [oversizedID])
-    let transport = try ScriptedTransport([reply("TractandaItem/get", object(response))])
+    let transport = try ScriptedTransport([reply("TractandaItem/getBounded", object(response))])
 
     let result = try await ItemClient(transport: transport).items(
         ids: [resolved.itemID, unresolvedID, missingID, remainingID, oversizedID])
@@ -60,9 +67,9 @@ func revision(_ subject: String, itemID: String? = nil) throws -> Revision {
         ItemGetResult(list: [unrequested], notFound: [], state: "state"),
     ]
     for result in malformed {
-        let transport = try ScriptedTransport([reply("TractandaItem/get", object(result))])
+        let transport = try ScriptedTransport([reply("TractandaItem/getBounded", object(result))])
         await #expect(
-            throws: TractandaError("protocolError", "Get result omitted or repeated requested IDs.")
+            throws: TractandaError("protocolError", "Read response omitted or repeated requested IDs.")
         ) {
             try await ItemClient(transport: transport).revision(for: item.itemID)
         }
@@ -75,14 +82,14 @@ func revision(_ subject: String, itemID: String? = nil) throws -> Revision {
     let typedGet = ItemGetResult(
         list: [demoted], notFound: [], state: "store-state",
         historicalDispositions: dispositions)
-    let getTransport = try ScriptedTransport([reply("TractandaItem/get", object(typedGet))])
+    let getTransport = try ScriptedTransport([reply("TractandaItem/getBounded", object(typedGet))])
     let get = try await ItemClient(transport: getTransport).items(ids: [demoted.itemID])
     #expect(get.list == [demoted])
     #expect(get.historicalDispositions == dispositions)
 
     let legacyGetTransport = try ScriptedTransport([
         reply(
-            "TractandaItem/get",
+            "TractandaItem/getBounded",
             [
                 "list": [try object(demoted)], "notFound": [], "state": "store-state",
             ])
@@ -92,14 +99,14 @@ func revision(_ subject: String, itemID: String? = nil) throws -> Revision {
 
     let invalidGetTransport = try ScriptedTransport([
         reply(
-            "TractandaItem/get",
+            "TractandaItem/getBounded",
             [
                 "list": [try object(demoted)], "notFound": [], "state": "store-state",
                 "historicalDispositions": [Identifier.make(): "demoted"],
             ])
     ])
     await #expect(
-        throws: TractandaError("protocolError", "The server returned an invalid native response.")
+        throws: TractandaError("protocolError", "Get disposition map names a revision not returned.")
     ) {
         try await ItemClient(transport: invalidGetTransport).items(ids: [demoted.itemID])
     }
@@ -137,9 +144,9 @@ func revision(_ subject: String, itemID: String? = nil) throws -> Revision {
     let exactRevision = try await ItemClient(transport: exactRevisionTransport).call(
         "TractandaRevision/get",
         arguments: ["itemID": demoted.itemID, "revisionID": demoted.revisionID],
-        returning: RevisionGetResult.self)
-    #expect(exactRevision.revision == demoted)
-    #expect(exactRevision.historicalDispositions == dispositions)
+        returning: JMAPRevisionGetResponse.self)
+    #expect(try exactRevision.list[0].canonicalRevision() == demoted)
+    #expect(exactRevision.list.count == 1)
 
     let invalidDispositionTransport = try ScriptedTransport([
         reply(
@@ -150,7 +157,7 @@ func revision(_ subject: String, itemID: String? = nil) throws -> Revision {
             ])
     ])
     await #expect(
-        throws: TractandaError("protocolError", "The server returned an invalid native response.")
+        throws: TractandaError("protocolError", "History page contains an invalid disposition map.")
     ) {
         try await ItemClient(transport: invalidDispositionTransport).history(itemID: demoted.itemID)
     }
@@ -167,7 +174,7 @@ func revision(_ subject: String, itemID: String? = nil) throws -> Revision {
             [
                 "ids": [historical.itemID], "position": 0, "total": 1, "queryState": "query-token",
             ]),
-        reply("TractandaItem/get", object(result)),
+        reply("TractandaItem/getBounded", object(result)),
     ])
     let page = try await ItemClient(transport: transport).page(matching: ItemQuery(limit: 1))
     #expect(page.items == [historical])
@@ -179,7 +186,7 @@ func revision(_ subject: String, itemID: String? = nil) throws -> Revision {
     let unresolved = ItemUnresolvedState(
         itemID: itemID, status: .conflicted, stateToken: "token")
     let result = ItemGetResult(list: [], notFound: [], unresolved: [unresolved], state: "state")
-    let transport = try ScriptedTransport([reply("TractandaItem/get", object(result))])
+    let transport = try ScriptedTransport([reply("TractandaItem/getBounded", object(result))])
     do {
         _ = try await ItemClient(transport: transport).revision(for: itemID)
         Issue.record("Expected unresolved item error")
@@ -201,12 +208,12 @@ func revision(_ subject: String, itemID: String? = nil) throws -> Revision {
                 "completeness": "unresolvedItems", "conflictsAvailable": true,
             ]),
         reply(
-            "TractandaItem/get",
+            "TractandaItem/getBounded",
             object(
                 ItemGetResult(
                     list: resolved, notFound: [], unresolved: [unresolved], state: "query-token"))),
         reply(
-            "TractandaItem/get",
+            "TractandaItem/getBounded",
             object(
                 ItemGetResult(
                     list: [], notFound: [ids[64]], state: "query-token"))),
@@ -252,7 +259,7 @@ func revision(_ subject: String, itemID: String? = nil) throws -> Revision {
             representativeRevisionID: resolvedRevision.revisionID, detailsComplete: true))
     let transport = try ScriptedTransport([
         reply("TractandaItem/state", object(stateResult)),
-        reply("TractandaItem/resolveConflict", object(commitResult)),
+        reply("TractandaItem/resolveConflict", object(try MutationReceipt(commitResult))),
     ])
     let client = ItemClient(transport: transport)
     #expect(try await client.itemStates(ids: [itemID]) == stateResult)
@@ -260,8 +267,8 @@ func revision(_ subject: String, itemID: String? = nil) throws -> Revision {
         itemID: itemID, expectedStateToken: "state-token", reviewedFrontier: state.frontier!,
         changes: ["subject": .text("chosen")], unset: [], operationID: "resolve-op")
     let result = try await client.resolveConflict(request)
-    #expect(result.revision == resolvedRevision)
-    #expect(result.itemState?.stateToken == "new-state")
+    #expect(result.revisionID == resolvedRevision.revisionID)
+    #expect(result.itemID == resolvedRevision.itemID)
     let requests = await transport.requests
     let envelope = try JSONSerialization.jsonObject(with: requests[1]) as! [String: Any]
     let calls = envelope["methodCalls"] as! [[Any]]
@@ -302,7 +309,9 @@ func revision(_ subject: String, itemID: String? = nil) throws -> Revision {
 }
 
 func reply(_ method: String, _ value: Any, tag: String = "client") throws -> Data {
-    try JSONSerialization.data(withJSONObject: ["methodResponses": [[method, value, tag]]])
+    try JSONSerialization.data(withJSONObject: [
+        "methodResponses": [[method, try fixtureReadPayload(method, value), tag]]
+    ])
 }
 func object(_ value: some Encodable) throws -> Any {
     try JSONSerialization.jsonObject(with: JSON.encode(value))
@@ -317,7 +326,9 @@ func object(_ value: some Encodable) throws -> Any {
             [
                 "ids": [first.itemID, second.itemID], "position": 0, "total": 3, "queryState": "state-1",
             ]),
-        reply("TractandaItem/get", ["list": object([second, first]), "notFound": [], "state": "state-1"]),
+        reply(
+            "TractandaItem/getBounded",
+            ["list": object([second, first]), "notFound": [], "state": "state-1"]),
     ])
     let page = try await ItemClient(transport: transport).page(matching: ItemQuery(limit: 2))
     #expect(page.items == [first, second])
@@ -334,7 +345,7 @@ func object(_ value: some Encodable) throws -> Any {
             [
                 "ids": [item.itemID], "position": 0, "total": 1, "queryState": "before",
             ]),
-        reply("TractandaItem/get", ["list": [], "notFound": [item.itemID], "state": "after"]),
+        reply("TractandaItem/getBounded", ["list": [], "notFound": [item.itemID], "state": "after"]),
     ])
     await #expect(throws: TractandaError("stateChanged", "Items changed while loading; refresh the view.")) {
         try await ItemClient(transport: transport).page(matching: ItemQuery())
@@ -533,9 +544,9 @@ func object(_ value: some Encodable) throws -> Any {
     let result = CommitResult(revision: copied, wasReplayed: false, isIndexReady: true, warnings: [])
     let transport = try ScriptedTransport([
         reply("error", ["type": "attachmentCopyPending", "description": "Copying", "retryable": true]),
-        reply("TractandaItem/commit", object(result)),
+        reply("TractandaItem/commit", object(try MutationReceipt(result))),
     ])
-    #expect(try await ItemClient(transport: transport).commit(request).revision == copied)
+    #expect(try await ItemClient(transport: transport).commit(request).revisionID == copied.revisionID)
     let requests = await transport.requests
     #expect(requests.count == 2)
     #expect(requests[0] == requests[1])
@@ -561,7 +572,7 @@ func object(_ value: some Encodable) throws -> Any {
     let sent = await transport.requests
     let begin = try JSONSerialization.jsonObject(with: sent[0]) as! [String: Any]
     let args = (begin["methodCalls"] as! [[Any]])[0][1] as! [String: String]
-    #expect(args == ["operationID": "rebuild-intent"])
+    #expect(args == ["operationID": "rebuild-intent", "accountId": "00112233-4455-6677-8899-aabbccddeeff"])
 }
 
 @Test func documentJobsUseCompactLifecycleAndPreserveInt64PageOrdinals() async throws {
@@ -621,4 +632,53 @@ func object(_ value: some Encodable) throws -> Any {
         expectedRevisionID: id, state: "completed", reasonCode: nil, pageCount: 100, acceptedPages: 1,
         coverage: try DocumentCoverage(converted: 1), discarded: false, committed: nil)
     #expect(throws: (any Error).self) { try malformed.validate() }
+}
+
+@Test func acknowledgedRevisionReadPinsTheImmutableID() async throws {
+    let saved = try revision("Saved")
+    let transport = try ScriptedTransport([
+        reply("TractandaRevision/get", ["revision": object(saved)])
+    ])
+    let loaded = try await ItemClient(transport: transport).revision(
+        itemID: saved.itemID, revisionID: saved.revisionID)
+    #expect(loaded == saved)
+    let request = try JSONSerialization.jsonObject(with: await transport.requests[0]) as! [String: Any]
+    let args = (request["methodCalls"] as! [[Any]])[0][1] as! [String: Any]
+    #expect(args["ids"] as? [String] == [saved.revisionID])
+}
+
+@Test func oldFullCommitWireResultIsRejected() async throws {
+    let saved = try revision("Old wire")
+    let transport = try ScriptedTransport([
+        reply(
+            "TractandaItem/commit",
+            object(
+                CommitResult(
+                    revision: saved, wasReplayed: false, isIndexReady: true, warnings: [])))
+    ])
+    do {
+        _ = try await ItemClient(transport: transport).commit(
+            CommitRequest(classID: "Item", operationID: "fixture"))
+        Issue.record("Old full wire DTO was accepted")
+    } catch { #expect(error is TractandaError) }
+}
+
+@Test func requestProblemsAreTranslatedAcrossBothNativeClients() async throws {
+    for code in ["notJSON", "notRequest", "unknownCapability", "limit"] {
+        let problem = try JSONSerialization.data(withJSONObject: [
+            "type": "urn:ietf:params:jmap:error:" + code, "status": 400,
+        ])
+        let transport = ScriptedTransport([problem])
+        do {
+            let _: [String: String] = try await ItemClient(transport: transport).call(
+                "Core/echo", arguments: ["value": "echo"], returning: [String: String].self)
+            Issue.record("Request problem accepted")
+        } catch let error as TractandaError { #expect(error.code == code) }
+        do {
+            _ = try NativeMethodResult.unwrap(problem, method: "Core/echo")
+            Issue.record("Native unwrapping accepted a request problem")
+        } catch let error as TractandaError { #expect(error.code == code) }
+        let request = try JSONSerialization.jsonObject(with: await transport.requests[0]) as! [String: Any]
+        #expect((request["using"] as? [String])?.contains("urn:ietf:params:jmap:core") == true)
+    }
 }

@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import platform
+import stat
 import copy
 from pathlib import Path
 import subprocess
@@ -12,6 +13,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,9 +49,10 @@ class HookHarness:
         self.hook_dir = self.root / "rendered-hooks"
         self.hook_dir.mkdir()
         self._write_mock("mock-mktemp", """
-import os, sys
-path = os.environ["MOCK_DESCRIPTOR"]
-open(path, "wb").close()
+import os, sys, tempfile
+pattern = sys.argv[1]
+directory, leaf = os.path.split(pattern)
+path = tempfile.mkstemp(prefix=leaf.split("XXXXXX", 1)[0], dir=directory)[1]
 print(path)
 """)
         self._write_mock("mock-cat", """
@@ -71,8 +74,9 @@ sys.exit(int(os.environ.get("MOCK_SYSTEMCTL_EXIT", "0")))
 """)
         self._write_mock("mock-python", """
 import json, os, sys
+arguments = sys.argv[1:]
 with open(os.environ["MOCK_LOG"], "a", encoding="utf-8") as f:
-    f.write(json.dumps({"program":"python-hook", "args":sys.argv[1:]}) + "\\n")
+    f.write(json.dumps({"program":"python-hook", "args":arguments}) + "\\n")
 sys.exit(int(os.environ.get("MOCK_PYTHON_EXIT", "0")))
 """)
         self.env = os.environ.copy()
@@ -181,18 +185,27 @@ class PackageHookTests(unittest.TestCase):
             pre = self.harness.run("tractanda.preinst.in", *args)
             self.assertEqual(pre.returncode, 0, (args, pre.stderr))
             records = self.harness.records()
-            self.assertEqual(records[0]["args"], ["-I", "-", "verify-helper", str(self.harness.helper)])
+            self.assertEqual(records[0]["args"][:4], ["-I", "-", "preinst-helper", str(self.harness.helper)])
+            self.assertTrue(records[0]["args"][4].startswith(str(self.harness.root / "descriptor-")))
+            self.assertEqual(len(records[0]["args"]), 5)
             self.assertEqual(records[1]["args"][:2], ["--package-lifecycle", "preinst"])
-            self.assertEqual(records[1]["descriptor"], DESCRIPTOR + "\n")
+            self.assertEqual(records[1]["args"][3], records[0]["args"][4])
+            self.assertEqual(json.loads(records[1]["descriptor"]), json.loads(DESCRIPTOR))
 
         for args in (("configure",), ("configure", "")):
             self.harness.clear()
             post = self.harness.run("tractanda.postinst.in", *args)
             self.assertEqual(post.returncode, 0, (args, post.stderr))
             records = self.harness.records()
-            self.assertEqual(records[0]["args"], ["-I", "-", "verify-helper", str(self.harness.helper)])
+            self.assertEqual(records[0]["args"], ["-I", "-", "configure-helper", str(self.harness.helper)])
             self.assertEqual(records[1]["args"][:2], ["--package-lifecycle", "configure"])
             self.assertEqual(records[1]["descriptor"], DESCRIPTOR + "\n")
+
+    def test_uuidd_configuration_failure_prevents_setup_restart(self):
+        self.harness.env["MOCK_PYTHON_EXIT"] = "42"
+        result = self.harness.run("tractanda.postinst.in", "configure")
+        self.assertEqual(result.returncode, 42)
+        self.assertEqual(self.harness.records(), [{"program": "python-hook", "args": ["-I", "-", "configure-helper", str(self.harness.helper)]}])
 
     def test_prerm_and_abort_events_route_finitely(self):
         for hook, args, expected in (
@@ -255,10 +268,12 @@ class PackageHookTests(unittest.TestCase):
             result = self.harness.run("tractanda.postrm", *args, helper=False)
             self.assertEqual(result.returncode, 0, result.stderr)
             records = self.harness.records()
-            if args[0] in ("upgrade", "disappear"):
+            if args[0] == "upgrade":
                 self.assertEqual(records, [])
+            elif args[0] == "disappear":
+                self.assertEqual(records, [{"program": "python-hook", "args": ["-I", "-", "uuidd-remove"]}])
             else:
-                self.assertEqual(records[0]["args"], ["-I", "-", "postrm"])
+                self.assertEqual(records[0]["args"], ["-I", "-", "postrm-remove" if args[0] in ("remove", "purge") else "postrm"])
                 self.assertEqual(records[1], {"program": "systemctl", "args": ["daemon-reload"]})
 
     def test_postrm_skips_nonessential_cleanup_if_python_or_systemctl_is_absent(self):
@@ -324,15 +339,95 @@ class FallbackUnitTests(unittest.TestCase):
         self.temp.cleanup()
 
     def invoke_as_root(self, arguments):
-        def read_owned_fixture(path, maximum=None):
+        def read_owned_fixture(path, maximum=None, private=True):
             maximum = self.fallback.MAX_BYTES if maximum is None else maximum
             data = Path(path).read_bytes()
             if not data or len(data) > maximum:
                 raise SystemExit("mock bounded-file refusal")
             return data
         with mock.patch.object(self.fallback.os, "geteuid", return_value=0), \
+             mock.patch.object(self.fallback, "root_uid", return_value=os.getuid()), \
              mock.patch.object(self.fallback, "read_private_regular", side_effect=read_owned_fixture):
             return self.fallback.fallback(arguments)
+
+    def test_preinst_helper_validates_unchanged_strict_descriptor(self):
+        with mock.patch.object(self.fallback, "verify_helper") as verify:
+            self.assertEqual(self.invoke_as_root(["preinst-helper", "/fixed/setup", str(self.descriptor)]), 0)
+            verify.assert_called_once_with(["verify-helper", "/fixed/setup"])
+        for key in ("modelProvisioningManifestPath", "modelProvisioningManifestSHA256", "modelProvisioningManifest"):
+            descriptor = json.loads(DESCRIPTOR)
+            descriptor[key] = "unsupported"
+            self.descriptor.write_text(json.dumps(descriptor))
+            with mock.patch.object(self.fallback, "verify_helper"), self.assertRaises(SystemExit):
+                self.invoke_as_root(["preinst-helper", "/fixed/setup", str(self.descriptor)])
+
+    def test_layout_selection_requires_single_protected_installation(self):
+        m = self.fallback
+        m.INSTALLATION = str(self.root / "opt/tractanda/var/lib/tractanda/Installation")
+        m.LEGACY_ROOT = str(self.root / "etc/tractanda")
+        m.CONFIG_ROOT = str(self.root / "opt/tractanda/etc/tractanda")
+        legacy = Path(m.LEGACY_ROOT); legacy.mkdir(parents=True)
+        with mock.patch.object(m, "root_directory_chain") as custody:
+            self.assertEqual(m.select_layout(), "current")
+            (legacy / "receipts").mkdir()
+            self.assertEqual(m.select_layout(), "legacy")
+            custody.assert_called_with(str(legacy))
+            current = Path(m.INSTALLATION); current.mkdir(parents=True)
+            (current / "receipts").mkdir()
+            with self.assertRaises(SystemExit): m.select_layout()
+            (legacy / "receipts").rmdir(); legacy.rmdir()
+            legacy.symlink_to(m.CONFIG_ROOT)
+            self.assertEqual(m.select_layout(), "current")
+            legacy.unlink(); legacy.symlink_to("/wrong")
+            with self.assertRaises(SystemExit): m.select_layout()
+
+    def test_interrupted_layout_journal_selects_protected_proof_and_resumes(self):
+        m = self.fallback
+        m.INSTALLATION = str(self.root / "opt/tractanda/var/lib/tractanda/Installation")
+        m.LEGACY_ROOT = str(self.root / "etc/tractanda")
+        m.CONFIG_ROOT = str(self.root / "opt/tractanda/etc/tractanda")
+        current = Path(m.INSTALLATION); current.mkdir(parents=True)
+        (current / "receipts").mkdir()
+        marker = current / "layout-migration.json"
+        value = {"version": 1, "platform": "linux", "phase": "relocated",
+                 "sourceConfig": m.LEGACY_ROOT, "targetConfig": m.CONFIG_ROOT,
+                 "moves": [], "originalFiles": {}}
+        marker.write_text(json.dumps(value))
+        legacy = Path(m.LEGACY_ROOT); legacy.mkdir(parents=True)
+        (legacy / "receipts").mkdir()
+        with mock.patch.object(m, "root_directory_chain"), \
+                mock.patch.object(m, "read_private_regular", side_effect=lambda path, *args: Path(path).read_bytes()):
+            self.assertEqual(m.select_layout(), "legacy")
+            retained = Path(str(legacy) + ".layout-pre20261027")
+            legacy.rename(retained)
+            self.assertEqual(m.select_layout(), "legacy")
+            self.assertTrue(m.RECEIPTS.startswith(str(retained)))
+            legacy.symlink_to(m.CONFIG_ROOT)
+            self.assertEqual(m.select_layout(), "migrating-current")
+            value["phase"] = "committed"; marker.write_text(json.dumps(value))
+            self.assertEqual(m.select_layout(), "current")
+            value["targetConfig"] = "/wrong"; marker.write_text(json.dumps(value))
+            with self.assertRaises(SystemExit): m.select_layout()
+
+    def test_configure_migrates_only_verified_legacy_helper(self):
+        m = self.fallback; m.LAYOUT = "legacy"
+        calls = []
+        with mock.patch.object(m.os, "geteuid", return_value=0), \
+                mock.patch.object(m, "verify_helper", side_effect=lambda args: calls.append(("verify", args))), \
+                mock.patch.object(m.subprocess, "run", side_effect=lambda args, **kw: calls.append(("migrate", args)) or subprocess.CompletedProcess(args, 0)), \
+                mock.patch.object(m, "select_layout", return_value="current"), \
+                mock.patch.object(m, "ensure_layout_aliases", side_effect=lambda: calls.append(("aliases", None))), \
+                mock.patch.object(m, "uuidd_configure", return_value=0):
+            self.assertEqual(m.fallback(["configure-helper", "/fixed/setup"]), 0)
+        self.assertEqual([entry[0] for entry in calls], ["verify", "migrate", "verify", "aliases"])
+        self.assertEqual(calls[1][1], ["/fixed/setup", "--migrate-system-layout"])
+        with mock.patch.object(m.os, "geteuid", return_value=0), \
+                mock.patch.object(m, "verify_helper"), \
+                mock.patch.object(m.subprocess, "run", return_value=subprocess.CompletedProcess([], 1)), \
+                mock.patch.object(m, "uuidd_configure") as configure, \
+                self.assertRaises(SystemExit):
+            m.fallback(["configure-helper", "/fixed/setup"])
+        configure.assert_not_called()
 
     def test_clean_first_install_fallback_is_noninitializing(self):
         self.assertEqual(self.invoke_as_root(["preinst", "install", str(self.descriptor)]), 0)
@@ -602,6 +697,85 @@ class FallbackUnitTests(unittest.TestCase):
             receipts["two"]["manifestSHA256"] = "d" * 64
             with self.assertRaisesRegex(SystemExit, "outside original/incoming/observed"):
                 self.fallback.safe_state()
+
+
+class LayoutAliasTests(unittest.TestCase):
+    def test_default_alias_table_matches_approved_physical_locations(self):
+        self.assertEqual(module_from_template().LAYOUT_ALIASES, (
+            ("/etc/tractanda", "/opt/tractanda/etc/tractanda"),
+            ("/var/lib/tractanda", "/opt/tractanda/var/lib/tractanda"),
+            ("/opt/tractanda/var/log/tractanda", "/var/log/tractanda"),
+            ("/opt/tractanda/run/tractanda", "/run/tractanda"),
+        ))
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="tractanda-layout-alias-")
+        self.root = Path(self.temp.name).resolve()
+        self.module = module_from_template()
+        pairs = (("etc/tractanda", "opt/tractanda/etc/tractanda"),
+                 ("var/lib/tractanda", "opt/tractanda/var/lib/tractanda"),
+                 ("opt/tractanda/var/log/tractanda", "var/log/tractanda"),
+                 ("opt/tractanda/run/tractanda", "run/tractanda"))
+        self.module.LAYOUT_ALIASES = tuple((str(self.root / a), str(self.root / b)) for a, b in pairs)
+        actual_lstat = os.lstat
+        def root_custody(path, *args, **kwargs):
+            metadata = actual_lstat(path, *args, **kwargs)
+            fields = list(metadata)
+            fields[4] = 0  # Only root ownership is simulated; path types/modes/links are real.
+            return os.stat_result(fields)
+        self.custody = mock.patch.object(self.module.os, "lstat", side_effect=root_custody)
+        self.custody.start()
+
+    def tearDown(self):
+        self.custody.stop()
+        self.temp.cleanup()
+
+    def test_fresh_configure_creates_exact_leaf_aliases_and_retry_preserves_inodes(self):
+        m = self.module
+        m.ensure_layout_aliases()
+        first = {}
+        for alias, target in m.LAYOUT_ALIASES:
+            self.assertEqual(os.readlink(alias), target)
+            self.assertTrue(Path(target).is_dir())
+            first[alias] = Path(alias).lstat().st_ino
+        self.assertFalse((self.root / "opt/tractanda/var").is_symlink())
+        self.assertFalse(os.path.lexists(self.root / "opt/tractanda/var/run/tractanda"))
+        m.ensure_layout_aliases()
+        self.assertEqual(first, {alias: Path(alias).lstat().st_ino for alias, _ in m.LAYOUT_ALIASES})
+
+    def test_occupied_or_wrong_alias_preserves_foreign_contents(self):
+        m = self.module
+        alias = Path(m.LAYOUT_ALIASES[0][0]); alias.parent.mkdir(parents=True)
+        alias.mkdir(); foreign = alias / "foreign"; foreign.write_text("keep")
+        with self.assertRaises(SystemExit): m.ensure_layout_aliases()
+        self.assertEqual(foreign.read_text(), "keep")
+        foreign.unlink(); alias.rmdir()
+        victim = self.root / "victim"; victim.mkdir(); (victim / "foreign").write_text("keep")
+        alias.symlink_to(victim)
+        with self.assertRaises(SystemExit): m.ensure_layout_aliases()
+        self.assertEqual(os.readlink(alias), str(victim))
+        self.assertEqual((victim / "foreign").read_text(), "keep")
+
+    def test_prefix_var_symlink_and_writable_target_parent_are_refused_without_mutation(self):
+        m = self.module
+        prefix = self.root / "opt/tractanda"; prefix.mkdir(parents=True)
+        victim = self.root / "victim"; victim.mkdir(); (victim / "foreign").write_text("keep")
+        (prefix / "var").symlink_to(victim)
+        with self.assertRaises(SystemExit): m.ensure_layout_aliases()
+        self.assertEqual(list(victim.iterdir()), [victim / "foreign"])
+        (prefix / "var").unlink()
+        (prefix / "var").mkdir(mode=0o777); (prefix / "var").chmod(0o777)
+        with self.assertRaises(SystemExit): m.ensure_layout_aliases()
+        self.assertEqual(stat.S_IMODE((prefix / "var").stat().st_mode), 0o777)
+
+    def test_alias_failure_prevents_uuidd_configuration_and_setup_handoff(self):
+        m = self.module; m.LAYOUT = "current"
+        with mock.patch.object(m.os, "geteuid", return_value=0), \
+                mock.patch.object(m, "verify_helper"), \
+                mock.patch.object(m, "ensure_layout_aliases", side_effect=SystemExit("occupied alias")), \
+                mock.patch.object(m, "uuidd_configure") as uuidd:
+            with self.assertRaises(SystemExit): m.fallback(["configure-helper", "/fixed/setup"])
+        uuidd.assert_not_called()
 
 
 if __name__ == "__main__":

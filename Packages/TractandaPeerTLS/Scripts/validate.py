@@ -87,8 +87,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cached-checkouts", type=Path)
     parser.add_argument("--label")
+    parser.add_argument("--operation-timeout-seconds", type=int, default=86400,
+                        help="Finite Swift build/test budget; short probes/cleanup keep their own limits")
     parser.add_argument("--linux-cached", action="store_true", help="Run only in the already cached project ARM64 image")
     args = parser.parse_args()
+    if args.operation_timeout_seconds <= 0:
+        parser.error("--operation-timeout-seconds must be positive")
     name = "macos" if platform.system() == "Darwin" else "linux"
     label = args.label or name
     env = os.environ.copy()
@@ -107,8 +111,9 @@ def main():
         command = ["/usr/local/bin/container", "run", "--rm", "--progress", "none", "--name", container_name,
                    "--read-only", "--uid", str(os.getuid()), "--gid", str(os.getgid()), "--cpus", "2", "--memory", "3G", "--no-dns",
                    "--mount", f"type=bind,source={ROOT},target=/proof", "--workdir", "/proof", "--entrypoint", "/usr/bin/python3",
-                   image, "/proof/Scripts/validate.py", "--label", label]
-        run(command, label + "-host", env, 1200)
+                   image, "/proof/Scripts/validate.py", "--label", label,
+                   "--operation-timeout-seconds", str(args.operation_timeout_seconds)]
+        run(command, label + "-host", env, args.operation_timeout_seconds + 3600)
         return
     common = ["--package-path", str(ROOT), "--disable-sandbox"]
     for entry in ("scratch", "cache", "config", "security"):
@@ -135,7 +140,8 @@ def main():
     backend = ["--build-system", "native"] if name == "linux" else []
     # Native Linux test discovery requires compiler index records in Swift 6.4.
     index = [] if name == "linux" else ["--disable-index-store"]
-    run(["swift", "test", *common, *backend, "--jobs", "2", *index], label + "-tests", env)
+    run(["swift", "test", *common, *backend, "--jobs", "2", *index], label + "-tests", env,
+        args.operation_timeout_seconds)
     for pin in json.loads((ROOT / "Package.resolved").read_text())["pins"]:
         if not pin["location"].startswith("https://github.com/apple/"):
             raise RuntimeError("nonportable location in public Package.resolved")

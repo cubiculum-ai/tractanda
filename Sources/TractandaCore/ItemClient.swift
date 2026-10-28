@@ -1,35 +1,90 @@
 import Foundation
+import TractandaClient
 
 /// A synchronous client for the existing native method envelope.
 /// Each instance is confined to its caller; it does not own or bypass an ItemStore.
 public final class ItemClient {
     private let transport: (Data) throws -> Data
+    private let context: NativeClientContext
 
-    public init(socketPath: String) {
-        transport = { try LocalTransport.call(socket: socketPath, request: $0) }
+    public convenience init(socketPath: String) {
+        self.init(transport: { try LocalTransport.call(socket: socketPath, request: $0) })
     }
 
-    public init(connection: ServerConnection) {
-        transport = { try connection.send($0) }
+    public convenience init(connection: ServerConnection) {
+        self.init(transport: { try connection.send($0) })
     }
 
-    public init(transport: @escaping (Data) throws -> Data) { self.transport = transport }
+    public init(transport: @escaping (Data) throws -> Data) {
+        self.transport = transport
+        context = NativeClientContext(transport: transport)
+    }
 
+    private init(transport: @escaping (Data) throws -> Data, context: NativeClientContext) {
+        self.transport = transport
+        self.context = context
+    }
+
+    /// A checked adapter borrows the outer discovery context; discovery bypasses its restricted transport.
+    func checkedForwarding(transport: @escaping (Data) throws -> Data) -> ItemClient {
+        ItemClient(transport: transport, context: context)
+    }
+
+    public func invalidateSession() { context.invalidate() }
+
+    /// Internal checked forwarding adapters retain the server's original response envelope.
+    func sendNativeEnvelope(_ data: Data) throws -> Data { try transport(data) }
+
+    /// Standard reads return their wire DTOs. Use typed read conveniences when canonical
+    /// revisions are required; generic calls never rewrite arbitrary JSON or read projections.
     public func call(_ method: String, arguments: [String: Any] = [:]) throws -> Data {
         let envelope: [String: Any] = [
-            "using": [ItemService.capability], "methodCalls": [[method, arguments, "client"]],
+            "using": ["urn:ietf:params:jmap:core", ItemService.capability],
+            "methodCalls": [[method, arguments, "client"]],
         ]
-        let response = try transport(JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys]))
-        return try NativeMethodResult.unwrap(response, method: method)
+        let response = try context.send(
+            JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys]), transport: transport)
+        let payload = try NativeMethodResult.unwrap(response, method: method)
+        return try TractandaJMAPCodec.extensionResultFromWire(
+            method: method, result: JMAPValue.decode(payload)
+        ).encoded()
+    }
+
+    public static func queryArguments(criteria: [String: Any], calculateTotal: Bool = true) throws -> [String:
+        Any]
+    {
+        let filterKeys: Set<String> = [
+            "expression", "text", "categoryPath", "excludedCategoryIDs", "viewID", "sectionID", "at",
+            "timeZone",
+        ]
+        var result: [String: Any] = [
+            "filter": criteria.filter { filterKeys.contains($0.key) }, "calculateTotal": calculateTotal,
+        ]
+        for (key, value) in criteria where !filterKeys.contains(key) {
+            if key == "sort" {
+                let sorts = try JSON.decode([ItemSort].self, JSONSerialization.data(withJSONObject: value))
+                result[key] = try JSONSerialization.jsonObject(
+                    with: JSON.encode(sorts.map(JMAPReadComparator.init)))
+            } else {
+                result[key] = value
+            }
+        }
+        return result
+    }
+
+    public func query(criteria: [String: Any], calculateTotal: Bool = true) throws -> Data {
+        try call(
+            "TractandaItem/query",
+            arguments: Self.queryArguments(criteria: criteria, calculateTotal: calculateTotal))
     }
 
     /// Runs a query and its matching get serially in one native request.
     /// The service resolves `#ids` from the successful query result under the same caller context.
     public func queryThenGet(arguments: [String: Any]) throws -> (query: Data, get: Data) {
         let envelope: [String: Any] = [
-            "using": [ItemService.capability],
+            "using": ["urn:ietf:params:jmap:core", ItemService.capability],
             "methodCalls": [
-                ["TractandaItem/query", arguments, "query"],
+                ["TractandaItem/query", try Self.queryArguments(criteria: arguments), "query"],
                 [
                     "TractandaItem/get",
                     ["#ids": ["resultOf": "query", "name": "TractandaItem/query", "path": "/ids"]],
@@ -37,9 +92,16 @@ public final class ItemClient {
                 ],
             ],
         ]
-        let response = try transport(JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys]))
+        let response = try context.send(
+            JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys]), transport: transport)
         guard let decoded = try JSONSerialization.jsonObject(with: response) as? [String: Any] else {
             throw TractandaError("protocolError", "Invalid native response.")
+        }
+        if let type = decoded["type"] as? String, type.hasPrefix("urn:ietf:params:jmap:error:"),
+            let status = decoded["status"] as? Int, (400...599).contains(status)
+        {
+            throw TractandaError(
+                String(type.dropFirst("urn:ietf:params:jmap:error:".count)), "JMAP request rejected.")
         }
         if let code = decoded["code"] as? String {
             throw TractandaError(code, decoded["message"] as? String ?? "")
@@ -68,12 +130,42 @@ public final class ItemClient {
     }
 
     public func revision(for itemID: String) throws -> Revision {
-        struct Result: Decodable { let list: [Revision] }
-        let result = try JSON.decode(Result.self, call("TractandaItem/get", arguments: ["ids": [itemID]]))
-        guard let revision = result.list.first else {
+        let result = try JSON.decode(
+            JMAPItemGetResponse.self, call("TractandaItem/get", arguments: ["ids": [itemID]]))
+        guard result.notFound.isEmpty, result.list.count == 1 else {
             throw TractandaError("notFound", "Item is unavailable.")
         }
+        if let state = result.list[0].resolution, state.status != .ready {
+            throw TractandaError("itemUnresolved", "Item has no current representative.")
+        }
+        return try result.list[0].canonicalRevision()
+    }
+
+    public func revision(itemID: String, revisionID: String) throws -> Revision {
+        let result = try JSON.decode(
+            JMAPRevisionGetResponse.self,
+            call("TractandaRevision/get", arguments: ["ids": [revisionID]]))
+        guard result.notFound.isEmpty, result.list.count == 1 else {
+            throw TractandaError("notFound", "Revision is unavailable.")
+        }
+        let revision = try result.list[0].canonicalRevision()
+        guard revision.itemID == itemID, revision.revisionID == revisionID else {
+            throw TractandaError("protocolError", "Exact revision response does not match its request.")
+        }
         return revision
+    }
+
+    /// Full-content history conversion mirrors the SDK. Raw call(history) remains the
+    /// standard DTO with recursively tagged Int64 decimal strings, not canonical Codable.
+    public func history(itemID: String, position: Int = 0, limit: Int = 100) throws -> ItemHistoryResult {
+        try Identifier.validate(itemID)
+        guard position >= 0, (1...256).contains(limit) else {
+            throw TractandaError("invalidArguments", "Invalid history page or fields selection.")
+        }
+        let wire = try JSON.decode(JMAPHistoryResponse.self, call("TractandaItem/history", arguments: [
+            "itemID": itemID, "position": position, "limit": limit,
+        ]))
+        return try wire.canonicalResult(itemID: itemID, position: position, limit: limit)
     }
 
     public func beginStoreRebuild(operationID: String) throws -> StoreRebuildStatus {
@@ -104,12 +196,17 @@ public final class ItemClient {
         }
         return status
     }
-    public func commit(_ request: CommitRequest) throws -> CommitResult {
+    public func commit(_ request: CommitRequest) throws -> MutationReceipt {
         let arguments = try JSONSerialization.jsonObject(with: JSON.encode(request)) as! [String: Any]
         while true {
             try Task.checkCancellation()
             do {
-                return try JSON.decode(CommitResult.self, call("TractandaItem/commit", arguments: arguments))
+                let receipt = try JSON.decode(
+                    MutationReceipt.self, call("TractandaItem/commit", arguments: arguments))
+                guard receipt.operationID == request.operationID,
+                    request.action == .create || request.action == .copy || receipt.itemID == request.itemID
+                else { throw TractandaError("protocolError", "Commit receipt does not match its intent.") }
+                return receipt
             } catch let error as TractandaError where error.code == "attachmentCopyPending" {
                 Thread.sleep(forTimeInterval: 0.1)
             }
@@ -288,7 +385,7 @@ public final class ItemClient {
             let queryState: String
         }
         struct GetResult: Decodable {
-            let list: [Revision]
+            let list: [JMAPItemRecord]
             let notFound: [String]
             let state: String
         }
@@ -301,7 +398,9 @@ public final class ItemClient {
             arguments["position"] = position
             arguments["limit"] = 64
             arguments["at"] = queryDate
-            let page = try JSON.decode(QueryResult.self, call("TractandaItem/query", arguments: arguments))
+            let page = try JSON.decode(
+                QueryResult.self,
+                call("TractandaItem/query", arguments: Self.queryArguments(criteria: arguments)))
             if let initialState, initialState != page.queryState {
                 throw TractandaError("stateChanged", "Refresh the changing board.")
             }
@@ -312,7 +411,10 @@ public final class ItemClient {
                 guard result.state == page.queryState, result.notFound.isEmpty else {
                     throw TractandaError("stateChanged", "Refresh the changing board.")
                 }
-                revisions.append(contentsOf: result.list)
+                revisions.append(
+                    contentsOf: try result.list.filter {
+                        $0.resolution?.status == nil || $0.resolution?.status == .ready
+                    }.map { try $0.canonicalRevision() })
             }
             position += page.ids.count
             if position >= page.total { return revisions }

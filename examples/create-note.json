@@ -1,15 +1,29 @@
 {
-  "using": ["https://tractanda.ai/ns/local-prototype/4"],
+  "using": [
+    "urn:ietf:params:jmap:core",
+    "https://tractanda.ai/ns/jmap/1"
+  ],
   "methodCalls": [
-    ["TractandaItem/commit", {
-      "action": "create",
-      "classID": "Item",
-      "changes": {
-        "subject": {"type": "text", "value": "An unstructured thought"},
-        "body": {"type": "text", "value": "Organize this later."}
+    [
+      "TractandaItem/commit",
+      {
+        "action": "create",
+        "classID": "Item",
+        "changes": {
+          "subject": {
+            "type": "text",
+            "value": "An unstructured thought"
+          },
+          "body": {
+            "type": "text",
+            "value": "Organize this later."
+          }
+        },
+        "unset": [],
+        "operationID": "example-create-note-v1",
+        "accountId": "REPLACE_WITH_DISCOVERED_ACCOUNT_ID"
       },
-      "unset": [],
-      "operationID": "example-create-note-v1"
-    }, "create"]
+      "create"
+    ]
   ]
 }

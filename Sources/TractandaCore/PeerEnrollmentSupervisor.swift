@@ -107,7 +107,7 @@ package enum PeerEnrollmentSupervisor {
         }
         #if os(macOS)
             // Only the protected managed installation may cross OS custody. No arbitrary executable option.
-            let base = URL(fileURLWithPath: "/Users/Shared/Library/Application Support/Tractanda")
+            let base = URL(fileURLWithPath: "/Library/Tractanda/Software")
             let alias = base.appendingPathComponent("current")
             let link = try FileMetadata.read(at: alias)
             guard link.type == .symbolicLink, link.uid == 0 else { throw failure("helperUnavailable") }

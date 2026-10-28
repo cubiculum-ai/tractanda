@@ -10,7 +10,7 @@ extension SetupEngine {
     var clientLink: URL { roots.software.appendingPathComponent("current") }
 
     func installationReceipts() throws -> [InstallationReceipt] {
-        let directory = roots.configuration.appendingPathComponent("receipts")
+        let directory = roots.installation.appendingPathComponent("receipts")
         guard exists(directory) else { return [] }
         try requireOwned(directory, uid: 0, directory: true)
         let entries = try FileManager.default.contentsOfDirectory(

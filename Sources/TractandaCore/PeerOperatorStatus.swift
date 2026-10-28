@@ -3,9 +3,16 @@ import Foundation
 /// Nonsecret local diagnostics. Readiness describes this Store's current serving gate,
 /// not a proof that every replica or all replication history has been verified.
 public struct PeerOperatorStatus: Codable, Sendable {
+    public static let maximumResponseBytes = 1024 * 1024
     public static let nativeMethod = "TractandaPeer/status"
     public let canonical: PeerCanonicalStatus
     public let runtime: PeerOperatorRuntimeStatus
+    /// Scoped status encoding matches compact JMAP wire accounting; no global JSON policy changes.
+    public func encoded() throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        return try encoder.encode(self)
+    }
     public init(canonical: PeerCanonicalStatus, runtime: PeerOperatorRuntimeStatus) {
         self.canonical = canonical
         self.runtime = runtime
@@ -24,6 +31,13 @@ public struct PeerCanonicalStatus: Codable, Sendable {
     public let configuredPairingCount: Int?
     /// Canonical commitments only; status never reads or validates private key bytes.
     public let committedPairingCount: Int?
+    public let personal: PersonalClusterCanonicalStatus?
+    public init(storeID: String, replicaID: String?, readiness: Readiness, localDisposed: Bool?,
+        configuredPairingCount: Int?, committedPairingCount: Int?, personal: PersonalClusterCanonicalStatus? = nil) {
+        self.storeID = storeID; self.replicaID = replicaID; self.readiness = readiness
+        self.localDisposed = localDisposed; self.configuredPairingCount = configuredPairingCount
+        self.committedPairingCount = committedPairingCount; self.personal = personal
+    }
 }
 
 public struct PeerSynchronizationStatus: Codable, Sendable {
@@ -61,7 +75,7 @@ public struct PeerSynchronizationStatus: Codable, Sendable {
             "recoveryRequired", "peerLeaseChanged", "peerSessionExhausted", "connectionFailed",
             "deadlineExceeded", "cancelled", "resourceLimit", "peerRepairRequired", "peerSyncWorkInvalid",
             "peerPayloadVerifying", "peerVerificationBusy", "peerExportChanged", "peerSyncUnavailable",
-            "peerRuntimeUnavailable", "invalidPeerResponse", "invalidPeerFrame",
+            "peerRuntimeUnavailable", "enrollmentRuntimeUnavailable", "invalidPeerResponse", "invalidPeerFrame",
             "unsupportedAuthorityContext",
             "invalidPeerConfiguration", "invalidOriginAdmission", "documentIntegrity", "invalidPeerPackage",
             "invalidPeerExport", "forbidden", "incompatiblePeer", "peerCompatibilityRequired",
@@ -88,13 +102,18 @@ public struct PeerOperatorRuntimeStatus: Codable, Sendable {
     public let pendingConnectionCount: Int?
     public let lastErrorCode: String?
     public let synchronization: PeerSynchronizationStatus
+    /// Local loaded endpoint settings, separate from current membership and observed sessions.
+    public let configuredPeers: [PeerRuntimeConfiguration.Peer]?
+    public let personalPeers: [PersonalPeerObservation]?
     public init(
         state: State, configurationPath: String? = nil, settingsDigest: String? = nil,
         synchronizationEnabled: Bool = false, listenerConfigured: Bool? = nil,
         responderPublished: Bool? = nil,
         incomingConnectionCount: Int? = nil, outgoingConnectionCount: Int? = nil,
         pendingConnectionCount: Int? = nil, lastErrorCode: String? = nil,
-        synchronization: PeerSynchronizationStatus
+        synchronization: PeerSynchronizationStatus,
+        configuredPeers: [PeerRuntimeConfiguration.Peer]? = nil,
+        personalPeers: [PersonalPeerObservation]? = nil
     ) throws {
         guard
             [incomingConnectionCount, outgoingConnectionCount, pendingConnectionCount].allSatisfy({ value in
@@ -111,6 +130,12 @@ public struct PeerOperatorRuntimeStatus: Codable, Sendable {
                     && $0.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
             }) ?? true
         else { throw PeerSynchronizationStatus.invalid() }
+        guard configuredPeers.map({ $0.count <= 256 && ((try? JSON.encode($0).count) ?? Int.max) <= 128 * 1024 }) ?? true,
+            personalPeers.map({ $0.count <= 512 }) ?? true
+        else { throw PeerSynchronizationStatus.invalid() }
+        try personalPeers?.forEach { try $0.validate() }
+        self.configuredPeers = configuredPeers?.sorted { $0.alias < $1.alias }
+        self.personalPeers = personalPeers?.sorted { ($0.replicaID, $0.configurationDigest) < ($1.replicaID, $1.configurationDigest) }
         self.configurationPath = configurationPath
         self.settingsDigest = settingsDigest
         self.synchronizationEnabled = synchronizationEnabled
@@ -126,7 +151,7 @@ public struct PeerOperatorRuntimeStatus: Codable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case state, configurationPath, settingsDigest, synchronizationEnabled, listenerConfigured
         case responderPublished, incomingConnectionCount, outgoingConnectionCount, pendingConnectionCount
-        case lastErrorCode, synchronization
+        case lastErrorCode, synchronization, configuredPeers, personalPeers
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -141,7 +166,9 @@ public struct PeerOperatorRuntimeStatus: Codable, Sendable {
             outgoingConnectionCount: c.decodeIfPresent(Int.self, forKey: .outgoingConnectionCount),
             pendingConnectionCount: c.decodeIfPresent(Int.self, forKey: .pendingConnectionCount),
             lastErrorCode: c.decodeIfPresent(String.self, forKey: .lastErrorCode),
-            synchronization: c.decode(PeerSynchronizationStatus.self, forKey: .synchronization))
+            synchronization: c.decode(PeerSynchronizationStatus.self, forKey: .synchronization),
+            configuredPeers: c.decodeIfPresent([PeerRuntimeConfiguration.Peer].self, forKey: .configuredPeers),
+            personalPeers: c.decodeIfPresent([PersonalPeerObservation].self, forKey: .personalPeers))
     }
     public static var unavailable: Self {
         // Fixed literals satisfy the same bounded constructors as live diagnostics.

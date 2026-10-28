@@ -4,9 +4,22 @@ import PackageDescription
 let package = Package(
     name: "TractandaPeerTLS",
     platforms: [.macOS(.v15)],
-    products: [.library(name: "TractandaPeerTLS", targets: ["TractandaPeerTLS"])],
+    products: [
+        .library(name: "TractandaPeerTLS", targets: ["TractandaPeerTLS"]),
+        .library(name: "TractandaHTTPSIdentity", targets: ["TractandaHTTPSIdentity"]),
+    ],
     dependencies: [.package(url: "https://github.com/apple/swift-nio.git", exact: "2.101.3")],
     targets: [
+        .target(name: "CHTTPSIdentityValidation", dependencies: ["CNIOBoringSSL"]),
+        .target(name: "TractandaHTTPSIdentity", dependencies: [
+            "CHTTPSIdentityValidation", "NIOSSL", .product(name: "NIOCore", package: "swift-nio"),
+        ]),
+        .testTarget(name: "TractandaHTTPSIdentityTests", dependencies: [
+            "TractandaHTTPSIdentity", "NIOSSL", "CNIOBoringSSL",
+            .product(name: "NIOTLS", package: "swift-nio"),
+            .product(name: "NIOCore", package: "swift-nio"),
+            .product(name: "NIOEmbedded", package: "swift-nio"),
+        ]),
         .target(
             name: "CNIOBoringSSL",
             cSettings: [

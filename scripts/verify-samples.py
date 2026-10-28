@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Load shipped templates/examples into disposable stores and rebuild from files."""
+from jmap_client import query_arguments
 import importlib.util
 import json
 from pathlib import Path
@@ -19,7 +20,7 @@ RETIRED = {"NoteItem", "TodoItem", "PendencyItem", "ActionItem", "SavedViewItem"
 def snapshot(client):
     records, position = {}, 0
     while True:
-        page = client.call("TractandaItem/query", {"position": position, "limit": 64})
+        page = client.call("TractandaItem/query", query_arguments({"position": position, "limit": 64}))
         for start in range(0, len(page["ids"]), 8):
             result = client.call("TractandaItem/get", {"ids": page["ids"][start:start + 8]})
             assert not result["notFound"] and not result.get("remainingIDs")
@@ -32,9 +33,9 @@ def snapshot(client):
     views = {}
     for item_id, item in records.items():
         if "viewDefinition" in item["fields"]:
-            views[item_id] = client.call("TractandaItem/query", {
+            views[item_id] = client.call("TractandaItem/query", query_arguments({
                 "viewID": item_id, "at": "2026-09-16T12:00:00Z", "timeZone": "Europe/Vienna",
-            })["ids"]
+            }))["ids"]
     return records, views
 
 
@@ -56,22 +57,26 @@ def verify(binary):
             })["items"] == installed
             for name in ("create-note.json", "query-and-get.json"):
                 envelope = json.loads((PROJECT / "examples" / name).read_text())
+                for _, arguments, _ in envelope['methodCalls']:
+                    if arguments.get('accountId') == 'REPLACE_WITH_DISCOVERED_ACCOUNT_ID':
+                        arguments['accountId'] = client.context.session[0]
                 result = wire.wire(socket, envelope)
                 assert "code" not in result, result
                 assert all(call[0] != "error" for call in result["methodResponses"]), result
                 if name == "create-note.json":
                     created = result["methodResponses"][0][1]
-                    assert created["revision"]["fields"]["classID"] == wire.text("Item")
+                    confirmed = client.hydrate_mutation(created)['revision']
+                    assert confirmed["fields"]["classID"] == wire.text("Item")
                     replay = wire.wire(socket, envelope)["methodResponses"][0][1]
-                    assert replay["replayed"] and replay["revision"] == created["revision"]
+                    assert replay["replayed"] and replay["revisionId"] == created["revisionId"]
             command = [sys.executable, str(PROJECT / "examples/create-project.py"),
                        str(socket), "Example project", "--binary", binary,
                        "--project-root", installed["what"], "--status-root", installed["status"]]
             project = json.loads(subprocess.check_output(command))
             assert json.loads(subprocess.check_output(command)) == project
-            project_items = client.call("TractandaItem/query", {
+            project_items = client.call("TractandaItem/query", query_arguments({
                 "categoryPath": [project["projectID"], project["statusRootID"]],
-            })
+            }))
             assert project_items["total"] == 1
             before = snapshot(client)
             types = client.call("TractandaStore/describe", {"topic": "types"})["types"]

@@ -9,7 +9,7 @@ import Foundation
 #endif
 
 final class ItemIndex {
-    static let catalogueSchemaVersion = "20"
+    static let catalogueSchemaVersion = "21"
     static let catalogueEngine = "tractanda-sqlite-catalogue-v18"
     static let catalogueRowByteWindow = 8 * 1024 * 1024 + 4096
     static let cataloguePageByteWindow = catalogueRowByteWindow
@@ -422,10 +422,15 @@ final class ItemIndex {
                 "CREATE TABLE recovery_ordinals (item TEXT NOT NULL, revision TEXT PRIMARY KEY, ordinal INTEGER NOT NULL, UNIQUE(item, ordinal))"
             )
             try execute("CREATE TABLE recovery_heads (item TEXT PRIMARY KEY, revision TEXT NOT NULL UNIQUE)")
+            try execute(
+                "CREATE TABLE blob_references (sha256 TEXT NOT NULL, item TEXT NOT NULL, revision TEXT NOT NULL, attachment TEXT NOT NULL, PRIMARY KEY(sha256,revision,attachment))"
+            )
+            try execute("CREATE INDEX blob_references_digest ON blob_references(sha256,revision,attachment)")
             try createRevisionGraphTables()
         }
         if !create {
             // No old-schema shim: rebuilding preserves canonical items and constructs this disposable projection.
+            try execute("SELECT sha256,item,revision,attachment FROM blob_references LIMIT 0")
             try execute("SELECT encoded_bytes,owner_work_id FROM corpus_generation LIMIT 0")
             try execute("SELECT generation_id FROM corpus_gc_candidate LIMIT 0")
             try execute("SELECT status,dirty FROM current_projection LIMIT 0")
@@ -1014,8 +1019,42 @@ final class ItemIndex {
         }
     }
 
+    struct BlobReference: Sendable {
+        let itemID: String
+        let revisionID: String
+        let attachmentID: String
+    }
+    func blobReferences(sha256: String, after: String? = nil, limit: Int = 64) throws -> [BlobReference] {
+        let query =
+            "SELECT item,revision,attachment FROM blob_references WHERE sha256=? AND revision>? ORDER BY revision,attachment LIMIT ?"
+        let statement = try prepare(query, [sha256, after ?? "", String(min(max(limit, 1), 64))])
+        defer { sqlite3_finalize(statement) }
+        var result: [BlobReference] = []
+        while true {
+            let status = catalogueStep(statement)
+            if status == SQLITE_DONE { return result }
+            guard status == SQLITE_ROW, let item = sqlite3_column_text(statement, 0),
+                let revision = sqlite3_column_text(statement, 1),
+                let attachment = sqlite3_column_text(statement, 2)
+            else { throw error() }
+            result.append(
+                BlobReference(
+                    itemID: String(cString: item), revisionID: String(cString: revision),
+                    attachmentID: String(cString: attachment)))
+        }
+    }
+    func indexBlobReferences(_ row: CatalogueRow, fields: [String: ItemValue]?) throws {
+        guard let fields else { return }
+        for attachment in try AttachmentDescriptor.descriptors(in: fields) {
+            try execute(
+                "INSERT OR IGNORE INTO blob_references VALUES (?,?,?,?)",
+                [attachment.sha256, row.itemID, row.revisionID, attachment.attachmentID])
+        }
+    }
+
     func replaceCatalogue<Rows: Sequence>(identity: String, rows: Rows) throws
     where Rows.Element == CatalogueRow {
+        try execute("DELETE FROM blob_references")
         try execute("DELETE FROM revision_catalog")
         try execute("DELETE FROM operation_receipts")
         try execute("DELETE FROM feedback_refs")

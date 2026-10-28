@@ -1,6 +1,7 @@
 import CTractandaPlatform
 import Crypto
 import Foundation
+import TractandaClient
 
 #if canImport(Darwin)
     import Darwin
@@ -34,25 +35,24 @@ public enum ItemDirectoryExport {
         let files = DocumentContentFiles(
             root: staging, ownerUID: getuid(), minimumFreeBytes: 1024 * 1024 * 1024)
         // The selected revision stays pinned; current permission is checked by each server read.
-        let pinned = ItemClient(transport: { request in
+        let pinned = client.checkedForwarding(transport: { request in
             try Task.checkCancellation()
-            guard let envelope = try JSONSerialization.jsonObject(with: request) as? [String: Any],
-                let calls = envelope["methodCalls"] as? [[Any]], calls.count == 1,
-                calls[0].count == 3, let method = calls[0][0] as? String,
-                let args = calls[0][1] as? [String: Any],
-                args["itemID"] as? String == revision.itemID,
-                args["revisionID"] as? String == revision.revisionID
-            else { throw TractandaError("protocolError", "Unpinned export dependency request.") }
-            let result = try client.call(method, arguments: args)
-            if method == "TractandaAttachment/list" {
-                let object = try JSONSerialization.jsonObject(with: result) as? [String: Any]
+            let envelope = try JMAPRequest.decode(request)
+            guard envelope.methodCalls.count == 1, let call = envelope.methodCalls.first,
+                call.arguments["itemID"]?.text == revision.itemID,
+                call.arguments["revisionID"]?.text == revision.revisionID
+            else {
+                throw TractandaError("protocolError", "Unpinned export dependency request.")
+            }
+            let response = try client.sendNativeEnvelope(request)
+            if call.name == "TractandaAttachment/list" {
+                let data = try NativeMethodResult.unwrap(response, method: call.name, callID: call.callID)
+                let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
                 guard object?["revisionID"] as? String == revision.revisionID else {
                     throw TractandaError("protocolError", "Attachment list returned a different revision.")
                 }
             }
-            return try JSONSerialization.data(withJSONObject: [
-                "methodResponses": [[method, try JSONSerialization.jsonObject(with: result), "client"]]
-            ])
+            return response
         })
         let revisionBytes = try JSON.encode(revision)
         try files.writeImmutable(revisionBytes, path: ["revision.json"], maximumBytes: revisionBytes.count)

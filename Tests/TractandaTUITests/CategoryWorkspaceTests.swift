@@ -19,7 +19,7 @@ final class CategoryWorkspaceTests: XCTestCase {
         }
         deinit { try? FileManager.default.removeItem(at: root) }
         func category(_ name: String, parents: [Revision] = []) throws -> Revision {
-            try client.commit(
+            try client.commitFixture(
                 CommitRequest(
                     classID: "Item",
                     changes: [
@@ -32,7 +32,7 @@ final class CategoryWorkspaceTests: XCTestCase {
             ).revision
         }
         func item(_ subject: String, categories: [Revision] = []) throws -> Revision {
-            try client.commit(
+            try client.commitFixture(
                 CommitRequest(
                     classID: "Item",
                     changes: [

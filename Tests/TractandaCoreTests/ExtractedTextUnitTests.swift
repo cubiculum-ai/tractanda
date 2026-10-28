@@ -453,7 +453,7 @@ final class ExtractedTextUnitTests: XCTestCase, @unchecked Sendable {
         try budget(root)
     }
 
-    func testFailureEnvelopePreservesErrorMeaningAndOmitsUnscopedState() throws {
+    func testFailureOutcomePreservesErrorMeaningWithoutUnscopedState() throws {
         let root = try root()
         defer { try? FileManager.default.removeItem(at: root) }
         let service = ItemService(store: try makeStore(root))
@@ -462,13 +462,10 @@ final class ExtractedTextUnitTests: XCTestCase, @unchecked Sendable {
             (TractandaError("forbidden", "denied"), "forbidden"),
             (CancellationError(), "cancelled"), (NSError(domain: "private-path", code: 1), "serverError"),
         ] {
-            let data = try service.extractedTextUnitFailure(call, error: error)
-            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-            XCTAssertNil(object["sessionState"])
-            let calls = try XCTUnwrap(object["methodResponses"] as? [[Any]])
-            let failure = try XCTUnwrap(calls.first?[1] as? [String: Any])
-            XCTAssertEqual(failure["type"] as? String, expected)
-            XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("private-path"))
+            let outcome = try service.extractedTextUnitFailure(call, error: error)
+            guard case .failure(let failure, _) = outcome else { return XCTFail("Expected typed failure.") }
+            XCTAssertEqual(failure.type, expected)
+            XCTAssertFalse((failure.description ?? "").contains("private-path"))
         }
         try budget(root)
     }

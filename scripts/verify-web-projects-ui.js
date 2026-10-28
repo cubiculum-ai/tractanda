@@ -15,9 +15,19 @@ async (page) => {
   const origin=await page.evaluate(()=>location.origin);
   const picker=page.getByLabel('Project',{exact:true});
   const text=value=>({type:'text',value}), ref=id=>({type:'reference',value:{itemID:id}});
+  let rpcSession=null;
   async function rpc(method,args) {
-    const response=await page.request.post(origin+'/api',{headers:{Authorization:'Bearer '+token,'Content-Type':'application/json',Origin:origin},data:{using:['https://tractanda.ai/ns/local-prototype/4'],methodCalls:[[method,args,'acceptance']]}});
-    const call=(await response.json()).methodResponses?.[0];
+    if(method==='TractandaItem/query') {
+      const {expression,text,categoryPath,excludedCategoryIDs,viewID,sectionID,at,timeZone,sort,...paging}=args;
+      args={filter:Object.fromEntries(Object.entries({expression,text,categoryPath,excludedCategoryIDs,viewID,sectionID,at,timeZone}).filter(([,value])=>value!==undefined)),...paging,calculateTotal:true,...(sort?{sort:sort.map(entry=>entry.categoryRootID?{property:'categoryMembership',categoryRootId:entry.categoryRootID,isAscending:entry.isAscending??true}:entry)}:{})};
+    }
+    const scoped=!['Core/echo','TractandaSession/get','TractandaAuth/createSession'].includes(method);
+    if(scoped&&!rpcSession)rpcSession=await rpc('TractandaSession/get',{});
+    if(scoped&&!Object.hasOwn(args,'accountId')&&!Object.hasOwn(args,'#accountId'))
+      args={...args,accountId:rpcSession.primaryAccounts['https://tractanda.ai/ns/jmap/1']};
+    const response=await page.request.post(origin+'/api',{headers:{Authorization:'Bearer '+token,'Content-Type':'application/json',Origin:origin},data:{using:['https://tractanda.ai/ns/jmap/1'],methodCalls:[[method,args,'acceptance']]}});
+    const envelope=await response.json();if(rpcSession&&envelope.sessionState&&envelope.sessionState!==rpcSession.state)rpcSession=null;
+    const call=envelope.methodResponses?.[0];
     if(!call||call[0]!==method)throw new Error('Native method failed: '+JSON.stringify(call));
     return call[1];
   }
@@ -27,7 +37,8 @@ async (page) => {
     const request={action:action||(existing?'revise':'create'),changes,unset:[],operationID:'ui-fixture:'+(Date.now().toString(36)+'-'+Math.random().toString(36).slice(2))};
     if(existing){request.itemID=id(existing);request.expectedRevisionID=existing.fields.revisionID.value;}
     else request.classID='Item';
-    return (await rpc('TractandaItem/commit',request)).revision;
+    const receipt=await rpc('TractandaItem/commit',request);
+    return (await rpc('TractandaRevision/get',{ids:[receipt.revisionId]})).list[0];
   }
   async function choose(project) {
     await picker.selectOption(project);

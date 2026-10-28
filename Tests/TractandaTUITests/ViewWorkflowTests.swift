@@ -20,7 +20,7 @@ final class ViewWorkflowTests: XCTestCase {
         }
         deinit { try? FileManager.default.removeItem(at: root) }
         func item(_ fields: [String: ItemValue]) throws -> Revision {
-            try client.commit(
+            try client.commitFixture(
                 CommitRequest(classID: "Item", changes: fields, operationID: Identifier.make())
             ).revision
         }
@@ -59,7 +59,7 @@ final class ViewWorkflowTests: XCTestCase {
         try workspace.toggleSection(0, isCollapsed: true)
         XCTAssertEqual(workspace.rows.filter { $0.sectionIndex == 0 }.count, 1)
         let last = try XCTUnwrap(workspace.sections[0].items.last)
-        _ = try fixture.client.commit(workspace.assignment("exclude", item: last, category: first))
+        _ = try fixture.client.commitFixture(workspace.assignment("exclude", item: last, category: first))
         try workspace.toggleSection(0, isCollapsed: false)
         XCTAssertEqual(workspace.sections.map(\.total), [65, 66])
         XCTAssertEqual(workspace.sections[0].items.map { $0.fields["rank"] }, [.integer(64)])
@@ -348,7 +348,7 @@ final class ViewWorkflowTests: XCTestCase {
         XCTAssertEqual(definition.presentation.sectionIDs, [first.itemID, second.itemID])
         XCTAssertEqual(definition.presentation.collapsedSectionIDs, [first.itemID])
         // A concurrent edit rejects Save and keeps the user's pending name editable.
-        _ = try fixture.client.commit(
+        _ = try fixture.client.commitFixture(
             CommitRequest(
                 action: .revise, itemID: view.itemID,
                 expectedRevisionID: view.revisionID, changes: ["subject": .text("Changed elsewhere")],

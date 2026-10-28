@@ -48,11 +48,14 @@ public struct BundleManifest: Codable, Equatable, Sendable {
     public let files: [File]
     public let embedding: EmbeddingPayload?
     public let documentExtraction: DocumentExtractionPayload?
+    public let modelProvisioningManifestPath: String?
+    public let modelProvisioningManifestSHA256: String?
     public let canonicalFormats: CanonicalFormatSupport?
     public init(
         profile: String = Self.profile, version: String, platform: String, arch: String, files: [File],
         embedding: EmbeddingPayload? = nil, documentExtraction: DocumentExtractionPayload? = nil,
-        canonicalFormats: CanonicalFormatSupport? = nil
+        canonicalFormats: CanonicalFormatSupport? = nil,
+        modelProvisioningManifestPath: String? = nil, modelProvisioningManifestSHA256: String? = nil
     ) {
         self.profile = profile
         self.version = version
@@ -61,6 +64,8 @@ public struct BundleManifest: Codable, Equatable, Sendable {
         self.files = files
         self.embedding = embedding
         self.documentExtraction = documentExtraction
+        self.modelProvisioningManifestPath = modelProvisioningManifestPath
+        self.modelProvisioningManifestSHA256 = modelProvisioningManifestSHA256
         self.canonicalFormats = canonicalFormats
     }
 
@@ -103,10 +108,19 @@ public struct BundleManifest: Codable, Equatable, Sendable {
             throw SetupError("Bundle is missing the Tractanda web resource bundle.")
         }
         try canonicalFormats?.validate()
-        try embedding?.validate(files: files)
+        guard (modelProvisioningManifestPath == nil) == (modelProvisioningManifestSHA256 == nil) else {
+            throw SetupError("Model provisioning descriptor is incomplete.")
+        }
+        if let path = modelProvisioningManifestPath, let hash = modelProvisioningManifestSHA256 {
+            guard path == "models/manifest.json", hash.count == 64, hash.utf8.allSatisfy(asciiHex),
+                files.contains(where: { $0.path == path && $0.sha256 == hash && $0.size <= 1024 * 1024 }) else {
+                throw SetupError("Model provisioning manifest must be digest-bound release data.")
+            }
+        }
+        try embedding?.validate(files: files, provisioned: modelProvisioningManifestPath != nil)
         if let documentExtraction {
             try documentExtraction.validatePlatform(platform: platform, arch: arch)
-            try documentExtraction.validate(files: files)
+            try documentExtraction.validate(files: files, provisioned: modelProvisioningManifestPath != nil)
         } else if files.contains(where: {
             $0.path == "bin/tractanda-document-converter"
                 || $0.path.hasPrefix("models/granite-docling-258m-mlx/")
@@ -148,10 +162,14 @@ public struct SetupRoots: Sendable {
     public let data: URL
     public let indexes: URL
     public let commands: URL
+    public let installation: URL
+    public let work: URL
+    public let logs: URL
+    public let models: URL
     public init(
         platform: SetupPlatform = .host, software: URL? = nil, configuration: URL? = nil,
         launchDefinitions: URL? = nil, runtime: URL? = nil, data: URL? = nil, indexes: URL? = nil,
-        commands: URL? = nil
+        commands: URL? = nil, installation: URL? = nil, work: URL? = nil, logs: URL? = nil, models: URL? = nil
     ) {
         self.platform = platform
         self.commands =
@@ -162,34 +180,44 @@ public struct SetupRoots: Sendable {
             self.software =
                 software
                 ?? URL(
-                    fileURLWithPath: "/Users/Shared/Library/Application Support/Tractanda", isDirectory: true)
+                    fileURLWithPath: "/Library/Tractanda/Software", isDirectory: true)
             self.configuration =
                 configuration
                 ?? URL(
-                    fileURLWithPath: "/Users/Shared/Library/Application Support/Tractanda", isDirectory: true)
+                    fileURLWithPath: "/Library/Tractanda/Configuration", isDirectory: true)
             self.launchDefinitions =
                 launchDefinitions ?? URL(fileURLWithPath: "/Library/LaunchDaemons", isDirectory: true)
             self.runtime =
                 runtime
                 ?? URL(
-                    fileURLWithPath: "/Users/Shared/Library/Application Support/Tractanda/runtime",
+                    fileURLWithPath: "/private/var/run/tractanda",
                     isDirectory: true)
             self.data =
-                data ?? URL(fileURLWithPath: "/Users/Shared/Library/Tractanda/Stores", isDirectory: true)
+                data ?? URL(fileURLWithPath: "/Library/Tractanda/Stores", isDirectory: true)
             self.indexes =
                 indexes
                 ?? URL(
-                    fileURLWithPath: "/Users/Shared/Library/Application Support/Tractanda/Indexes",
+                    fileURLWithPath: "/Library/Tractanda/StoreIndices",
                     isDirectory: true)
         case .linux:
             self.software = software ?? URL(fileURLWithPath: "/opt/tractanda", isDirectory: true)
-            self.configuration = configuration ?? URL(fileURLWithPath: "/etc/tractanda", isDirectory: true)
+            self.configuration = configuration ?? URL(fileURLWithPath: "/opt/tractanda/etc/tractanda", isDirectory: true)
             self.launchDefinitions =
                 launchDefinitions ?? URL(fileURLWithPath: "/etc/systemd/system", isDirectory: true)
             self.runtime = runtime ?? URL(fileURLWithPath: "/run/tractanda", isDirectory: true)
-            self.data = data ?? URL(fileURLWithPath: "/var/lib/tractanda/stores", isDirectory: true)
-            self.indexes = indexes ?? URL(fileURLWithPath: "/var/cache/tractanda/indexes", isDirectory: true)
+            self.data = data ?? URL(fileURLWithPath: "/opt/tractanda/var/lib/tractanda/Stores", isDirectory: true)
+            self.indexes = indexes ?? URL(fileURLWithPath: "/opt/tractanda/var/lib/tractanda/StoreIndices", isDirectory: true)
         }
+        // Injected configuration roots retain isolated fixture state; host defaults use the
+        // distinct persistent, working and logging roots selected by the administrator.
+        self.installation = installation ?? (configuration != nil ? self.configuration : URL(fileURLWithPath:
+            platform == .macos ? "/Library/Tractanda/Installation" : "/opt/tractanda/var/lib/tractanda/Installation", isDirectory: true))
+        self.work = work ?? (configuration != nil ? self.configuration.appendingPathComponent("document-state") : URL(fileURLWithPath:
+            platform == .macos ? "/Library/Tractanda/Work" : "/opt/tractanda/var/lib/tractanda/Work", isDirectory: true))
+        self.models = models ?? (configuration != nil ? self.configuration.appendingPathComponent("models") : URL(fileURLWithPath:
+            platform == .macos ? "/Library/Tractanda/Models" : "/opt/tractanda/var/lib/tractanda/Models", isDirectory: true))
+        self.logs = logs ?? (configuration != nil ? self.configuration.appendingPathComponent("logs") : URL(fileURLWithPath:
+            platform == .macos ? "/Library/Logs/Tractanda" : "/var/log/tractanda", isDirectory: true))
     }
 }
 
@@ -222,6 +250,7 @@ public struct SetupOptions: Equatable, Sendable {
     public enum StoreSelection: Equatable, Sendable {
         case unconfigured
         case standalone
+        case freshPersonalTarget(storeID: String)
         case prepared(storeID: String, replicaID: String)
     }
     public let storeSelection: StoreSelection
@@ -229,8 +258,10 @@ public struct SetupOptions: Equatable, Sendable {
         case preserve
         case replace(URL)
         case disable
+        case outboundOnly
     }
     public let peerRuntime: PeerRuntimeAction
+    public let newInstanceOnly: Bool
     public let name: String
     public let owner: String?
     public let mode: Mode
@@ -240,7 +271,7 @@ public struct SetupOptions: Equatable, Sendable {
     public init(
         name: String = "default", owner: String? = nil, mode: Mode = .empty, port: Int = 48_728,
         bundle: URL, uuidNode: String? = nil, peerRuntime: PeerRuntimeAction = .preserve,
-        storeSelection: StoreSelection = .unconfigured
+        storeSelection: StoreSelection = .unconfigured, newInstanceOnly: Bool = false
     ) {
         self.name = name
         self.owner = owner
@@ -250,6 +281,7 @@ public struct SetupOptions: Equatable, Sendable {
         self.uuidNode = uuidNode
         self.peerRuntime = peerRuntime
         self.storeSelection = storeSelection
+        self.newInstanceOnly = newInstanceOnly
     }
     func validate() throws {
         guard name.utf8.count <= 32, !name.isEmpty,
@@ -259,6 +291,21 @@ public struct SetupOptions: Equatable, Sendable {
             throw SetupError("Instance name or port is invalid.")
         }
         if let owner, !validAccountName(owner) { throw SetupError("Account name is invalid.") }
+        if newInstanceOnly {
+            guard case .freshPersonalTarget = storeSelection, peerRuntime == .outboundOnly else {
+                throw SetupError("New-instance-only preparation requires a fresh personal target and outbound peer policy.")
+            }
+        }
+        if peerRuntime == .outboundOnly {
+            guard newInstanceOnly, case .freshPersonalTarget = storeSelection else {
+                throw SetupError("Outbound join policy is available only for a new personal target.")
+            }
+        }
+        if case .freshPersonalTarget(let storeID) = storeSelection {
+            guard mode == .empty, let uuid = UUID(uuidString: storeID),
+                uuid.version1Components != nil, uuid.uuidString.lowercased() == storeID
+            else { throw SetupError("Fresh personal target requires a canonical UUIDv1 store pin and empty mode.") }
+        }
         if case .prepared(let storeID, let replicaID) = storeSelection {
             guard mode != .sample, storeID != replicaID,
                 [storeID, replicaID].allSatisfy({ value in
@@ -352,7 +399,7 @@ public struct DocumentExtractionPayload: Codable, Equatable, Sendable {
         "model.safetensors.index.json", "model.safetensors",
     ]
 
-    func validate(files: [BundleManifest.File]) throws {
+    func validate(files: [BundleManifest.File], provisioned: Bool = false) throws {
         try identity.validate()
         guard self == Self.descriptor(identity: identity) else {
             throw SetupError("Unsupported document payload descriptor.")
@@ -386,7 +433,7 @@ public struct DocumentExtractionPayload: Codable, Equatable, Sendable {
         let prefix = modelDirectory + "/"
         let names = Set(
             files.filter { $0.path.hasPrefix(prefix) }.map { String($0.path.dropFirst(prefix.count)) })
-        guard names == Self.assetNames else {
+        guard names == Self.assetNames || (provisioned && names.isEmpty) else {
             throw SetupError("Document model must contain exactly 14 pinned assets.")
         }
     }

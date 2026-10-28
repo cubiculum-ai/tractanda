@@ -2,7 +2,9 @@
 set -eu
 helper=/opt/tractanda/current/bin/tractanda-setup
 descriptor=
-cleanup() { if [ -n "$descriptor" ]; then /bin/rm -f -- "$descriptor"; fi; }
+cleanup() {
+ if [ -n "$descriptor" ]; then /bin/rm -f -- "$descriptor"; fi
+}
 trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
@@ -27,7 +29,11 @@ if [ "$lifecycle" != abort-upgrade ]; then
 TRACTANDA_PACKAGE_DESCRIPTOR_EOF
 fi
 if [ -x "$helper" ]; then
- set -- verify-helper "$helper"
+ if [ "$lifecycle" = abort-upgrade ]; then
+  set -- verify-helper "$helper"
+ else
+  set -- preinst-helper "$helper" "$descriptor"
+ fi
 else
  [ "$lifecycle" != abort-upgrade ] || { echo "tractanda preinst: no-helper abort is unsafe" >&2; exit 1; }
  set -- preinst "$lifecycle" "$descriptor"

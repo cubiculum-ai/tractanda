@@ -48,12 +48,18 @@ class ProducerTests(unittest.TestCase):
             return P.component(path, tree, 'embeddings', 'amd64', P.sha(P.B.canonical(value)))
 
     def test_unadmitted_stops_before_heavy_or_environment_work(self):
-        with mock.patch.object(P.B, 'native_baseline') as native, mock.patch.object(P, 'source_rows') as source:
+        registry = self.root / 'registry.json'
+        registry.write_bytes(P.B.canonical({'profile': 'tractanda.linux-runtime-inputs.v1',
+            'runtimeRevision': P.RUNTIME,
+            'architectures': {arch: {'embeddings': None, 'documents': None} for arch in P.B.ARCH}}))
+        with mock.patch.object(P, 'REGISTRY', registry), mock.patch.object(P.B, 'native_baseline') as native, \
+                mock.patch.object(P, 'source_rows') as source, mock.patch.object(P, 'build_environment') as env:
             with self.assertRaisesRegex(ValueError, 'Unadmitted amd64 components: embeddings, documents'):
                 P.produce(argparse.Namespace(arch='amd64'))
             native.assert_not_called()
             source.assert_not_called()
-        self.assertEqual(list(self.root.iterdir()), [])
+            env.assert_not_called()
+        self.assertEqual(list(self.root.iterdir()), [registry])
 
     def test_registry_rejects_unknown_component_or_nonhash(self):
         value = {'profile': 'tractanda.linux-runtime-inputs.v1', 'runtimeRevision': P.RUNTIME,
@@ -297,24 +303,32 @@ class ProducerTests(unittest.TestCase):
     def test_existing_descriptor_default_and_injected_runner_keep_exact_validation(self):
         model = self.root / 'model'
         weight = self.put(model / 'model.safetensors', b'tiny-fixture-only')
+        pinned_assets = {'files': [{'path': 'model.safetensors', 'size': weight.stat().st_size,
+                                    'sha256': P.B.digest(weight)}]}
         profile = {'alias': 'tractanda-granite-embedding-311m-multilingual-r2-vmlx-fp32-44399559',
                    'modelRevision': P.MODELS['embeddings'], 'vmlxRevision': P.RUNTIME, 'dimensions': 768,
                    'pooling': 'cls', 'normalization': 'l2', 'revision': 'fixture-profile',
                    'assets': {'model.safetensors': P.B.digest(weight)}}
         host = self.root / 'tractanda-embeddings'
-        with mock.patch.object(P.B.MAC, 'run', return_value=json.dumps(profile)) as default:
+        catalogs = {'granite-embedding-311m-multilingual-r2': pinned_assets,
+                    'granite-docling-258m-mlx': {'files': []}}
+        with mock.patch.object(P.B.MAC, 'model_artifacts', return_value=catalogs), \
+                mock.patch.object(P.B.MAC, 'run', return_value=json.dumps(profile)) as default:
             descriptor = P.B.MAC.embedding_descriptor(host, model)
             default.assert_called_once_with(str(host), '--describe')
         runner = mock.Mock(return_value=json.dumps(profile))
-        with mock.patch.object(P.B.MAC, 'run', side_effect=AssertionError('default runner must not execute')):
+        with mock.patch.object(P.B.MAC, 'model_artifacts', return_value=catalogs), \
+                mock.patch.object(P.B.MAC, 'run', side_effect=AssertionError('default runner must not execute')):
             self.assertEqual(P.B.MAC.embedding_descriptor(host, model, runner=runner), descriptor)
         runner.assert_called_once_with(str(host), '--describe')
         self.put(weight, b'changed')
-        with self.assertRaisesRegex(ValueError, 'pinned hashes'):
+        with mock.patch.object(P.B.MAC, 'model_artifacts', return_value=catalogs), \
+                self.assertRaisesRegex(ValueError, 'Offline model snapshot'):
             P.B.MAC.embedding_descriptor(host, model, runner=runner)
         profile['dimensions'] = 1024
         runner.return_value = json.dumps(profile)
-        with self.assertRaisesRegex(ValueError, 'bundled Granite profile'):
+        with mock.patch.object(P.B.MAC, 'model_artifacts', return_value=catalogs), \
+                self.assertRaisesRegex(ValueError, 'bundled Granite profile'):
             P.B.MAC.embedding_descriptor(host, model, runner=runner)
 
     def test_d3_handoff_forwards_same_probe_runner_through_both_levels(self):

@@ -40,9 +40,9 @@ enum CommitFailure {
 
     static func isDefinitive(_ code: String) -> Bool {
         [
-            "revisionConflict", "forbidden", "notFound", "operationMismatch", "limit",
+            "revisionConflict", "forbidden", "notFound", "operationMismatch",
             "unsupportedQuery", "notCategory", "notView", "unknownClass", "abstractClass",
-            "invalidArguments", "invalidRecord", "invalidValue", "invalidKey", "invalidID",
+            "notJSON", "notRequest", "unknownCapability", "limit", "invalidArguments", "invalidRecord", "invalidValue", "invalidKey", "invalidID",
             "invalidView", "invalidSelection", "invalidHolder", "invalidPermissions", "invalidRole",
             "invalidPendency",
             "categoryCycle", "invalidCategory",
@@ -140,7 +140,7 @@ struct BatchOperation: Codable, Equatable, Sendable {
                 let result = try client.commit(request)
                 entries[index].outcome = Outcome(
                     status: .saved,
-                    detail: result.isIndexReady ? result.revision.revisionID : "Saved; index needs recovery")
+                    detail: result.isIndexReady ? result.revisionID : "Saved; index needs recovery")
             } else {
                 let current = try client.revision(for: entry.itemID)
                 guard current.revisionID == entry.revisionID else {

@@ -6,6 +6,7 @@ passed on stdin/HTTP, never printed, saved in project records, or supplied in ar
 No macOS accounts or passwords are accessed by this fixture.
 """
 import argparse
+from jmap_client import encode_arguments
 import http.client
 import importlib.util
 import json
@@ -58,7 +59,7 @@ def main():
                 module_spec=importlib.util.spec_from_file_location('categories',Path(__file__).with_name('category-board-fixture.py'))
                 categories=importlib.util.module_from_spec(module_spec);module_spec.loader.exec_module(categories)
                 def commit(request):
-                    result=subprocess.run([binary,'call',str(socket),'TractandaItem/commit',json.dumps(request)],capture_output=True,text=True,check=True,**user_options)
+                    result=subprocess.run([binary,'call',str(socket),'TractandaItem/commit',json.dumps(encode_arguments('TractandaItem/commit',request))],capture_output=True,text=True,check=True,**user_options)
                     return json.loads(result.stdout)
                 mapping=categories.create_fixture(commit)
                 board_id=mapping['viewItemID']
@@ -81,8 +82,18 @@ def main():
                     connection.close()
                     return result
 
+                api_sessions = {}
                 def api(token):
-                    return request('/api', {'using': [fixture.CAPABILITY], 'methodCalls': [['TractandaStore/info', {}, 'test']]}, token=token)
+                    if token and token not in api_sessions:
+                        result = request('/api', {'using': [fixture.CAPABILITY], 'methodCalls': [['TractandaSession/get', {}, 'discovery']]}, token=token)
+                        if result[0] != 200: return result
+                        api_sessions[token] = json.loads(result[2])['methodResponses'][0][1]
+                    args = {'accountId': api_sessions[token]['primaryAccounts'][fixture.CAPABILITY]} if token else {}
+                    result = request('/api', {'using': [fixture.CAPABILITY], 'methodCalls': [['TractandaStore/info', args, 'test']]}, token=token)
+                    envelope = json.loads(result[2])
+                    if token in api_sessions and envelope.get('sessionState', api_sessions[token]['state']) != api_sessions[token]['state']:
+                        del api_sessions[token]
+                    return result
 
                 status, headers, page = request('/')
                 check(status == 200 and b'class="needs-login"' in page and b'autocomplete="current-password"' in page, 'Plain URL presents a password sign-in screen')
@@ -108,7 +119,7 @@ def main():
                 check(status == 200 and info['ownerUID'] == account.pw_uid, 'Password login preserves the kernel-authenticated native OS identity')
                 check(json.loads(request('/auth/session', token=token)[2])['isAuthenticated'], 'Issued session is recognized')
                 second = json.loads(request('/auth/login', {'username': username, 'password': password})[2])['token']
-                delayed_body = json.dumps({'using':[fixture.CAPABILITY], 'methodCalls':[['TractandaStore/info', {}, 'delayed']]}).encode()
+                delayed_body = json.dumps({'using':[fixture.CAPABILITY], 'methodCalls':[['TractandaStore/info', {'accountId': api_sessions[token]['primaryAccounts'][fixture.CAPABILITY]}, 'delayed']]}).encode()
                 delayed = http.client.HTTPConnection(address.hostname, address.port, timeout=22)
                 delayed.putrequest('POST', '/api')
                 for key, value in {'Origin':origin, 'Content-Type':'application/json', 'Authorization':'Bearer '+token, 'Content-Length':str(len(delayed_body))}.items():

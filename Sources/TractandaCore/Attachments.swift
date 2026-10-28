@@ -244,7 +244,7 @@ final class AttachmentPayloadStore: @unchecked Sendable {
             } else {
                 try verifyPayload(attachment, descriptor: existing, cacheResult: true)
             }
-            guard fsync(payloadParent) == 0 else {
+            guard fsync(payloadParent) == 0, tractanda_durable_sync(existing) == 0 else {
                 throw Self.posix("Cannot synchronize attachment payload directory.")
             }
             try discardStaging(id: stageID)
@@ -286,7 +286,7 @@ final class AttachmentPayloadStore: @unchecked Sendable {
         let stagedMode = before.mode & 0o777
         guard stagedMode == UInt32(Self.stagingMode) || stagedMode == UInt32(Self.publishedMode),
             stagedMode == UInt32(Self.publishedMode) || fchmod(staged, Self.publishedMode) == 0,
-            fsync(staged) == 0
+            tractanda_durable_sync(staged) == 0
         else {
             throw Self.posix("Cannot make attachment payload immutable.")
         }
@@ -315,7 +315,7 @@ final class AttachmentPayloadStore: @unchecked Sendable {
             {
                 defer { _ = close(existing) }
                 try verifyPayload(attachment, descriptor: existing, cacheResult: true)
-                guard fsync(payloadParent) == 0 else {
+                guard fsync(payloadParent) == 0, tractanda_durable_sync(existing) == 0 else {
                     throw Self.posix("Cannot synchronize attachment payload directory.")
                 }
                 try discardStaging(id: stageID)
@@ -325,7 +325,7 @@ final class AttachmentPayloadStore: @unchecked Sendable {
         }
         // If this sync fails, the immutable name may already exist. A retry validates it and
         // synchronizes the directory before acknowledging publication.
-        guard fsync(payloadParent) == 0 else {
+        guard fsync(payloadParent) == 0, tractanda_durable_sync(staged) == 0 else {
             throw Self.posix("Cannot synchronize published attachment payload.")
         }
         guard stageName.withCString({ unlinkat(stagingParent, $0, 0) }) == 0,
@@ -735,7 +735,9 @@ final class AttachmentPayloadStore: @unchecked Sendable {
         let descriptors = try openPayloadFile(path: path, id: attachment.attachmentID)
         defer { closeAll(descriptors) }
         try verifyPayload(attachment, descriptor: descriptors.last!, cacheResult: true)
-        guard fsync(descriptors[descriptors.count - 2]) == 0 else {
+        guard fsync(descriptors[descriptors.count - 2]) == 0,
+            tractanda_durable_sync(descriptors.last!) == 0
+        else {
             throw Self.posix("Cannot synchronize recovered original publication.")
         }
         return true
@@ -780,6 +782,11 @@ final class AttachmentPayloadStore: @unchecked Sendable {
                         descriptor: files.last!, byteCount: before.size, chunkLimit: chunkByteLimit)
                     guard try Self.metadata(for: files.last!) == before else {
                         throw TractandaError("attachmentIntegrity", "Recovered original changed.")
+                    }
+                    if !Self.isArchived(files.last!) {
+                        guard fsync(parent) == 0, tractanda_durable_sync(files.last!) == 0 else {
+                            throw Self.posix("Cannot confirm recovered original durability.")
+                        }
                     }
                     try visit(id, path)
                 }
@@ -1391,6 +1398,139 @@ extension AttachmentPayloadStore {
         } catch {
             closeAll(chain)
             throw error
+        }
+    }
+}
+
+/// A descriptor-pinned immutable source. It exposes no path and cannot authorize a principal.
+/// HTTP callers verify off-queue before headers and recheck current access before each bounded read.
+public final class JMAPBlobPinnedSource: @unchecked Sendable {
+    private let lock = NSLock()
+    private var closed = false
+    private var verified = false
+    private let verifier: () throws -> Void
+    private let reader: (Int64, Int) throws -> Data
+    private let closer: () -> Void
+    init(
+        verify: @escaping () throws -> Void, read: @escaping (Int64, Int) throws -> Data,
+        close: @escaping () -> Void
+    ) {
+        verifier = verify
+        reader = read
+        closer = close
+    }
+    public func verify() throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !closed else { throw TractandaError("notFound", "Blob source is closed.") }
+        if !verified {
+            try verifier()
+            verified = true
+        }
+    }
+    public func read(offset: Int64, limit: Int = 262_144) throws -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !closed, verified else {
+            throw TractandaError("attachmentVerifying", "Blob source is not verified.")
+        }
+        return try reader(offset, limit)
+    }
+    public func close() {
+        lock.lock()
+        defer { lock.unlock() }
+        if !closed {
+            closed = true
+            closer()
+        }
+    }
+    deinit { close() }
+}
+
+extension AttachmentPayloadStore {
+    func pinBlob(_ attachment: AttachmentDescriptor, staged: Bool) throws -> JMAPBlobPinnedSource {
+        _ = try Self.validated(attachment)
+        let chain: [Int32]
+        if staged {
+            let directories = try openDirectoryChain(components: ["attachments", ".staging"], create: false)
+            do {
+                let fd = try openRegularFile(
+                    in: directories.last!, name: Self.stageName(attachment.attachmentID),
+                    flags: O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC,
+                    expectedMode: Self.stagingMode)
+                chain = directories + [fd]
+            } catch {
+                closeAll(directories)
+                throw error
+            }
+        } else {
+            chain = try openPayloadFile(id: attachment.attachmentID)
+        }
+        do {
+            let fd = chain.last!
+            let expected = try Self.metadata(for: fd)
+            guard expected.size == UInt64(attachment.byteCount),
+                staged
+                    ? Self.validStagingMetadata(expected, allowSealed: false, ownerUID: ownerUID)
+                    : Self.validPublishedMetadata(
+                        expected, descriptor: attachment, ownerUID: ownerUID, archived: Self.isArchived(fd))
+            else { throw TractandaError("attachmentIntegrity", "Blob source metadata differs.") }
+            return JMAPBlobPinnedSource(
+                verify: {
+                    guard try Self.metadata(for: fd) == expected else {
+                        throw TractandaError("attachmentIntegrity", "Blob source changed.")
+                    }
+                    let digest = try Self.sha256(
+                        descriptor: fd, byteCount: expected.size, chunkLimit: Self.maximumChunkBytes,
+                        progress: { _ in try Task.checkCancellation() })
+                    guard digest == attachment.sha256, try Self.metadata(for: fd) == expected else {
+                        throw TractandaError("attachmentIntegrity", "Blob digest differs.")
+                    }
+                },
+                read: { offset, limit in
+                    guard offset >= 0, offset <= attachment.byteCount, limit >= 0,
+                        limit <= Self.maximumChunkBytes
+                    else {
+                        throw TractandaError("invalidArguments", "Blob read exceeds its bounded range.")
+                    }
+                    guard try Self.metadata(for: fd) == expected else {
+                        throw TractandaError("attachmentIntegrity", "Blob source changed.")
+                    }
+                    let bytes = try Self.readExactly(
+                        descriptor: fd, offset: offset,
+                        count: Int(min(Int64(limit), attachment.byteCount - offset)))
+                    guard try Self.metadata(for: fd) == expected else {
+                        throw TractandaError("attachmentIntegrity", "Blob source changed while reading.")
+                    }
+                    return bytes
+                }, close: { [self] in closeAll(chain) })
+        } catch {
+            closeAll(chain)
+            throw error
+        }
+    }
+}
+
+extension AttachmentPayloadStore {
+    func requireBlobReserve(minimumFreeBytes: Int64, additionalBytes: Int) throws {
+        guard minimumFreeBytes >= 0, additionalBytes >= 0 else {
+            throw TractandaError("resourceLimit", "Invalid blob capacity request.")
+        }
+        let free: UInt64
+        if let availableBytesOverride {
+            free = try availableBytesOverride()
+        } else {
+            var capacity = statvfs()
+            guard statvfs(root.path, &capacity) == 0, capacity.f_frsize > 0 else {
+                throw TractandaError("resourceLimit", "Cannot inspect blob filesystem capacity.")
+            }
+            let total = UInt64(capacity.f_bavail).multipliedReportingOverflow(by: UInt64(capacity.f_frsize))
+            guard !total.overflow else { throw TractandaError("resourceLimit", "Blob capacity overflowed.") }
+            free = total.partialValue
+        }
+        let required = UInt64(minimumFreeBytes).addingReportingOverflow(UInt64(additionalBytes))
+        guard !required.overflow, free >= required.partialValue else {
+            throw TractandaError("resourceLimit", "Blob free-space reserve would be crossed.")
         }
     }
 }

@@ -14,16 +14,19 @@ struct NativePeerEnrollmentSession: Sendable {
 enum NativePrivateSession: Sendable {
     case credential(NativeCredentialRegistrationSession)
     case enrollment(NativePeerEnrollmentSession)
+    case personal(NativePersonalEnrollmentSession)
     var byteCount: Int {
         switch self {
         case .credential(let s): s.byteCount
         case .enrollment(let s): s.byteCount
+        case .personal(let s): s.byteCount
         }
     }
     var ready: Data {
         switch self {
         case .credential: NativePeerCredentialRegistration.ready
         case .enrollment: NativePeerEnrollment.ready
+        case .personal: NativePersonalEnrollment.ready
         }
     }
     var maximumReply: Int {
@@ -32,12 +35,14 @@ enum NativePrivateSession: Sendable {
         case .enrollment(let s):
             s.operation == .exportTarget
                 ? NativePeerEnrollment.maximumTargetOutputBytes : NativePeerEnrollment.maximumMetadata
+        case .personal: NativePersonalEnrollment.maximumReply
         }
     }
     var outputOnly: Bool {
         switch self {
         case .credential: false
         case .enrollment(let s): s.operation == .exportTarget
+        case .personal: false
         }
     }
     func complete(_ data: Data?) async throws -> Data {
@@ -46,6 +51,9 @@ enum NativePrivateSession: Sendable {
             guard let data else { throw NativePeerCredentialRegistration.protocolFailure() }
             return try await s.commit(PeerPrivateCredentialInput(bytes: data))
         case .enrollment(let s): return try await s.commit(data)
+        case .personal(let s):
+            guard let data else { throw NativePersonalEnrollment.failure() }
+            return try await s.commit(data)
         }
     }
     func validateBeforeDelivery() async throws {
@@ -53,20 +61,24 @@ enum NativePrivateSession: Sendable {
             try await s.validateBeforeDelivery()
             try s.control?.check()
         }
+        if case .personal(let s) = self { try s.control.check() }
     }
     func checkDelivery() throws {
         if case .enrollment(let s) = self { try s.control?.check() }
+        if case .personal(let s) = self { try s.control.check() }
     }
     func cancel() async {
         switch self {
         case .credential(let s): await s.cancel()
         case .enrollment(let s): await s.cancel()
+        case .personal(let s): await s.cancel()
         }
     }
     func failure(_ error: any Error) -> Data {
         switch self {
         case .credential: NativePeerCredentialRegistration.failure(error)
         case .enrollment: NativePeerEnrollment.failure(error)
+        case .personal: NativePersonalEnrollment.failureData(error)
         }
     }
 }

@@ -6,7 +6,7 @@ def create_fixture(commit):
     def ref(v):return {'type':'reference','value':{'itemID':v}}
     def refs(v):return {'type':'list','value':[ref(i) for i in v]}
     def create(name,fields,kind='Item'):
-        return commit({'action':'create','classID':kind,'changes':{'subject':text(name),**fields},'unset':[],'operationID':'fixture-'+uuid.uuid4().hex})['revision']['fields']['itemID']['value']
+        return commit({'action':'create','classID':kind,'changes':{'subject':text(name),**fields},'unset':[],'operationID':'fixture-'+uuid.uuid4().hex})['itemId']
     def category(name,parents=[]):
         return create(name,{'selection':{'type':'object','value':{'language':text('tractanda.spotlight.v0'),'expression':text('itemID == ""')}},'categoryParents':refs(parents)})
     project=category('Fixture project');status=category('Status');group=category('Clients',[project])

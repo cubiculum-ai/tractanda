@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Drive saved table views through an owned PTY and inspect the actual native store."""
+from jmap_client import query_arguments
 import argparse
 import datetime
 import importlib.util
@@ -32,7 +33,7 @@ def main():
         with wire.server(native, store, path) as client:
             def create(fields):
                 import uuid
-                return client.commit(wire.intent("create", str(uuid.uuid4()), class_id="Item", changes=fields))["revision"]
+                return client.commit_with_revision(wire.intent("create", str(uuid.uuid4()), class_id="Item", changes=fields))["revision"]
 
             categories = [create({"subject": wire.text(name), "selection": tagged("object", {
                 "language": wire.text("tractanda.spotlight.v0"), "expression": wire.text(rule),
@@ -48,7 +49,7 @@ def main():
                 recent = sorted(items, key=lambda item: (
                     -datetime.datetime.fromisoformat(item['fields']['modifiedAt']['value'].replace('Z','+00:00')).timestamp(),
                     wire.item_id(item)))
-                page = client.call('TractandaItem/query', {'expression':'rank >= 0','limit':64})
+                page = client.call('TractandaItem/query', query_arguments({'expression':'rank >= 0','limit':64}))
                 assert page['ids'] == [wire.item_id(item) for item in recent[:64]]
                 newest_rank = recent[0]['fields']['rank']['value']
                 assert newest_rank != 0
@@ -57,10 +58,10 @@ def main():
                 ui.wait('Preview for item 00')
                 ui.send('o');ui.wait('Sort items');ui.send(b'\x15\x13');ui.wait('Sort applied')
                 ui.wait(f'Preview for item {newest_rank:02d}')
-                client.commit(wire.intent('revise','recently-modified-older-item',item=wire.item_id(items[0]),
+                client.commit_with_revision(wire.intent('revise','recently-modified-older-item',item=wire.item_id(items[0]),
                     base=wire.revision_id(items[0]),changes={'body':wire.text('Recently edited older item')}))
                 ui.send('r');ui.wait('Refreshed');ui.send(ESC+b'[H');ui.wait('Recently edited older item')
-                assert client.call('TractandaItem/query', {'expression':'rank >= 0','limit':1})['ids'] == [wire.item_id(items[0])]
+                assert client.call('TractandaItem/query', query_arguments({'expression':'rank >= 0','limit':1}))['ids'] == [wire.item_id(items[0])]
                 checks.append('Default ordering is newest modification first; clearing a custom sort restores it and editing an older item moves it to the first page')
                 ui.send("o"); ui.wait("Sort items"); ui.paste("rank"); ui.send(b"\t\x15")
                 ui.paste("descending"); ui.send(b"\x13"); ui.wait("Sort applied")
@@ -105,9 +106,9 @@ def main():
                 presentation = definition["presentation"]["value"]
                 assert presentation["columns"]["value"][0]["value"]["property"] == wire.text("rank")
                 assert presentation["collapsedSections"]["value"][0]["value"]["itemID"] == wire.item_id(categories[0])
-                page = client.call("TractandaItem/query", {"viewID": identity, "position": 64, "limit": 64})
+                page = client.call("TractandaItem/query", query_arguments({"viewID": identity, "position": 64, "limit": 64}))
                 assert page["ids"] == [wire.item_id(item) for item in reversed(items[:6])]
-                south = client.call("TractandaItem/query", {"viewID": identity, "sectionID": wire.item_id(categories[1])})
+                south = client.call("TractandaItem/query", query_arguments({"viewID": identity, "sectionID": wire.item_id(categories[1])}))
                 assert south["ids"] == [wire.item_id(item) for item in reversed(items[65:])]
                 ui.send("a"); ui.wait("All readable items")
                 tui.choose(ui, "v", "TUI view fixture", "Open saved view")
@@ -117,7 +118,7 @@ def main():
                 before = wire.manifest(store)
                 client.rebuild("verify-tui-views-rebuild")
                 assert wire.manifest(store) == before
-                assert client.call("TractandaItem/query", {"viewID": identity, "position": 64})["ids"] == page["ids"]
+                assert client.call("TractandaItem/query", query_arguments({"viewID": identity, "position": 64}))["ids"] == page["ids"]
                 ui.send("r"); ui.wait("Refreshed"); assert "Rank 文" in ui.screen
                 ui.close()
                 checks.append("Disposable index rebuild preserves canonical files, saved layout and query order")

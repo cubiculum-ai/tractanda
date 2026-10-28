@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Offline tests for prepare-agent-access plan generation."""
 
+from jmap_client import query_arguments
 import argparse
 import copy
 import importlib.util
@@ -205,7 +206,7 @@ def _native_verify(binary):
                         "body": WIRE.text(f"Body {index + 1}"),
                     },
                 )
-                revision = client.commit(request)["revision"]
+                revision = client.commit_with_revision(request)["revision"]
                 item_id = revision["fields"]["itemID"]["value"]
                 ids.append(item_id)
                 baseline_subjects[item_id] = revision["fields"]["subject"]["value"]
@@ -213,13 +214,13 @@ def _native_verify(binary):
 
             deleted_id = ids[-1]
             deleted_revision = client.get(deleted_id)
-            client.commit(WIRE.intent(
+            client.commit_with_revision(WIRE.intent(
                 "revise", "native-delete", item=deleted_id,
                 base=deleted_revision["fields"]["revisionID"]["value"],
                 changes={"isDeleted": {"type": "boolean", "value": True}},
             ))
 
-            query = client.call("TractandaItem/query", {"expression": 'classID == "Item"'})
+            query = client.call("TractandaItem/query", query_arguments({"expression": 'classID == "Item"'}))
             _assert(query["total"] == 3, "native fixture must create exactly three Items")
             query_ids = query["ids"]
             responses = client.batch([["TractandaItem/get", {"ids": query_ids}, "notes"]])[0]
@@ -239,7 +240,7 @@ def _native_verify(binary):
             grants_path = base / "grants.json"
             _write_json(snapshot_path, snapshot)
             _write_json(grants_path, grants)
-            policy = client.call("TractandaItem/query", {"expression": 'classID == "AccessConfigurationItem"'})
+            policy = client.call("TractandaItem/query", query_arguments({"expression": 'classID == "AccessConfigurationItem"'}))
             _assert(policy["total"] == 1, "fresh store has one founding access policy")
             founding_policy = client.get(policy["ids"][0])
             canonical_before = WIRE.manifest(store)
@@ -264,7 +265,7 @@ def _native_verify(binary):
 
             revise_requests = plan["phases"][0]["requests"]
             for request in revise_requests:
-                applied = client.commit(request)
+                applied = client.commit_with_revision(request)
                 item_id = request["itemID"]
                 revision_after_apply[item_id] = applied["revision"]["fields"]["revisionID"]["value"]
                 revision = client.get(item_id)
@@ -273,7 +274,7 @@ def _native_verify(binary):
                 _assert(fields["body"]["value"] == baseline_bodies[item_id], "body must survive permission-only apply")
                 _assert(fields["permissions"] == request["changes"]["permissions"], "native permissions must match planner")
             for request in revise_requests:
-                replay = client.commit(request)
+                replay = client.commit_with_revision(request)
                 _assert(replay["replayed"] is True, "exact replay should be idempotent")
                 _assert(
                     client.get(request["itemID"])["fields"]["revisionID"]["value"] == revision_after_apply[request["itemID"]],
@@ -295,7 +296,7 @@ def _native_verify(binary):
                 base=current["fields"]["revisionID"]["value"],
                 changes={"subject": WIRE.text("Revised by owner with admin privilege")},
             )
-            revised = client.commit(update)["revision"]["fields"]["subject"]["value"]
+            revised = client.commit_with_revision(update)["revision"]["fields"]["subject"]["value"]
             _assert(revised == "Revised by owner with admin privilege", "administrator can revise unshared item")
 
             stale = WIRE.intent(

@@ -1,0 +1,30 @@
+#!/bin/sh
+# Optional default-selected sample store. The required payload component must be installed first.
+set -eu
+[ "${3:-/}" = / ] || { echo 'Install Tractanda on the running system volume.' >&2; exit 1; }
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+IFS= read -r bundle < "$script_dir/release-path"
+[ -x "$bundle/bin/tractanda-setup" ] || { echo 'Install the Tractanda software component first.' >&2; exit 1; }
+configuration='/Library/Tractanda/Configuration'
+installation='/Library/Tractanda/Installation'
+registry="$configuration/connections.json"
+instance=default
+if [ -e "$registry" ]; then
+    [ ! -L "$registry" ] && [ "$(/usr/bin/stat -f %u "$registry")" = 0 ] || {
+        echo 'The system connection registry must be a regular root-owned file.' >&2; exit 1;
+    }
+    instance=$(/usr/bin/plutil -extract defaultProfile raw -o - "$registry") || {
+        echo 'Select the installation explicitly with tractanda-setup; no system default is configured.' >&2; exit 1;
+    }
+fi
+case "$instance" in ''|*[!a-z0-9-]*) echo 'Invalid default database name.' >&2; exit 1;; esac
+if [ -f "$installation/receipts/$instance.json" ]; then
+    # The mandatory payload component already upgraded the owned instance.
+    exit 0
+fi
+owner=$(/usr/bin/stat -f %Su /dev/console)
+case "$owner" in ''|root|loginwindow|_mbsetupuser)
+    echo 'Log in as the intended owner before installing, or use install.sh with an explicit --owner.' >&2
+    exit 1;;
+esac
+"$bundle/bin/tractanda-setup" install --bundle "$bundle" --name "$instance" --owner "$owner" --sample

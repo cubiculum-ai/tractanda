@@ -24,28 +24,37 @@ private final class PeerResolutionCompletion: Sendable {
     }
 }
 
-/// One owned libc lookup, no queued lookups. Caller timeout never frees the underlying slot.
-/// libc lookup cannot safely be interrupted: graceful close waits for that one actual return.
+/// Bounded owned libc lookups, no queued lookup for an outstanding hostname/port.
+/// Caller timeout never frees an actual slot. Graceful close waits for libc to return.
 package actor PeerNameResolver {
     private let pool: NIOThreadPool
     private let loop: any EventLoop
     private let resolveAddress: @Sendable (String, Int) throws -> [SocketAddress]
-    private var active: (UUID, EventLoopFuture<[SocketAddress]>, PeerResolutionCompletion)?
+    private struct Lookup {
+        let id: UUID
+        let future: EventLoopFuture<[SocketAddress]>
+        let completion: PeerResolutionCompletion
+    }
+    private let maximumConcurrentLookups: Int
+    private var active: [String: Lookup] = [:]
     private var stopped = false
     private var closing: Task<Void, Error>?
     package init(
-        loop: any EventLoop,
+        loop: any EventLoop, maximumConcurrentLookups: Int = 1,
         resolving: (@Sendable (String, Int) throws -> [SocketAddress])? = nil
     ) {
+        precondition((1...8).contains(maximumConcurrentLookups))
         self.loop = loop
+        self.maximumConcurrentLookups = maximumConcurrentLookups
         resolveAddress = resolving ?? { try Self.addresses(host: $0, port: $1) }
-        pool = NIOThreadPool(numberOfThreads: 1)
+        pool = NIOThreadPool(numberOfThreads: maximumConcurrentLookups)
         pool.start()
     }
     package func resolve(host: String, port: Int, seconds: Double) async throws -> [SocketAddress] {
         guard !stopped else { throw TractandaError("serviceClosed", "Peer resolver is closed.") }
         if let numeric = try? SocketAddress(ipAddress: host, port: port) { return [numeric] }
-        guard active == nil else {
+        let key = host.lowercased() + "|" + String(port)
+        guard active[key] == nil, active.count < maximumConcurrentLookups else {
             throw TractandaError("serviceBusy", "A peer hostname lookup is still outstanding.")
         }
         guard seconds.isFinite, seconds > 0, seconds <= 60 else {
@@ -56,7 +65,7 @@ package actor PeerNameResolver {
         let completion = PeerResolutionCompletion(loop: loop)
         let resolveAddress = resolveAddress
         let future = pool.runIfActive(eventLoop: loop) { try resolveAddress(host, port) }
-        active = (id, future, completion)
+        active[key] = Lookup(id: id, future: future, completion: completion)
         let deadline = loop.scheduleTask(in: .nanoseconds(Int64(seconds * 1_000_000_000))) {
             completion.complete(
                 .failure(TractandaError("deadlineExceeded", "Peer hostname lookup timed out.")))
@@ -64,7 +73,7 @@ package actor PeerNameResolver {
         future.whenComplete { [self] result in
             deadline.cancel()
             completion.complete(result)
-            Task { await finished(id) }
+            Task { await finished(key, id: id) }
         }
         return try await withTaskCancellationHandler {
             let addresses = try await completion.promise.futureResult.get()
@@ -132,22 +141,24 @@ package actor PeerNameResolver {
         }
         return addresses
     }
-    private func finished(_ id: UUID) {
-        if active?.0 == id { active = nil }
+    private func finished(_ key: String, id: UUID) {
+        if active[key]?.id == id { active[key] = nil }
     }
     package func close() async throws {
         if let closing { return try await closing.value }
         stopped = true
-        active?.2.complete(.failure(TractandaError("cancelled", "Peer resolver stopped.")))
-        let work = active?.1
+        for lookup in active.values {
+            lookup.completion.complete(.failure(TractandaError("cancelled", "Peer resolver stopped.")))
+        }
+        let work = active.values.map(\.future)
         let pool = pool
         let task = Task {
-            if let work { _ = try? await work.get() }
+            for future in work { _ = try? await future.get() }
             try await pool.shutdownGracefully()
         }
         closing = task
         try await task.value
-        active = nil
+        active = [:]
     }
-    package func isResolvingForTesting() -> Bool { active != nil }
+    package func isResolvingForTesting() -> Bool { !active.isEmpty }
 }

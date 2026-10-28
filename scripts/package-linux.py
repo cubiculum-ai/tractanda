@@ -469,7 +469,23 @@ def full_components(root, spec, rows, embedding_runner=None):
     names = {v['path'] for v in rows}
     if not any(v.startswith('bin/Tractanda_TractandaWeb.resources/') or v.startswith('bin/Tractanda_TractandaWeb.bundle/') for v in names):
         raise ValueError('The web resource bundle is mandatory.')
-    embedding = MAC.embedding_descriptor(root / 'bin/tractanda-embeddings', root / 'models/granite-embedding-311m-multilingual-r2',
+    artifacts = MAC.model_artifacts()
+    embedding_dir = root / 'models/granite-embedding-311m-multilingual-r2'
+    document_dir = root / 'models/granite-docling-258m-mlx'
+    has_embedding = embedding_dir.exists()
+    has_document = document_dir.exists()
+    if has_embedding != has_document:
+        raise ValueError('Offline packages must include both pinned model artifacts or neither.')
+    allowed_model_paths = set()
+    if has_embedding:
+        for identifier, artifact in artifacts.items():
+            allowed_model_paths.update(
+                'models/' + identifier + '/' + row['path'] for row in artifact['files'])
+    unexpected_models = {name for name in names if name.startswith('models/')
+                         and name != 'models/manifest.json' and name not in allowed_model_paths}
+    if unexpected_models:
+        raise ValueError('Payload contains unpinned model files: ' + ', '.join(sorted(unexpected_models)[:3]))
+    embedding = MAC.embedding_descriptor(root / 'bin/tractanda-embeddings', embedding_dir if has_embedding else None,
                                          runner=embedding_runner)
     document = spec['documentExtraction']
     if (not isinstance(document, dict) or document.get('converterPath') != 'bin/tractanda-document-converter'
@@ -479,7 +495,10 @@ def full_components(root, spec, rows, embedding_runner=None):
         raise ValueError('Complete pinned local document descriptor is mandatory.')
     if digest(ROOT / MAC.MODEL_MANIFEST) != MAC.MODEL_MANIFEST_SHA:
         raise ValueError('Pinned Docling source model manifest changed.')
-    MAC.validate_docling_model(root / document['modelDirectory'])
+    MAC.validate_docling_source_artifact(artifacts['granite-docling-258m-mlx'])
+    if has_document:
+        MAC.validate_artifact_directory(document_dir, artifacts['granite-docling-258m-mlx'])
+        MAC.validate_docling_model(document_dir)
     required = list(spec['runtimeNotices']) + list(document.get('noticePaths', [])) + [
         'licenses/Granite/' + v for v in ('LICENSE', 'README.md', 'NOTICE', 'Gemma-Terms.html', 'Gemma-Prohibited-Use-Policy.html')]
     for key, expected in [('modelManifestPath', MAC.MODEL_MANIFEST_SHA), ('runtimePatchManifestPath', MAC.PATCH_MANIFEST_SHA),
@@ -505,12 +524,24 @@ def verify_bundle(root, arch, snapshot=None):
             or manifest.get('arch') != ARCH[arch][0] or manifest.get('files') != rows
             or not manifest.get('embedding') or not manifest.get('documentExtraction')):
         raise ValueError('Bundle is incomplete, changed or belongs to another architecture.')
+    catalog_path = 'models/manifest.json'
+    if (manifest.get('modelProvisioningManifestPath') != catalog_path
+            or not re.fullmatch(r'[0-9a-f]{64}', manifest.get('modelProvisioningManifestSHA256', ''))
+            or catalog_path not in {row['path'] for row in rows}
+            or digest(root / catalog_path) != manifest['modelProvisioningManifestSHA256']
+            or (root / catalog_path).read_bytes() != (ROOT / MAC.MODEL_ARTIFACT_MANIFEST).read_bytes()):
+        raise ValueError('Bundle model-provisioning manifest is missing or differs from the checked-in source.')
+    artifacts = MAC.model_artifacts()
+    for identifier, artifact in artifacts.items():
+        directory = root / 'models' / identifier
+        if directory.exists():
+            MAC.validate_artifact_directory(directory, artifact)
     run([root / 'bin/tractanda-setup', 'plan', '--bundle', root])
     unchanged_manifest(root, snapshot)
     return manifest
 
 
-def assemble(payload, spec_path, output, arch, maximum, embedding_runner=None):
+def assemble(payload, spec_path, output, arch, maximum, embedding_runner=None, include_model_weights=False):
     baseline = native_baseline(arch)
     spec = validate_spec(read_json(spec_path), arch)
     if payload.is_symlink():
@@ -522,6 +553,13 @@ def assemble(payload, spec_path, output, arch, maximum, embedding_runner=None):
     rows = inventory(payload)
     if any(v['path'] == 'bundle-manifest.json' for v in rows):
         raise ValueError('Input payload must not carry a stale generated bundle manifest.')
+    if any(v['path'] == 'models/manifest.json' for v in rows):
+        raise ValueError('Model catalog is generated from the checked-in pinned source, not the producer payload.')
+    model_dirs = [payload / 'models' / identifier for identifier in MAC.model_artifacts()]
+    any_model_dirs = any(path.exists() for path in model_dirs)
+    all_model_dirs = all(path.exists() for path in model_dirs)
+    if any_model_dirs != all_model_dirs or include_model_weights != all_model_dirs:
+        raise ValueError('Use --include-model-weights with both complete model directories, or provide neither.')
     public_assets(payload)
     closure = runtime_closure(payload, rows, arch, spec['dynamicLoads'])
     embedding, document = full_components(payload, spec, rows, embedding_runner=embedding_runner)
@@ -537,12 +575,18 @@ def assemble(payload, spec_path, output, arch, maximum, embedding_runner=None):
     for row in rows:
         source, target = payload / row['path'], output / row['path']
         copy_verified(source, target, row, maximum)
+    catalog = output / 'models/manifest.json'
+    catalog.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(ROOT / MAC.MODEL_ARTIFACT_MANIFEST, catalog)
+    catalog.chmod(0o644)
     receipt = output / 'lib/tractanda/linux-bundle-build.json'
     receipt.parent.mkdir(parents=True, exist_ok=True)
     receipt.write_bytes(metadata)
     receipt.chmod(0o644)
     manifest = dict(profile='tractanda.bundle.v1', version=spec['version'], platform='linux', arch=ARCH[arch][0],
-                    files=inventory(output), canonicalFormats=formats, embedding=embedding, documentExtraction=document)
+                    files=inventory(output), canonicalFormats=formats, embedding=embedding, documentExtraction=document,
+                    modelProvisioningManifestPath='models/manifest.json',
+                    modelProvisioningManifestSHA256=digest(catalog))
     snapshot = ManifestSnapshot(canonical(manifest) + b'\n')
     (output / 'bundle-manifest.json').write_bytes(snapshot.raw)
     (output / 'bundle-manifest.json').chmod(0o644)
@@ -560,8 +604,11 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--arch', choices=ARCH, required=True)
     parser.add_argument('--max-stage-bytes', type=int, required=True)
+    parser.add_argument('--include-model-weights', action='store_true',
+                        help='Include both complete pinned model directories for offline operation.')
     args = parser.parse_args()
-    print(json.dumps(assemble(args.payload, args.input_spec, args.output, args.arch, args.max_stage_bytes), indent=2))
+    print(json.dumps(assemble(args.payload, args.input_spec, args.output, args.arch, args.max_stage_bytes,
+                             include_model_weights=args.include_model_weights), indent=2))
 
 
 if __name__ == '__main__':

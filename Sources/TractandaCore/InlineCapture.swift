@@ -366,8 +366,13 @@ extension ItemClient {
         let args = try JSONSerialization.jsonObject(with: JSON.encode(preparation)) as! [String: Any]
         return try JSON.decode(CapturePlan.self, call("TractandaItem/prepareCapture", arguments: args))
     }
-    public func commitCapture(_ plan: CapturePlan) throws -> CommitResult {
+    public func commitCapture(_ plan: CapturePlan) throws -> MutationReceipt {
         let args = try JSONSerialization.jsonObject(with: JSON.encode(plan)) as! [String: Any]
-        return try JSON.decode(CommitResult.self, call("TractandaItem/commitCapture", arguments: args))
+        let receipt = try JSON.decode(MutationReceipt.self, call("TractandaItem/commitCapture", arguments: args))
+        guard receipt.operationID == plan.commitRequest.operationID,
+            plan.commitRequest.action == .create || plan.commitRequest.action == .copy
+                || receipt.itemID == plan.commitRequest.itemID
+        else { throw TractandaError("protocolError", "Capture receipt does not match its intent.") }
+        return receipt
     }
 }

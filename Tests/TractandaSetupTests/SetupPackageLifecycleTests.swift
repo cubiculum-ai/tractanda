@@ -30,10 +30,12 @@ final class SetupPackageLifecycleTests: XCTestCase {
             calls.append([executable] + arguments)
             if let index = arguments.firstIndex(of: "--bootstrap-store") {
                 bootstraps += 1
-                try StoreBootstrap.initialize(
+                let identity = try StoreBootstrap.initialize(
                     store: URL(fileURLWithPath: arguments[index + 1]),
                     indexDirectory: URL(fileURLWithPath: arguments[index + 2]),
-                    owner: arguments[index + 3], instance: arguments[index + 4])
+                    owner: arguments[index + 3], instance: arguments[index + 4],
+                    commonStoreID: arguments.count > index + 5 ? arguments[index + 5] : nil)
+                return ProcessResult(status: 0, output: identity.map { $0.replicaID + "\n" } ?? "")
             }
             guard executable == "/usr/bin/systemctl", let action = arguments.first else {
                 return ProcessResult(status: 0)
@@ -81,14 +83,14 @@ final class SetupPackageLifecycleTests: XCTestCase {
         var ownerLive = true
         var ownerTicks: UInt64 = 1
         var denyAuthentication = false
-        init(root: URL) throws {
+        init(root: URL, dataRoot: URL? = nil) throws {
             self.root = root
             let roots = SetupRoots(
                 platform: .linux, software: root.appendingPathComponent("p"),
                 configuration: root.appendingPathComponent("c"),
                 launchDefinitions: root.appendingPathComponent("u"),
                 runtime: root.appendingPathComponent("r"),
-                data: root.appendingPathComponent("d"), indexes: root.appendingPathComponent("i"),
+                data: dataRoot ?? root.appendingPathComponent("d"), indexes: root.appendingPathComponent("i"),
                 commands: root.appendingPathComponent("b"))
             runner = Runner(roots.launchDefinitions)
             engine = SetupEngine(
@@ -394,7 +396,9 @@ final class SetupPackageLifecycleTests: XCTestCase {
         let root = try GuardedFixtureDirectory.create(
             prefix: "pkg", source: "SetupPackageLifecycleTests", test: name)
         self.root = root
-        return try Fixture(root: root)
+        // Foundation canonicalizes /private/tmp to /tmp on macOS; keep mock package
+        // root and standardized bundle spelling identical without relaxing the product guard.
+        return try Fixture(root: root.standardizedFileURL)
     }
     override func tearDownWithError() throws {
         if let root { try FileManager.default.removeItem(at: root) }
@@ -443,6 +447,25 @@ final class SetupPackageLifecycleTests: XCTestCase {
         try f.install()
         XCTAssertEqual(f.runner.bootstraps, 1)
         XCTAssertEqual(try f.engine.readReceipt("a")?.state, .active)
+    }
+
+    func testFreshPersonalTargetKeepsDpkgBinaryAndPinsGeneratedIdentity() throws {
+        let f = try fixture()
+        try f.configureFresh()
+        let storeID = try UUID.makeVersion1().uuidString.lowercased()
+        let options = f.options(selection: .freshPersonalTarget(storeID: storeID))
+        let state = try XCTUnwrap(f.engine.readPackageState())
+        XCTAssertEqual(state.phase, .committed)
+        XCTAssertEqual(state.incoming?.manifestSHA256, try f.engine.installedPackageCompatibility().manifestSHA256)
+        XCTAssertEqual(options.bundle.standardizedFileURL.path, f.engine.packagePayload.path)
+        try f.engine.install(options)
+        let receipt = try XCTUnwrap(f.engine.readReceipt("a"))
+        XCTAssertEqual(receipt.freshTargetStoreID, storeID)
+        XCTAssertNotNil(receipt.freshTargetReplicaID)
+        XCTAssertEqual(receipt.release, f.engine.packagePayload.path)
+        XCTAssertTrue(receipt.initialized)
+        XCTAssertThrowsError(try f.engine.install(f.options(selection: .standalone)))
+        XCTAssertEqual(try f.engine.readReceipt("a")?.freshTargetReplicaID, receipt.freshTargetReplicaID)
     }
 
     func testOldPrermAndRepeatedPreinstRetainOriginalRunningIntentAndBlockStarts() throws {

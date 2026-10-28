@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise the modal direct view-definition form in an owned PTY."""
+from jmap_client import query_arguments
 import argparse
 import importlib.util
 import json
@@ -31,7 +32,7 @@ def main():
         root = Path(directory)
         with wire.server(native, root / "store", root / "s") as client:
             def create(fields):
-                return client.commit(wire.intent("create", str(uuid.uuid4()), class_id="Item", changes=fields))["revision"]
+                return client.commit_with_revision(wire.intent("create", str(uuid.uuid4()), class_id="Item", changes=fields))["revision"]
 
             included = create({"subject": wire.text("Direct include"), "selection": tagged("object", {
                 "language": wire.text("tractanda.spotlight.v0"), "expression": wire.text('itemID == ""'),
@@ -78,7 +79,7 @@ def main():
                     ui.resize(*size); ui.wait("F8 Save")
                     assert "r ank" in ui.screen
                     snapshots.append({"name": "populated-grid-focused", "columns": size[0], "rows": size[1], "screen": ui.screen, "ansiFrame": ui.raw.rsplit("\x1b[H", 1)[-1]})
-                assert not client.call("TractandaItem/query", {"expression": "viewDefinition == *"})["ids"]
+                assert not client.call("TractandaItem/query", query_arguments({"expression": "viewDefinition == *"}))["ids"]
                 ui.send(SAVE_VIEW); ui.wait("Saved one revision")
                 saved = tui.wait_item(client, 'subject == "Direct PTY view"', ui)
                 definition = saved["fields"]["viewDefinition"]["value"]

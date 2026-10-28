@@ -12,8 +12,18 @@ import subprocess
 import sys
 import uuid
 
-STATE = "/etc/tractanda/package-transaction.json"
-RECEIPTS = "/etc/tractanda/receipts"
+INSTALLATION = "/opt/tractanda/var/lib/tractanda/Installation"
+STATE = os.path.join(INSTALLATION, "package-transaction.json")
+RECEIPTS = os.path.join(INSTALLATION, "receipts")
+LAYOUT = "current"
+LEGACY_ROOT = "/etc/tractanda"
+CONFIG_ROOT = "/opt/tractanda/etc/tractanda"
+LAYOUT_ALIASES = (
+    ("/etc/tractanda", "/opt/tractanda/etc/tractanda"),
+    ("/var/lib/tractanda", "/opt/tractanda/var/lib/tractanda"),
+    ("/opt/tractanda/var/log/tractanda", "/var/log/tractanda"),
+    ("/opt/tractanda/run/tractanda", "/run/tractanda"),
+)
 ACTIVE = "/opt/tractanda/current"
 UNIT_DIR = "/etc/systemd/system"
 ROLES = ("server", "embeddings", "authentication")
@@ -35,6 +45,9 @@ UNIT_PROPERTIES = {
 def refuse(message):
     raise SystemExit("tractanda package fallback: " + message)
 
+def root_uid():
+    return 0
+
 def root_directory_chain(path):
     if not path.startswith("/"):
         refuse("protected parent is not absolute")
@@ -47,6 +60,86 @@ def root_directory_chain(path):
         if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != 0
                 or metadata.st_mode & 0o022):
             refuse("protected directory ancestry is not root-owned and stable")
+
+def ensure_layout_directory(path):
+    """Create only missing protected directories; never follow or chmod an occupant."""
+    if os.path.lexists(path):
+        root_directory_chain(path)
+        return
+    parent = os.path.dirname(path)
+    ensure_layout_directory(parent)
+    try:
+        os.mkdir(path, 0o755)
+    except FileExistsError:
+        pass
+    root_directory_chain(path)
+    directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+def ensure_layout_aliases():
+    """Fixed leaf aliases belong to Setup state, outside dpkg-owned current software."""
+    for alias, target in LAYOUT_ALIASES:
+        ensure_layout_directory(target)
+        parent = os.path.dirname(alias)
+        ensure_layout_directory(parent)
+        if os.path.lexists(alias):
+            metadata = os.lstat(alias)
+            if (not stat.S_ISLNK(metadata.st_mode) or metadata.st_uid != 0
+                    or metadata.st_nlink != 1 or os.readlink(alias) != target):
+                refuse("layout alias is occupied or points outside its exact target")
+            continue
+        os.symlink(target, alias)
+        directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+def select_layout():
+    """Select a protected proof root, admitting only the pinned migration journal."""
+    global STATE, RECEIPTS, LAYOUT, UUIDD_RECEIPT
+    STATE = os.path.join(INSTALLATION, "package-transaction.json")
+    RECEIPTS = os.path.join(INSTALLATION, "receipts")
+    UUIDD_RECEIPT = os.path.join(CONFIG_ROOT, "uuidd-normal-clock.json")
+    marker_path = os.path.join(INSTALLATION, "layout-migration.json")
+    marker = None
+    if os.path.lexists(marker_path):
+        marker = decode_object(read_private_regular(marker_path, 16 * 1024 * 1024))
+        if (set(marker) != {"version", "platform", "phase", "sourceConfig", "targetConfig", "moves", "originalFiles"}
+                or type(marker["version"]) is not int or marker["version"] != 1 or marker["platform"] != "linux"
+                or marker["phase"] not in ("preparing", "relocated", "committed")
+                or marker["sourceConfig"] != LEGACY_ROOT or marker["targetConfig"] != CONFIG_ROOT
+                or type(marker["moves"]) is not list or type(marker["originalFiles"]) is not dict):
+            refuse("layout migration journal is not recognized")
+    legacy_root = LEGACY_ROOT
+    if os.path.islink(LEGACY_ROOT):
+        if os.readlink(LEGACY_ROOT) != CONFIG_ROOT:
+            refuse("configuration alias points outside the selected physical root")
+        legacy = False
+    else:
+        if not os.path.lexists(LEGACY_ROOT) and marker and marker["phase"] == "relocated":
+            legacy_root = LEGACY_ROOT + ".layout-pre20261027"
+        legacy_state = os.path.join(legacy_root, "package-transaction.json")
+        legacy_receipts = os.path.join(legacy_root, "receipts")
+        legacy = os.path.lexists(legacy_state) or os.path.lexists(legacy_receipts)
+    current = os.path.lexists(STATE) or os.path.lexists(RECEIPTS)
+    if legacy and current and not (marker and marker["phase"] != "committed"):
+        refuse("legacy and current installation state coexist without a valid migration")
+    if legacy:
+        root_directory_chain(legacy_root)
+        STATE, RECEIPTS = legacy_state, legacy_receipts
+        UUIDD_RECEIPT = os.path.join(legacy_root, "uuidd-normal-clock.json")
+        LAYOUT = "legacy"
+    elif marker and marker["phase"] != "committed":
+        if not current:
+            refuse("interrupted migration has no protected package state")
+        LAYOUT = "migrating-current"
+    else:
+        LAYOUT = "current"
+    return LAYOUT
 
 def unique_object(pairs):
     value = {}
@@ -480,12 +573,183 @@ def write_state(state):
         os.close(fd)
         os.close(parent_fd)
 
+# This leaf and receipt belong only to this installer. Never edit vendor units,
+# administrator drop-ins, uuidd.socket, or libuuid's persistent clock state.
+UUIDD_DROPIN = "/etc/systemd/system/uuidd.service.d/90-tractanda-normal-clock.conf"
+UUIDD_RECEIPT = os.path.join(CONFIG_ROOT, "uuidd-normal-clock.json")
+UUIDD_HEADER = "# Managed by Tractanda: UUIDv1 issuance uses the normal clock.\n"
+
+
+def uuidd_run(arguments):
+    budget = int(os.environ.get("TRACTANDA_UUIDD_TIMEOUT_SECONDS", "1800"))
+    if not 1 <= budget <= 604800:
+        refuse("invalid uuidd service-operation timeout")
+    result = subprocess.run(arguments, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, timeout=budget, check=False)
+    if result.returncode:
+        refuse("uuidd service operation failed: " + " ".join(arguments))
+    return result.stdout.strip()
+
+
+def uuidd_command():
+    raw = uuidd_run(["/usr/bin/systemctl", "show", "uuidd.service", "--property=ExecStart", "--value"])
+    # systemctl's argv display is not shell syntax. Admit only an unambiguous
+    # safe-token subset; never reinterpret quotes, escapes, specifiers or ';'.
+    match = re.fullmatch(r"\{ path=(/usr/sbin/uuidd) ; argv\[\]=([A-Za-z0-9_./=:+ \-]+) ; ignore_errors=no ; [^{}]*\}", raw)
+    if not match:
+        refuse("unsupported uuidd ExecStart; administrator review required")
+    args = match[2].split()
+    if not args or args[0] != match[1] or "--socket-activation" not in args:
+        refuse("uuidd must retain its supported executable and socket activation")
+    return args
+
+
+def uuidd_without_continuous(args):
+    clean = []
+    for arg in args:
+        if arg == "--cont-clock" or re.fullmatch(r"--cont-clock=[0-9]+[hd]?", arg):
+            continue
+        if arg.startswith("--cont") or arg.startswith("-C"):
+            refuse("ambiguous uuidd continuous-clock option")
+        clean.append(arg)
+    return clean
+
+
+def uuidd_atomic(path, data, mode):
+    parent = os.path.dirname(path)
+    os.makedirs(parent, mode=0o755, exist_ok=True)
+    root_directory_chain(parent)
+    temporary = path + ".tractanda-new-" + str(uuid.uuid4())
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode)
+    try:
+        with os.fdopen(fd, "wb", closefd=False) as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(fd)
+        os.replace(temporary, path)
+        parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+    finally:
+        os.close(fd)
+        os.unlink(temporary) if os.path.lexists(temporary) else None
+
+
+def uuidd_owned_content():
+    if not os.path.lexists(UUIDD_RECEIPT):
+        if os.path.lexists(UUIDD_DROPIN):
+            refuse("uuidd drop-in name collision; no ownership receipt")
+        return None
+    receipt = decode_object(read_private_regular(UUIDD_RECEIPT, 16384))
+    content = receipt.get("content")
+    if (set(receipt) != {"profile", "content"} or receipt["profile"] != "tractanda.uuidd-normal-clock.v1"
+            or type(content) is not str or not content.startswith(UUIDD_HEADER)):
+        refuse("invalid uuidd ownership receipt")
+    if os.path.lexists(UUIDD_DROPIN):
+        if read_private_regular(UUIDD_DROPIN, 8192, private=False) != content.encode():
+            refuse("uuidd drop-in was modified; preserving administrator content")
+    return content
+
+
+def uuidd_reload_restart():
+    uuidd_run(["/usr/bin/systemctl", "daemon-reload"])
+    # deb-systemd-invoke honors policy-rc.d. A denied restart must never be
+    # mistaken for changing an already running continuous-clock daemon.
+    uuidd_run(["/usr/bin/deb-systemd-invoke", "try-restart", "uuidd.service"])
+
+
+def uuidd_verify_running():
+    pid = uuidd_run(["/usr/bin/systemctl", "show", "uuidd.service", "--property=MainPID", "--value"])
+    if not pid.isdecimal():
+        refuse("uuidd running PID is malformed")
+    if int(pid):
+        with open("/proc/" + pid + "/cmdline", "rb") as stream:
+            args = [part.decode("ascii") for part in stream.read(8192).split(b"\0") if part]
+        if uuidd_without_continuous(args) != args:
+            refuse("uuidd still runs continuous-clock mode; restart may be policy-blocked")
+
+
+def uuidd_configure():
+    owned = uuidd_owned_content()
+    args = uuidd_command()
+    clean = uuidd_without_continuous(args)
+    if owned is None and args == clean:
+        uuidd_verify_running()
+        return 0  # Already normal: do not take ownership of existing admin policy.
+    content = UUIDD_HEADER + "[Service]\nExecStart=\nExecStart=" + " ".join(clean) + "\n"
+    if owned is not None and content != owned:
+        refuse("effective uuidd command changed outside owned policy; review required")
+    if owned is None:
+        receipt = json.dumps({"profile": "tractanda.uuidd-normal-clock.v1", "content": content}) + "\n"
+        # Record intent first so failed installation/configuration is retryable.
+        uuidd_atomic(UUIDD_RECEIPT, receipt.encode(), 0o600)
+    uuidd_atomic(UUIDD_DROPIN, content.encode(), 0o644)
+    uuidd_reload_restart()
+    effective = uuidd_command()
+    if uuidd_without_continuous(effective) != effective:
+        refuse("a higher-priority uuidd configuration still enables continuous clock")
+    uuidd_verify_running()
+    return 0
+
+
+def uuidd_unlink(path):
+    os.unlink(path)
+    parent_fd = os.open(os.path.dirname(path), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
+def uuidd_remove():
+    owned = uuidd_owned_content()
+    if owned is None:
+        return 0
+    if os.path.lexists(UUIDD_DROPIN):
+        uuidd_unlink(UUIDD_DROPIN)
+    # Keep the receipt on failure; removal/purge can safely retry. Leave shared
+    # directories, socket activation and daemon clock data exactly in place.
+    uuidd_reload_restart()
+    uuidd_unlink(UUIDD_RECEIPT)
+    return 0
+
+
 def fallback(arguments):
     if os.geteuid() != 0 or not arguments:
         refuse("root custody and a finite fallback action are required")
     action = arguments[0]
+    if action == "configure-helper":
+        if len(arguments) != 2:
+            refuse("invalid configure-helper arguments")
+        verify_helper(["verify-helper", arguments[1]])
+        if LAYOUT in ("legacy", "migrating-current"):
+            result = subprocess.run([arguments[1], "--migrate-system-layout"], check=False)
+            if result.returncode != 0:
+                refuse("explicit system layout migration failed")
+            if select_layout() != "current":
+                refuse("system layout migration did not complete")
+            verify_helper(["verify-helper", arguments[1]])
+        ensure_layout_aliases()
+        return uuidd_configure()
+    if action == "uuidd-remove":
+        if len(arguments) != 1:
+            refuse("invalid uuidd-remove arguments")
+        return uuidd_remove()
+    if action == "postrm-remove":
+        if len(arguments) != 1:
+            refuse("invalid postrm-remove arguments")
+        fallback(["postrm"])
+        return uuidd_remove()
     if action == "verify-helper":
         return verify_helper(arguments)
+    if action == "preinst-helper":
+        if len(arguments) != 3:
+            refuse("invalid preinst helper arguments")
+        verify_helper(["verify-helper", arguments[1]])
+        validate_descriptor(arguments[2])
+        return 0
     if action == "preinst":
         if len(arguments) != 3 or arguments[1] not in ("install", "upgrade"):
             refuse("invalid preinst fallback arguments")
@@ -548,6 +812,7 @@ def fallback(arguments):
 
 def main():
     try:
+        select_layout()
         return fallback(sys.argv[1:])
     except SystemExit:
         raise

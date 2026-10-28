@@ -17,6 +17,12 @@ Use the server as the authority for the current schema, readable records and per
 
 Tool names may carry a harness prefix. The [connection guide](references/connection.md) defines feature compatibility and stale-process checks. Refresh info after a restart or behavior mismatch; reconnect an outdated adapter before relying on its references or making writes. Restarting an adapter does not necessarily refresh the harness’s tool list. Some harnesses discover tools once per session: reconnect using the harness, or start a fresh session if needed. Do not call an unlisted tool by guessing its name. Compiled references remain static until restart/reinitialization. The initialize version and `connection.referenceRevision` identify their cache. The same guide covers native-client fallback.
 
+## Work across personal and workgroup peers
+
+The current personal/workgroup model uses equivalent full-server peers with one writer per physical replica. Members share a StoreID while each replica has its own ReplicaID. Item edits can be made offline and reconciled later; permissions are stored in revisions, and current policy governs all history. Unix account names are shared user identities, while UID/GID and administrator-group mappings are local to each host. Membership is shared and administrator-coordinated; peer endpoints and secrets are host-local.
+
+Use native cluster status to inspect local membership and observed synchronization. Enrollment requires a separate operator workflow; see [connection setup](references/connection.md) and its clustering guide. Pairing is a private peer binding, distinct from authenticated client access. A successful connection or local readiness does not prove convergence. Failover is not automatic: after switching peers, a read may lag until synchronization catches up, so report the store and observed state used.
+
 ## Think in independent dimensions
 
 Everything is an item. Use concrete `Item` for generic content; specialized classes add data semantics. An ordinary item can carry category criteria, a saved view definition, both, or neither. Item type describes data semantics; category membership organizes it. Do not introduce a new class for every project or action.
@@ -76,6 +82,8 @@ Use tagged `date` values for known timestamps, including `activityNotes[].at` an
 For an explicitly surfaced projection conflict, use the served conflict-resolution contract only after reviewing its current state and complete frontier. This does not grant broader read or write permissions.
 
 For imports, read [importing existing records](references/importing.md). Stable source-derived operation IDs are useful, but replay also requires the identical payload and the same actor/store. Retain the payload journal; verify existing source identifiers and visible category intersections instead of restarting committed writes when the store state changes.
+
+Keep uncertain-write retries on the same store and actor. A peer switch may reach a replica that has not received the first operation's replay record; the same operation ID and payload do not promise cross-peer deduplication. Reconcile the result before deliberately submitting work elsewhere.
 
 Category assignment is metadata on an item, not moving its content into a folder. Read the items reference for shared versus personal overrides. Accepting/rejecting a learned suggestion changes recorded feedback and potentially membership; use the learning API's documented action, revision guard and operation ID. Read `tractanda://reference/learning` before doing so.
 

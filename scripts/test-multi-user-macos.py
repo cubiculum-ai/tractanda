@@ -39,7 +39,7 @@ def main():
     for entry in accounts.values():
         grp.getgrgid(entry.pw_gid)
     sources = {"tractanda": options.binary.resolve(strict=True)}
-    for name in ["verify-multi-user.py", "verify-ipc.py"]:
+    for name in ["verify-multi-user.py", "verify-ipc.py", "jmap_client.py"]:
         sources[name] = Path(__file__).with_name(name).resolve()
     if options.mcp_binary:
         sources["tractanda-mcp"] = options.mcp_binary.resolve(strict=True)

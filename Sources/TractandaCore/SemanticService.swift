@@ -9,7 +9,7 @@ protocol SemanticVectorStorage: AnyObject {
     func append(_ generation: Vec1Generation, chunks: [SemanticChunk], vectors: [[Double]]) throws
     func publish(_ generation: Vec1Generation, count: Int64) throws
     func discard(_ generation: Vec1Generation) throws
-    func prune(profileID: String, current: (String) throws -> Bool) throws
+    func prunePage(profileID: String, after: String?, current: (String) throws -> Bool) throws -> String?
     func cleanup() throws
     func search(
         vector: [Double], profileID: String, limit: Int,
@@ -60,8 +60,8 @@ final class SemanticMemoryStorage: SemanticVectorStorage {
         try backing?.publish(generation, count: count)
     }
     func discard(_ generation: Vec1Generation) throws { try backing?.discard(generation) }
-    func prune(profileID: String, current: (String) throws -> Bool) throws {
-        try backing?.prune(profileID: profileID, current: current)
+    func prunePage(profileID: String, after: String?, current: (String) throws -> Bool) throws -> String? {
+        try backing?.prunePage(profileID: profileID, after: after, current: current)
     }
     func cleanup() throws { try backing?.cleanup() }
     func search(
@@ -196,22 +196,31 @@ final class SemanticService {
     private var documentWorkSuspended = false
     private var queryTasks: [String: Task<Void, Never>] = [:]
     private var retryAfter: [String: Date] = [:]
+    private var providerRetryAfter = Date.distantPast
     private var storageProfile: String?
     private var storageProblem: TractandaError?
     /// `ItemStore.state` is the service-wide generation while maintenance has
     /// no caller context. It changes after every published head or index
     /// rebuild, so an idle request must not rescan every canonical item.
     private var reconciledStoreState: String?
+    private var scanCursor: String?
+    private var scanActive = false
+    private var scanAgain = false
+    private var pruneCursor: String?
+    private var pruneActive = false
+    private var pruneAgain = false
+    private let reconciliationPageSize = 32
     private var epoch = 0
 
     private let pendingQueryLifetimeForTesting: TimeInterval?
     private let queryLifetimeClock: @Sendable () -> Date
-    private let retryDelay: TimeInterval = 5
+    private let retryDelay: TimeInterval
     private let maximumQueries = SemanticConfiguration.maximumPendingQueries
 
     init(
         store: ItemStore,
         storage: SemanticVectorStorage? = nil,
+        retryDelayForTesting: TimeInterval = 5,
         embed: @escaping @Sendable (SemanticConfiguration, [String], Bool) async throws -> [[Double]] =
             SemanticService.defaultEmbed
     ) {
@@ -220,6 +229,7 @@ final class SemanticService {
         hasInjectedStorage = storage != nil
         queryLifetimeClock = { Date() }
         pendingQueryLifetimeForTesting = nil
+        retryDelay = retryDelayForTesting
         self.embed = embed
         configurations = SemanticConfigurationStore(storeRoot: store.root)
     }
@@ -229,6 +239,7 @@ final class SemanticService {
         storage: SemanticVectorStorage? = nil,
         queryLifetimeClock: @escaping @Sendable () -> Date,
         pendingQueryLifetimeForTesting: TimeInterval? = nil,
+        retryDelayForTesting: TimeInterval = 5,
         embed: @escaping @Sendable (SemanticConfiguration, [String], Bool) async throws -> [[Double]] =
             SemanticService.defaultEmbed
     ) {
@@ -237,6 +248,7 @@ final class SemanticService {
         hasInjectedStorage = storage != nil
         self.queryLifetimeClock = queryLifetimeClock
         self.pendingQueryLifetimeForTesting = pendingQueryLifetimeForTesting
+        retryDelay = retryDelayForTesting
         self.embed = embed
         configurations = SemanticConfigurationStore(storeRoot: store.root)
     }
@@ -287,6 +299,7 @@ final class SemanticService {
                 "itemTextProfile": ItemTextContent.profile,
                 "indexableItems": 0,
                 "indexedItems": 0,
+                "pendingItems": 0,
                 "coverage": "disabled",
             ]
         }
@@ -319,6 +332,7 @@ final class SemanticService {
             "itemTextProfile": ItemTextContent.profile,
             "indexableItems": indexable,
             "indexedItems": indexed,
+            "pendingItems": indexable - indexed,
             "coverage": indexed == indexable && storageProblem == nil ? "complete" : "partial",
         ]
     }
@@ -624,7 +638,6 @@ final class SemanticService {
             }
             guard let work = documentWork, work.jobID == completed.jobID else { continue }
             documentWork = nil
-            reconciledStoreState = nil
             defer { try? store.releaseIndexedCorpus(work.snapshot.corpus) }
             var published = false
             defer {
@@ -640,6 +653,9 @@ final class SemanticService {
                 )
             else {
                 retryAfter[work.snapshot.itemID] = Date().addingTimeInterval(retryDelay)
+                if completed.failed && !work.failed {
+                    providerRetryAfter = Date().addingTimeInterval(retryDelay)
+                }
                 continue
             }
             defer { try? store.releaseIndexedCorpus(current.corpus) }
@@ -647,6 +663,7 @@ final class SemanticService {
             try store.revalidateIndexedCorpus(current.corpus)
             try work.storage.publish(work.generation, count: completed.count)
             published = true
+            providerRetryAfter = .distantPast
             if current.revisionID != work.snapshot.revisionID { try work.storage.rebind(current) }
             retryAfter.removeValue(forKey: current.itemID)
         }
@@ -656,31 +673,67 @@ final class SemanticService {
         try storage.cleanup()
         guard !documentWorkSuspended else { return }
         let storeState = store.state
-        let canRetry = documentWork == nil && hasDueDocumentRetry
-        guard reconciledStoreState != storeState || canRetry else { return }
-        try storage.prune(profileID: profileID) { itemID in
-            guard let current = try snapshot(id: itemID, configuration: configuration, profileID: profileID)
-            else { return false }
-            defer { try? store.releaseIndexedCorpus(current.corpus) }
-            return true
+        if reconciledStoreState != storeState {
+            let starting = reconciledStoreState == nil
+            reconciledStoreState = storeState
+            if starting || !scanActive {
+                scanCursor = nil
+                scanActive = true
+                scanAgain = false
+            } else {
+                scanAgain = true
+            }
+            if starting || !pruneActive {
+                pruneCursor = nil
+                pruneActive = true
+                pruneAgain = false
+            } else {
+                pruneAgain = true
+            }
         }
-        reconciledStoreState = storeState
+        if pruneActive {
+            pruneCursor = try storage.prunePage(profileID: profileID, after: pruneCursor) { itemID in
+                guard let current = try snapshot(id: itemID, configuration: configuration, profileID: profileID)
+                else { return false }
+                defer { try? store.releaseIndexedCorpus(current.corpus) }
+                return true
+            }
+            if pruneCursor == nil {
+                pruneActive = pruneAgain
+                pruneAgain = false
+            }
+        }
         guard documentWork == nil else { return }
-        var cursor: String?
-        while let revision = try store.semanticCurrentRevision(after: cursor) {
-            cursor = revision.itemID
+        guard providerRetryAfter <= Date() else { return }
+        if !scanActive && hasDueDocumentRetry {
+            scanCursor = nil
+            scanActive = true
+        }
+        guard scanActive else { return }
+        for _ in 0..<reconciliationPageSize {
+            guard let revision = try store.semanticCurrentRevision(after: scanCursor) else {
+                scanCursor = nil
+                scanActive = scanAgain
+                scanAgain = false
+                return
+            }
+            scanCursor = revision.itemID
             guard let current = try snapshot(revision, configuration: configuration, profileID: profileID)
-            else { continue }
+            else {
+                retryAfter.removeValue(forKey: revision.itemID)
+                continue
+            }
             var transferred = false
             defer { if !transferred { try? store.releaseIndexedCorpus(current.corpus) } }
             if let indexed = try storage.identity(itemID: current.itemID, profileID: profileID),
                 indexed.contentHash == current.contentHash
             {
+                retryAfter.removeValue(forKey: current.itemID)
                 if indexed.revisionID != current.revisionID { try storage.rebind(current) }
             } else if retryAfter[current.itemID, default: .distantPast] <= Date() {
                 try scheduleDocument(current, configuration)
                 transferred = true
-                break
+                return
             }
         }
     }
@@ -943,6 +996,7 @@ final class SemanticService {
         queryVectors.removeAll()
         queryFailures.removeAll()
         retryAfter.removeAll()
+        providerRetryAfter = .distantPast
         reconciledStoreState = nil
     }
 

@@ -42,6 +42,44 @@ final class PeerTLSTests: XCTestCase {
         XCTAssertEqual(String(describing: client), "PeerTLSContext(profile-v1)")
     }
 
+    func testEnrollmentPurposeSeparatesImportedKeyContextWithoutChangingPeerContext() throws {
+        let ordinary = try fixtureProfile()
+        let invitation = try PeerTLSProfile(storeID: ordinary.storeID,
+            initiatorReplicaID: ordinary.initiatorReplicaID, responderReplicaID: ordinary.responderReplicaID,
+            pairingID: ordinary.pairingID, purpose: .enrollmentInvitation)
+        let continuation = try PeerTLSProfile(storeID: ordinary.storeID,
+            initiatorReplicaID: ordinary.initiatorReplicaID, responderReplicaID: ordinary.responderReplicaID,
+            pairingID: ordinary.pairingID, purpose: .enrollmentContinuation)
+        XCTAssertEqual(ordinary.purpose, .peer)
+        XCTAssertNotEqual(ordinary.importerContext, invitation.importerContext)
+        XCTAssertNotEqual(invitation.importerContext, continuation.importerContext)
+        let secret = try PeerTLSSecret.generate()
+        try rejected(Pair(client: PeerTLSContext(profile: ordinary, role: .initiator, secret: secret),
+            server: PeerTLSContext(profile: invitation, role: .responder, secret: secret)))
+        try rejected(Pair(client: PeerTLSContext(profile: invitation, role: .initiator, secret: secret),
+            server: PeerTLSContext(profile: continuation, role: .responder, secret: secret)))
+    }
+
+    func testEnrollmentInvitationAndContinuationRetainQualifiedHybridTLSProperties() throws {
+        let ordinary = try fixtureProfile()
+        for purpose in [PeerTLSProfile.Purpose.enrollmentInvitation, .enrollmentContinuation] {
+            let profile = try PeerTLSProfile(storeID: ordinary.storeID,
+                initiatorReplicaID: ordinary.initiatorReplicaID, responderReplicaID: ordinary.responderReplicaID,
+                pairingID: ordinary.pairingID, purpose: purpose)
+            let secret = try PeerTLSSecret.generate()
+            let pair = try Pair(client: PeerTLSContext(profile: profile, role: .initiator, secret: secret),
+                server: PeerTLSContext(profile: profile, role: .responder, secret: secret))
+            try pair.start()
+            try pair.payload()
+            XCTAssertEqual(pair.clientSessions.count, 1)
+            let session = pair.clientSessions.values.withLock { $0[0] }
+            XCTAssertEqual(session.profile.purpose, purpose)
+            XCTAssertEqual(session.cipherSuite, 0x1302)
+            XCTAssertEqual(session.keyExchangeGroup, 0x11ec)
+            XCTAssertFalse(pair.wire.early)
+        }
+    }
+
     func testFreshConnectionsUseImportedPSKHybridCipherAndProtectedPayload() throws {
         let secret = try PeerTLSSecret.generate()
         let client = try context(.initiator, secret)

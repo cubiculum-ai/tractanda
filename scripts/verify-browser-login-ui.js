@@ -20,10 +20,20 @@ async (page) => {
   page.on('dialog', dialog => dialog.accept());
   const profile = await (await page.request.get(origin + '/auth/session')).json();
   const headers = {'Content-Type':'application/json', Authorization:'Bearer '+token};
+  let rpcSession=null;
   async function rpc(method, values) {
-    const response = await page.request.post(origin+'/api', {headers, data:{using:['https://tractanda.ai/ns/local-prototype/4'],methodCalls:[[method, values, 'ui-test']]}});
+    if(method==='TractandaItem/query') {
+      const {expression,text,categoryPath,excludedCategoryIDs,viewID,sectionID,at,timeZone,sort,...paging}=values;
+      values={filter:Object.fromEntries(Object.entries({expression,text,categoryPath,excludedCategoryIDs,viewID,sectionID,at,timeZone}).filter(([,value])=>value!==undefined)),...paging,calculateTotal:true,...(sort?{sort:sort.map(entry=>entry.categoryRootID?{property:'categoryMembership',categoryRootId:entry.categoryRootID,isAscending:entry.isAscending??true}:entry)}:{})};
+    }
+    const scoped=!['Core/echo','TractandaSession/get','TractandaAuth/createSession'].includes(method);
+    if(scoped&&!rpcSession)rpcSession=await rpc('TractandaSession/get',{});
+    if(scoped&&!Object.hasOwn(values,'accountId')&&!Object.hasOwn(values,'#accountId'))
+      values={...values,accountId:rpcSession.primaryAccounts['https://tractanda.ai/ns/jmap/1']};
+    const response = await page.request.post(origin+'/api', {headers, data:{using:['https://tractanda.ai/ns/jmap/1'],methodCalls:[[method, values, 'ui-test']]}});
     if (response.status() !== 200) throw new Error('Native API failed: '+response.status());
-    const call = (await response.json()).methodResponses[0];
+    const envelope=await response.json();if(rpcSession&&envelope.sessionState&&envelope.sessionState!==rpcSession.state)rpcSession=null;
+    const call = envelope.methodResponses[0];
     if (call[0] !== method) throw new Error('Native method failed: '+JSON.stringify(call));
     return call[1];
   }
@@ -115,7 +125,7 @@ async (page) => {
   await second.locator('#login-password').waitFor({state:'visible'});
   check(!await page.evaluate(() => localStorage.getItem('tractanda.browser-session') || sessionStorage.getItem('tractanda.web-session')), 'Sign-out removes stored browser credentials');
   check(await second.locator('#login-password').isVisible(), 'Other tabs sharing that browser session return to sign-in');
-  const revoked = await page.request.post(origin+'/api',{headers,data:{using:['https://tractanda.ai/ns/local-prototype/4'],methodCalls:[['TractandaStore/info',{},'revoked']]}});
+  const revoked = await page.request.post(origin+'/api',{headers,data:{using:['https://tractanda.ai/ns/jmap/1'],methodCalls:[['TractandaStore/info',{accountId:rpcSession?.primaryAccounts['https://tractanda.ai/ns/jmap/1']},'revoked']]}});
   check(revoked.status() === 401, 'Actual server logout rejects subsequent use of the old token');
   check(errors.length === 0, 'No browser JavaScript errors');
   await second.close();

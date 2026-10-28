@@ -13,13 +13,11 @@ import tempfile
 import uuid
 from datetime import datetime, timezone
 
-PROFILE = 'tractanda.release-delivery.v1'
+PROFILE = 'tractanda.release-delivery.v2'
 ARCHES = {'amd64': 'x86_64', 'arm64': 'arm64'}
-CHECKS = ('raven-backup-and-restore', 'canonical-cluster-initialization',
-          'raven-candidate-runtime', 'stash-amd64-install-and-empty-preparation',
-          'ssh-activation-closed-and-reaped', 'prepared-target-adoption',
-          'loaded-peer-runtime-both-hosts', 'bidirectional-canary')
-INSTALL_CHECKS = CHECKS[:2]
+INSTALL_CHECKS = ('candidate-compatibility-and-maintenance', 'current-installation-identity')
+CHECKS = ('raven-candidate-runtime', 'stash-candidate-runtime',
+          'current-membership-and-peer-runtime', 'bidirectional-verification')
 RESERVE = 10 * 1024**3
 
 
@@ -218,14 +216,14 @@ def binding(state):
 
 def challenge(state):
     value = binding(state)
-    return {'profile': 'tractanda.release-cluster-acceptance.v1', 'candidateID': digest(canonical(value)), 'candidate': value,
+    return {'profile': 'tractanda.release-cluster-acceptance.v2', 'candidateID': digest(canonical(value)), 'candidate': value,
             'cluster': {'storeID': '', 'ravenReplicaID': '', 'stashReplicaID': ''},
             'checks': [{'name': name, 'status': 'PENDING', 'completedAt': '', 'evidence': []} for name in CHECKS]}
 
 
 def install_challenge(state):
     value = binding(state)
-    return {'profile': 'tractanda.release-install-authorization.v1', 'candidateID': digest(canonical(value)), 'candidate': value,
+    return {'profile': 'tractanda.release-install-authorization.v2', 'candidateID': digest(canonical(value)), 'candidate': value,
             'raven': {'storeID': '', 'replicaID': ''},
             'checks': [{'name': name, 'status': 'PENDING', 'completedAt': '', 'evidence': []} for name in INSTALL_CHECKS]}
 
@@ -243,7 +241,7 @@ def validate_pins(pins, keys):
 
 
 def validate_checks(checks, names):
-    require([c['name'] for c in checks] == list(names), 'Evidence must retain backup/initialization/activation-before-adoption order')
+    require([c['name'] for c in checks] == list(names), 'Evidence must retain the current compatibility/runtime verification order')
     previous = None
     for check in checks:
         require(set(check) == {'name', 'status', 'completedAt', 'evidence'} and check['status'] == 'PASS', 'Every actual cluster check must explicitly pass')

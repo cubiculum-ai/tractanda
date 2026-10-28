@@ -45,7 +45,7 @@ def main():
         path, store = root / "s", root / "store"
         with wire.server(native, store, path) as client:
             def create(name, fields):
-                return client.commit(wire.intent("create", str(uuid.uuid4()), class_id="Item",
+                return client.commit_with_revision(wire.intent("create", str(uuid.uuid4()), class_id="Item",
                     changes={"subject": wire.text(name), **fields}))["revision"]
 
             categories = {name: create(name, {"selection": tagged("object", {
@@ -136,7 +136,7 @@ def main():
                 ui.send(b"\r")
                 ui.wait("Type apply")
                 before = client.get(identities[0])
-                changed = client.commit(wire.intent("revise", "outside-group-edit", item=identities[0],
+                changed = client.commit_with_revision(wire.intent("revise", "outside-group-edit", item=identities[0],
                     base=wire.revision_id(before), changes={"body": wire.text("External work retained")}))["revision"]
                 ui.paste("apply")
                 ui.send(b"\x13")

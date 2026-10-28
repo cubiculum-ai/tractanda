@@ -196,6 +196,7 @@ extension ItemIndex {
         try requireGraphCapacity(additionalBytes: additionalBytes)
         try execute("SAVEPOINT catalogue_row")
         do {
+            try indexBlobReferences(row, fields: graphFields)
             try execute(
                 "INSERT INTO revision_catalog VALUES (?,?,?,NULLIF(?,''),?,?,?,?,?,?,?,?,?,?,?,NULLIF(?,''),CAST(NULLIF(?,'') AS INTEGER))",
                 [

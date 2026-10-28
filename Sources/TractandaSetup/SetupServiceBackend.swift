@@ -215,6 +215,7 @@ struct SetupServiceBackend {
     func load(_ instance: String, role: SetupServiceRole = .server, enableAtBoot: Bool = true) throws {
         if roots.platform == .macos {
             if try !isRunning(instance, role: role) {
+                try successful(["enable", label(instance, role: role)])
                 try successful(["bootstrap", "system", definitionURL(instance, role: role).path])
             }
             return

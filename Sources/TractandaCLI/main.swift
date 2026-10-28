@@ -14,16 +14,22 @@ import TractandaWeb
 let usage = """
     Tractanda — experimental local item server
 
+      tractanda [--profile NAME | --socket PATH] cluster invite [--hostname DNS] [--fallback-host DNS] [--out PRIVATE_FILE] [--resume] [--json]
+      tractanda cluster join --prepare-new NAME --hostname TARGET_DNS [--code-file PRIVATE_FILE] [--no-wait] [--json]
+      tractanda [--profile NAME | --socket PATH] cluster join --hostname TARGET_DNS [--replace-expired] [--code-file PRIVATE_FILE] [--no-wait] [--json]
+      tractanda [--profile NAME | --socket PATH] cluster join-status|resume [--operation-id UUID] [--json]
+      tractanda [--profile NAME | --socket PATH] cluster status [--json]
       tractanda init STORE [--index-directory PATH]
-      tractanda personal-peer ...                 (fresh personal membership/enrollment; run without arguments for syntax)
+      tractanda personal-peer ...                 (low-level personal peer repair; run without arguments for syntax)
       tractanda inspect-content STORE [--owner OS_USER] [--output PRIVATE_JSON]
       tractanda activate-content STORE TAGGED_CONFIG_JSON --index-directory PATH
       tractanda seed STORE [--index-directory PATH]
       tractanda configure-access STORE TAGGED_CONFIG_JSON OPERATION_ID [--index-directory PATH]
       tractanda serve STORE SOCKET [--max-requests N] [--index-directory PATH]
-      tractanda daemon STORE SOCKET [--index-directory PATH] [--http-port PORT|--no-http] [--managed] [--document-converter PATH --document-model-directory PATH --document-scratch-directory PATH] [--document-inspect-seconds N] [--document-model-load-seconds N] [--document-page-seconds N] [--document-no-progress-seconds N] [--document-termination-grace-seconds N] [--attachment-upload-idle-seconds N] [--attachment-staged-byte-quota N] [--attachment-minimum-free-bytes N] [--rebuild-no-progress-seconds N] [--view ID | --project-root ID --status-root ID [--project ID]]
+      tractanda daemon STORE SOCKET [--index-directory PATH] [--http-port PORT|--no-http] [--public-jmap-config ABSOLUTE_JSON_PATH] [--managed] [--document-converter PATH --document-model-directory PATH --document-scratch-directory PATH] [--document-inspect-seconds N] [--document-model-load-seconds N] [--document-page-seconds N] [--document-no-progress-seconds N] [--document-termination-grace-seconds N] [--attachment-upload-idle-seconds N] [--attachment-staged-byte-quota N] [--attachment-minimum-free-bytes N] [--rebuild-no-progress-seconds N] [--view ID | --project-root ID --status-root ID [--project ID]]
       tractanda connections list|add|default|remove ...
       tractanda service prepare|install|activate|start|stop|status|uninstall ...
+      tractanda models prefetch|status|import|run --manifest PATH --storage PATH [--artifact ID] [--from DIRECTORY] [-- EXECUTABLE ARGS...]
       tractanda uuid-v1 [COUNT]
       tractanda uuid-node
       tractanda inspect-uuid UUID
@@ -33,10 +39,9 @@ let usage = """
       tractanda request SOCKET [JSON_FILE]          (otherwise reads stdin)
       tractanda call SOCKET METHOD [ARGUMENTS_JSON] (otherwise reads stdin)
       tractanda info SOCKET
-      tractanda [--profile NAME | --socket PATH] peer enrollment activate --operation-id UUID --file PATH --root ABSOLUTE_PATH --source-replica UUID --bootstrap-id UUID --bootstrap-sha256 HEX --approval-id UUID --approval-sha256 HEX [--target-user OS_USER]
       tractanda [--profile NAME | --socket PATH] peer status
-      tractanda [--profile NAME | --socket PATH] peer enrollment pair|begin|step|status|accept|read|export-target|register [options]
-      tractanda [--profile NAME | --socket PATH] peer credential register --file PATH --origin UUID [--origin UUID...] --operation-id UUID
+      tractanda [--profile NAME | --socket PATH] peer enrollment ... (historical prepared-target repair, not native pairing)
+      tractanda [--profile NAME | --socket PATH] peer credential register ... (historical credential repair)
       tractanda describe SOCKET [TOPIC]           (overview, types, or properties)
       tractanda extracted-text SOCKET ITEM_ID... (bounded source text and current citation locators)
       tractanda get SOCKET ITEM_ID...
@@ -98,7 +103,9 @@ let usage = """
     Item mutations require an operation ID; reuse identical arguments when retrying.
     Local access configuration replaces current settings without creating an item revision.
     Fresh stores use the personal/workgroup profile and admit the creating OS account.
-    configure-access changes current local OS user/group policy; personal-peer manages explicit peer enrollment.
+    configure-access changes current local OS user/group policy; cluster manages normal native pairing.
+    Pairing codes use private terminal/file input and output, never secret argv or ordinary JSON.
+    personal-peer and historical peer enrollment tools are repair interfaces, not the normal join flow.
     Set TRACTANDA_SERVER_USER to pin another account's daemon identity. This is not network JMAP.
     """
 
@@ -113,30 +120,21 @@ typealias CLIRequestSender = (ServerConnection, Data, LocalTransport.ResponseWai
 
 func call(
     _ connection: ServerConnection, _ method: String, _ args: Any,
-    responseWait: LocalTransport.ResponseWait = .bounded,
-    sendForTesting: CLIRequestSender? = nil
+    responseWait: LocalTransport.ResponseWait = .untilCompletion,
+    sendForTesting: CLIRequestSender? = nil, argumentsAreWire: Bool = false
 ) throws -> Data {
-    let request: [String: Any] = ["using": [ItemService.capability], "methodCalls": [[method, args, "cli"]]]
+    let request: [String: Any] = [
+        "using": ["urn:ietf:params:jmap:core", ItemService.capability],
+        "methodCalls": [[method, args, "cli"]],
+    ]
     let bytes = try JSONSerialization.data(withJSONObject: request, options: [.sortedKeys])
-    let response: Data
-    if let sendForTesting {
-        response = try sendForTesting(connection, bytes, responseWait)
-    } else {
-        response = try connection.send(bytes, responseWait: responseWait)
+    let sender: (Data) throws -> Data = { request in
+        if let sendForTesting { return try sendForTesting(connection, request, responseWait) }
+        return try connection.send(request, responseWait: responseWait)
     }
-    guard let envelope = try JSONSerialization.jsonObject(with: response) as? [String: Any] else {
-        throw TractandaError("protocolError", "Invalid response.")
-    }
-    if let code = envelope["code"] as? String {
-        throw TractandaError(code, envelope["message"] as? String ?? "")
-    }
-    guard let calls = envelope["methodResponses"] as? [[Any]], let first = calls.first,
-        let result = first[1] as? [String: Any]
-    else { throw TractandaError("protocolError", "Missing method response.") }
-    if first[0] as? String == "error" {
-        throw TractandaError(result["type"] as? String ?? "error", result["description"] as? String ?? "")
-    }
-    return try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys, .prettyPrinted])
+    let response = try NativeClientContext(transport: sender).send(
+        bytes, argumentEncoding: argumentsAreWire ? .wire : .canonical, transport: sender)
+    return try NativeMethodResult.unwrap(response, method: method, callID: "cli")
 }
 func run() throws {
     var args = Array(CommandLine.arguments.dropFirst())
@@ -214,6 +212,8 @@ func run() throws {
                 operationID: credentialOptions.operationID))
         return
     }
+    if try clusterEnrollmentCommand(arguments: args, options: options) { return }
+    if try clusterStatusCommand(arguments: args, options: options) { return }
     if let statusOptions = try peerStatusOptions(arguments: args, options: options) {
         output(try call(statusOptions.resolve(), PeerOperatorStatus.nativeMethod, [:]))
         return
@@ -574,7 +574,8 @@ func run() throws {
     case "call":
         try require(3)
         let input = try args.count > 3 ? Data(args[3].utf8) : FileHandle.standardInput.readToEnd() ?? Data()
-        output(try call(connection, args[2], JSONSerialization.jsonObject(with: input)))
+        output(
+            try call(connection, args[2], JSONSerialization.jsonObject(with: input), argumentsAreWire: true))
     case "info":
         output(try call(connection, "TractandaStore/info", [:]))
     case "rebuild":
@@ -632,7 +633,9 @@ func run() throws {
     case "query", "search":
         try require(3)
         output(
-            try call(connection, "TractandaItem/query", [command == "query" ? "expression" : "text": args[2]])
+            try call(
+                connection, "TractandaItem/query",
+                ["filter": [command == "query" ? "expression" : "text": args[2]], "calculateTotal": true])
         )
     case "history":
         try require(3)
@@ -705,7 +708,7 @@ func run() throws {
             // Compose a whole-property edit from the specified immutable base. A later
             // concurrent edit still fails the guard; a retry reconstructs identical intent.
             let data = try call(
-                connection, "TractandaRevision/get", ["itemID": args[2], "revisionID": args[3]])
+                connection, "TractandaRevision/get", ["ids": [args[3]]])
             let envelope = try JSONSerialization.jsonObject(with: data) as! [String: Any]
             let revision = try JSON.decode(
                 Revision.self, JSONSerialization.data(withJSONObject: envelope["revision"]!))
@@ -718,7 +721,13 @@ func run() throws {
     }
 }
 
-if CommandLine.arguments.dropFirst().first == "daemon" {
+if CommandLine.arguments.dropFirst().first == "models" {
+    do { try modelCommand(Array(CommandLine.arguments.dropFirst())) } catch {
+        let failure = error as? TractandaError ?? TractandaError("error", String(describing: error))
+        FileHandle.standardError.write((try? JSON.encode(failure)) ?? Data(failure.description.utf8))
+        FileHandle.standardError.write(Data([10])); exit(1)
+    }
+} else if CommandLine.arguments.dropFirst().first == "daemon" {
     do { try await daemonCommand(Array(CommandLine.arguments.dropFirst())) } catch {
         let failure = error as? TractandaError ?? TractandaError("error", String(describing: error))
         FileHandle.standardError.write((try? JSON.encode(failure)) ?? Data(failure.description.utf8))

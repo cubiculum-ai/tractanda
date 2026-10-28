@@ -182,14 +182,39 @@ final class CoreTests: XCTestCase {
             return try JSONSerialization.jsonObject(
                 with: service.handle(data, peerUID: store.ownerUID)) as! [String: Any]
         }
-        let validCalls: [[Any]] = [["Core/echo", [:], "call"]]
-        for capabilities in [["urn:ietf:params:jmap:core"], [ItemService.capability, "future.capability"]] {
-            let rejected = try response(["using": capabilities, "methodCalls": validCalls])
-            XCTAssertEqual(rejected["code"] as? String, "unsupportedCapability")
-            XCTAssertTrue((rejected["message"] as? String)?.contains(ItemService.capability) == true)
+        let validCalls: [[Any]] = [["Core/echo", ["value": "round-trip"], "call"]]
+        let coreOnly = try response(["using": ["urn:ietf:params:jmap:core"], "methodCalls": validCalls])
+        let echo = try XCTUnwrap((coreOnly["methodResponses"] as? [[Any]])?.first)
+        XCTAssertEqual(echo[0] as? String, "Core/echo")
+        XCTAssertEqual(echo[1] as? [String: String], ["value": "round-trip"])
+        XCTAssertEqual(echo[2] as? String, "call")
+
+        func assertRequestProblem(_ object: [String: Any], _ type: String, status: Int = 400) {
+            XCTAssertEqual(object["type"] as? String, "urn:ietf:params:jmap:error:" + type)
+            XCTAssertEqual(object["status"] as? Int, status)
+            XCTAssertNil(object["code"])
+            XCTAssertNil(object["message"])
         }
+        let unknownCapability = try response([
+            "using": [ItemService.capability, "future.capability"], "methodCalls": validCalls,
+        ])
+        assertRequestProblem(unknownCapability, "unknownCapability")
         let malformed = try response(["using": ItemService.capability, "methodCalls": validCalls])
-        XCTAssertEqual(malformed["code"] as? String, "invalidRequest")
+        assertRequestProblem(malformed, "notRequest")
+
+        let extensible = try response([
+            "using": ["urn:ietf:params:jmap:core"], "methodCalls": validCalls, "futureRequestField": true,
+        ])
+        XCTAssertEqual((extensible["methodResponses"] as? [[Any]])?.count, 1)
+        let repeatedIDs = try response([
+            "using": ["urn:ietf:params:jmap:core"],
+            "methodCalls": [["Core/echo", ["n": 1], ""], ["Core/echo", ["n": 2], ""]],
+        ])
+        let repeated = try XCTUnwrap(repeatedIDs["methodResponses"] as? [[Any]])
+        XCTAssertEqual(repeated.count, 2)
+        XCTAssertEqual(repeated.map { $0[2] as? String }, ["", ""])
+        XCTAssertEqual((repeated[0][1] as? [String: Int])?["n"], 1)
+        XCTAssertEqual((repeated[1][1] as? [String: Int])?["n"], 2)
 
         let invalidID = String(repeating: "e", count: 201)
         assertCode("invalidArguments") {
@@ -712,7 +737,7 @@ final class CoreTests: XCTestCase {
         let service = ItemService(store: store)
         func envelope(_ calls: [[Any]], uid: UInt32? = nil) throws -> [String: Any] {
             let data = try JSONSerialization.data(withJSONObject: [
-                "using": [ItemService.capability], "methodCalls": calls,
+                "using": ["urn:ietf:params:jmap:core", ItemService.capability], "methodCalls": calls,
             ])
             return try JSONSerialization.jsonObject(
                 with: service.handle(data, peerUID: uid ?? store.ownerUID)) as! [String: Any]
@@ -734,6 +759,16 @@ final class CoreTests: XCTestCase {
         let calls = response["methodResponses"] as! [[Any]]
         XCTAssertEqual(((calls[1][1] as! [String: Any])["list"] as! [Any]).count, 1)
         XCTAssertEqual((calls[2][1] as! [String: Any])["type"] as? String, "invalidResultReference")
+        let collision = try envelope([
+            [
+                "TractandaItem/get",
+                ["ids": [], "#ids": ["resultOf": "missing", "name": "TractandaItem/query", "path": "/ids"]],
+                "collision",
+            ]
+        ])
+        XCTAssertEqual(
+            ((collision["methodResponses"] as! [[Any]])[0][1] as! [String: Any])["type"] as? String,
+            "invalidArguments")
         let denied = try envelope([["TractandaStore/info", [:], "i"]], uid: store.ownerUID &+ 1)
         XCTAssertEqual(denied["code"] as? String, "forbidden")
         let spoofed = try envelope([["TractandaItem/commit", ["actor": "uid:0"], "s"]])

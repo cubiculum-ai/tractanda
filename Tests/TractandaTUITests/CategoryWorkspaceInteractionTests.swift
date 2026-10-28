@@ -19,7 +19,7 @@ final class CategoryWorkspaceInteractionTests: XCTestCase {
         }
         deinit { try? FileManager.default.removeItem(at: root) }
         func category(_ subject: String, body: String = "") throws -> Revision {
-            try client.commit(
+            try client.commitFixture(
                 CommitRequest(
                     classID: "Item",
                     changes: [

@@ -47,10 +47,11 @@ let package = Package(
                 .linkedLibrary("proc", .when(platforms: [.macOS])),
             ]),
         .executableTarget(name: "TractandaAuthHelper", dependencies: ["CTractandaPlatform"]),
+        .target(name: "CTractandaSetupMetadata", dependencies: ["CTractandaPlatform"]),
         .executableTarget(
             name: "TractandaSetup",
             dependencies: [
-                "CTractandaPlatform", "TractandaCore", .product(name: "Crypto", package: "swift-crypto"),
+                "CTractandaPlatform", "CTractandaSetupMetadata", "TractandaCore", .product(name: "Crypto", package: "swift-crypto"),
             ]),
         .target(name: "CTractandaTerminal"),
         .target(name: "TractandaLearning"),
@@ -102,6 +103,7 @@ let package = Package(
             name: "TractandaWeb",
             dependencies: [
                 "TractandaCore", "TractandaKanban",
+                .product(name: "TractandaClient", package: "TractandaClient"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
@@ -111,6 +113,8 @@ let package = Package(
             dependencies: [
                 "TractandaCore", "TractandaWeb", "TractandaMCP", "TractandaKanban", "TractandaPeerTransport",
                 "CTractandaPlatform",
+                .product(name: "TractandaClient", package: "TractandaClient"),
+                .product(name: "TractandaHTTPSIdentity", package: "TractandaPeerTLS"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
@@ -143,6 +147,7 @@ let package = Package(
             name: "TractandaServerTests",
             dependencies: [
                 "TractandaServer", "CTractandaPlatform", "TractandaPeerTransport",
+                .product(name: "TractandaHTTPSIdentity", package: "TractandaPeerTLS"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
             ]),

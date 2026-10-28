@@ -21,6 +21,9 @@ MODEL_MANIFEST = "Packages/TractandaDocuments/Sources/TractandaDocumentConverter
 MAX_CMLX_METALLIB_BYTES = 64 * 1024 * 1024
 MODEL_MANIFEST_SHA = "64894c93726b0b76d2eb5c20f001c61d6fc2eea1ef848b23773ba60cae9e00ef"
 PATCH_MANIFEST_SHA = "732b8d020e258b8ab5de5875f53bc3756143b089d9a1d7619f311ccbe4674635"
+MODEL_ARTIFACT_MANIFEST = 'config/model-artifacts.json'
+MODEL_ARTIFACT_MANIFEST_SHA = '88b3029047c98e7593ccb2cc0f2aae32795d4fe50c43f4b8897199dcf0a81297'
+MODEL_ARTIFACT_EXTENSIONS = {'.json', '.safetensors', '.txt', '.model', '.tiktoken', '.md', '.jinja'}
 
 def run(*args):
     try:
@@ -49,7 +52,7 @@ def copy_tree(source, target):
 
 
 def embedding_descriptor(host, model_directory, runner=None):
-    """Require the actual helper's pinned profile and exact verified model inputs."""
+    """Require the actual helper's pinned profile; weights may be provisioned on demand."""
     profile = json.loads((run if runner is None else runner)(str(host), '--describe'))
     if (profile.get('alias') != 'tractanda-granite-embedding-311m-multilingual-r2-vmlx-fp32-44399559'
             or profile.get('modelRevision') != '44399559930365213510b1ee2eb15ded83374f0e'
@@ -57,17 +60,13 @@ def embedding_descriptor(host, model_directory, runner=None):
             or profile.get('dimensions') != 768 or profile.get('pooling') != 'cls'
             or profile.get('normalization') != 'l2'):
         raise ValueError('The embedding helper does not describe the bundled Granite profile.')
+    artifact = model_artifacts()['granite-embedding-311m-multilingual-r2']
     assets = profile.get('assets')
-    if not isinstance(assets, dict) or not assets or 'model.safetensors' not in assets:
+    expected_assets = {entry['path']: entry['sha256'] for entry in artifact['files']}
+    if not isinstance(assets, dict) or assets != expected_assets or 'model.safetensors' not in assets:
         raise ValueError('The embedding helper has no pinned model asset set.')
-    actual = {}
-    for path in model_directory.rglob('*'):
-        if path.is_symlink():
-            raise ValueError('Model assets must not be symbolic links.')
-        if path.is_file():
-            actual[path.relative_to(model_directory).as_posix()] = digest(path)
-    if actual != assets:
-        raise ValueError('Model assets differ from the embedding helper\'s pinned hashes.')
+    if model_directory is not None:
+        validate_artifact_directory(model_directory, artifact)
     return {
         'backend': 'vmlx-granite-embedding-f32-v1',
         'modelDirectory': 'models/granite-embedding-311m-multilingual-r2',
@@ -172,6 +171,70 @@ def validate_docling_model(directory):
     return validator.validate_model_directory(directory)
 
 
+def model_artifacts():
+    path = ROOT / MODEL_ARTIFACT_MANIFEST
+    if digest(path) != MODEL_ARTIFACT_MANIFEST_SHA:
+        raise ValueError('Pinned model artifact manifest bytes changed.')
+    raw = json.loads(path.read_text(encoding='utf-8'))
+    if not isinstance(raw, dict) or set(raw) != {'schemaVersion', 'artifacts'} or raw['schemaVersion'] != 1:
+        raise ValueError('Pinned model artifact manifest has an unsupported shape.')
+    artifacts = {}
+    for artifact in raw['artifacts']:
+        if not isinstance(artifact, dict) or set(artifact) != {'identifier', 'repository', 'revision', 'files'}:
+            raise ValueError('Pinned model artifact entry has an unsupported shape.')
+        identifier = artifact['identifier']
+        if identifier in artifacts or identifier not in {
+                'granite-embedding-311m-multilingual-r2', 'granite-docling-258m-mlx'}:
+            raise ValueError('Pinned model artifact identifier is invalid or duplicated.')
+        fixed = {
+            'granite-embedding-311m-multilingual-r2':
+                ('ibm-granite/granite-embedding-311m-multilingual-r2', '44399559930365213510b1ee2eb15ded83374f0e'),
+            'granite-docling-258m-mlx':
+                ('ibm-granite/granite-docling-258M-mlx', 'a8b999991fe8c521a0cec749973414eaaf823731'),
+        }[identifier]
+        if (artifact.get('repository'), artifact.get('revision')) != fixed:
+            raise ValueError('Pinned model artifact repository or revision changed.')
+        if (not isinstance(artifact['repository'], str)
+                or not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', artifact['repository'])
+                or not isinstance(artifact['revision'], str)
+                or not re.fullmatch(r'[0-9a-f]{40}', artifact['revision'])
+                or not isinstance(artifact['files'], list) or not artifact['files']):
+            raise ValueError('Pinned model artifact revision or file list is invalid.')
+        seen = set()
+        for entry in artifact['files']:
+            if (not isinstance(entry, dict) or set(entry) != {'path', 'size', 'sha256'}
+                    or not isinstance(entry['path'], str) or not entry['path']
+                    or Path(entry['path']).is_absolute() or Path(entry['path']).as_posix() != entry['path']
+                    or '..' in Path(entry['path']).parts or '\\' in entry['path']
+                    or Path(entry['path']).suffix.lower() not in MODEL_ARTIFACT_EXTENSIONS
+                    or type(entry['size']) is not int or entry['size'] <= 0
+                    or not re.fullmatch(r'[0-9a-f]{64}', entry['sha256'])
+                    or entry['path'] in seen):
+                raise ValueError('Pinned model artifact file metadata is invalid.')
+            seen.add(entry['path'])
+        artifacts[identifier] = artifact
+    if set(artifacts) != {'granite-embedding-311m-multilingual-r2', 'granite-docling-258m-mlx'}:
+        raise ValueError('Pinned model artifact set is incomplete.')
+    return artifacts
+
+
+def validate_artifact_directory(directory, artifact):
+    """Verify an optional offline snapshot against the checked-in fixed-revision manifest."""
+    if directory.is_symlink() or not directory.is_dir():
+        raise ValueError('Model artifact root must be a real directory.')
+    expected = {entry['path']: entry for entry in artifact['files']}
+    actual = {}
+    for path in directory.rglob('*'):
+        if path.is_symlink() or not (path.is_file() or path.is_dir()):
+            raise ValueError('Model artifact contains a link or special file.')
+        if path.is_file():
+            relative = path.relative_to(directory).as_posix()
+            actual[relative] = {'size': path.stat().st_size, 'sha256': digest(path)}
+    if actual != {name: {'size': row['size'], 'sha256': row['sha256']} for name, row in expected.items()}:
+        raise ValueError('Offline model snapshot differs from the pinned artifact manifest.')
+    return True
+
+
 def document_descriptor(converter, model_directory):
     if converter.is_symlink() or not stat.S_ISREG(converter.stat().st_mode) or not os.access(converter, os.X_OK):
         raise ValueError('Document converter must be a regular executable.')
@@ -181,12 +244,17 @@ def document_descriptor(converter, model_directory):
     patches = ROOT / 'Packages/TractandaDocuments/RuntimePatches/manifest.json'
     if digest(manifest) != MODEL_MANIFEST_SHA or digest(patches) != PATCH_MANIFEST_SHA:
         raise ValueError('Pinned Docling model/runtime manifest differs.')
-    proof = validate_docling_model(model_directory)
+    artifacts = model_artifacts()
+    docling_artifact = artifacts['granite-docling-258m-mlx']
+    validate_docling_source_artifact(docling_artifact)
+    if model_directory is not None:
+        validate_artifact_directory(model_directory, docling_artifact)
+        validate_docling_model(model_directory)
     return {
         'converterPath': 'bin/tractanda-document-converter',
         'identity': {'converter': 'tractanda.docling-native.v2-idefics3-gelu-f32',
                      'model': 'ibm-granite/granite-docling-258M-mlx',
-                     'modelRevision': proof['revision'],
+                     'modelRevision': docling_artifact['revision'],
                      'runtimeRevision': '61a4b20d4ad01b10466e8fc94c50402a9f994430',
                      'preprocessing': 'opaque-rgb-content-crop-hf4561-pillow123-grid-v2',
                      'parser': 'doctags-strict-v1'},
@@ -208,12 +276,22 @@ def document_descriptor(converter, model_directory):
     }
 
 
+def validate_docling_source_artifact(artifact):
+    source = json.loads((ROOT / MODEL_MANIFEST).read_text(encoding='utf-8'))
+    source_files = {row['file']: {'size': row['bytes'], 'sha256': row['sha256']} for row in source['files']}
+    artifact_files = {row['path']: {'size': row['size'], 'sha256': row['sha256']} for row in artifact['files']}
+    if source.get('revision') != artifact['revision'] or source_files != artifact_files:
+        raise ValueError('Docling artifact entries differ from the pinned source model manifest.')
+
+
 def copy_docling_payload(converter, model_directory, output, descriptor):
     shutil.copy2(converter, output / descriptor['converterPath'])
     for bundle in selected_resource_bundles(converter.parent):
         merge_resource_bundle(bundle, output / 'bin' / bundle.name)
-    copy_tree(model_directory, output / descriptor['modelDirectory'])
-    proof = validate_docling_model(output / descriptor['modelDirectory'])
+    if model_directory is not None:
+        copy_tree(model_directory, output / descriptor['modelDirectory'])
+        validate_artifact_directory(output / descriptor['modelDirectory'], model_artifacts()['granite-docling-258m-mlx'])
+        validate_docling_model(output / descriptor['modelDirectory'])
     notices = ROOT / 'Packages/TractandaDocuments/ThirdPartyNotices'
     destination = output / 'licenses/Docling'
     destination.mkdir(parents=True, exist_ok=True)
@@ -226,7 +304,7 @@ def copy_docling_payload(converter, model_directory, output, descriptor):
     for path in descriptor['noticePaths']:
         if not (output / path).is_file():
             raise ValueError('Missing document runtime/model notice: ' + path)
-    return proof
+    return True
 
 
 def copy_public_source(root, output):
@@ -273,10 +351,14 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--version', default='0.1.0-poc.1')
     parser.add_argument('--sign-identity', default='-', help='Developer ID identity, or - for a local ad-hoc build')
-    parser.add_argument('--embeddings-host', type=Path)
+    parser.add_argument('--embeddings-host', type=Path, required=True,
+                        help='Built local embedding worker; model weights are optional.')
     parser.add_argument('--model-directory', type=Path)
-    parser.add_argument('--document-converter', type=Path)
+    parser.add_argument('--document-converter', type=Path, required=True,
+                        help='Built local document converter; model weights are optional.')
     parser.add_argument('--document-model-directory', type=Path)
+    parser.add_argument('--include-model-weights', action='store_true',
+                        help='Include both complete pinned model directories for offline operation.')
     args = parser.parse_args()
     root = ROOT
     output = args.output.resolve()
@@ -285,10 +367,14 @@ def main():
         parser.error('Output must be a new directory; existing releases are not overwritten.')
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._+-]{0,79}', args.version):
         parser.error('Invalid release version.')
-    if bool(args.embeddings_host) != bool(args.model_directory):
-        parser.error('Embedding runtime and weights must be supplied together.')
-    if bool(args.document_converter) != bool(args.document_model_directory):
-        parser.error('Document converter and pinned model must be supplied together.')
+    if args.model_directory and not args.embeddings_host:
+        parser.error('Embedding weights require the embedding host.')
+    if args.document_model_directory and not args.document_converter:
+        parser.error('Document weights require the document converter.')
+    if bool(args.model_directory and args.document_model_directory) != args.include_model_weights:
+        parser.error('--include-model-weights requires both complete model directories; omit both for a slim package.')
+    if bool(args.model_directory) != bool(args.document_model_directory):
+        parser.error('Offline packages must include both model directories or neither.')
     document = (document_descriptor(args.document_converter, args.document_model_directory)
                 if args.document_converter else None)
     resource_roots = [products]
@@ -312,16 +398,21 @@ def main():
     for bundle in selected_resource_bundles(products):
         merge_resource_bundle(bundle, output / 'bin' / bundle.name)
     copy_public_source(root, output)
+    artifacts_path = output / 'models/manifest.json'
+    artifacts_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(root / MODEL_ARTIFACT_MANIFEST, artifacts_path)
     embedding = None
     if args.embeddings_host:
         host = args.embeddings_host.resolve()
-        embedding = embedding_descriptor(host, args.model_directory.resolve())
+        embedding = embedding_descriptor(host, args.model_directory.resolve() if args.model_directory else None)
         shutil.copy2(host, output / 'bin/tractanda-embeddings')
         identifiers['tractanda-embeddings'] = 'ai.tractanda.embeddings'
         for bundle in selected_resource_bundles(host.parent):
             destination = output / 'bin' / bundle.name
             merge_resource_bundle(bundle, destination)
-        copy_tree(args.model_directory.resolve(), output / embedding['modelDirectory'])
+        if args.model_directory:
+            copy_tree(args.model_directory.resolve(), output / embedding['modelDirectory'])
+            validate_artifact_directory(output / embedding['modelDirectory'], model_artifacts()['granite-embedding-311m-multilingual-r2'])
         # Model/runtime notices come from the same audited source snapshot.
         for name in ('LICENSE', 'README.md', 'NOTICE', 'Gemma-Terms.html', 'Gemma-Prohibited-Use-Policy.html'):
             if not (output / 'licenses/Granite' / name).is_file():
@@ -376,6 +467,8 @@ def main():
                 'sourceCommit': run('git', '-C', str(root), 'rev-parse', 'HEAD').strip(), 'platform': 'macos',
                 'arch': 'arm64', 'files': files,
                 'canonicalFormats': json.loads(run(str(output / 'bin/tractanda-setup'), '--canonical-format-support'))}
+    manifest['modelProvisioningManifestPath'] = 'models/manifest.json'
+    manifest['modelProvisioningManifestSHA256'] = digest(artifacts_path)
     if embedding:
         manifest['embedding'] = embedding
     if document:

@@ -293,17 +293,31 @@ final class SQLiteReadPool: @unchecked Sendable {
 
     /// Marks an exclusive writer/rebuild as waiting so later readers cannot overtake it,
     /// then waits for all currently admitted readers to leave.
-    func beginExclusiveAndDrain(timeout: TimeInterval = 5) throws {
+    func beginExclusiveAndDrain(
+        timeout: TimeInterval? = 5, cancellation: SQLiteReadCancellation? = nil
+    ) throws {
         condition.lock()
         exclusiveWaiting = true
         condition.broadcast()
-        let deadline = Date().addingTimeInterval(max(0, timeout))
+        let deadline = timeout.map { Date().addingTimeInterval(max(0, $0)) }
         while !leased.isEmpty {
-            guard condition.wait(until: deadline) else {
+            if cancellation?.isCancelled == true {
                 exclusiveWaiting = false
                 condition.broadcast()
                 condition.unlock()
-                throw SQLiteReadPoolError.timeout
+                throw SQLiteReadPoolError.cancelled
+            }
+            if let deadline {
+                guard condition.wait(until: deadline) else {
+                    exclusiveWaiting = false
+                    condition.broadcast()
+                    condition.unlock()
+                    throw SQLiteReadPoolError.timeout
+                }
+            } else {
+                // This is a cancellation-observation tick, never a deadline on a healthy
+                // accepted reader. Automatic publication recovery waits for completion.
+                _ = condition.wait(until: Date().addingTimeInterval(0.05))
             }
         }
         do {

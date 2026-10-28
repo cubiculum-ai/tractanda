@@ -68,7 +68,12 @@ extension ItemClient {
     public func prepareCapture(_ preparation: CapturePreparation) async throws -> CapturePlan {
         try await call("TractandaItem/prepareCapture", arguments: preparation, returning: CapturePlan.self)
     }
-    public func commitCapture(_ plan: CapturePlan) async throws -> CommitResult {
-        try await call("TractandaItem/commitCapture", arguments: plan, returning: CommitResult.self)
+    public func commitCapture(_ plan: CapturePlan) async throws -> MutationReceipt {
+        let receipt = try await call("TractandaItem/commitCapture", arguments: plan, returning: MutationReceipt.self)
+        guard receipt.operationID == plan.commitRequest.operationID,
+            plan.commitRequest.action == .create || plan.commitRequest.action == .copy
+                || receipt.itemID == plan.commitRequest.itemID
+        else { throw TractandaError("protocolError", "Capture receipt does not match its intent.") }
+        return receipt
     }
 }

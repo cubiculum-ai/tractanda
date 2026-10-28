@@ -430,7 +430,7 @@ public final class TerminalApplication {
     private let categoryPreviewLoader: CategoryPreviewLoader?
     private let captureActionLoader: CaptureActionLoader?
     private var captureCommitRunning = false
-    private var completedCaptureResult: CommitResult?
+    private var completedCaptureResult: MutationReceipt?
     private var captureDraftForm: Form?
     private var capturePreviewGate = CapturePreviewGate()
     private var categoryPreviewGeneration = 0
@@ -544,6 +544,9 @@ public final class TerminalApplication {
             captureActionLoader ?? previewConnection.map(CaptureActionLoader.init(connection:))
         if let operation = try journal.loadOperation() {
             switch operation {
+            case .confirmed(let receipt):
+                try journal.clear()
+                status = "Recovered confirmed save · " + String(receipt.revisionID.prefix(8))
             case .single(let request):
                 pending = PendingEdit(request)
                 status = "Recovered unconfirmed edit. R retries the same request; Q quits and keeps it."
@@ -5253,9 +5256,11 @@ public final class TerminalApplication {
         guard let edit = pendingLearning else { return }
         do {
             let result = try edit.send(using: workspace.client)
-            // Cleanup must finish before accepting any new mutation; otherwise keep this exact retry.
-            try journal.clear()
             pendingLearning = nil
+            do { try journal.acknowledge(result) } catch {
+                status = "Learning edit saved; recovery cleanup failed: \(error)"
+                return
+            }
             form = nil
             panel = nil
             var notice: String
@@ -5332,7 +5337,7 @@ public final class TerminalApplication {
     private func sendPending() {
         guard let pending else { return }
         do {
-            let result: CommitResult
+            let result: MutationReceipt
             if case .capture(let plan) = pending.write {
                 if let confirmed = completedCaptureResult {
                     result = confirmed
@@ -5393,10 +5398,13 @@ public final class TerminalApplication {
             panel = nil
             columnEditor = nil
             var cleanupWarning = ""
-            do { try journal.clear() } catch { cleanupWarning = " Recovery record retained: \(error)" }
+            do { try journal.acknowledge(result) } catch {
+                status = "Saved · \(result.revisionID.prefix(8)); recovery cleanup failed: \(error)"
+                return
+            }
             do {
                 if committedViewDefinition {
-                    try workspace.openView(result.revision)
+                    try workspace.openView(workspace.client.revision(itemID: result.itemID, revisionID: result.revisionID))
                     try reloadViewWorkspace()
                     itemIndex = 0
                     columnOffset = 0
@@ -5406,7 +5414,7 @@ public final class TerminalApplication {
                         try beginPicker(.categories)
                         if var manager = picker {
                             manager.expanded = categoryManagerBeforeSave.expanded
-                            let preferredID = result.revision.itemID
+                            let preferredID = result.itemID
                             manager.index =
                                 manager.matches.firstIndex { $0.itemID == preferredID }
                                 ?? manager.matches.firstIndex {
@@ -5437,7 +5445,7 @@ public final class TerminalApplication {
                                 }
                             } else if categoryManagerBeforeSave.replacesCategory {
                                 let matches = manager.tree?.rows(
-                                    filter: result.revision.fields["subject"]?.string ?? "", expanded: [])
+                                    filter: "", expanded: [])
                                 if let relocated = matches?.first(where: { $0.item.itemID == preferredID }) {
                                     selectCategoryWorkspacePath(ids: relocated.path.map(\.itemID))
                                 }
@@ -5445,12 +5453,12 @@ public final class TerminalApplication {
                         }
                     }
                     itemIndex =
-                        workspace.rows.firstIndex { $0.item?.itemID == result.revision.itemID } ?? itemIndex
+                        workspace.rows.firstIndex { $0.item?.itemID == result.itemID } ?? itemIndex
                 }
             } catch { cleanupWarning += " Refresh failed: \(error)" }
             status =
                 (result.wasReplayed ? "Recovered saved edit" : "Saved one revision")
-                + " · " + String(result.revision.revisionID.prefix(8))
+                + " · " + String(result.revisionID.prefix(8))
                 + (result.isIndexReady ? "" : "; index needs recovery") + cleanupWarning
             // queue() sends synchronously but absorbs failures. Only the confirmed response above can
             // release this staged definition; conflicts and lost responses retain its exact guard.

@@ -733,7 +733,7 @@ class Pipeline:
         self.state['activeStep'] = 'install-authorization'
         accepted = delivery.verify_install(self.state)
         if accepted is None:
-            self.state.update(status='paused', pauseReason='Verify Raven backup/restore and canonical cluster initialization, then use explicit allow-install and run.',
+            self.state.update(status='paused', pauseReason='Verify candidate compatibility/maintenance and current installation identity, then use explicit allow-install and run.',
                               installCandidateID=delivery.install_challenge(self.state)['candidateID'])
             self.save()
             return False
@@ -799,10 +799,12 @@ class Pipeline:
         self.run_command('bundle', [sys.executable, 'scripts/package-macos.py', '--build-products', products,
             '--output', self.bundle, '--version', self.state['version'], '--sign-identity', s['applicationIdentity'],
             '--embeddings-host', str(Path(embedding_products) / 'TractandaEmbeddingsHost'),
-            '--model-directory', s['modelDirectory'],
-            '--document-converter', str(Path(document_products) / 'tractanda-document-converter'),
-            '--document-model-directory', s['documentModelDirectory']])
-        self.verify_document_model(self.bundle / 'models/granite-docling-258m-mlx', 'document-model-copied.json')
+            '--document-converter', str(Path(document_products) / 'tractanda-document-converter')])
+        bundle_manifest = json.loads((self.bundle / 'bundle-manifest.json').read_text(encoding='utf-8'))
+        catalog = self.bundle / 'models/manifest.json'
+        if (bundle_manifest.get('modelProvisioningManifestPath') != 'models/manifest.json'
+                or bundle_manifest.get('modelProvisioningManifestSHA256') != sha(catalog)):
+            raise RuntimeError('Slim release bundle does not bind the pinned model artifact catalog.')
         return {'manifestSHA256': sha(self.bundle / 'bundle-manifest.json')}
 
     def build_package(self):
@@ -867,8 +869,10 @@ class Pipeline:
                 raise RuntimeError('Release checksums changed.')
 
     def install(self):
+        if not delivery.active(self.state):
+            raise RuntimeError('Revise the pending legacy candidate explicitly to the current delivery contract.')
         self.verify_notarization()
-        if delivery.active(self.state) and delivery.verify_install(self.state) is None:
+        if delivery.verify_install(self.state) is None:
             raise RuntimeError('Explicit candidate-bound allow-install is required before managed installation.')
         # Root authorization does not bypass macOS privacy protection for Documents.
         # Give the administrator process a private, verified temporary payload and cwd.
@@ -891,7 +895,7 @@ class Pipeline:
         base = Path(self.settings['softwareRoot'])
         client = base / 'current/bin/tractanda'
         environment = {**os.environ, 'TRACTANDA_SERVER_USER': 'daemon'}
-        socket = base / 'runtime' / self.settings['instance'] / 'server.sock'
+        socket = Path('/private/var/run/tractanda') / self.settings['instance'] / 'server.sock'
         info = json.loads(command([client, 'info', socket], env=environment))
         manifest = read(self.bundle / 'bundle-manifest.json')
         expected = next(f['sha256'] for f in manifest['files'] if f['path'] == 'bin/tractanda')
@@ -951,9 +955,11 @@ class Pipeline:
             time.sleep(min(30, remaining))
 
     def publish(self):
+        if not delivery.active(self.state):
+            raise RuntimeError('Revise the pending legacy candidate explicitly to the current delivery contract.')
         self.verify_artifacts()
         self.verify_notarization()
-        if delivery.active(self.state) and delivery.verify_acceptance(self.state) is None:
+        if delivery.verify_acceptance(self.state) is None:
             raise RuntimeError('Explicit candidate-bound cluster acceptance is required before publication.')
         repo, version = self.settings['repository'], self.state['version']
         tag = 'v' + version

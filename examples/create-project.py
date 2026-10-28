@@ -12,7 +12,7 @@ import subprocess
 
 
 def tagged(kind, value):
-    return {'type': kind, 'value': value}
+    return {'type': kind, 'value': str(value) if kind == 'integer' else value}
 
 
 def text(value):
@@ -24,7 +24,7 @@ def reference(identity):
 
 
 def identity(revision):
-    return revision['fields']['itemID']['value']
+    return revision.get('itemId', revision['id'])
 
 
 def main():
@@ -50,10 +50,14 @@ def main():
         return json.loads(result.stdout)
 
     def commit(action, operation, fields, **extra):
-        return call('TractandaItem/commit', {
+        receipt = call('TractandaItem/commit', {
             'action': action, 'operationID': operation,
             'changes': fields, 'unset': [], **extra,
-        })['revision']
+        })
+        result = call('TractandaRevision/get', {'ids': [receipt['revisionId']]})
+        if len(result['list']) != 1 or result['list'][0]['itemId'] != receipt['itemId']:
+            raise RuntimeError('Committed revision is unavailable for this item.')
+        return result['list'][0]
 
     selection = tagged('object', {'language': text('tractanda.spotlight.v0'),
                                    'expression': text('itemID == ""')})
@@ -67,7 +71,7 @@ def main():
 
     if args.project_root:
         roots = call('TractandaItem/get', {'ids': [args.project_root, args.status_root]})
-        found = {identity(r): r for r in roots['list']}
+        found = {identity(r): r for r in roots['list'] if r.get('fields') is not None}
         if any(i not in found or 'selection' not in found[i]['fields'] or
                found[i]['fields'].get('isDeleted', {}).get('value', False)
                for i in [args.project_root, args.status_root]):
@@ -75,11 +79,11 @@ def main():
         project_root, status_root = args.project_root, args.status_root
         categories, position = {}, 0
         while True:
-            page = call('TractandaItem/query', {'expression': 'selection == *',
-                                               'position': position, 'limit': 64})
+            page = call('TractandaItem/query', {'filter': {'expression': 'selection == *'},
+                                               'position': position, 'limit': 64, 'calculateTotal': True})
             if page['ids']:
                 values = call('TractandaItem/get', {'ids': page['ids']})['list']
-                categories.update({identity(r): r for r in values})
+                categories.update({identity(r): r for r in values if r.get('fields') is not None})
             position += len(page['ids'])
             if position >= page['total']:
                 break
@@ -97,7 +101,7 @@ def main():
             descendants.add(i)
             pending.extend(children.get(i, ()))
         columns = sorted((i for i in descendants if not children.get(i)), key=lambda i: (
-            categories[i]['fields'].get('categoryOrder', {}).get('value', 0),
+            int(categories[i]['fields'].get('categoryOrder', {}).get('value', '0')),
             categories[i]['fields'].get('subject', {}).get('value', ''), i))
         if not columns:
             parser.error('The status root needs at least one readable status child.')

@@ -14,18 +14,27 @@ public struct DocumentConverterConfiguration: Codable, Sendable {
     public let scratchDirectory: String
     public let timeoutSeconds: Double
     public let preparationDirectory: String?
+    public let modelArtifact: ModelArtifactManifest?
+    public let modelStorageDirectory: String?
 
     public init(
         executablePath: String, modelDirectory: String, scratchDirectory: String,
-        timeoutSeconds: Double = 360, preparationDirectory: String? = nil
+        timeoutSeconds: Double = 360, preparationDirectory: String? = nil,
+        modelArtifact: ModelArtifactManifest? = nil, modelStorageDirectory: String? = nil
     ) {
         self.executablePath = executablePath
         self.modelDirectory = modelDirectory
         self.scratchDirectory = scratchDirectory
         self.timeoutSeconds = timeoutSeconds
         self.preparationDirectory = preparationDirectory
+        self.modelArtifact = modelArtifact
+        self.modelStorageDirectory = modelStorageDirectory
     }
 
+    public var modelIsReady: Bool {
+        guard let modelArtifact, let modelStorageDirectory else { return true }
+        return ModelProvisioner.activated(modelArtifact, root: URL(fileURLWithPath: modelStorageDirectory))
+    }
     func validate(storeRoot: URL, indexDirectory: URL) throws {
         for path in [executablePath, modelDirectory, scratchDirectory] {
             guard path.hasPrefix("/"), path != "/", path.utf8.count <= 4096, !path.contains("\0") else {
@@ -68,9 +77,20 @@ public struct DocumentConverterConfiguration: Codable, Sendable {
             throw TractandaError(
                 "invalidDocumentConfiguration", "Document converter must be a trusted local executable.")
         }
-        var model = stat()
-        guard lstat(modelDirectory, &model) == 0, model.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else {
-            throw TractandaError("invalidDocumentConfiguration", "Document model directory is unavailable.")
+        if let modelArtifact, let modelStorageDirectory {
+            try modelArtifact.validate()
+            guard modelStorageDirectory.hasPrefix("/"), modelStorageDirectory != "/",
+                modelArtifact.directory(in: URL(fileURLWithPath: modelStorageDirectory)).path == modelDirectory else {
+                throw TractandaError("invalidDocumentConfiguration", "Document artifact path differs from its pin.")
+            }
+        } else {
+            guard modelArtifact == nil, modelStorageDirectory == nil else {
+                throw TractandaError("invalidDocumentConfiguration", "Document artifact configuration is incomplete.")
+            }
+            var model = stat()
+            guard lstat(modelDirectory, &model) == 0, model.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else {
+                throw TractandaError("invalidDocumentConfiguration", "Document model directory is unavailable.")
+            }
         }
         try FileManager.default.createDirectory(
             at: scratch, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])

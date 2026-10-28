@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise named preset update/copy/delete transactions in an isolated real terminal."""
+from jmap_client import query_arguments
 import argparse
 import importlib.util
 import json
@@ -84,7 +85,7 @@ def main():
                 ui.wait('Appearance changes canceled')
                 assert prefs.read_bytes() == before
                 assert read()['savedPalettes'] == [] and read()['cursor'] == cursor
-                assert not client.call('TractandaItem/query')['ids']
+                assert not client.call('TractandaItem/query', query_arguments({}))['ids']
                 checks.append('An empty saved library survives restart; Custom is not deletable; canonical items and cursor settings stay intact')
     report = {'status': 'passed', 'checks': checks}
     args.output.parent.mkdir(parents=True, exist_ok=True)

@@ -29,11 +29,7 @@ final class LearningWorkspace {
         self.categoryID = categoryID
     }
 
-    private struct GetResult: Decodable {
-        let list: [Revision]
-        let notFound: [String]
-        let state: String
-    }
+    typealias GetResult = FullItemRead
 
     private func status() throws -> CategoryLearningState {
         try JSON.decode(
@@ -106,11 +102,9 @@ final class LearningWorkspace {
                     + (nextExpression.isEmpty ? "" : " && (\(nextExpression))")
                 let page = try JSON.decode(
                     ItemPage.self,
-                    client.call(
-                        "TractandaItem/query",
-                        arguments: [
-                            "expression": filter, "position": position, "limit": Self.pageSize,
-                        ]))
+                    client.query(criteria: [
+                        "expression": filter, "position": position, "limit": Self.pageSize,
+                    ]))
                 guard page.position == position, page.ids.count <= Self.pageSize,
                     page.total >= position + page.ids.count
                 else { throw TractandaError("protocolError", "Invalid example page.") }

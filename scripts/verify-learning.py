@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Independent learning API/CLI checks, including canonical-only transfer and retry recovery."""
+from jmap_client import query_arguments
 import argparse
 import importlib.util
 import json
@@ -45,12 +46,12 @@ def main():
                 fields = {'subject': ipc.text(text)}
                 if label:
                     fields['categoryOverrides'] = {'type':'object','value':{category:ipc.text(label)}}
-                return client.commit(ipc.intent('create', 'create-'+text, class_id='Item', changes=fields))['revision']
+                return client.commit_with_revision(ipc.intent('create', 'create-'+text, class_id='Item', changes=fields))['revision']
 
             if not args.import_from:
-                founding = client.call('TractandaItem/query', {'expression': 'classID == "AccessConfigurationItem"'})
+                founding = client.call('TractandaItem/query', query_arguments({'expression': 'classID == "AccessConfigurationItem"'}))
                 check(founding['total'] == 1, 'Fresh store has exactly one founding access policy')
-                category_revision = client.commit(ipc.intent('create', 'category', class_id='Item', changes={
+                category_revision = client.commit_with_revision(ipc.intent('create', 'category', class_id='Item', changes={
                     'subject':ipc.text('Chess'),
                     'selection':{'type':'object','value':{'language':ipc.text('tractanda.spotlight.v0'),
                                                           'expression':ipc.text('subject == "no matching example"')}}
@@ -83,7 +84,7 @@ def main():
                 request = dict(itemID=ipc.item_id(candidate),categoryID=category,
                                expectedRevisionID=ipc.revision_id(candidate),operationID='accept-suggestion',
                                action='accept',modelID=model['modelID'])
-                accepted = call('feedback',**request)['revision']
+                accepted = client.hydrate_mutation(call('feedback',**request))['revision']
                 check(accepted['fields']['categoryOverrides']['value'][category] == ipc.text('include'), 'Acceptance uses the existing versioned manual assignment')
                 check(call('status',categoryID=category)['status'] == 'staleModel', 'Feedback invalidates an affected training model')
                 check(call('feedback',**request)['replayed'], 'Lost-response retry returns the existing feedback receipt')
@@ -97,7 +98,7 @@ def main():
                                         operationID='settings',settings=settings)
                 result = cli('learning-settings',category,ipc.revision_id(category_revision),'settings',json.dumps(settings))
                 check(call('settings',**settings_request)['replayed'], 'Settings edits retain retry semantics')
-                check(result['revision']['fields']['learningSettings']['value']['threshold']['value'] == 0.2, 'Settings are canonical typed properties')
+                check(client.hydrate_mutation(result)['revision']['fields']['learningSettings']['value']['threshold']['value'] == 0.2, 'Settings are canonical typed properties')
                 invalid_settings = dict(settings_request,operationID='unknown-setting',settings={'type':'object','value':{'profile':ipc.text('unknown')}})
                 error = client.batch([['TractandaLearning/settings',invalid_settings,'invalid']])[0]
                 check(error[0] == 'error' and error[1]['type'] == 'invalidLearningSettings', 'Unknown settings profiles are rejected')

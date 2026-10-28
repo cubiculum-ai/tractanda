@@ -1,4 +1,5 @@
 import Foundation
+import TractandaClient
 
 #if canImport(Darwin)
     import Darwin
@@ -287,6 +288,16 @@ struct RebuildNativeCall {
     let method: String
     let callID: String
     let arguments: [String: Any]
+    let replyBudget: TractandaClient.JMAPReplyBudget?
+    init(
+        method: String, callID: String, arguments: [String: Any],
+        replyBudget: TractandaClient.JMAPReplyBudget? = nil
+    ) {
+        self.method = method
+        self.callID = callID
+        self.arguments = arguments
+        self.replyBudget = replyBudget
+    }
 }
 struct RebuildAdmission: Sendable {
     let policy: RebuildAdministratorPolicy

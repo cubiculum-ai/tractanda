@@ -60,8 +60,8 @@ final class SetupServiceBackendTests: XCTestCase {
         XCTAssertEqual(roots.platform.serviceUser, "daemon")
         XCTAssertEqual(roots.runtime.path, "/run/tractanda")
         XCTAssertEqual(roots.commands.path, "/usr/bin")
-        XCTAssertEqual(roots.data.path, "/var/lib/tractanda/stores")
-        XCTAssertEqual(roots.indexes.path, "/var/cache/tractanda/indexes")
+        XCTAssertEqual(roots.data.path, "/opt/tractanda/var/lib/tractanda/Stores")
+        XCTAssertEqual(roots.indexes.path, "/opt/tractanda/var/lib/tractanda/StoreIndices")
     }
 
     func testServerUnitLiteralArgumentsAndTrustedEnvironmentHaveNoShell() throws {

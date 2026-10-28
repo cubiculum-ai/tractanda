@@ -14,7 +14,7 @@ public actor ServiceCoordinator {
     private var rebuildControl: RebuildControl?
     private var rebuildTask: Task<Void, Never>?
     private var rebuildPolicy: RebuildAdministratorPolicy?
-    private var rebuildSessionState = ""
+    private var nativeSessionBasis: NativeProtocolSessionBasis?
     private var canonicalWorkGeneration: UInt64 = 0
     private let privateCredentialOwner = UUID()
     private var privateCredentialAdmissions: [UUID: PeerExchangeControl] = [:]
@@ -29,6 +29,7 @@ public actor ServiceCoordinator {
     private var peerRuntimeStopped = false
     private var peerRuntimeSnapshotDeliveryHookForTesting: (@Sendable () async -> Void)?
     private var rebuildHookForTesting: (@Sendable () async throws -> Void)?
+    private var rebuildStoreQueueHookForTesting: (@Sendable () throws -> Void)?
     private var rebuildNoProgressSeconds: Double = 120
     private let core: CoreBox
     private let readPool: SQLiteReadPool
@@ -81,6 +82,7 @@ public actor ServiceCoordinator {
     private var peerClockStopped = false
     private let peerClockIntakeEnabled: Bool
     private var preparedReadHookForTesting: (@Sendable () async -> Void)?
+    private var nativeAdmissionHookForTesting: (@Sendable (String) async -> Void)?
     private var pooledReadLeaseHookForTesting: (@Sendable () -> Void)?
     private var pooledReadBeforeFinishHookForTesting: (@Sendable () async -> Void)?
     private var pooledHistoryAfterSnapshotHookForTesting: (@Sendable () -> Void)?
@@ -164,11 +166,166 @@ public actor ServiceCoordinator {
     }
 
     /// The UID is authenticated by the in-process transport and never read from request bytes.
-    public func handle(_ request: Data, forUID uid: UInt32) async throws -> Data {
+    public func handle(_ data: Data, forUID uid: UInt32) async throws -> Data {
+        try await handle(JMAPRequest.decode(data), forUID: uid)
+    }
+    package func handle(
+        _ request: JMAPRequest, forUID uid: UInt32,
+        additionalMethods: [String: JMAPMethodDefinition] = [:], publicBinding: JMAPPublicBinding? = nil,
+        authentication: JMAPHTTPAuthentication? = nil
+    ) async throws -> Data {
+        if let authentication, authentication.uid != uid {
+            throw TractandaError("forbidden", "Authenticated principal differs from caller.")
+        }
+        func definitions(_ document: JMAPValue? = nil) -> [String: JMAPMethodDefinition] {
+            var result = NativeMethodCatalog.definitions(discovery: document) { invocation, context in
+                if let authentication {
+                    do { _ = try await authentication.revalidate() } catch {
+                        return .failure(
+                            .init("forbidden", description: "Credentials expired or were revoked."),
+                            effects: .none)
+                    }
+                }
+                return await self.handleInvocation(
+                    NativeMethodInvocation(
+                        invocation, context: context, principal: authentication.map(NativePrincipalPin.init)),
+                    forUID: uid)
+            }
+            for (name, definition) in additionalMethods { result[name] = definition }
+            return result
+        }
+        let limits = publicBinding?.kernelLimits ?? .init()
+        let provisional = JMAPKernel(
+            methods: definitions(), limits: limits, sessionState: { try! .init("metadata-preflight") })
+        _ = try provisional.begin(request)
+        let snapshot = try await bindingSessionSnapshot(
+            forUID: uid, publicBinding: publicBinding, principal: authentication.map(NativePrincipalPin.init),
+            localSetLimit: additionalMethods["PushSubscription/set"] == nil
+                ? 0 : Int64(TractandaJMAP.maximumObjectsInSet))
+        let kernel = JMAPKernel(
+            methods: definitions(snapshot.document), limits: limits,
+            accounts: snapshot.accounts, sessionState: { snapshot.state })
+        return try await kernel.execute(request).value.encoded()
+    }
+    private func bindingSessionSnapshot(
+        forUID uid: UInt32, publicBinding: JMAPPublicBinding?, principal: NativePrincipalPin? = nil,
+        localSetLimit: Int64 = 0
+    ) async throws
+        -> JMAPBindingSessionSnapshot
+    {
+        try principal?.validate(uid: uid, directory: makeAccountDirectory())
+        let basis: NativeProtocolSessionBasis
+        if exclusiveRebuildPending, var captured = nativeSessionBasis {
+            captured.isReadOnly = true
+            basis = captured
+        } else {
+            basis = try await submit(principal: principal) { service in
+                try service.store.withAccess(forUID: uid, recoverPublication: false) {
+                    var basis = try service.store.nativeProtocolSessionBasis
+                    basis.maximumConcurrentRequests = Int64(Self.maximumPending)
+                    return basis
+                }
+            }
+            nativeSessionBasis = basis
+        }
+        if let publicBinding {
+            let snapshot = try basis.publicSnapshot(
+                forUID: uid, accounts: makeAccountDirectory(), binding: publicBinding)
+            guard principal == nil || snapshot.document["username"]?.text == principal?.name else {
+                throw TractandaError("forbidden", "Authenticated principal changed.")
+            }
+            return snapshot
+        }
+        var localBasis = basis
+        localBasis.maximumObjectsInSet = localSetLimit
+        let local = try localBasis.session(forUID: uid, accounts: makeAccountDirectory())
+        guard principal == nil || local.username == principal?.name else {
+            throw TractandaError("forbidden", "Authenticated principal changed.")
+        }
+        return .init(document: local.value, state: local.state, accounts: [try basis.accountAccess()])
+    }
+    public func publicJMAPSession(authentication: JMAPHTTPAuthentication, binding: JMAPPublicBinding)
+        async throws -> JMAPBindingSessionSnapshot
+    {
+        _ = try await authentication.revalidate()
+        let snapshot = try await bindingSessionSnapshot(
+            forUID: authentication.uid, publicBinding: binding, principal: NativePrincipalPin(authentication))
+        guard snapshot.document["username"]?.text == authentication.principalName else {
+            throw TractandaError("invalidSession", "Authenticated identity changed.")
+        }
+        return snapshot
+    }
+    package func handleAuthenticatedJMAP(
+        _ data: Data, authentication: JMAPHTTPAuthentication,
+        additionalMethods: [String: JMAPMethodDefinition]
+    ) async throws -> Data {
+        _ = try await authentication.revalidate()
+        return try await handle(
+            JMAPRequest.decode(data), forUID: authentication.uid,
+            additionalMethods: additionalMethods, authentication: authentication)
+    }
+    public func handlePublicJMAP(
+        _ data: Data, authentication: JMAPHTTPAuthentication, binding: JMAPPublicBinding,
+        additionalMethods: [String: JMAPMethodDefinition]
+    ) async throws -> Data {
+        _ = try await authentication.revalidate()
+        let request = try JMAPRequest.decode(data, limits: binding.kernelLimits)
+        return try await handle(
+            request, forUID: authentication.uid, additionalMethods: additionalMethods, publicBinding: binding,
+            authentication: authentication)
+    }
+    private func handleInvocation(_ request: NativeMethodInvocation, forUID uid: UInt32) async
+        -> NativeMethodOutcome
+    {
+        await NativeInvocationScope.$budget.withValue(request.replyBudget) {
+            do { return try await self.handleInvocationScoped(request, forUID: uid) } catch {
+                return .nativeFailure(error, budget: request.replyBudget)
+            }
+        }
+    }
+    func setNativeAdmissionHookForTesting(_ hook: (@Sendable (String) async -> Void)?) {
+        nativeAdmissionHookForTesting = hook
+    }
+    private func handleInvocationScoped(_ request: NativeMethodInvocation, forUID uid: UInt32) async throws
+        -> NativeMethodOutcome
+    {
+        let request = try request.normalizedForDomain()
+        let principal = request.principal
+        await nativeAdmissionHookForTesting?(request.method)
+        if exclusiveRebuildPending,
+            !["TractandaStore/rebuild", "TractandaStore/rebuildStatus", "TractandaStore/rebuildCancel"]
+                .contains(request.method)
+        {
+            throw TractandaError("serviceBusy", "An exclusive rebuild is in progress.")
+        }
+        if !NativeMethodCatalog.readOnly.contains(request.method) {
+            if request.method == "TractandaStore/rebuild" || request.method == "TractandaStore/rebuildCancel"
+            {
+                let overhead =
+                    try JMAPInvocation(name: request.method, arguments: .object([]), callID: request.callID)
+                    .value.encoded().count - 2
+                try request.replyBudget?.reserveMutationResponse(
+                    maximumResponseBytes: overhead + request.argumentsJSON.count + 8192)
+            } else {
+                try await submit(principal: principal) { service in
+                    try service.store.withAccess(forUID: uid) {
+                        try service.reserveNativeMutationReply(request)
+                    }
+                }
+            }
+        }
+        if nativeSessionBasis?.persistenceProfile == "personal-workgroup",
+            NativeMethodCatalog.completelyObserved.contains(request.method)
+        {
+            request.replyBudget?.useCompletePublicationObservation()
+        }
+        if !NativeMethodCatalog.readOnly.contains(request.method) {
+            request.replyBudget?.markDomainOperationBegan()
+        }
         if let call = ItemService.rebuildNativeCall(request) {
             try beginWork()
             defer { finishWork() }
-            return try await handleRebuild(call, uid: uid)
+            return try await handleRebuild(call, uid: uid, principal: principal)
         }
         let acceptedGeneration = canonicalWorkGeneration
         guard !exclusiveRebuildPending else {
@@ -176,14 +333,19 @@ public actor ServiceCoordinator {
         }
         try beginWork()
         defer { finishWork() }
+        try await submit(principal: principal) { service in
+            try service.store.recoverPersonalPublicationForRequest(forUID: uid)
+        }
         if let call = ItemService.extractedTextUnitCall(request) {
-            return try await handleExtractedTextUnit(call, uid: uid, generation: acceptedGeneration)
+            return try await handleExtractedTextUnit(
+                call, uid: uid, generation: acceptedGeneration, principal: principal)
         }
         if ItemService.semanticLifecycleMethod(request) != nil {
             return try await handleSemanticLifecycle(request, uid: uid, generation: acceptedGeneration)
         }
         if let call = ItemService.documentJobNativeCall(request) {
-            return try await handleDocumentJob(call, uid: uid, generation: acceptedGeneration)
+            return try await handleDocumentJob(
+                call, uid: uid, generation: acceptedGeneration, principal: principal)
         }
         if ItemService.attachmentCopyCallID(request) != nil {
             return try await handleAttachmentCopy(request, uid: uid)
@@ -192,7 +354,7 @@ public actor ServiceCoordinator {
             return try await handleAttachmentIntegrity(request, uid: uid)
         }
         try requireCanonicalGeneration(acceptedGeneration)
-        let pooled = try? await submit { service in
+        let pooled = try? await submit(principal: principal) { service in
             if let prepared = try service.preparePooledQuery(request, peerUID: uid) {
                 return prepared
             }
@@ -208,14 +370,14 @@ public actor ServiceCoordinator {
             if let page {
                 if let hook = pooledReadBeforeFinishHookForTesting { await hook() }
                 try requireCanonicalGeneration(acceptedGeneration)
-                let response = try? await submit { service in
+                let response = try? await submit(principal: principal) { service in
                     try service.finishPooledQuery(pooled, page: page, peerUID: uid)
                 }
                 if let response { return response }
             }
         }
         try requireCanonicalGeneration(acceptedGeneration)
-        let pooledGet = try? await submit { service in
+        let pooledGet = try? await submit(principal: principal) { service in
             try service.preparePooledGet(request, peerUID: uid)
         }
         if let pooledGet {
@@ -228,14 +390,14 @@ public actor ServiceCoordinator {
             if let records {
                 if let hook = pooledReadBeforeFinishHookForTesting { await hook() }
                 try requireCanonicalGeneration(acceptedGeneration)
-                let response = try? await submit { service in
+                let response = try? await submit(principal: principal) { service in
                     try service.finishPooledGet(pooledGet, records: records, peerUID: uid)
                 }
                 if let response { return response }
             }
         }
         try requireCanonicalGeneration(acceptedGeneration)
-        let pooledHistory = try? await submit { service in
+        let pooledHistory = try? await submit(principal: principal) { service in
             try service.preparePooledHistory(request, peerUID: uid)
         }
         if let pooledHistory {
@@ -251,7 +413,7 @@ public actor ServiceCoordinator {
             if let result {
                 if let hook = pooledReadBeforeFinishHookForTesting { await hook() }
                 try requireCanonicalGeneration(acceptedGeneration)
-                let response = try? await submit { service in
+                let response = try? await submit(principal: principal) { service in
                     try service.finishPooledHistory(pooledHistory, result: result, peerUID: uid)
                 }
                 if let response { return response }
@@ -260,7 +422,7 @@ public actor ServiceCoordinator {
         try requireCanonicalGeneration(acceptedGeneration)
         let prepared: PreparedNativeRead?
         do {
-            prepared = try await submit { service in
+            prepared = try await submit(principal: principal) { service in
                 return try service.prepareNativeRead(request, peerUID: uid)
             }
         } catch {
@@ -275,7 +437,7 @@ public actor ServiceCoordinator {
             if let evaluated {
                 try requireCanonicalGeneration(acceptedGeneration)
                 do {
-                    let response = try await submit { service -> Data? in
+                    let response = try await submit(principal: principal) { service -> NativeMethodOutcome? in
                         defer { service.maintainSemanticIndex() }
                         return try service.finishNativeRead(prepared, page: evaluated, peerUID: uid)
                     }
@@ -284,12 +446,14 @@ public actor ServiceCoordinator {
                     let failure =
                         error as? TractandaError
                         ?? TractandaError("invalidRequest", String(describing: error))
-                    return (try? JSON.encode(failure)) ?? Data("{\"code\":\"serverError\"}".utf8)
+                    return .nativeFailure(failure, budget: request.replyBudget)
                 }
             }
         }
         try requireCanonicalGeneration(acceptedGeneration)
-        let response = try await submit { service in service.handle(request, peerUID: uid) }
+        let response = try await submit(principal: principal) { service in
+            service.nativeInvocationOutcome(request, peerUID: uid)
+        }
         return response
     }
 
@@ -302,12 +466,16 @@ public actor ServiceCoordinator {
     func setDocumentJobIndexHookForTesting(_ hook: (@Sendable (IndexCorpusWriteBatch) throws -> Void)?) {
         documentJobIndexHookForTesting = hook
     }
-    private func handleDocumentJob(_ call: DocumentJobNativeCall, uid: UInt32, generation: UInt64)
-        async throws -> Data
+    private func handleDocumentJob(
+        _ call: DocumentJobNativeCall, uid: UInt32, generation: UInt64, principal: NativePrincipalPin?
+    )
+        async throws -> NativeMethodOutcome
     {
         do {
             try requireCanonicalGeneration(generation)
-            let dispatched = try await submit { try $0.dispatchDocumentJob(call, peerUID: uid) }
+            let dispatched = try await submit(principal: principal) {
+                try $0.dispatchDocumentJob(call, peerUID: uid)
+            }
             if ["cancel", "resume", "rebase", "discard"].contains(
                 String(call.method.dropFirst("TractandaDocumentJob/".count))),
                 let args = try? JSONSerialization.jsonObject(with: call.arguments) as? [String: Any],
@@ -322,16 +490,20 @@ public actor ServiceCoordinator {
             let failure =
                 error as? TractandaError
                 ?? TractandaError("invalidArguments", "Invalid document job request.")
-            return try await submit {
+            return try await submit(principal: principal) {
                 $0.documentNativeFailure(callID: call.callID, failure: failure, peerUID: uid)
             }
         }
     }
+    /// Host-only activation notification; downloaded model data never changes canonical item policy.
+    package func documentModelDidBecomeReady() async { await recoverDocumentJobsAtStartup() }
+
     private func recoverDocumentJobsAtStartup() async {
         guard accepting, !exclusiveRebuildPending, !documentJobDraining else { return }
         do {
-            let admissions = try await submit { service in
-                try service.store.recoverDocumentJobAdmissions(
+            let admissions = try await submit { service -> [DocumentJobAdmission] in
+                guard !service.documentModelIsAwaiting else { return [] }
+                return try service.store.recoverDocumentJobAdmissions(
                     configurationSHA256: service.documentJobRuntime()?.configurationSHA256)
             }
             for admission in admissions { enqueueDocumentJob(admission) }
@@ -621,12 +793,14 @@ public actor ServiceCoordinator {
             }
         }
     }
-    private func handleExtractedTextUnit(_ call: ExtractedTextUnitCall, uid: UInt32, generation: UInt64)
-        async throws -> Data
+    private func handleExtractedTextUnit(
+        _ call: ExtractedTextUnitCall, uid: UInt32, generation: UInt64, principal: NativePrincipalPin?
+    )
+        async throws -> NativeMethodOutcome
     {
         guard accepting, !semanticLifecyclePending, !extractedUnitDraining, extractedUnitAdmissions < 64
         else {
-            return try await submit {
+            return try await submit(principal: principal) {
                 try $0.extractedTextUnitFailure(
                     call, error: TractandaError("serviceBusy", "Source readers are draining or at capacity."))
             }
@@ -648,7 +822,9 @@ public actor ServiceCoordinator {
             guard accepting, !semanticLifecyclePending, !extractedUnitDraining,
                 extractedUnitTasks.count < 64
             else { throw TractandaError("serviceBusy", "Source readers are draining or at capacity.") }
-            let work = try await submit { try $0.prepareExtractedTextUnit(call, peerUID: uid) }
+            let work = try await submit(principal: principal) {
+                try $0.prepareExtractedTextUnit(call, peerUID: uid)
+            }
             prepared = work
             try requireCanonicalGeneration(generation)
             guard accepting, !semanticLifecyclePending, !extractedUnitDraining, epoch == extractedUnitEpoch,
@@ -671,7 +847,7 @@ public actor ServiceCoordinator {
             try requireCanonicalGeneration(generation)
             guard accepting, !semanticLifecyclePending, !extractedUnitDraining, epoch == extractedUnitEpoch
             else { throw TractandaError("serviceBusy", "Source reader delivery was fenced.") }
-            let response = try await submit {
+            let response = try await submit(principal: principal) {
                 try $0.finishExtractedTextUnit(work, result: result, peerUID: uid)
             }
             try await submit { try $0.store.releaseIndexedCorpus(work.corpus) }
@@ -693,7 +869,9 @@ public actor ServiceCoordinator {
                 // The detached reader has terminated. Failure leaves charged durable retirement debt.
                 try? await submit { try $0.store.releaseIndexedCorpus(work.corpus) }
             }
-            return try await submit { try $0.extractedTextUnitFailure(call, error: failure) }
+            return try await submit(principal: principal) {
+                try $0.extractedTextUnitFailure(call, error: failure)
+            }
         }
     }
     private func drainExtractedTextUnits(retireMetadata: Bool) async throws {
@@ -718,20 +896,25 @@ public actor ServiceCoordinator {
     func setExtractedUnitHookForTesting(_ hook: (@Sendable () async -> Void)?) {
         extractedUnitHookForTesting = hook
     }
-    private func handleSemanticLifecycle(_ request: Data, uid: UInt32, generation: UInt64) async throws
-        -> Data
+    private func handleSemanticLifecycle(_ request: NativeMethodInvocation, uid: UInt32, generation: UInt64)
+        async throws
+        -> NativeMethodOutcome
     {
+        let principal = request.principal
         guard !semanticLifecyclePending else {
             throw TractandaError("serviceBusy", "Another semantic lifecycle operation is draining readers.")
         }
         semanticLifecyclePending = true
         defer { semanticLifecyclePending = false }
-        try await submit { service in
+        try await submit(principal: principal) { service in
             try service.store.withAccess(forUID: uid) { try service.store.requireAdministrator() }
         }
+        request.replyBudget?.markDomainOperationBegan()
         try await drainSemanticDocumentWork()
         try requireCanonicalGeneration(generation)
-        let response = try await submit { $0.handle(request, peerUID: uid) }
+        let response = try await submit(principal: principal) {
+            $0.nativeInvocationOutcome(request, peerUID: uid)
+        }
         if accepting, !exclusiveRebuildPending { try? await submit { $0.resumeSemanticDocumentWork() } }
         return response
     }
@@ -788,6 +971,9 @@ public actor ServiceCoordinator {
         rebuildHookForTesting = hook
         rebuildNoProgressSeconds = noProgressSeconds
     }
+    func setRebuildStoreQueueHookForTesting(_ hook: (@Sendable () throws -> Void)?) {
+        rebuildStoreQueueHookForTesting = hook
+    }
     func setRebuildRecordHookForTesting(_ hook: (@Sendable () throws -> Void)?) async throws {
         try await submit { service in
             service.store.afterRecoveryRecordForTesting = hook.map { action in { _ in try action() } }
@@ -796,16 +982,19 @@ public actor ServiceCoordinator {
     func setCanonicalSyncHookForTesting(_ hook: (@Sendable () throws -> Void)?) async throws {
         try await submit { service in service.store.afterCanonicalSyncEntryForTesting = hook }
     }
-    private func handleRebuild(_ call: RebuildNativeCall, uid: UInt32) async throws -> Data {
+    private func handleRebuild(_ call: RebuildNativeCall, uid: UInt32, principal: NativePrincipalPin?)
+        async throws -> NativeMethodOutcome
+    {
         do {
+            try principal?.validate(uid: uid, directory: makeAccountDirectory())
             let policy: RebuildAdministratorPolicy
             var trustedBeforeAdmission = false
             if exclusiveRebuildPending, let captured = rebuildPolicy {
                 policy = captured
                 trustedBeforeAdmission = rebuildControl?.status.indexTrusted ?? false
             } else {
-                let admission = try await submit { service in
-                    try service.store.withAccess(forUID: uid) {
+                let admission = try await submit(principal: principal) { service in
+                    try service.store.withAccess(forUID: uid, recoverPublication: false) {
                         RebuildAdmission(
                             policy: try service.store.rebuildAdministratorPolicy(),
                             state: service.store.state,
@@ -815,7 +1004,6 @@ public actor ServiceCoordinator {
                 }
                 policy = admission.policy
                 trustedBeforeAdmission = admission.indexTrusted
-                rebuildSessionState = admission.state
             }
             try policy.authorize(uid: uid, accounts: makeAccountDirectory())
             let arguments = call.arguments
@@ -843,7 +1031,11 @@ public actor ServiceCoordinator {
                 let accountFactory = makeAccountDirectory
                 let control = try RebuildControl(
                     status: status, journal: rebuildJournal,
-                    publicationAuthority: { try policy.authorize(uid: uid, accounts: accountFactory()) })
+                    publicationAuthority: {
+                        try principal?.validate(uid: uid, directory: accountFactory())
+                        try policy.authorize(uid: uid, accounts: accountFactory())
+                    })
+                call.replyBudget?.markPublicationAttempt()
                 rebuildControl = control
                 rebuildPolicy = policy
                 // Pause producer failure publication atomically with the generation fence.
@@ -871,28 +1063,23 @@ public actor ServiceCoordinator {
             else {
                 throw TractandaError("notFound", "No matching rebuild is available.")
             }
-            if call.method == "TractandaStore/rebuildCancel" { try rebuildControl?.cancel() }
+            if call.method == "TractandaStore/rebuildCancel" {
+                call.replyBudget?.markPublicationAttempt()
+                try rebuildControl?.cancel()
+            }
             return try rebuildResponse(call: call, status: rebuildControl?.status ?? current)
         } catch {
             let error =
                 error as? TractandaError ?? TractandaError("invalidArguments", String(describing: error))
-            return try JSONSerialization.data(withJSONObject: [
-                "methodResponses": [
-                    [
-                        "error",
-                        ["type": error.code, "description": error.message], call.callID,
-                    ]
-                ], "sessionState": rebuildSessionState,
-            ])
+            return .nativeFailure(error, budget: call.replyBudget)
         }
     }
-    private func rebuildResponse(call: RebuildNativeCall, status: StoreRebuildStatus) throws -> Data {
-        let value = try JSONSerialization.jsonObject(with: JSON.encode(status))
-        return try JSONSerialization.data(withJSONObject: [
-            "methodResponses": [[call.method, value, call.callID]],
-            "sessionState": rebuildSessionState,
-        ])
+    private func rebuildResponse(call: RebuildNativeCall, status: StoreRebuildStatus) throws
+        -> NativeMethodOutcome
+    {
+        try .nativeEncodedSuccess(call.method, status)
     }
+
     private func performRebuild(
         _ control: RebuildControl, uid: UInt32,
         hook: (@Sendable () async throws -> Void)?
@@ -923,8 +1110,12 @@ public actor ServiceCoordinator {
             try control.check()
             try await hook?()
             try control.check()
+            let storeQueueHook = rebuildStoreQueueHookForTesting
             try await submit { service in
-                try service.store.withAccess(forUID: uid) { try service.store.rebuildIndex(control: control) }
+                try storeQueueHook?()
+                try service.store.withAccess(forUID: uid, recoverPublication: false) {
+                    try service.store.rebuildIndex(control: control)
+                }
             }
         } catch { failure = error }
         watchdog.cancel()
@@ -973,6 +1164,10 @@ public actor ServiceCoordinator {
             service.store.pooledRecordByteLimitForTesting = limit
         }
     }
+    func setPersonalDurableAcknowledgementHookForTesting(_ hook: (@Sendable () throws -> Void)?) async throws
+    {
+        try await submit { service in service.store.beforePersonalDurableAcknowledgementForTesting = hook }
+    }
     func setPooledHistoryBatchLimitForTesting(_ limit: Int?) async throws {
         _ = try await submit { service in
             service.store.pooledHistoryBatchLimitForTesting = limit
@@ -986,13 +1181,91 @@ public actor ServiceCoordinator {
         verificationScanHookForTesting = hook
     }
 
+    /// Trusted resource adapters share the single Store owner and fresh OS admission.
+    package func withJMAPAccess<T: Sendable>(
+        authentication: JMAPHTTPAuthentication,
+        replyBudget: JMAPReplyBudget? = nil, recoverPublication: Bool = false, renewCredential: Bool = true,
+        _ body: @escaping @Sendable (ItemStore) throws -> T
+    ) async throws -> T {
+        if renewCredential {
+            _ = try await authentication.revalidate()
+        } else {
+            _ = try await authentication.checkCurrent()
+        }
+        try beginWork()
+        defer { finishWork() }
+        guard !exclusiveRebuildPending else {
+            throw TractandaError("serviceBusy", "Canonical rebuild owns the Store.")
+        }
+        let directory = makeAccountDirectory
+        return try await submit { service in
+            guard try directory().user(forUID: authentication.uid).name == authentication.principalName else {
+                throw TractandaError("invalidSession", "Authenticated identity changed before admission.")
+            }
+            func admitted() throws -> T {
+                try service.store.withAccess(
+                    forUID: authentication.uid, recoverPublication: recoverPublication,
+                    expectedPrincipalName: authentication.principalName
+                ) { try body(service.store) }
+            }
+            if let replyBudget { return try service.store.withNativeReplyBudget(replyBudget, admitted) }
+            return try admitted()
+        }
+    }
+    package func cancelJMAPBlobUpload(id: String, authentication: JMAPHTTPAuthentication) async {
+        _ = try? await submit { service in
+            try service.store.cancelBlobUploadForCleanup(
+                id: id, uid: authentication.uid, principalName: authentication.principalName)
+        }
+    }
+    package func closeJMAPBlobDownload(id: String, authentication: JMAPHTTPAuthentication) async {
+        _ = try? await submit { service in
+            try service.store.closeBlobDownloadForCleanup(
+                id: id, uid: authentication.uid, principalName: authentication.principalName)
+        }
+    }
+    public func jmapVisibleStates(authentication: JMAPHTTPAuthentication) async throws -> [String: [String:
+        String]]
+    {
+        try await withJMAPAccess(
+            authentication: authentication, recoverPublication: false, renewCredential: false
+        ) { store in
+            [
+                try store.nativeProtocolSessionBasis.identity: [
+                    "TractandaItem": store.state, "TractandaRevision": store.state,
+                ]
+            ]
+        }
+    }
+
+    /// Unix peer credentials authenticate one call, not a renewable HTTP grant or a push credential.
+    package func localJMAPAuthentication(forUID uid: UInt32) throws -> JMAPHTTPAuthentication {
+        let account = try localJMAPIdentity(forUID: uid)
+        return JMAPHTTPAuthentication(
+            credentialID: "unix-call-" + UUID().uuidString, uid: uid,
+            principalName: account.name, expiresAt: .distantFuture
+        ) { [weak self] in
+            guard let self else { throw TractandaError("serviceClosed", "Service is closed.") }
+            return try await self.localJMAPIdentity(forUID: uid)
+        }
+    }
+    private func localJMAPIdentity(forUID uid: UInt32) throws -> AccountIdentity {
+        try beginWork()
+        defer { finishWork() }
+        return try makeAccountDirectory().user(forUID: uid)
+    }
     public func accountIdentity(forUID uid: UInt32) async throws -> AccountIdentity {
         try beginWork()
         defer { finishWork() }
         if exclusiveRebuildPending, let policy = rebuildPolicy {
             return try policy.accountIfAdmitted(uid: uid, accounts: makeAccountDirectory())
         }
-        return try await submit { service in try service.store.accountIdentity(forUID: uid) }
+        let directory = makeAccountDirectory
+        return try await submit { service in
+            try service.store.withAccess(forUID: uid, recoverPublication: false) {
+                try directory().user(forUID: uid)
+            }
+        }
     }
 
     /// Startup metadata for the trusted listener, without impersonating a client account.
@@ -1143,14 +1416,21 @@ public actor ServiceCoordinator {
     func setAttachmentIntegrityHookForTesting(_ hook: (@Sendable () async throws -> Void)?) {
         attachmentIntegrityHookForTesting = hook
     }
-    private func handleAttachmentIntegrity(_ request: Data, uid: UInt32) async throws -> Data {
+    private func handleAttachmentIntegrity(_ request: NativeMethodInvocation, uid: UInt32) async throws
+        -> NativeMethodOutcome
+    {
+        let principal = request.principal
         let generation = canonicalWorkGeneration
         let prepared: PreparedAttachmentIntegrityCall
         do {
-            prepared = try await submit { try $0.prepareAttachmentIntegrityNativeCall(request, peerUID: uid) }
+            prepared = try await submit(principal: principal) {
+                try $0.prepareAttachmentIntegrityNativeCall(request, peerUID: uid)
+            }
         } catch {
             try requireCanonicalGeneration(generation)
-            return try await submit { $0.handle(request, peerUID: uid) }
+            return try await submit(principal: principal) {
+                $0.nativeInvocationOutcome(request, peerUID: uid)
+            }
         }
         try requireCanonicalGeneration(generation)
         if prepared.method == "TractandaAttachment/abort" {
@@ -1160,20 +1440,22 @@ public actor ServiceCoordinator {
             }
             try requireCanonicalGeneration(generation)
             attachmentIntegrityFailures.removeValue(forKey: prepared.key)
-            return try await submit { $0.handle(request, peerUID: uid) }
+            return try await submit(principal: principal) {
+                $0.nativeInvocationOutcome(request, peerUID: uid)
+            }
         }
         if prepared.method == "TractandaAttachment/uploadStatus"
             || prepared.method == "TractandaAttachment/integrity"
         {
             let bytes = attachmentIntegrityTasks[prepared.key]?.progress.verifiedBytes ?? 0
             let failure = attachmentIntegrityFailures[prepared.key]
-            return try await submit {
+            return try await submit(principal: principal) {
                 try $0.attachmentIntegrityNativeResponse(
                     request, peerUID: uid, verifiedBytes: bytes, pending: false, failure: failure)
             }
         }
         if let code = attachmentIntegrityFailures[prepared.key] {
-            return try await submit {
+            return try await submit(principal: principal) {
                 try $0.attachmentIntegrityNativeResponse(
                     request, peerUID: uid, verifiedBytes: 0, pending: false, failure: code)
             }
@@ -1199,17 +1481,17 @@ public actor ServiceCoordinator {
                 attachmentIntegrityTasks[prepared.key] = AttachmentIntegrityTask(
                     task: task, progress: progress)
             } else if attachmentIntegrityTasks[prepared.key] == nil, let id = work.uploadID {
-                try await submit {
+                try await submit(principal: principal) {
                     try $0.store.attachmentIntegrityFinished(uploadID: id, failureCode: "cancelled")
                 }
             }
             let bytes = attachmentIntegrityTasks[prepared.key]?.progress.verifiedBytes ?? 0
-            return try await submit {
+            return try await submit(principal: principal) {
                 try $0.attachmentIntegrityNativeResponse(
                     request, peerUID: uid, verifiedBytes: bytes, pending: true)
             }
         }
-        return try await submit { $0.handle(request, peerUID: uid) }
+        return try await submit(principal: principal) { $0.nativeInvocationOutcome(request, peerUID: uid) }
     }
     private func attachmentIntegrityCompleted(
         key: String, work: AttachmentIntegrityWork, failureCode: String?
@@ -1231,18 +1513,26 @@ public actor ServiceCoordinator {
     func setAttachmentCopyHookForTesting(_ hook: (@Sendable () async throws -> Void)?) {
         attachmentCopyHookForTesting = hook
     }
-    private func handleAttachmentCopy(_ request: Data, uid: UInt32) async throws -> Data {
+    private func handleAttachmentCopy(_ request: NativeMethodInvocation, uid: UInt32) async throws
+        -> NativeMethodOutcome
+    {
+        let principal = request.principal
         let generation = canonicalWorkGeneration
         let call: PreparedCopyCall
-        do { call = try await submit { try $0.prepareAttachmentCopyNativeCall(request, peerUID: uid) } } catch
-        {
+        do {
+            call = try await submit(principal: principal) {
+                try $0.prepareAttachmentCopyNativeCall(request, peerUID: uid)
+            }
+        } catch {
             try requireCanonicalGeneration(generation)
-            return try await submit { $0.handle(request, peerUID: uid) }
+            return try await submit(principal: principal) {
+                $0.nativeInvocationOutcome(request, peerUID: uid)
+            }
         }
         try requireCanonicalGeneration(generation)
         switch call.admission {
         case .replay(let result):
-            return try await submit {
+            return try await submit(principal: principal) {
                 try $0.attachmentCopyNativeResponse(callID: call.callID, result: result, peerUID: uid)
             }
         case .prepared(let work):
@@ -1251,12 +1541,12 @@ public actor ServiceCoordinator {
                 switch result {
                 case .success(let prepared):
                     try requireCanonicalGeneration(generation)
-                    return try await submit {
+                    return try await submit(principal: principal) {
                         try $0.finishAttachmentCopyNativeCall(
                             callID: call.callID, prepared: prepared, peerUID: uid)
                     }
                 case .failure(let error):
-                    return try await submit {
+                    return try await submit(principal: principal) {
                         try $0.attachmentCopyPending(
                             callID: call.callID, plan: work.plan, bytes: 0, peerUID: uid, failure: error)
                     }
@@ -1266,6 +1556,7 @@ public actor ServiceCoordinator {
                 guard attachmentCopyTasks.isEmpty else {
                     throw TractandaError("serviceBusy", "One bounded attachment copy is already running.")
                 }
+                request.replyBudget?.markPublicationAttempt()
                 let progress = AttachmentIntegrityProgress()
                 let hook = attachmentCopyHookForTesting
                 let task = Task.detached(priority: .utility) { [self] in
@@ -1285,7 +1576,7 @@ public actor ServiceCoordinator {
                 attachmentCopyTasks[key] = AttachmentCopyTask(task: task, progress: progress)
             }
             let bytes = attachmentCopyTasks[key]?.progress.verifiedBytes ?? 0
-            return try await submit {
+            return try await submit(principal: principal) {
                 try $0.attachmentCopyPending(callID: call.callID, plan: work.plan, bytes: bytes, peerUID: uid)
             }
         }
@@ -1301,6 +1592,7 @@ public actor ServiceCoordinator {
     /// Internal shutdown signal before consumers wait on Store-backed maintenance. This only
     /// requests cooperative stops; close() retains writer ownership through all accepted drains.
     public func requestBackgroundStop() {
+        core.requestPersonalRecoveryStop()
         peerRuntimeStopped = true
         peerClockStopped = true
         peerClockLease?.control.cancel()
@@ -1316,6 +1608,7 @@ public actor ServiceCoordinator {
     public func close() async {
         guard accepting else { return }
         accepting = false
+        core.requestPersonalRecoveryStop()
         for control in privateCredentialAdmissions.values { control.cancel() }
         for control in privateEnrollmentAdmissions.values { control.cancel() }
         peerRuntimeStopped = true
@@ -1378,6 +1671,16 @@ public actor ServiceCoordinator {
                 "serviceBusy", "Rebuild fenced earlier background work; retry after completion.")
         }
     }
+    private func submit<T: Sendable>(
+        principal: NativePrincipalPin?, _ body: @escaping @Sendable (ItemService) throws -> T
+    ) async throws -> T {
+        try await core.submit { service in
+            guard let principal else { return try body(service) }
+            return try service.store.withExpectedPrincipal(forUID: principal.uid, name: principal.name) {
+                try body(service)
+            }
+        }
+    }
     private func submit<T: Sendable>(_ body: @escaping @Sendable (ItemService) throws -> T) async throws -> T
     {
         try await core.submit(body)
@@ -1391,7 +1694,7 @@ public actor ServiceCoordinator {
         try beginWork()
         defer { finishWork() }
         let result = try await submit { service in
-            try service.store.withAccess(forUID: uid) {
+            try service.store.withAccess(forUID: uid, recoverPublication: false) {
                 if service.store.isPersonalWorkgroup {
                     return try service.store.personalPeerCanonicalStatus()
                 }
@@ -1635,14 +1938,15 @@ public actor ServiceCoordinator {
             control.cancel()
         }
     }
-    package func personalPeerLocalRequest(_ request: PeerExchangeRequest, forUID uid: UInt32) async throws
+    package func personalPeerLocalRequest(_ request: PeerExchangeRequest, forUID uid: UInt32,
+        principal: NativePrincipalPin? = nil) async throws
         -> Data
     {
         let generation = canonicalWorkGeneration
         try requireCanonicalGeneration(generation)
         try beginWork()
         defer { finishWork() }
-        let result = try await submit { service in
+        let result = try await submit(principal: principal) { service in
             try service.store.withAccess(forUID: uid) {
                 try service.store.requireAdministrator()
                 return try PersonalPeerBridge.local(store: service.store, request: request, uid: uid)
@@ -1669,6 +1973,142 @@ public actor ServiceCoordinator {
         try requireCanonicalGeneration(generation)
         try Task.checkCancellation()
         return result
+    }
+
+    private func personalEnrollmentSubmit<T: Sendable>(
+        principal: NativePrincipalPin? = nil,
+        _ operation: @escaping @Sendable (ItemStore) throws -> T
+    ) async throws -> T {
+        let generation = canonicalWorkGeneration
+        try requireCanonicalGeneration(generation)
+        try beginWork()
+        defer { finishWork() }
+        let result = try await submit(principal: principal) { try operation($0.store) }
+        try requireCanonicalGeneration(generation)
+        try Task.checkCancellation()
+        return result
+    }
+    package func personalEnrollmentIdentity(authorization: PersonalEnrollmentMembershipAuthorization) async throws
+        -> PersonalSyncIdentity {
+        try await personalEnrollmentSubmit { store in
+            try authorization.revalidate(store: store)
+            return try store.personalSyncIdentity()
+        }
+    }
+    package func personalEnrollmentCommitMembership(preparation: PersonalMembershipPreparation,
+        acknowledgements: [PersonalMembershipOnlineAcknowledgement], authorization: PersonalEnrollmentMembershipAuthorization
+    ) async throws -> PersonalMembershipConfiguration {
+        try await personalEnrollmentSubmit { store in
+            let result = try store.commitPersonalMembershipChange(preparation: preparation, acknowledgements: acknowledgements,
+                authorization: authorization)
+            try store.personalEnrollmentRecordCommitted(authorization: authorization)
+            return result
+        }
+    }
+    package func personalEnrollmentRuntimeMaterial(now: Int64) async throws -> PersonalEnrollmentRuntimeMaterial {
+        try await personalEnrollmentSubmit { try $0.personalEnrollmentRuntimeMaterial(now: now) }
+    }
+    package func personalEnrollmentValidateTransport(_ binding: PeerExchangeBinding,
+        purpose: PersonalEnrollmentTransportPurpose, now: Int64) async throws {
+        try await personalEnrollmentSubmit { try $0.personalEnrollmentValidateTransport(binding, purpose: purpose, now: now) }
+    }
+    package func personalEnrollmentIssue(forUID uid: UInt32, endpoints: [PeerRuntimeConfiguration.Endpoint], now: Int64,
+        expectedUnusedOperationID: String? = nil, principal: NativePrincipalPin? = nil) async throws
+        -> PersonalEnrollmentInvitation {
+        try await personalEnrollmentSubmit(principal: principal) { try $0.personalEnrollmentIssue(forUID: uid, endpoints: endpoints, now: now,
+            expectedUnusedOperationID: expectedUnusedOperationID) }
+    }
+    package func personalEnrollmentSourceSnapshot(forUID uid: UInt32, principal: NativePrincipalPin? = nil) async throws -> PersonalEnrollmentSourceSnapshot {
+        try await personalEnrollmentSubmit(principal: principal) { try $0.personalEnrollmentSourceSnapshot(forUID: uid) }
+    }
+    package func personalEnrollmentBeginTarget(forUID uid: UInt32, invitation: PersonalEnrollmentInvitation,
+        hostname: String, principal: NativePrincipalPin? = nil) async throws -> PersonalEnrollmentTargetStatus {
+        try await personalEnrollmentSubmit(principal: principal) {
+            try PersonalEnrollmentTargetRegistry(root: $0.root).begin(store: $0, forUID: uid, invitation: invitation, hostname: hostname)
+        }
+    }
+    package func personalEnrollmentBeginReplacement(forUID uid: UInt32, invitation: PersonalEnrollmentInvitation,
+        hostname: String, now: Int64, principal: NativePrincipalPin) async throws -> PersonalEnrollmentTargetStatus {
+        try await personalEnrollmentSubmit(principal: principal) {
+            try PersonalEnrollmentTargetRegistry(root: $0.root).beginReplacement(store: $0, forUID: uid,
+                invitation: invitation, hostname: hostname, now: now)
+        }
+    }
+    package func personalEnrollmentClaim(_ claim: PersonalEnrollmentClaim, binding: PeerExchangeBinding,
+        now: Int64) async throws -> PersonalEnrollmentIssuerStatus {
+        try await personalEnrollmentSubmit { try $0.personalEnrollmentClaim(claim, binding: binding, now: now) }
+    }
+    package func personalEnrollmentHostState() async throws -> PersonalEnrollmentHostState {
+        try await personalEnrollmentSubmit { try $0.personalEnrollmentHostState() }
+    }
+    package func personalEnrollmentNodeStatus(operationID: String? = nil) async throws -> PersonalEnrollmentNodeStatus {
+        try await personalEnrollmentSubmit { try $0.personalEnrollmentNodeStatus(operationID: operationID) }
+    }
+    package func personalEnrollmentSourceAuthorization() async throws -> (UInt32, PersonalEnrollmentSourceSnapshot) {
+        try await personalEnrollmentSubmit { try $0.personalEnrollmentSourceAuthorization() }
+    }
+    package func personalEnrollmentWriteJob(_ job: PersonalEnrollmentSourceJob,
+        replacing expected: PersonalEnrollmentSourceJob) async throws {
+        try await personalEnrollmentSubmit { try $0.personalEnrollmentWriteJob(job, replacing: expected) }
+    }
+    package func personalEnrollmentPlanCredentials(_ plan: PersonalEnrollmentPlan) async throws -> [PeerCredential] {
+        try await personalEnrollmentSubmit { try $0.personalEnrollmentPlanCredentials(plan) }
+    }
+    package func personalEnrollmentPrepareLocal(plan: PersonalEnrollmentPlan, keys: [PeerCredential]) async throws -> PersonalEnrollmentPreparedWork {
+        try await personalEnrollmentSubmit { try $0.personalEnrollmentPrepareLocal(plan: plan, keys: keys) }
+    }
+    package func personalEnrollmentTargetAcknowledged(binding: PeerExchangeBinding) async throws {
+        try await personalEnrollmentSubmit { try $0.personalEnrollmentTargetAcknowledged(binding: binding) }
+    }
+    package func personalEnrollmentTargetClaim(operationID: String? = nil) async throws -> PersonalEnrollmentClaim {
+        try await personalEnrollmentSubmit { try $0.personalEnrollmentTargetClaim(operationID: operationID) }
+    }
+    package func personalEnrollmentCleanupReplacement() async throws -> Bool {
+        try await personalEnrollmentSubmit { try $0.personalEnrollmentCleanupReplacement() }
+    }
+    package func personalEnrollmentPromoteReplacement(binding: PeerExchangeBinding) async throws {
+        try await personalEnrollmentSubmit { try $0.personalEnrollmentPromoteReplacement(binding: binding) }
+    }
+    package func personalEnrollmentCleanupRenewal() async throws -> Bool {
+        try await personalEnrollmentSubmit { try $0.personalEnrollmentCleanupRenewal() }
+    }
+    package func personalEnrollmentCleanupSupersededCandidates() async throws -> Bool {
+        try await personalEnrollmentSubmit { try $0.personalEnrollmentCleanupSupersededCandidates() }
+    }
+    package func personalEnrollmentConfirmRetainedContinuation(binding: PeerExchangeBinding) async throws {
+        try await personalEnrollmentSubmit { try $0.personalEnrollmentConfirmRetainedContinuation(binding: binding) }
+    }
+    package func personalEnrollmentAcceptRenewal(binding: PeerExchangeBinding, control: PeerExchangeControl) async throws {
+        try await personalEnrollmentSubmit { try $0.personalEnrollmentAcceptRenewal(binding: binding, control: control) }
+    }
+    package func personalEnrollmentPrepareTarget(_ packet: PersonalEnrollmentStagePacket,
+        binding: PeerExchangeBinding) async throws -> PersonalEnrollmentPreparedWork {
+        try await personalEnrollmentSubmit { try $0.personalEnrollmentPrepareTarget(packet, binding: binding) }
+    }
+    package func personalEnrollmentPrepareMember(_ packet: PersonalEnrollmentStagePacket,
+        decision: PersonalEnrollmentAdminDecision, binding: PeerExchangeBinding) async throws -> PersonalEnrollmentPreparedWork {
+        try await personalEnrollmentSubmit { try $0.personalEnrollmentPrepareMember(packet, decision: decision, binding: binding) }
+    }
+    package func personalEnrollmentMemberPrepared(plan: PersonalEnrollmentPlan,
+        decision: PersonalEnrollmentAdminDecision, binding: PeerExchangeBinding) async throws -> PersonalEnrollmentPreparedWork {
+        try await personalEnrollmentSubmit { try $0.personalEnrollmentMemberPrepared(plan: plan, decision: decision, binding: binding) }
+    }
+    package func personalEnrollmentCompleteMember(plan: PersonalEnrollmentPlan,
+        decision: PersonalEnrollmentAdminDecision, binding: PeerExchangeBinding) async throws {
+        try await personalEnrollmentSubmit { try $0.personalEnrollmentCompleteMember(plan: plan, decision: decision, binding: binding) }
+    }
+    package func personalEnrollmentTargetPrepared(binding: PeerExchangeBinding) async throws -> PersonalEnrollmentPreparedWork {
+        try await personalEnrollmentSubmit { try $0.personalEnrollmentTargetPrepared(binding: binding) }
+    }
+    package func personalEnrollmentTargetCommitted(authorization: PersonalEnrollmentMembershipAuthorization) async throws {
+        try await personalEnrollmentSubmit { try $0.personalEnrollmentTargetCommitted(authorization: authorization) }
+    }
+    package func personalEnrollmentFinishTarget(readiness: PersonalEnrollmentBaselineReadiness?,
+        authorization: PersonalEnrollmentMembershipAuthorization) async throws {
+        try await personalEnrollmentSubmit { try $0.personalEnrollmentFinishTarget(readiness: readiness, authorization: authorization) }
+    }
+    package func personalEnrollmentFinishSource() async throws {
+        try await personalEnrollmentSubmit { try $0.personalEnrollmentFinishSource() }
     }
 
     /// Host-private runtime bridge. A snapshot must be validated again before later admission.
@@ -1946,6 +2386,7 @@ private final class CoreBox: @unchecked Sendable {
     private var service: ItemService?
     let readPool: SQLiteReadPool
     let peerClockIntakeEnabled: Bool
+    private let personalRecoveryCancellation = SQLiteReadCancellation()
 
     init(
         root: URL, indexDirectory: URL?, accounts: any AccountDirectory,
@@ -1986,10 +2427,25 @@ private final class CoreBox: @unchecked Sendable {
         service?.requiresAsyncDocumentJobs = true
         readPool = try SQLiteReadPool(
             databaseURL: store.indexDirectory.appendingPathComponent("items.sqlite"))
+        let pool = readPool
+        let cancellation = personalRecoveryCancellation
+        store.personalRecoveryCancellation = cancellation
+        store.personalRecoveryIndexWillReplace = {
+            // Pooled evaluations release their SQLite lease before their serial Store
+            // recheck, so accepted readers can finish while this owner waits to swap.
+            try pool.beginExclusiveAndDrain(timeout: nil, cancellation: cancellation)
+        }
+        store.personalRecoveryIndexDidReplace = { succeeded in
+            defer { pool.endExclusive() }
+            if succeeded { try pool.resumeAfterRebuild() }
+        }
     }
 
+    func requestPersonalRecoveryStop() { personalRecoveryCancellation.cancel() }
+
     func submit<T: Sendable>(_ body: @escaping @Sendable (ItemService) throws -> T) async throws -> T {
-        try await withCheckedThrowingContinuation { continuation in
+        let budget = NativeInvocationScope.budget
+        return try await withCheckedThrowingContinuation { continuation in
             queue.async { [self] in
                 guard let service else {
                     continuation.resume(
@@ -1997,7 +2453,10 @@ private final class CoreBox: @unchecked Sendable {
                     return
                 }
                 do {
-                    continuation.resume(returning: try body(service))
+                    let result =
+                        try budget.map { try service.store.withNativeReplyBudget($0) { try body(service) } }
+                        ?? body(service)
+                    continuation.resume(returning: result)
                 } catch {
                     continuation.resume(throwing: error)
                 }

@@ -118,6 +118,20 @@ extension ItemStore {
         try CanonicalFormatSupport.personalWorkgroup.require(fence)
     }
 
+    /// Normal compatible upgrades use the durable monotonic reader fence, not a content
+    /// inventory. Caller must hold the existing root's writer lock after stopping its writer.
+    /// Explicit selected-content recovery/import still inventories its complete selected input.
+    /// This proves reader compatibility only; startup independently rebuilds/validates content.
+    package static func personalWorkgroupUpgradeRequirement(
+        root: URL, ownerUID: UInt32
+    ) throws -> CanonicalReaderRequirement {
+        try verifyPersonalWorkgroupRoot(root: root, ownerUID: ownerUID)
+        guard let fence = try CanonicalReaderRequirement.load(root: root, ownerUID: ownerUID) else {
+            throw TractandaError("invalidPersonalProfile", "Established personal reader fence is missing.")
+        }
+        return fence
+    }
+
 }
 
 extension ItemStore {

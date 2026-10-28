@@ -4,10 +4,10 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('nod
 const live=fs.readFileSync('Sources/TractandaWeb/Resources/LiveClient.js','utf8');
 const text=value=>({type:'text',value}), ref=itemID=>({type:'reference',value:{itemID}});
 const refs=ids=>({type:'list',value:ids.map(ref)});
-function category(id,parents=[],extras={}) {return {fields:{itemID:text(id),revisionID:text(id+'-revision'),subject:text(id),selection:text('TRUEPREDICATE'),categoryParents:refs(parents),requestIdentity:text('large replay receipt'),...extras}};}
+function category(id,parents=[],extras={}) {return {id,revisionId:id+'-revision',resolution:{itemID:id,status:'ready'},fields:{itemID:text(id),revisionID:text(id+'-revision'),subject:text(id),selection:text('TRUEPREDICATE'),categoryParents:refs(parents),requestIdentity:text('large replay receipt'),...extras}};}
 const categories=[category('projects'),category('project',['projects'],{filterCategories:refs(['filter'])}),category('status'),category('ready',['status']),category('done',['status']),category('filter')];
-const task={fields:{itemID:text('task'),revisionID:text('task-revision'),subject:text('Task'),modifiedAt:{type:'date',value:'2026-09-26T00:00:00Z'},body:text('Complete body'),workingNotes:text('Keep these notes'),requestIdentity:text('large replay receipt'),foreign:{type:'integer',value:42},categoryOverrides:{type:'object',value:{unrelated:text('exclude')}}}};
-const taskB={fields:{...structuredClone(task.fields),itemID:text('taskB'),revisionID:text('taskB-revision'),subject:text('Task B')}};
+const task={id:'task',revisionId:'task-revision',resolution:{itemID:'task',status:'ready'},fields:{itemID:text('task'),revisionID:text('task-revision'),subject:text('Task'),modifiedAt:{type:'date',value:'2026-09-26T00:00:00Z'},body:text('Complete body'),workingNotes:text('Keep these notes'),requestIdentity:text('large replay receipt'),foreign:{type:'integer',value:'42'},categoryOverrides:{type:'object',value:{unrelated:text('exclude')}}}};
+const taskB={id:'taskB',revisionId:'taskB-revision',resolution:{itemID:'taskB',status:'ready'},fields:{...structuredClone(task.fields),itemID:text('taskB'),revisionID:text('taskB-revision'),subject:text('Task B')}};
 const records=new Map([...categories,task].map(r=>[r.fields.itemID.value,r]));
 function fixture(options={}) {
  if(options.multipleTasks)records.set('taskB',taskB);
@@ -16,18 +16,19 @@ function fixture(options={}) {
   calls.push({method,args});
   if(method==='TractandaStore/info')return {state};
   if(method==='TractandaItem/query') {
-   const ids=args.expression?categories.map(c=>c.fields.itemID.value):args.categoryPath.at(-1)==='done'?[]:options.conflictsAvailable?[]:options.multipleTasks?['task','taskB']:['task'];
+   const ids=args.filter.expression?categories.map(c=>c.fields.itemID.value):args.filter.categoryPath.at(-1)==='done'?[]:options.conflictsAvailable?[]:options.multipleTasks?['task','taskB']:['task'];
    return {ids:ids.slice(args.position,args.position+args.limit),position:args.position,total:ids.length,queryState:state,conflictsAvailable:!!options.conflictsAvailable};
   }
-  assert.equal(method,'TractandaItem/get');
+  assert.ok(['TractandaItem/get','TractandaItem/getBounded'].includes(method));
   const list=args.ids.filter(id=>!(options.unresolvedTask&&id==='task')&&!(options.remaining||[]).includes(id)&&!(options.oversized||[]).includes(id)).map(id=>{
    const original=records.get(id);assert.ok(original);
    const r=structuredClone(original);
-   if(args.properties)r.fields=Object.fromEntries(Object.entries(r.fields).filter(([k])=>args.properties.includes(k)||['itemID','revisionID','classID','schemaVersion','createdAt','modifiedAt'].includes(k)));
+   if(args.fieldProperties)r.fields=Object.fromEntries(Object.entries(r.fields).filter(([k])=>args.fieldProperties.includes(k)||['itemID','revisionID','classID','schemaVersion','createdAt','modifiedAt'].includes(k)));
    if(args.projection==='content')delete r.fields.requestIdentity;
    return r;
   });
-  return {list,notFound:[],unresolved:options.unresolvedTask&&args.ids.includes('task')?[{itemID:'task',status:'conflicted',stateToken:'token'}]:[],remainingIDs:(options.remaining||[]).filter(id=>args.ids.includes(id)),oversizedIDs:(options.oversized||[]).filter(id=>args.ids.includes(id)),state};
+  if(options.unresolvedTask&&args.ids.includes('task'))list.push({id:'task',revisionId:null,formatVersion:null,fields:null,resolution:{itemID:'task',status:'conflicted',stateToken:'token'}});
+  return {list,notFound:[],remainingIDs:(options.remaining||[]).filter(id=>args.ids.includes(id)),oversizedIDs:(options.oversized||[]).filter(id=>args.ids.includes(id)),state};
  };
  const context=vm.createContext({projectBoard:{projectRootID:'projects',statusRootID:'status'},selectedViewID:'project',currentDate:()=> '2026-09-26T12:00:00Z',selectionIsCurrent:()=>true,fieldText:(f,k)=>f[k]?.type==='text'?f[k].value:'',apiError:(code,message)=>Object.assign(new Error(message),{code}),nativeCall,nativeCalls:async entries=>{
   assert.ok(entries.length<=8);
@@ -44,7 +45,7 @@ function fixture(options={}) {
  return {context,calls,batches,changeState:()=>{state='two';}};
 }
 function savedFixture(options={}) {
- const calls=[],batches=[],view={fields:{itemID:text('view'),revisionID:text('view-revision'),subject:text('Saved board'),
+ const calls=[],batches=[],view={id:'view',resolution:{itemID:'view',status:'ready'},fields:{itemID:text('view'),revisionID:text('view-revision'),subject:text('Saved board'),
   viewDefinition:{type:'object',value:{presentation:{type:'object',value:{sections:refs(['ready','done'])}}}},
   filterCategories:refs(['filter'])}};
  const records=new Map([...categories,task,view].map(record=>[record.fields.itemID.value,record]));
@@ -52,11 +53,13 @@ function savedFixture(options={}) {
   calls.push({method,args});
   if(method==='TractandaStore/info')return {state:'one'};
   if(method==='TractandaItem/query') {
-   const ids=args.sectionID==='done'?[]:['task'];
+   const ids=args.filter.sectionID==='done'?[]:['task'];
    return {ids:ids.slice(args.position,args.position+args.limit),position:args.position,total:ids.length,queryState:'one'};
   }
-  assert.equal(method,'TractandaItem/get');
-  return {list:args.ids.filter(id=>!(options.unresolved||[]).includes(id)&&!(options.remaining||[]).includes(id)&&!(options.oversized||[]).includes(id)&&!(options.missing||[]).includes(id)).map(id=>structuredClone(records.get(id))),notFound:(options.missing||[]).filter(id=>args.ids.includes(id)),unresolved:(options.unresolved||[]).filter(id=>args.ids.includes(id)).map(itemID=>({itemID,status:'conflicted',stateToken:'token'})),remainingIDs:(options.remaining||[]).filter(id=>args.ids.includes(id)),oversizedIDs:(options.oversized||[]).filter(id=>args.ids.includes(id)),state:'one'};
+  assert.ok(['TractandaItem/get','TractandaItem/getBounded'].includes(method));
+  const list=args.ids.filter(id=>!(options.unresolved||[]).includes(id)&&!(options.remaining||[]).includes(id)&&!(options.oversized||[]).includes(id)&&!(options.missing||[]).includes(id)).map(id=>structuredClone(records.get(id)));
+  for(const itemID of options.unresolved||[])if(args.ids.includes(itemID))list.push({id:itemID,revisionId:null,formatVersion:null,fields:null,resolution:{itemID,status:'conflicted',stateToken:'token'}});
+  return {list,notFound:(options.missing||[]).filter(id=>args.ids.includes(id)),remainingIDs:(options.remaining||[]).filter(id=>args.ids.includes(id)),oversizedIDs:(options.oversized||[]).filter(id=>args.ids.includes(id)),state:'one'};
  };
  const context=vm.createContext({projectBoard:null,selectedViewID:'view',currentDate:()=> '2026-09-26T12:00:00Z',selectionIsCurrent:()=>true,fieldText:(f,k)=>f[k]?.type==='text'?f[k].value:'',apiError:(code,message)=>Object.assign(new Error(message),{code}),nativeCall,nativeCalls:async entries=>{
   batches.push(entries.length);
@@ -75,8 +78,10 @@ function savedFixture(options={}) {
  const protocolCalls=[];
  const protocol=vm.createContext({nativeCapability:'test-capability',accessToken:'token',AbortSignal,apiError:(code,message)=>Object.assign(new Error(message),{code}),showServerVersion:()=>{},forgetAccessToken:()=>{},showSignIn:()=>{},pendingWrite:null,
   fetch:async(_url,options)=>{
-   const body=JSON.parse(options.body);protocolCalls.push(body.methodCalls);
-   return {ok:true,json:async()=>({methodResponses:body.methodCalls.map(([method,_args,id])=>[method,{id},id])})};
+   const body=JSON.parse(options.body);
+   if(body.methodCalls[0][0]==='TractandaSession/get')return {ok:true,json:async()=>({methodResponses:[['TractandaSession/get',{profile:'tractanda.local-session.v1',state:'metadata',primaryAccounts:{'test-capability':'account'},accounts:{account:{accountCapabilities:{'test-capability':{}}}}},'web-0']]})};
+   protocolCalls.push(body.methodCalls);
+   return {ok:true,json:async()=>({methodResponses:body.methodCalls.map(([method,_args,id])=>[method,{id,accountId:_args.accountId},id])})};
   }});
  vm.runInContext(live.slice(live.indexOf('  async function nativeCalls('),live.indexOf('  function plain(')),protocol);
  const paired=await protocol.nativeCalls([['TractandaStore/info',{}],['TractandaItem/query',{position:0}]]);
@@ -87,11 +92,11 @@ function savedFixture(options={}) {
  const grouped=vm.createContext({currentDate:()=> '2026-09-26T12:00:00Z',apiError:(code,message)=>Object.assign(new Error(message),{code}),nativeCalls:async entries=>{
   groupedBatches.push(entries.length);
   return entries.map(([_method,args])=>{
-   const total=args.categoryPath[0]==='long'?70:1;
-   return {ids:Array.from({length:Math.min(64,total-args.position)},(_,index)=>args.categoryPath[0]+'-'+(args.position+index)),total,queryState:'one'};
+   const total=args.filter.categoryPath[0]==='long'?70:1;
+   return {ids:Array.from({length:Math.min(64,total-args.position)},(_,index)=>args.filter.categoryPath[0]+'-'+(args.position+index)),total,queryState:'one'};
   });
  }});
- vm.runInContext(live.slice(live.indexOf('  async function queryIDGroups('),live.indexOf('  async function queryRevisions(')),grouped);
+ vm.runInContext(live.slice(live.indexOf('  function queryArguments('),live.indexOf('  async function queryRevisions(')),grouped);
  const groups=await grouped.queryIDGroups(['long',...Array.from({length:9},(_,index)=>'short-'+index)].map(id=>({categoryPath:[id]})),'one');
  assert.equal(groups[0].length,70);
  assert.deepEqual(groupedBatches,[8,3],'Large membership sets page in a later bounded envelope.');
@@ -101,7 +106,7 @@ function savedFixture(options={}) {
   if(limit>32)throw Object.assign(new Error('large'),{code:'responseTooLarge'});
  return [{ids:['item'],position:0,total:1,queryState:'one'},{list:[task],notFound:[],state:'one'}];
  }});
-vm.runInContext(live.slice(live.indexOf('  async function queryPageWithRevisions('),live.indexOf('  async function queryRevisions(')),paged);
+vm.runInContext(live.slice(live.indexOf('  function queryArguments('),live.indexOf('  async function queryRevisions(')),paged);
 await paged.queryPageWithRevisions({viewID:'view'},0,{projection:'content'});
 assert.deepEqual(pageLimits,[64,32],'An oversized combined response retries a smaller read-only page.');
 const cursorArguments=[];
@@ -111,7 +116,7 @@ const cursorPaged=vm.createContext({nativeCalls:async entries=>{
   if(cursorAttempt===1)throw Object.assign(new Error('large'),{code:'responseTooLarge'});
   return [{ids:['item'],position:8,total:20,queryState:'one',nextCursor:'next-token'},{list:[task],notFound:[],state:'one'}];
 }});
-vm.runInContext(live.slice(live.indexOf('  async function queryPageWithRevisions('),live.indexOf('  async function queryRevisions(')),cursorPaged);
+vm.runInContext(live.slice(live.indexOf('  function queryArguments('),live.indexOf('  async function queryRevisions(')),cursorPaged);
 const cursorPage=await cursorPaged.queryPageWithRevisions({expression:'classID == "Item"'},8,{projection:'content'},'opaque-token');
 assert.equal(cursorPage[0].nextCursor,'next-token');
 assert.deepEqual(cursorArguments.map(args=>args.limit),[64,32]);
@@ -126,10 +131,10 @@ const safeContinuation=vm.createContext({
   if(cursor)throw Object.assign(new Error('expired'),{code:'invalidCursor'});
   const ids=[position===0?'first':'second'];
   return [{ids,position,total:2,queryState:'same-state',nextCursor:position===0?'next':null},
-    {list:ids.map(itemID=>({itemID})),state:'same-state',notFound:[]}];
+    {list:ids.map(itemID=>({id:itemID,resolution:{status:'ready'}})),state:'same-state',notFound:[]}];
  }
 });
-vm.runInContext(live.slice(live.indexOf('  async function queryRevisions('),live.indexOf('  async function projectGraph(')),safeContinuation);
+vm.runInContext(live.slice(live.indexOf('  function queryArguments('),live.indexOf('  async function queryIDGroups('))+live.slice(live.indexOf('  async function queryRevisions('),live.indexOf('  async function projectGraph(')),safeContinuation);
 const safelyLoaded=await safeContinuation.queryRevisions({expression:'classID == "Item"'},'same-state',null);
 assert.equal(safelyLoaded.revisions.length,2);
 assert.deepEqual(continuationCalls,[
@@ -143,14 +148,14 @@ const f=fixture(),snapshot={};
  assert.deepEqual(Array.from(loaded.data.tasks[0].categoryIDs),['ready']);
  assert.deepEqual(Array.from(loaded.data.tasks[0].filterCategoryIDs),['filter']);
  assert.equal(loaded.data.tasks[0].summary,'Complete body');
- assert.equal(loaded.revisions.get('task').fields.foreign.value,42,'Content projection preserves unknown fields for the guarded editor.');
+ assert.equal(loaded.revisions.get('task').fields.foreign.value,'42','Content projection preserves unknown fields for the guarded editor.');
  assert.equal(loaded.revisions.get('task').fields.categoryOverrides.value.unrelated.value,'exclude');
  assert.equal(loaded.revisions.get('task').fields.requestIdentity,undefined);
- assert.equal(f.calls.filter(c=>c.args.expression).length,1,'Reuse the checked category graph within one refresh.');
+ assert.equal(f.calls.filter(c=>c.args.filter?.expression).length,1,'Reuse the checked category graph within one refresh.');
  assert.deepEqual(f.batches,[2,2,3],'Query and get share a request; membership and filter lookups share another.');
- const gets=f.calls.filter(c=>c.method==='TractandaItem/get');
+ const gets=f.calls.filter(c=>c.method==='TractandaItem/getBounded');
  assert.equal(gets.length,2,'Fetch categories and card content once; membership lookups need IDs only.');
- assert.ok(gets[0].args.properties.includes('viewDefinition'));
+ assert.ok(gets[0].args.fieldProperties.includes('viewDefinition'));
  assert.equal(gets[1].args.projection,'content');
  const partial=fixture({unresolvedTask:true}),partialSnapshot={};
  await partial.context.discoverProjectViews('project',0,partialSnapshot);
@@ -183,10 +188,10 @@ const f=fixture(),snapshot={};
  changed.changeState();
  const refreshed=await changed.context.readLiveBoard('project',oldSnapshot);
  assert.equal(refreshed.data.serverState,'two');
- assert.equal(changed.calls.filter(c=>c.args.expression).length,2,'A changed generation discards the earlier category graph.');
+ assert.equal(changed.calls.filter(c=>c.args.filter?.expression).length,2,'A changed generation discards the earlier category graph.');
  const separate={};
  await changed.context.discoverProjectViews('project',1,separate);
- assert.equal(changed.calls.filter(c=>c.args.expression).length,3,'A later refresh/login does not reuse a global category cache.');
+ assert.equal(changed.calls.filter(c=>c.args.filter?.expression).length,3,'A later refresh/login does not reuse a global category cache.');
  const saved=savedFixture(),savedBoard=await saved.context.readLiveBoard('view');
  assert.equal(savedBoard.data.tasks.length,1);
  assert.deepEqual(Array.from(savedBoard.data.tasks[0].categoryIDs),['ready']);

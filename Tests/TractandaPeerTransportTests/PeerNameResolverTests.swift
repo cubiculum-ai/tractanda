@@ -102,4 +102,37 @@ final class PeerNameResolverTests: XCTestCase {
         XCTAssertEqual(addresses.last, ipv4)
     }
 
+    func testBlockedHostnameDoesNotQueueOrPreventBoundedAlternativeLookup() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { try? await group.shutdownGracefully() }
+        let release = DispatchSemaphore(value: 0)
+        let entered = expectation(description: "blocked lookup owns one slot")
+        let calls = Mutex<[String]>([])
+        let resolver = PeerNameResolver(loop: group.next(), maximumConcurrentLookups: 2) { host, port in
+            calls.withLock { $0.append(host) }
+            if host == "held.example" {
+                entered.fulfill()
+                _ = release.wait(timeout: .now() + 10)
+            }
+            return [try SocketAddress(ipAddress: "127.0.0.1", port: port)]
+        }
+        defer {
+            release.signal()
+            try? await resolver.close()
+        }
+        let held = Task { try await resolver.resolve(host: "held.example", port: 1234, seconds: 0.03) }
+        await fulfillment(of: [entered], timeout: 2)
+        do {
+            _ = try await held.value
+            XCTFail("Expected timeout")
+        } catch { XCTAssertEqual((error as? TractandaError)?.code, "deadlineExceeded") }
+        do {
+            _ = try await resolver.resolve(host: "HELD.EXAMPLE", port: 1234, seconds: 1)
+            XCTFail("Queued duplicate underlying DNS work")
+        } catch { XCTAssertEqual((error as? TractandaError)?.code, "serviceBusy") }
+        let fallback = try await resolver.resolve(host: "fallback.example", port: 1234, seconds: 1)
+        XCTAssertEqual(fallback, [try SocketAddress(ipAddress: "127.0.0.1", port: 1234)])
+        XCTAssertEqual(calls.withLock { $0 }, ["held.example", "fallback.example"])
+    }
+
 }

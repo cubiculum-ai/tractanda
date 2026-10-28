@@ -58,7 +58,7 @@ package enum PeerEnrollmentSSH {
     static func helper(_ platform: PeerEnrollmentSSHPlatform) -> URL {
         URL(
             fileURLWithPath: platform == .macOS
-                ? "/Users/Shared/Library/Application Support/Tractanda/current/bin/tractanda-setup"
+                ? "/Library/Tractanda/Software/current/bin/tractanda-setup"
                 : "/opt/tractanda/current/bin/tractanda-setup")
     }
     static func arguments(

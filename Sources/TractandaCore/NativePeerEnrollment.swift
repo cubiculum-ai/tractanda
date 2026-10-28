@@ -507,16 +507,24 @@ package enum NativePeerEnrollment {
                 receive(fd, maximum: maximumMetadata, deadline: deadline), operationID: operation)
         }
     }
-    private static func sendNative(_ connection: ServerConnection, request: Data) throws -> Data {
+    private static func sendNative(_ connection: ServerConnection, request: Data, method: String) throws
+        -> Data
+    {
         var selected = connection
         selected.managedService = nil
-        return try selected.send(request)
+        let target = selected
+        let sender: (Data) throws -> Data = { try target.send($0) }
+        let response = try NativeClientContext(transport: sender).send(request, transport: sender)
+        return try NativeMethodResult.unwrap(response, method: method, callID: "enrollment")
     }
     package static func call(connection: ServerConnection, action: Action, operationID: String) throws -> Data
     {
         _ = try AuthorityRecord.persistentID(.text(operationID))
         let call = PeerEnrollmentNativeCall(action: action.rawValue, operationID: operationID)
-        return try checkedStatus(sendNative(connection, request: call.encoded()), operationID: operationID)
+        return try checkedStatus(
+            sendNative(
+                connection, request: call.encoded(), method: "TractandaPeerEnrollment/" + action.rawValue),
+            operationID: operationID)
     }
     package static func exportTarget(connection: ServerConnection, operationID: String, outputPath: String)
         throws -> Data
@@ -625,7 +633,8 @@ package enum NativePeerEnrollment {
         let call = PeerEnrollmentNativeCall(
             action: "read", operationID: operationID, descriptor: object, offset: offset,
             maximumBytes: maximumBytes)
-        let response = try sendNative(connection, request: call.encoded())
+        let response = try sendNative(
+            connection, request: call.encoded(), method: "TractandaPeerEnrollment/read")
         let chunk = try checkedChunk(response, object: object, offset: offset, maximumBytes: maximumBytes)
         try PeerEnrollmentFiles.writeExact(
             chunk.bytes, path: outputPath, maximum: PeerPackage.maximumChunkBytes)
@@ -661,30 +670,24 @@ package struct PeerEnrollmentNativeCall: Sendable {
         }
         return try JSONSerialization.data(
             withJSONObject: [
-                "using": [ItemService.capability],
+                "using": ["urn:ietf:params:jmap:core", ItemService.capability],
                 "methodCalls": [["TractandaPeerEnrollment/" + action, args, callID]],
             ], options: [.sortedKeys])
     }
-    package static func parse(_ data: Data) throws -> Self? {
-        guard let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let calls = envelope["methodCalls"] as? [[Any]],
-            calls.contains(where: { ($0.first as? String)?.hasPrefix("TractandaPeerEnrollment/") == true })
-        else { return nil }
+    package static func parse(_ call: NativeMethodInvocation) throws -> Self? {
+        guard call.method.hasPrefix("TractandaPeerEnrollment/") else { return nil }
         do {
-            guard data.count <= NativePeerEnrollment.maximumMetadata,
-                Set(envelope.keys) == ["using", "methodCalls"],
-                envelope["using"] as? [String] == [ItemService.capability], calls.count == 1,
-                calls[0].count == 3,
-                let method = calls[0][0] as? String, let args = calls[0][1] as? [String: Any],
-                let callID = calls[0][2] as? String, !callID.isEmpty, callID.utf8.count <= 256,
+            let args = try call.dictionary()
+            guard call.callCount == 1, try call.argumentsJSON.count <= NativePeerEnrollment.maximumMetadata,
                 let operation = args["operationID"] as? String
             else { throw NativePeerEnrollment.failure() }
+            let method = call.method
+            let callID = call.callID
             _ = try AuthorityRecord.persistentID(.text(operation))
             let action = String(method.dropFirst("TractandaPeerEnrollment/".count))
             if NativePeerEnrollment.Action(rawValue: action) != nil {
                 guard Set(args.keys) == ["operationID"] else { throw NativePeerEnrollment.failure() }
                 let call = Self(action: action, operationID: operation, callID: callID)
-                guard try call.encoded() == data else { throw NativePeerEnrollment.failure() }
                 return call
             }
             guard action == "read",
@@ -708,7 +711,6 @@ package struct PeerEnrollmentNativeCall: Sendable {
             let call = Self(
                 action: action, operationID: operation, descriptor: object, offset: bounds.offset,
                 maximumBytes: bounds.maximumBytes, callID: callID)
-            guard try call.encoded() == data else { throw NativePeerEnrollment.failure() }
             return call
         } catch {
             throw TractandaError(

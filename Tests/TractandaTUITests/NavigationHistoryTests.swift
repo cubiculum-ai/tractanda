@@ -19,7 +19,7 @@ final class NavigationHistoryTests: XCTestCase {
         }
         deinit { try? FileManager.default.removeItem(at: root) }
         func item(_ name: String, _ fields: [String: ItemValue] = [:]) throws -> Revision {
-            try client.commit(
+            try client.commitFixture(
                 CommitRequest(
                     classID: "Item", changes: fields.merging(["subject": .text(name)]) { _, b in b },
                     operationID: Identifier.make())
@@ -35,7 +35,7 @@ final class NavigationHistoryTests: XCTestCase {
                 ])
         }
         func revise(_ item: Revision, _ changes: [String: ItemValue]) throws -> Revision {
-            try client.commit(
+            try client.commitFixture(
                 CommitRequest(
                     action: .revise, itemID: item.itemID, expectedRevisionID: item.revisionID,
                     changes: changes, operationID: Identifier.make())
@@ -220,7 +220,7 @@ final class NavigationHistoryTests: XCTestCase {
         _ = try f.item("One", ["rank": .integer(1)])
         let workspace = Workspace(client: f.client)
         workspace.expression = "rank == 0"
-        let saved = try f.client.commit(workspace.viewRequest(name: "Saved")).revision
+        let saved = try f.client.commitFixture(workspace.viewRequest(name: "Saved")).revision
         try workspace.openView(saved)
         let location = workspace.navigationLocation
         try workspace.allItems()
@@ -236,7 +236,7 @@ final class NavigationHistoryTests: XCTestCase {
     func testUnsavedLayoutRetainsOriginalSaveGuardAndExtensionValues() throws {
         let f = try Fixture()
         let workspace = Workspace(client: f.client)
-        let original = try f.client.commit(workspace.viewRequest(name: "Saved")).revision
+        let original = try f.client.commitFixture(workspace.viewRequest(name: "Saved")).revision
         var definition = original.fields["viewDefinition"]!.map!
         definition["foreign.option"] = .text("retain")
         let saved = try f.revise(original, ["viewDefinition": .object(definition)])
@@ -251,7 +251,7 @@ final class NavigationHistoryTests: XCTestCase {
         let request = workspace.viewRequest(name: "Saved", replacing: true)
         XCTAssertEqual(request.expectedRevisionID, saved.revisionID)
         XCTAssertEqual(request.changes["viewDefinition"]?.map?["foreign.option"], .text("retain"))
-        XCTAssertThrowsError(try f.client.commit(request)) {
+        XCTAssertThrowsError(try f.client.commitFixture(request)) {
             XCTAssertEqual(($0 as? TractandaError)?.code, "revisionConflict")
         }
         XCTAssertEqual(try f.store.get(saved.itemID), newer)
@@ -264,7 +264,7 @@ final class NavigationHistoryTests: XCTestCase {
         let workspace = Workspace(client: f.client)
         try workspace.browse(path: [category])
         let categoryLocation = workspace.navigationLocation
-        let saved = try f.client.commit(workspace.viewRequest(name: "View later deleted")).revision
+        let saved = try f.client.commitFixture(workspace.viewRequest(name: "View later deleted")).revision
         try workspace.openView(saved)
         let viewLocation = workspace.navigationLocation
         try workspace.allItems()
@@ -294,7 +294,7 @@ final class NavigationHistoryTests: XCTestCase {
             return f.service.handle(data, peerUID: f.store.ownerUID)
         })
         let workspace = Workspace(client: client)
-        let saved = try client.commit(workspace.viewRequest(name: "Private view")).revision
+        let saved = try client.commitFixture(workspace.viewRequest(name: "Private view")).revision
         try workspace.openView(saved)
         workspace.view = nil
         let location = workspace.navigationLocation
@@ -406,7 +406,7 @@ final class NavigationHistoryTests: XCTestCase {
             let response = f.service.handle(data, peerUID: f.store.ownerUID)
             if calls.first?[0] as? String == "TractandaItem/query", !changedStore {
                 changedStore = true
-                _ = try f.client.commit(
+                _ = try f.client.commitFixture(
                     CommitRequest(
                         classID: "Item", changes: ["subject": .text("Change between sections")],
                         operationID: Identifier.make()))

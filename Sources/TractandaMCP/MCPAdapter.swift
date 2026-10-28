@@ -129,10 +129,20 @@ public enum MCPAdapter {
             let request = try ResourceCatalog.itemRequest(for: parameters.uri)
             do {
                 let data = try await gateway.call(request.method, arguments: request.arguments)
+                let segments = parameters.uri.dropFirst("tractanda://items/".count).split(separator: "/").map(
+                    String.init)
                 if request.method == "TractandaItem/get" {
-                    let result = try JSONDecoder().decode(Value.self, from: data)
-                    guard result.objectValue?["list"]?.arrayValue?.count == 1 else {
+                    let result = try JSONDecoder().decode(JMAPItemGetResponse.self, from: data)
+                    guard result.list.count == 1, result.notFound.isEmpty, result.list[0].id == segments[0]
+                    else {
                         throw TractandaError("notFound", "Item is unavailable.")
+                    }
+                } else if request.method == "TractandaRevision/get" {
+                    let result = try JSONDecoder().decode(JMAPRevisionGetResponse.self, from: data)
+                    guard result.list.count == 1, result.notFound.isEmpty,
+                        result.list[0].id == segments[2], result.list[0].itemID == segments[0]
+                    else {
+                        throw TractandaError("notFound", "Pinned revision is unavailable for this item.")
                     }
                 }
                 return .init(contents: [
@@ -200,13 +210,12 @@ public enum MCPAdapter {
         definition: ToolDefinition, supplied: [String: Value], gateway: NativeGateway
     ) async throws -> Data {
         var arguments = try definition.arguments(from: supplied)
-        if ["TractandaItem/get", "TractandaItem/history", "TractandaRevision/get"].contains(
-            definition.nativeMethod), arguments["projection"] == nil, arguments["properties"] == nil
+        if [
+            "TractandaItem/get", "TractandaItem/getBounded", "TractandaItem/history", "TractandaRevision/get",
+        ].contains(
+            definition.nativeMethod), arguments["projection"] == nil, arguments["fieldProperties"] == nil
         {
             arguments["projection"] = .string("content")
-        }
-        if definition.nativeMethod == "TractandaItem/get", arguments["maxBytes"] == nil {
-            arguments["maxBytes"] = .int(524_288)
         }
         if let feature = definition.requiredFeature {
             let info = try await gateway.call("TractandaStore/info", arguments: [:])

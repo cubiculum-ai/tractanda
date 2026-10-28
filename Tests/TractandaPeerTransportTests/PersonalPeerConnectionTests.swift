@@ -42,11 +42,19 @@ final class PersonalPeerConnectionTests: XCTestCase {
         let serverPairing = try pairing(local: rightID, remote: leftID, initiator: false)
         let responder = try PeerExchangeResponder(pairings: [serverPairing])
         let admission = PersonalTestAdmission()
+        let bytes = Data(repeating: 0x81, count: 256 * 1024)
+        let descriptor = try PersonalObjectDescriptor(
+            kind: .revision, id: UUID.makeVersion1().uuidString.lowercased(), byteCount: Int64(bytes.count),
+            sha256: String(repeating: "a", count: 64), itemID: UUID.makeVersion1().uuidString.lowercased())
+        let readFields: [String: ItemValue] = [
+            "descriptor": .bytes(try JSON.encode(descriptor)), "offset": .integer(0),
+            "limit": .integer(Int64(bytes.count)),
+        ]
         let operations = PersonalPeerOperations(
             validate: { _ in try admission.validate() },
             handle: { _, request in
                 admission.requests.withLock { $0 += 1 }
-                return try JSON.encode(request.fields)
+                return bytes
             })
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { try? await group.shutdownGracefully() }
@@ -71,16 +79,15 @@ final class PersonalPeerConnectionTests: XCTestCase {
         let right = try XCTUnwrap(accepted.snapshot.first)
         let readyRight = try await right.ready.get()
         XCTAssertEqual(readyRight.remoteReplicaID, leftID)
-        let bytes = Data(repeating: 0x81, count: 256 * 1024)
-        async let outbound = left.request(.init("personal.test", ["bytes": .bytes(bytes)])).get()
-        async let inbound = right.request(.init("personal.test", ["label": .text("reverse")])).get()
+        async let outbound = left.request(.init("personal.read", readFields)).get()
+        async let inbound = right.request(.init("personal.read", readFields)).get()
         let results = try await (outbound, inbound)
-        XCTAssertEqual(try JSON.decode([String: ItemValue].self, results.0)["bytes"], .bytes(bytes))
-        XCTAssertEqual(try JSON.decode([String: ItemValue].self, results.1)["label"], .text("reverse"))
+        XCTAssertEqual(results.0, bytes)
+        XCTAssertEqual(results.1, bytes)
         XCTAssertEqual(admission.requests.withLock { $0 }, 2)
         admission.admitted.withLock { $0 = false }
         do {
-            _ = try await left.request(.init("personal.test")).get()
+            _ = try await left.request(.init("personal.sync.ready")).get()
             XCTFail("Removed member executed an operation")
         } catch { XCTAssertEqual((error as? TractandaError)?.code, "untrustedPeer") }
         XCTAssertEqual(admission.requests.withLock { $0 }, 2)
@@ -105,12 +112,16 @@ final class PersonalPeerConnectionTests: XCTestCase {
 
     func testPersonalWireRejectsHistoricalVersionAndOversizedFrames() throws {
         let frame = PeerExchangeCodec.Frame(version: 2, requestID: 0, kind: .declaration, body: Data())
-        XCTAssertThrowsError(try PeerExchangeCodec.decode(JSON.encode(frame), expectedVersion: 3))
-        let personal = PeerExchangeCodec.Frame(version: 3, requestID: 0, kind: .declaration, body: Data())
-        XCTAssertNoThrow(try PeerExchangeCodec.decode(JSON.encode(personal), expectedVersion: 3))
+        XCTAssertThrowsError(
+            try PeerExchangeCodec.decode(JSON.encode(frame), expectedVersion: PersonalPeerJMAP.wireVersion))
+        let personal = PeerExchangeCodec.Frame(
+            version: PersonalPeerJMAP.wireVersion, requestID: 0, kind: .declaration, body: Data())
+        XCTAssertNoThrow(
+            try PeerExchangeCodec.decode(JSON.encode(personal), expectedVersion: PersonalPeerJMAP.wireVersion)
+        )
         XCTAssertThrowsError(try PeerExchangeCodec.decode(JSON.encode(personal)))
         let oversized = PeerExchangeCodec.Frame(
-            version: 3, requestID: 1, kind: .request,
+            version: PersonalPeerJMAP.wireVersion, requestID: 1, kind: .request,
             body: Data(repeating: 0, count: PeerExchangeCodec.maximumFrameBytes))
         XCTAssertThrowsError(try PeerExchangeCodec.encode(oversized, allocator: ByteBufferAllocator()))
     }

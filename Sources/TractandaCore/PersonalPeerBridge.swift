@@ -18,6 +18,33 @@ public struct PersonalPeerRuntimeConfiguration: Codable, Equatable, Sendable {
         self.settings = settings
         try validate()
     }
+    /// Explicit local routing overrides do not alter the shared membership document.
+    package static func configuredPeers(
+        membership: PersonalMembershipConfiguration, localReplicaID: String, port: Int,
+        endpointOverrides: [String: [PeerRuntimeConfiguration.Endpoint]] = [:]
+    ) throws -> [PeerRuntimeConfiguration.Peer] {
+        try membership.validate()
+        let remote = membership.members.filter { $0.replicaID != localReplicaID }
+        guard membership.members.contains(where: { $0.replicaID == localReplicaID }),
+            Set(endpointOverrides.keys).isSubset(of: Set(remote.map(\.replicaID)))
+        else {
+            throw TractandaError("invalidConfiguration", "Routing overrides require current remote members.")
+        }
+        let peers = try remote.map { member in
+            let endpoints =
+                try endpointOverrides[member.replicaID]
+                ?? [PeerRuntimeConfiguration.Endpoint(host: member.hostname, port: port)]
+            guard let first = endpoints.first else {
+                throw TractandaError(
+                    "invalidConfiguration", "A routing override requires at least one destination.")
+            }
+            return try PeerRuntimeConfiguration.Peer(
+                alias: member.replicaID + "-dial", host: first.host, port: first.port,
+                fallbackEndpoints: Array(endpoints.dropFirst()))
+        }
+        _ = try Self(settings: PeerRuntimeConfiguration(peers: peers))
+        return peers
+    }
     public func validate() throws {
         guard profile == Self.profileName else {
             throw TractandaError("invalidConfiguration", "Unsupported personal peer runtime profile.")
@@ -25,11 +52,15 @@ public struct PersonalPeerRuntimeConfiguration: Codable, Equatable, Sendable {
         for peer in settings.peers {
             // DNS is resolved anew for every reconnect. Literal addresses are not durable
             // membership destinations; listener addresses may still be wildcard/loopback.
-            let host = peer.endpoint.host
-            guard !host.contains(":"), host.contains(where: { $0.isLetter }),
-                !host.hasPrefix("["), !host.hasSuffix("]")
-            else {
-                throw TractandaError("invalidConfiguration", "Personal peers require configured hostnames.")
+            for endpoint in peer.endpoints {
+                let host = endpoint.host
+                guard !PeerRuntimeConfiguration.Endpoint.isNumericAddress(host),
+                    !host.contains(":"), host.contains(where: { $0.isLetter }),
+                    !host.hasPrefix("["), !host.hasSuffix("]")
+                else {
+                    throw TractandaError(
+                        "invalidConfiguration", "Personal peers require configured hostnames.")
+                }
             }
         }
     }
@@ -330,23 +361,27 @@ package enum PersonalPeerBridge {
 extension ItemStore {
     func personalPeerCanonicalStatus() throws -> PeerCanonicalStatus {
         try requireAdministrator()
-        let identity = try personalSyncIdentity()
+        guard let profile = try PersonalWorkgroupProfile.load(root, ownerUID: ownerUID),
+            profile.replicaID == replicaID
+        else { throw TractandaError("recoveryRequired", "Local personal identity is unavailable.") }
+        let membership = try PersonalSyncConfiguration.membership(root: root, ownerUID: ownerUID)
+        let pending = try PersonalSyncConfiguration.read(
+            PersonalMembershipPreparation.self, root: root,
+            name: PersonalSyncConfiguration.pendingName, ownerUID: ownerUID)
         let baseline = try PersonalSyncConfiguration.read(
-            PersonalBaselineSelection.self,
-            root: root, name: PersonalSyncConfiguration.baselineName, ownerUID: ownerUID)
-        let aliases: PersonalCredentialAliases?
-        if let membership = identity.membership {
-            aliases = try PersonalSyncConfiguration.read(
-                PersonalCredentialAliases.self, root: root,
-                name: ".personal-credentials-" + membership.digest + ".json", ownerUID: ownerUID)
-        } else {
-            aliases = nil
-        }
+            PersonalBaselineSelection.self, root: root,
+            name: PersonalSyncConfiguration.baselineName, ownerUID: ownerUID)
+        let personal = try PersonalClusterCanonicalStatus(
+            storeID: profile.storeID, currentMembership: membership,
+            pendingMembership: pending?.configuration,
+            requiredOnlineReplicaIDs: pending?.requiredOnlineReplicaIDs ?? [],
+            baselineSourceReplicaID: baseline?.sourceReplicaID)
         return .init(
-            storeID: identity.storeID, replicaID: identity.replicaID,
-            readiness: baseline == nil ? .ready : .pendingActivation,
-            localDisposed: nil, configuredPairingCount: aliases?.aliases.count,
-            committedPairingCount: nil)
+            storeID: profile.storeID, replicaID: profile.replicaID,
+            readiness: !isCanonicalTrusted ? .recoveryRequired
+                : (baseline != nil || isPersonalBaselinePending) ? .pendingActivation : .ready,
+            localDisposed: nil, configuredPairingCount: nil, committedPairingCount: nil,
+            personal: personal)
     }
 }
 
@@ -363,7 +398,7 @@ extension ItemStore {
         }
         try verifyPersonalWorkgroupRoot(root: root, ownerUID: ownerUID)
         guard let profile = try PersonalWorkgroupProfile.load(root, ownerUID: ownerUID),
-            profile.initialization == "freshReplica", profile.storeID == expectedStoreID,
+            ["freshReplica", "freshReplicaJoining"].contains(profile.initialization), profile.storeID == expectedStoreID,
             profile.replicaID == expectedReplicaID
         else {
             throw TractandaError(
@@ -407,6 +442,34 @@ extension ItemStore {
             try verifyPersonalSyncReplicaIdentityForSetup(
                 root: root, ownerUID: tractanda_uid(),
                 expectedStoreID: expectedStoreID, expectedReplicaID: expectedReplicaID)
+        }
+    }
+    /// Exact interrupted new-target Setup only. No writer/open or implicit promotion;
+    /// an already admitted/enrolled or populated target is never resumed as fresh.
+    package static func verifyUnjoinedPersonalSyncReplicaIdentityForSetup(
+        root: URL, ownerUID: UInt32, expectedStoreID: String, expectedReplicaID: String
+    ) throws {
+        try verifyPersonalSyncReplicaIdentityForSetup(root: root, ownerUID: ownerUID,
+            expectedStoreID: expectedStoreID, expectedReplicaID: expectedReplicaID)
+        guard let profile = try PersonalWorkgroupProfile.load(root, ownerUID: ownerUID),
+            profile.initialization == "freshReplicaJoining",
+            try PersonalSyncConfiguration.membership(root: root, ownerUID: ownerUID) == nil,
+            try PersonalSyncConfiguration.read(PersonalMembershipPreparation.self, root: root,
+                name: PersonalSyncConfiguration.pendingName, ownerUID: ownerUID) == nil,
+            try PersonalSyncConfiguration.read(PersonalBaselineSelection.self, root: root,
+                name: PersonalSyncConfiguration.baselineName, ownerUID: ownerUID) == nil else {
+            throw TractandaError("invalidEnrollmentTarget", "The interrupted target is already selected or enrolled; use its existing join/resume command.")
+        }
+        try POSIXDirectory.withEntries(at: root) { name in
+            guard name != ".personal-enrollment", name != ".peer-credentials",
+                !name.hasPrefix(".personal-credentials-") else {
+                throw TractandaError("invalidEnrollmentTarget", "The target already has enrollment or credential state; use its existing join/resume command.")
+            }
+            return true
+        }
+        let inventory = try PersonalRecoveryInventory.inspect([.init(root: root, ownerUID: ownerUID)])
+        guard inventory.isStructurallyComplete, inventory.records.isEmpty else {
+            throw TractandaError("invalidEnrollmentTarget", "The interrupted target contains history; it was not adopted or changed.")
         }
     }
 }

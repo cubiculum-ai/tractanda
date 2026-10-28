@@ -57,8 +57,11 @@ public final class SetupEngine {
 
     public func plan(_ options: SetupOptions) throws -> SetupPlan {
         try options.validate()
-        if roots.platform == .macos, options.storeSelection != .unconfigured {
-            throw SetupError("Linux store selection cannot be planned for macOS.")
+        if roots.platform == .macos {
+            switch options.storeSelection {
+            case .unconfigured, .freshPersonalTarget: break
+            default: throw SetupError("This store selection is unavailable on macOS.")
+            }
         }
         try ServerConnection(
             socketPath: roots.runtime.appendingPathComponent(options.name).appendingPathComponent(
@@ -114,8 +117,9 @@ public final class SetupEngine {
             }
             try install(options, upgrade: upgrade, packageOperationID: nil, explicitLinux: true)
         } else {
-            guard options.storeSelection == .unconfigured else {
-                throw SetupError("Explicit Linux store selection is unavailable on macOS.")
+            switch options.storeSelection {
+            case .unconfigured, .freshPersonalTarget: break
+            default: throw SetupError("This store selection is unavailable on macOS.")
             }
             try install(options, upgrade: upgrade, packageOperationID: nil)
         }
@@ -171,6 +175,35 @@ public final class SetupEngine {
             guard previous == plannedReceipt else {
                 throw SetupError("Installation state changed; retry the command.")
             }
+            if options.newInstanceOnly, let previous {
+                guard case .freshPersonalTarget(let storeID) = options.storeSelection,
+                    let requestedOwner = options.owner, previous.state == .preparing,
+                    previous.owner == requestedOwner, previous.freshTargetStoreID == storeID,
+                    previous.preparedStoreID == nil, !previous.sample, previous.port == options.port,
+                    previous.uuidNode == options.uuidNode, previous.manifestSHA256 == digest,
+                    previous.release == releaseURL(options, manifest: manifest, digest: digest).path,
+                    previous.store == roots.data.appendingPathComponent(options.name).path,
+                    previous.indexDirectory == roots.indexes.appendingPathComponent(options.name).path,
+                    previous.socket == roots.runtime.appendingPathComponent(options.name).appendingPathComponent("server.sock").path
+                else {
+                    throw SetupError("Only the exact owned, preparing fresh target can resume; no existing instance was adopted.")
+                }
+                let configuration = try PersonalPeerRuntimeConfiguration(settings: PeerRuntimeConfiguration(
+                    peers: [], synchronization: .init(enabled: true, intervalSeconds: 15)))
+                let expected = try ManagedPeerConfiguration(path: peerConfigurationURL(options.name).path,
+                    bytes: configuration.encoded())
+                guard previous.peerRuntimeConfiguration == expected else {
+                    throw SetupError("The retained outbound peer policy differs from the original preparation.")
+                }
+                // Even an owned preparing receipt must not rerun Setup after a shared profile
+                // was published; the operator can use the ordinary join/resume path.
+                try ensureNoGlobalProfile(options.name)
+            }
+            if let previous, case .freshPersonalTarget(let storeID) = options.storeSelection {
+                guard previous.freshTargetStoreID == storeID, previous.preparedStoreID == nil else {
+                    throw SetupError("Fresh target selection differs from the owned installation.")
+                }
+            }
             if roots.platform == .linux {
                 guard try sha256(packagePayload.appendingPathComponent("bundle-manifest.json")) == digest,
                     try verifyBundle(at: packagePayload) == manifest
@@ -179,9 +212,13 @@ public final class SetupEngine {
                     switch options.storeSelection {
                     case .unconfigured: break
                     case .standalone:
-                        guard previous.preparedStoreID == nil else {
+                        guard previous.preparedStoreID == nil, previous.freshTargetStoreID == nil else {
                             throw SetupError(
                                 "A prepared replica cannot be reclassified as a standalone source.")
+                        }
+                    case .freshPersonalTarget(let storeID):
+                        guard previous.freshTargetStoreID == storeID else {
+                            throw SetupError("Fresh target store selection differs from the retained pin.")
                         }
                     case .prepared(let storeID, let replicaID):
                         guard previous.preparedStoreID == storeID, previous.preparedReplicaID == replicaID
@@ -249,13 +286,16 @@ public final class SetupEngine {
                 try verifyRegistration(receipt)
                 if trustedOwnership {
                     for path in [receipt.store, receipt.indexDirectory] {
-                        try requireServiceDirectory(URL(fileURLWithPath: path), uid: account.uid)
+                        let url = URL(fileURLWithPath: path)
+                        if exists(url) || receipt.state != .preparing || receipt.initialized {
+                            try requireServiceDirectory(url, uid: account.uid)
+                        }
                     }
                 }
             }
             for path in [
                 roots.software, roots.launchDefinitions, dataParent, indexParent, roots.runtime,
-                roots.configuration.appendingPathComponent("logs"),
+                roots.logs,
             ] { try ensureRootDirectory(path) }
             if previous == nil { try writeReceipt(receipt) }
             try installRelease(manifest, from: options.bundle, to: release, digest: digest)
@@ -263,12 +303,18 @@ public final class SetupEngine {
                 tracked.releases[release.path] = digest
                 try writeReceipt(tracked)
             }
+            if manifest.modelProvisioningManifestPath != nil {
+                try ensureServiceDirectory(roots.models, uid: account.uid, mode: 0o700)
+            }
             for path in [receipt.store, receipt.indexDirectory] {
                 try ensureServiceDirectory(URL(fileURLWithPath: path), uid: account.uid, mode: 0o700)
             }
             try ensureServiceDirectory(
                 URL(fileURLWithPath: receipt.socket).deletingLastPathComponent(), uid: account.uid,
                 mode: 0o711)
+            if options.newInstanceOnly, previous?.initialized == true {
+                try verifySelectedReplicaIdentity(receipt, requireUnjoined: true)
+            }
             try ensureServiceLog(receipt.instance, uid: account.uid)
             if manifest.embedding != nil {
                 try ensureServiceLog(receipt.instance + "-embeddings", uid: account.uid)
@@ -296,7 +342,25 @@ public final class SetupEngine {
                     executable, "--bootstrap-store", receipt.store, receipt.indexDirectory, receipt.owner,
                     receipt.instance,
                 ]
-                try successful("/usr/bin/sudo", command, startup: true)
+                if let storeID = receipt.freshTargetStoreID {
+                    command.append(storeID)
+                    let result = try runner.runStartup("/usr/bin/sudo", command, environment: [:])
+                    guard result.status == 0 else {
+                        throw SetupError("Fresh target bootstrap failed: \(result.output.prefix(4096))")
+                    }
+                    let replicaID = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+                    try SetupOptions(
+                        name: receipt.instance, bundle: options.bundle,
+                        storeSelection: .prepared(storeID: storeID, replicaID: replicaID)
+                    ).validate()
+                    guard receipt.freshTargetReplicaID == nil || receipt.freshTargetReplicaID == replicaID else {
+                        throw SetupError("Fresh target replica identity changed during bootstrap.")
+                    }
+                    receipt.freshTargetReplicaID = replicaID
+                    try verifySelectedReplicaIdentity(receipt, requireUnjoined: options.newInstanceOnly)
+                } else {
+                    try successful("/usr/bin/sudo", command, startup: true)
+                }
                 receipt.initialized = true
                 try writeReceipt(receipt)
             }
@@ -448,7 +512,7 @@ public final class SetupEngine {
     /// Private per-instance state survives runtime switches and uninstall.
     func prepareDocumentState(_ receipt: inout InstallationReceipt, uid: UInt32) throws {
         if receipt.documentExtraction != nil {
-            let documents = roots.configuration.appendingPathComponent("document-state")
+            let documents = roots.work
                 .appendingPathComponent(receipt.instance)
             try ensureRootDirectory(documents)
             let scratch = documents.appendingPathComponent("scratch")
@@ -470,7 +534,21 @@ public final class SetupEngine {
             try writeReceipt(receipt)
             throw SetupError(receipt.recoveryReason!)
         }
-        if let previous, previous.state == .active { try requireCanonicalReader(previous, quiescent: true) }
+        if let previous, previous.state == .active {
+            try requireCanonicalReader(previous, quiescent: true)
+            if previous.runtimeDefinitionSHA256 == nil, receipt.runtimeDefinitionSHA256 != nil {
+                let serverRemoved = removeOwnedRegistration(definitionURL(receipt.instance), expectedSHA256: receipt.definitionSHA256)
+                let embeddingRemoved = removeOwnedRegistration(embeddingDefinitionURL(receipt.instance), expectedSHA256: receipt.embeddingDefinitionSHA256)
+                let runtimeRemoved = removeOwnedRegistration(runtimeDefinitionURL(receipt.instance), expectedSHA256: receipt.runtimeDefinitionSHA256)
+                if serverRemoved { receipt.definitionSHA256 = nil }
+                if embeddingRemoved { receipt.embeddingDefinitionSHA256 = nil }
+                if runtimeRemoved { receipt.runtimeDefinitionSHA256 = nil }
+                receipt.state = .preparing
+                receipt.recoveryReason = "The previous release has no qualified transient-runtime preparer. Services remain stopped; retry the new-layout candidate explicitly."
+                try writeReceipt(receipt)
+                throw SetupError(receipt.recoveryReason!)
+            }
+        }
         let definition = definitionURL(receipt.instance)
         let embeddingDefinition = embeddingDefinitionURL(receipt.instance)
         if let oldDefinition {
@@ -486,9 +564,11 @@ public final class SetupEngine {
         if let previous, previous.state == .active {
             var rollback = previous
             rollback.releases[release.path] = digest
+            rollback.runtimeDefinitionSHA256 = receipt.runtimeDefinitionSHA256
             try writeReceipt(rollback)
+            try replaceRuntimeRegistration(&rollback)
             do {
-                try loadEmbedding(previous)
+                try loadEmbedding(rollback)
                 try load(previous.instance)
             } catch {
                 try? unload(previous.instance)
@@ -639,6 +719,11 @@ public final class SetupEngine {
             try removeGlobalProfile(receipt)
             try removeClientLink(receipt)
             try removeTUICommandIfUnused()
+            if receipt.runtimeDefinitionSHA256 != nil {
+                _ = try runner.run("/bin/launchctl", ["bootout", "system/ai.tractanda.runtime." + receipt.instance], environment: [:])
+                try FileManager.default.removeItem(at: runtimeDefinitionURL(receipt.instance))
+                receipt.runtimeDefinitionSHA256 = nil
+            }
             receipt.state = .removed
             receipt.definitionSHA256 = nil
             receipt.embeddingDefinitionSHA256 = nil
@@ -677,7 +762,7 @@ public final class SetupEngine {
     func validateRoots(data: URL? = nil, indexes: URL? = nil) throws {
         let data = data ?? roots.data
         let indexes = indexes ?? roots.indexes
-        let paths = [data, indexes, roots.software, roots.configuration, roots.runtime]
+        let paths = [data, indexes, roots.software, roots.configuration, roots.runtime, roots.installation, roots.work, roots.logs]
         guard paths.allSatisfy({ $0.path.hasPrefix("/") && $0.path != "/" && !$0.path.contains("\0") }) else {
             throw SetupError("Installer roots must be absolute non-root directories.")
         }
@@ -687,12 +772,12 @@ public final class SetupEngine {
             return a == b || a.hasPrefix(b + "/") || b.hasPrefix(a + "/")
         }
         let reserved = [
-            roots.software.appendingPathComponent("releases"), clientLink,
-            roots.configuration.appendingPathComponent("receipts"),
-            roots.configuration.appendingPathComponent("logs"),
-            roots.configuration.appendingPathComponent("document-state"),
+            roots.software.appendingPathComponent("releases"), clientLink, roots.work, roots.logs,
+            roots.installation.appendingPathComponent("receipts"),
+            roots.logs,
+            roots.work,
             roots.configuration.appendingPathComponent("connections.json"),
-            roots.configuration.appendingPathComponent("installer.lock"), roots.runtime,
+            roots.runtime.appendingPathComponent("installer.lock"), roots.runtime,
         ]
         guard !overlaps(data, indexes),
             !reserved.contains(where: {
@@ -743,7 +828,7 @@ public final class SetupEngine {
     }
     func label(_ name: String) -> String { serviceBackend.label(name) }
     func receiptURL(_ name: String) -> URL {
-        roots.configuration.appendingPathComponent("receipts/" + name + ".json")
+        roots.installation.appendingPathComponent("receipts/" + name + ".json")
     }
     func successful(_ executable: String, _ arguments: [String], startup: Bool = false) throws {
         let result =
@@ -768,10 +853,20 @@ public final class SetupEngine {
         if try !serviceBackend.isRunning(name) {
             try requireCanonicalReader(receipt, quiescent: true)
         }
+        if roots.platform == .macos { try prepareManagedRuntime(name) }
         try serviceBackend.load(name, enableAtBoot: !(try packageStartupIsConfiguring(name)))
     }
     func unload(_ name: String) throws {
         try serviceBackend.unload(name)
+        if roots.platform == .macos, let receipt = try readReceipt(name),
+            let expected = receipt.runtimeDefinitionSHA256 {
+            let definition = runtimeDefinitionURL(name)
+            try requireOwned(definition, uid: 0, directory: false)
+            guard try sha256(definition) == expected else {
+                throw SetupError("Runtime preparer differs from the owned receipt.")
+            }
+            _ = try runner.run("/bin/launchctl", ["bootout", "system/ai.tractanda.runtime." + name], environment: [:])
+        }
     }
     func replaceRegistration(_ receipt: inout InstallationReceipt) throws {
         let bytes = try serviceDefinition(receipt)
@@ -782,6 +877,7 @@ public final class SetupEngine {
         } else {
             try writeProtected(bytes, to: definitionURL(receipt.instance), mode: 0o644)
         }
+        if roots.platform == .macos { try replaceRuntimeRegistration(&receipt) }
         receipt.definitionSHA256 = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
         try writeReceipt(receipt)
         try load(receipt.instance)
@@ -796,13 +892,19 @@ public final class SetupEngine {
         if let peer = receipt.peerRuntimeConfiguration {
             arguments += ["--peer-runtime-config", peer.path]
         }
+        let catalog = try modelCatalog(URL(fileURLWithPath: receipt.release))
+        if catalog != nil {
+            arguments += ["--model-provisioning-manifest", URL(fileURLWithPath: receipt.release).appendingPathComponent("models/manifest.json").path,
+                "--model-storage-directory", roots.models.path]
+            if let adoption = try modelAdoptionDirectory(receipt) { arguments += ["--model-adoption-directory", adoption] }
+        }
         if let document = receipt.documentExtraction {
             guard document == .pinned else { throw SetupError("Unsupported document receipt.") }
             let scratch = try documentStatePaths(receipt)
             let release = URL(fileURLWithPath: receipt.release)
             arguments += [
                 "--document-converter", release.appendingPathComponent(document.converterPath).path,
-                "--document-model-directory", release.appendingPathComponent(document.modelDirectory).path,
+                "--document-model-directory", try modelArtifact("granite-docling-258m-mlx", release: release)?.directory(in: roots.models).path ?? release.appendingPathComponent(document.modelDirectory).path,
                 "--document-scratch-directory", scratch,
             ]
         }
@@ -823,17 +925,17 @@ public final class SetupEngine {
             "Label": "ai.tractanda.server." + receipt.instance, "ProgramArguments": arguments,
             "UserName": roots.platform.serviceUser, "RunAtLoad": true,
             "KeepAlive": ["SuccessfulExit": false], "ThrottleInterval": 5, "Umask": 0o077,
-            "StandardOutPath": roots.configuration.appendingPathComponent("logs/" + receipt.instance + ".log")
+            "StandardOutPath": roots.logs.appendingPathComponent(receipt.instance + ".log")
                 .path,
-            "StandardErrorPath": roots.configuration.appendingPathComponent(
-                "logs/" + receipt.instance + ".log"
+            "StandardErrorPath": roots.logs.appendingPathComponent(
+                receipt.instance + ".log"
             ).path,
         ]
         if let node = receipt.uuidNode { dictionary["EnvironmentVariables"] = ["TRACTANDA_UUID_NODE": node] }
         return try PropertyListSerialization.data(fromPropertyList: dictionary, format: .xml, options: 0)
     }
     func documentStatePaths(_ receipt: InstallationReceipt) throws -> String {
-        let root = roots.configuration.appendingPathComponent("document-state").appendingPathComponent(
+        let root = roots.work.appendingPathComponent(
             receipt.instance)
         let scratch = root.appendingPathComponent("scratch").path
         guard receipt.documentScratchDirectory == scratch
@@ -856,7 +958,7 @@ public final class SetupEngine {
         }
         let identityBytes = try JSONSerialization.data(withJSONObject: identityObject)
         let identity = try JSONDecoder().decode(DocumentConverterIdentity.self, from: identityBytes)
-        guard extraction?["state"] as? String == "configured", identity == document.identity,
+        guard ["configured", "awaitingModel"].contains(extraction?["state"] as? String ?? ""), identity == document.identity,
             extraction?["executableSHA256"] as? String
                 == (try sha256(release.appendingPathComponent(document.converterPath))),
             extraction?["requiresPreparedInput"] as? Bool == false,

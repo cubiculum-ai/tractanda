@@ -98,7 +98,7 @@ def main():
                 had_preview = any(line.lstrip().startswith("Preview") for line in ui.screen.splitlines()[:-2])
                 ui.send(F11); ui.settle(); ui.wait('0 items')
                 assert any(line.lstrip().startswith("Preview") for line in ui.screen.splitlines()[:-2]) != had_preview
-                revised=client.commit(wire.intent('revise','menu-external-edit',item=identity,base=wire.revision_id(item),changes={'subject':wire.text('Refreshed through F12')}))['revision']
+                revised=client.commit_with_revision(wire.intent('revise','menu-external-edit',item=identity,base=wire.revision_id(item),changes={'subject':wire.text('Refreshed through F12')}))['revision']
                 ui.send('a');ui.wait('All readable items');ui.send(F12);ui.wait('Refreshed through F12')
                 assert client.get(identity) == revised
                 checks.append('F11 toggles preview and F12 refreshes using existing read-only commands, even with a ten-key display')

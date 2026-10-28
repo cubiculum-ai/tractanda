@@ -57,7 +57,9 @@ public struct ServerConnection: Codable, Equatable, Sendable {
     }
 
     /// Start only after connect failed before any request bytes were sent. Never replay an uncertain write.
-    public func send(_ request: Data, responseWait: LocalTransport.ResponseWait = .bounded) throws -> Data {
+    public func send(_ request: Data, responseWait: LocalTransport.ResponseWait = .untilCompletion) throws
+        -> Data
+    {
         do {
             return try LocalTransport.call(
                 socket: socketPath, request: request, serverUser: serverUser, responseWait: responseWait)
@@ -131,7 +133,7 @@ public struct ConnectionPreferences {
     public static func globalConfigurationURL() -> URL {
         #if os(macOS)
             return URL(
-                fileURLWithPath: "/Users/Shared/Library/Application Support/Tractanda/connections.json")
+                fileURLWithPath: "/Library/Tractanda/Configuration/connections.json")
         #else
             return URL(fileURLWithPath: "/etc/tractanda/connections.json")
         #endif

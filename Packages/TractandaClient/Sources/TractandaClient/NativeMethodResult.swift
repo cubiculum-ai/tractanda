@@ -14,6 +14,16 @@ public enum NativeMethodResult {
         guard case .object(let envelope) = value else {
             throw TractandaError("protocolError", "Invalid native response.")
         }
+        if case .string(let type)? = envelope["type"],
+            type.hasPrefix("urn:ietf:params:jmap:error:"),
+            case .integer(let status)? = envelope["status"], (400...599).contains(status)
+        {
+            let code = String(type.dropFirst("urn:ietf:params:jmap:error:".count))
+            guard ["notJSON", "notRequest", "unknownCapability", "limit"].contains(code) else {
+                throw TractandaError("protocolError", "Unknown JMAP request problem.")
+            }
+            throw TractandaError(code, "JMAP request rejected: " + code)
+        }
         if case .string(let code)? = envelope["code"] {
             let message: String
             if case .string(let text)? = envelope["message"] { message = text } else { message = "" }

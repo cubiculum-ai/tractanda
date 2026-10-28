@@ -87,10 +87,10 @@ final class DocumentPlacementTests: XCTestCase {
         let oldReader = CanonicalFormatSupport(
             readerLevel: 9, writerLevel: 9, read: [1, 2], write: [2],
             capabilities: CanonicalFormatSupport.current.capabilities.filter {
-                $0 != "tractanda.document-placement.v1"
+                $0 != "tractanda.document-placement.v1" && $0 != AtomicAuthorityCompatibility.capability
             },
             writeCapabilities: CanonicalFormatSupport.current.writeCapabilities.filter {
-                $0 != "tractanda.document-placement.v1"
+                $0 != "tractanda.document-placement.v1" && $0 != AtomicAuthorityCompatibility.capability
             })
         let requirement = CanonicalReaderRequirement(
             storeID: storeID, minimumReaderLevel: oldReader.readerLevel,

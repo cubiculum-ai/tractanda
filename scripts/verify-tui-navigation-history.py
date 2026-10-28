@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise view-selection history through the actual TUI and native server in an owned PTY."""
+from jmap_client import query_arguments
 import argparse
 import importlib.util
 import json
@@ -59,7 +60,7 @@ def main():
         root = Path(directory)
         with wire.server(str(args.native_binary.resolve()), root / 'store', root / 's') as client:
             def create(name, fields, kind='Item'):
-                return client.commit(wire.intent('create', 'seed-' + name, class_id=kind,
+                return client.commit_with_revision(wire.intent('create', 'seed-' + name, class_id=kind,
                     changes={'subject': wire.text(name), **fields}))['revision']
             def category(name, rule):
                 return create(name, {'selection': tagged('object', {
@@ -73,7 +74,7 @@ def main():
                 'sort': tagged('list', [tagged('object', {'property': wire.text('rank'), 'isAscending': tagged('boolean', True)})])
             })}, 'Item')
             before = wire.manifest(root / 'store')
-            state = client.call('TractandaItem/query', {'limit': 256})['queryState']
+            state = client.call('TractandaItem/query', query_arguments({'limit': 256}))['queryState']
             proxy = tui.LostResponseProxy(root / 'proxy', root / 's', drop_method='TractandaStore/info')
             proxy.drop_commit = False
             try:
@@ -145,7 +146,7 @@ def main():
             finally:
                 proxy.close()
             assert wire.manifest(root / 'store') == before
-            assert client.call('TractandaItem/query', {'limit': 256})['queryState'] == state
+            assert client.call('TractandaItem/query', query_arguments({'limit': 256}))['queryState'] == state
             checks.append('All navigation leaves canonical revisions/query state unchanged and restores terminal modes on exit')
     report = {'status': 'passed', 'platform': platform.platform(), 'checks': checks, 'snapshots': snapshots}
     args.output.parent.mkdir(parents=True, exist_ok=True)

@@ -30,7 +30,11 @@ TRACTANDA_PACKAGE_DESCRIPTOR_EOF
  *) echo "tractanda postinst: unsupported dpkg action" >&2; exit 2 ;;
 esac
 if [ -x "$helper" ]; then
- set -- verify-helper "$helper"
+ if [ "$lifecycle" = configure ]; then
+  set -- configure-helper "$helper"
+ else
+  set -- verify-helper "$helper"
+ fi
 else
  [ "$fallback_action" = postrm ] || { echo "tractanda postinst: new Setup helper is unavailable" >&2; exit 1; }
  set -- postrm

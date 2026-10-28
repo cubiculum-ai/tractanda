@@ -57,6 +57,14 @@ public struct PeerRuntimeConfiguration: Codable, Equatable, Sendable {
             try values.encode(port, forKey: .port)
         }
 
+        /// libc accepts legacy hexadecimal/octal/shorthand IPv4 spellings as numeric.
+        /// This is a parser only: validation must not depend on DNS availability.
+        package static func isNumericAddress(_ host: String) -> Bool {
+            var ipv4 = in_addr()
+            var ipv6 = in6_addr()
+            return host.withCString { inet_aton($0, &ipv4) == 1 || inet_pton(AF_INET6, $0, &ipv6) == 1 }
+        }
+
         fileprivate static func validateHost(_ host: String, allowWildcard: Bool) throws {
             guard !host.isEmpty, host.utf8.count <= 253,
                 host.utf8.allSatisfy({ $0 > 0x20 && $0 < 0x7f }),
@@ -112,8 +120,14 @@ public struct PeerRuntimeConfiguration: Codable, Equatable, Sendable {
     public struct Peer: Codable, Equatable, Sendable {
         public let alias: String
         public let endpoint: Endpoint
+        /// Ordered node-local alternatives; these grant no membership or pairing authority.
+        public let fallbackEndpoints: [Endpoint]
+        public var endpoints: [Endpoint] { [endpoint] + fallbackEndpoints }
+        public static let maximumEndpoints = 4
 
-        public init(alias: String, host: String, port: Int) throws {
+        public init(
+            alias: String, host: String, port: Int, fallbackEndpoints: [Endpoint] = []
+        ) throws {
             do {
                 _ = try AuthorityRecord.text(.text(alias))
             } catch {
@@ -125,24 +139,39 @@ public struct PeerRuntimeConfiguration: Codable, Equatable, Sendable {
             }
             self.alias = alias
             self.endpoint = try Endpoint(host: host, port: port)
-            try Endpoint.validateHost(self.endpoint.host, allowWildcard: false)
+            self.fallbackEndpoints = fallbackEndpoints
+            guard fallbackEndpoints.count < Self.maximumEndpoints else {
+                throw PeerRuntimeConfiguration.invalid("A peer permits at most four ordered destinations.")
+            }
+            for candidate in endpoints {
+                try Endpoint.validateHost(candidate.host, allowWildcard: false)
+            }
+            guard Set(endpoints.map { $0.host + "|" + String($0.port) }).count == endpoints.count else {
+                throw PeerRuntimeConfiguration.invalid("Peer destinations must be unique.")
+            }
         }
 
         public init(from decoder: Decoder) throws {
-            try rejectUnknownFields(decoder, allowed: ["alias", "endpoint"])
+            try rejectUnknownFields(decoder, allowed: ["alias", "endpoint", "fallbackEndpoints"])
             let values = try decoder.container(keyedBy: CodingKeys.self)
             let alias = try values.decode(String.self, forKey: .alias)
             let endpoint = try values.decode(Endpoint.self, forKey: .endpoint)
-            try self.init(alias: alias, host: endpoint.host, port: endpoint.port)
+            let fallback =
+                values.contains(.fallbackEndpoints)
+                ? try values.decode([Endpoint].self, forKey: .fallbackEndpoints) : []
+            try self.init(alias: alias, host: endpoint.host, port: endpoint.port, fallbackEndpoints: fallback)
         }
 
         public func encode(to encoder: Encoder) throws {
             var values = encoder.container(keyedBy: CodingKeys.self)
             try values.encode(alias, forKey: .alias)
             try values.encode(endpoint, forKey: .endpoint)
+            if !fallbackEndpoints.isEmpty {
+                try values.encode(fallbackEndpoints, forKey: .fallbackEndpoints)
+            }
         }
 
-        private enum CodingKeys: String, CodingKey, CaseIterable { case alias, endpoint }
+        private enum CodingKeys: String, CodingKey, CaseIterable { case alias, endpoint, fallbackEndpoints }
     }
 
     public struct Synchronization: Codable, Equatable, Sendable {

@@ -1,4 +1,5 @@
 import CTractandaPlatform
+import CTractandaSetupMetadata
 import Crypto
 import Foundation
 
@@ -29,6 +30,9 @@ extension SetupEngine {
         else { throw SetupError("Untrusted existing path: \(url.path)") }
     }
     func requireTrustedAncestry(of url: URL) throws {
+        if usesAnchoredMacRuntime, url.path == roots.runtime.path {
+            try withAnchoredMacRuntime { _ in }; return
+        }
         var current = URL(fileURLWithPath: "/", isDirectory: true)
         for component in url.standardizedFileURL.path.split(separator: "/") {
             current.appendPathComponent(String(component), isDirectory: true)
@@ -39,11 +43,8 @@ extension SetupEngine {
             let metadata = try FileManager.default.attributesOfItem(atPath: current.path)
             let owner = (metadata[.ownerAccountID] as? NSNumber)?.uint32Value
             let mode = (metadata[.posixPermissions] as? NSNumber)?.intValue ?? 0
-            let shared =
-                ["/Users/Shared", "/Users/Shared/Library", "/Users/Shared/Library/Application Support"]
-                .contains(current.path) && owner == 0 && mode & 0o1000 != 0
             guard metadata[.type] as? FileAttributeType == .typeDirectory,
-                shared || (owner == 0 && mode & 0o022 == 0)
+                owner == 0 && mode & 0o022 == 0
             else {
                 throw SetupError(
                     "Protect this parent directory before installation: \(current.path). Its permissions were not changed."
@@ -52,6 +53,9 @@ extension SetupEngine {
         }
     }
     func ensureRootDirectory(_ url: URL) throws {
+        if usesAnchoredMacRuntime, url.path == roots.runtime.path {
+            try withAnchoredMacRuntime { _ in }; return
+        }
         if trustedOwnership { try requireTrustedAncestry(of: url) }
         if exists(url) {
             try requireOwned(url, uid: 0, directory: true)
@@ -65,6 +69,10 @@ extension SetupEngine {
         try requireOwned(url, uid: uid, directory: true)
     }
     func ensureServiceDirectory(_ url: URL, uid: UInt32, mode: Int) throws {
+        if usesAnchoredMacRuntime, url.deletingLastPathComponent().path == roots.runtime.path {
+            guard mode == 0o711 else { throw SetupError("Unexpected managed runtime mode.") }
+            try prepareAnchoredMacRuntime(instance: url.lastPathComponent, uid: uid); return
+        }
         if exists(url) {
             try requireServiceDirectory(url, uid: uid)
             if trustedOwnership {
@@ -88,7 +96,7 @@ extension SetupEngine {
         }
     }
     func ensureServiceLog(_ name: String, uid: UInt32) throws {
-        let url = roots.configuration.appendingPathComponent("logs/" + name + ".log")
+        let url = roots.logs.appendingPathComponent(name + ".log")
         if exists(url) {
             try requireOwned(url, uid: uid, directory: false)
             return
@@ -106,7 +114,18 @@ extension SetupEngine {
         try FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: url.path)
     }
     func withInstallerLock(_ body: () throws -> Void) throws {
-        let lockURL = roots.configuration.appendingPathComponent("installer.lock")
+        try ensureRootDirectory(roots.installation)
+        if usesAnchoredMacRuntime {
+            try withAnchoredMacRuntime { context in
+                let descriptor = tractanda_setup_runtime_lock(context)
+                guard descriptor >= 0 else { throw SetupError("Another installer may hold the protected runtime lock.") }
+                defer { tractanda_unlock(descriptor) }
+                try body()
+            }
+            return
+        }
+        try ensureRootDirectory(roots.runtime)
+        let lockURL = roots.runtime.appendingPathComponent("installer.lock")
         if exists(lockURL) { try requireOwned(lockURL, uid: 0, directory: false) }
         let handle = tractanda_lock(lockURL.path)
         guard handle >= 0 else {
@@ -141,6 +160,20 @@ extension SetupEngine {
                             SetupPackageCompatibility.isDigest)
                 })
             else { throw SetupError("Invalid pending package definition commitments.") }
+        }
+        if let storeID = receipt.freshTargetStoreID {
+            guard receipt.preparedStoreID == nil, !receipt.sample,
+                !receipt.initialized || receipt.freshTargetReplicaID != nil else {
+                throw SetupError("Invalid fresh target receipt.")
+            }
+            try SetupOptions(name: name, bundle: packagePayload,
+                storeSelection: .freshPersonalTarget(storeID: storeID)).validate()
+            if let replicaID = receipt.freshTargetReplicaID {
+                try SetupOptions(name: name, bundle: packagePayload,
+                    storeSelection: .prepared(storeID: storeID, replicaID: replicaID)).validate()
+            }
+        } else if receipt.freshTargetReplicaID != nil {
+            throw SetupError("Fresh target replica has no store pin.")
         }
         guard (receipt.preparedStoreID == nil) == (receipt.preparedReplicaID == nil) else {
             throw SetupError("Prepared instance identity pins are incomplete.")
@@ -180,6 +213,13 @@ extension SetupEngine {
         try syncPeerReceipt(receiptURL(receipt.instance))
     }
     func verifyRegistration(_ receipt: InstallationReceipt) throws {
+        if let expected = receipt.runtimeDefinitionSHA256 {
+            let definition = runtimeDefinitionURL(receipt.instance)
+            try requireOwned(definition, uid: 0, directory: false)
+            guard try sha256(definition) == expected else {
+                throw SetupError("Runtime preparer differs from the owned receipt.")
+            }
+        }
         let definition = definitionURL(receipt.instance)
         if exists(definition) {
             try requireOwned(definition, uid: 0, directory: false)

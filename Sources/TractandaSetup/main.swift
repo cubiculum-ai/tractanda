@@ -7,8 +7,10 @@ let usage = """
 
     Options: --bundle PATH --name NAME --owner OS_USER --empty|--sample --port PORT
              --data-root PATH --index-root PATH --uuid-node MAC
-             --peer-runtime-configuration INPUT_JSON | --disable-peer-runtime (plan|install|upgrade only)
-             Linux install: --first-source | --adopt-prepared --store-id UUID --replica-id UUID
+             --peer-runtime-configuration INPUT_JSON | --disable-peer-runtime | --outbound-peer-sync
+             --new-instance-only (fresh-target plan/install only)
+             Install: --fresh-personal-target --store-id UUID
+             Linux install also: --first-source | --adopt-prepared --store-id UUID --replica-id UUID
     """
 
 func printJSON<T: Encodable>(_ value: T) throws {
@@ -26,6 +28,8 @@ func parse() throws -> (String, SetupOptions, URL?, URL?) {
     var name = "default"
     var owner: String?
     var mode: SetupOptions.Mode = .empty
+    var selectedMode = false
+    var newInstanceOnly = false
     var port = 48_728
     var bundle =
         SetupPlatform.host == .linux
@@ -62,11 +66,16 @@ func parse() throws -> (String, SetupOptions, URL?, URL?) {
                 selectedReplica = value
             default: node = value
             }
-        case "--first-source", "--adopt-prepared":
-            guard selection == nil else { throw SetupError("Choose exactly one Linux store selection.") }
+        case "--first-source", "--adopt-prepared", "--fresh-personal-target":
+            guard selection == nil else { throw SetupError("Choose exactly one store selection.") }
             selection = flag
-        case "--sample": mode = .sample
-        case "--empty": mode = .empty
+        case "--new-instance-only":
+            guard !newInstanceOnly else { throw SetupError("Duplicate new-instance-only selection.") }
+            newInstanceOnly = true
+        case "--sample", "--empty":
+            guard !selectedMode else { throw SetupError("Choose exactly one initial content mode.") }
+            selectedMode = true
+            mode = flag == "--sample" ? .sample : .empty
         default: throw SetupError("Unknown option: \(flag)")
         }
     }
@@ -76,11 +85,19 @@ func parse() throws -> (String, SetupOptions, URL?, URL?) {
             throw SetupError("Prepared adoption needs independent --store-id and --replica-id UUIDv1 pins.")
         }
         storeSelection = .prepared(storeID: selectedStore, replicaID: selectedReplica)
+    } else if selection == "--fresh-personal-target" {
+        guard let selectedStore, selectedReplica == nil else {
+            throw SetupError("Fresh target requires only --store-id.")
+        }
+        storeSelection = .freshPersonalTarget(storeID: selectedStore)
     } else {
         guard selectedStore == nil, selectedReplica == nil else {
-            throw SetupError("Identity pins require --adopt-prepared.")
+            throw SetupError("Identity pins require explicit store selection.")
         }
         storeSelection = selection == "--first-source" ? .standalone : .unconfigured
+    }
+    if newInstanceOnly, !["plan", "install"].contains(command) {
+        throw SetupError("New-instance-only selection requires plan or install.")
     }
     if selection != nil, !["plan", "install", "upgrade"].contains(command) {
         throw SetupError("Store selection applies only to explicit plan/install/upgrade.")
@@ -89,12 +106,16 @@ func parse() throws -> (String, SetupOptions, URL?, URL?) {
         command,
         SetupOptions(
             name: name, owner: owner, mode: mode, port: port, bundle: bundle, uuidNode: node,
-            peerRuntime: peerRuntimeArguments.action, storeSelection: storeSelection),
+            peerRuntime: peerRuntimeArguments.action, storeSelection: storeSelection,
+            newInstanceOnly: newInstanceOnly),
         dataRoot, indexRoot
     )
 }
 
 do {
+    // Root-owned directory modes are explicit; private files are separately created 0600.
+    // In particular the fd-anchored runtime root must be born 0755 without a path chmod.
+    if getuid() == 0 { _ = umask(0o022) }
     let internalArguments = Array(CommandLine.arguments.dropFirst())
     if internalArguments.contains("--help") {
         print(usage)
@@ -117,6 +138,16 @@ do {
         print("Selected personal replica custody, identity pins and initialized opening verified.")
         exit(0)
     }
+    if internalArguments == ["--migrate-system-layout"] {
+        print(try SetupLayoutMigration(engine: SetupEngine()).run())
+        exit(0)
+    }
+    if internalArguments.first == "--prepare-managed-runtime" {
+        guard internalArguments.count == 2 else { throw SetupError("Invalid runtime preparation request.") }
+        try SetupEngine().prepareManagedRuntime(internalArguments[1])
+        print("Managed runtime directory prepared.")
+        exit(0)
+    }
     if internalArguments == ["--canonical-format-support"] {
         try printJSON(CanonicalFormatSupport.current)
         exit(0)
@@ -125,7 +156,7 @@ do {
         let root = URL(fileURLWithPath: internalArguments[1]).resolvingSymlinksInPath()
         try printJSON(
             CanonicalReaderRequirement.withWriterLock(root: root, ownerUID: getuid()) {
-                try CanonicalReaderRequirement.admitQuiescent(root: root, ownerUID: getuid())
+                try ItemStore.personalWorkgroupUpgradeRequirement(root: root, ownerUID: getuid())
             })
         exit(0)
     }
@@ -160,13 +191,15 @@ do {
         exit(0)
     }
     if internalArguments.first == "--bootstrap-store" {
-        guard internalArguments.count == 5, getuid() != 0, getuid() == tractanda_uid(),
+        guard (internalArguments.count == 5 || internalArguments.count == 6), getuid() != 0, getuid() == tractanda_uid(),
             getuid() == (try SystemAccountDirectory().user(named: SetupPlatform.host.serviceUser)).uid
         else { throw SetupError("Store initialization must run as the service account.") }
-        try StoreBootstrap.initialize(
+        let identity = try StoreBootstrap.initialize(
             store: URL(fileURLWithPath: internalArguments[1]),
             indexDirectory: URL(fileURLWithPath: internalArguments[2]),
-            owner: internalArguments[3], instance: internalArguments[4])
+            owner: internalArguments[3], instance: internalArguments[4],
+            commonStoreID: internalArguments.count == 6 ? internalArguments[5] : nil)
+        if let identity { print(identity.replicaID) }
         exit(0)
     }
     let (command, options, dataRoot, indexRoot) = try parse()

@@ -12,6 +12,7 @@ actor NativeGateway {
     private let backend: (@Sendable (Data) async throws -> Data)?
     private let queue = DispatchQueue(label: "ai.tractanda.mcp.native")
     private var pendingCalls = 0
+    private var nativeContext: NativeAsyncClientContext?
 
     init(connection: ServerConnection) {
         self.connection = connection
@@ -64,64 +65,37 @@ actor NativeGateway {
         }
         pendingCalls += 1
         defer { pendingCalls -= 1 }
-        let result: Data
-        if let backend {
-            let arguments = try JSONSerialization.jsonObject(with: data) as! [String: Any]
-            let envelope = try JSONSerialization.data(
-                withJSONObject: [
-                    "using": [ItemService.capability], "methodCalls": [[method, arguments, "client"]],
-                ], options: [.sortedKeys])
-            result = try Self.unwrap(try await backend(envelope), method: method)
-        } else if let connection {
-            result = try await withCheckedThrowingContinuation { continuation in
-                queue.async {
-                    do {
-                        let arguments = try JSONSerialization.jsonObject(with: data) as! [String: Any]
-                        continuation.resume(
-                            returning: try ItemClient(connection: connection).call(
-                                method, arguments: arguments))
-                    } catch { continuation.resume(throwing: error) }
-                }
+        if nativeContext == nil {
+            if let backend {
+                nativeContext = NativeAsyncClientContext(transport: backend)
+            } else if let connection {
+                let queue = queue
+                nativeContext = NativeAsyncClientContext(transport: { request in
+                    try await withCheckedThrowingContinuation { continuation in
+                        queue.async {
+                            do { continuation.resume(returning: try connection.send(request)) } catch {
+                                continuation.resume(throwing: error)
+                            }
+                        }
+                    }
+                })
+            } else {
+                throw TractandaError("connectionClosed", "Native gateway is unavailable.")
             }
-        } else {
-            throw TractandaError("connectionClosed", "Native gateway is unavailable.")
         }
-        let compactWriteMethods = [
-            "TractandaItem/commit", "TractandaItem/commitCapture", "TractandaItem/resolveConflict",
-            "TractandaLearning/feedback",
-            "TractandaLearning/settings",
-        ]
-        let adapted =
-            compactWriteMethods.contains(method)
-            ? try compactWriteResult(result)
-            : result
-        guard adapted.count <= Self.maximumResultSize else {
+        let response = try await nativeContext!.send(method: method, arguments: data, argumentsAreWire: true)
+        let result = try Self.unwrap(response, method: method)
+        guard result.count <= Self.maximumResultSize else {
             throw TractandaError(
                 "responseTooLarge",
                 "Result exceeds 512 KiB. Request fewer items/a smaller page, or use the native client. A write may already have committed; retain its operationID."
             )
         }
-        return adapted
+        return result
     }
 
     private static func unwrap(_ response: Data, method: String) throws -> Data {
         return try NativeMethodResult.unwrap(response, method: method)
     }
 
-    /// MCP's ordinary write reply follows content projection and omits the server-owned
-    /// request identity and revision ancestry. This intentionally touches only these top-level
-    /// revision fields, never user keys at another path or the canonical record returned by the native
-    /// service. Explicit retrieval with projection=full remains byte-for-field native output.
-    private func compactWriteResult(_ data: Data) throws -> Data {
-        guard case .object(var result) = try JSONDecoder().decode(Value.self, from: data),
-            case .object(var revision)? = result["revision"],
-            case .object(var fields)? = revision["fields"]
-        else { return data }
-        let hadRequestIdentity = fields.removeValue(forKey: "requestIdentity") != nil
-        let hadRevisionAncestry = fields.removeValue(forKey: "revisionAncestry") != nil
-        guard hadRequestIdentity || hadRevisionAncestry else { return data }
-        revision["fields"] = .object(fields)
-        result["revision"] = .object(revision)
-        return try JSONEncoder().encode(Value.object(result))
-    }
 }

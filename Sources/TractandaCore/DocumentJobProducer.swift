@@ -52,7 +52,7 @@ struct DocumentJobNativeCall: Sendable {
     let arguments: Data
 }
 struct DocumentJobDispatch: Sendable {
-    let response: Data
+    let response: NativeMethodOutcome
     let admission: DocumentJobAdmission?
 }
 

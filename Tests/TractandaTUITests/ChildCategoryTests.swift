@@ -25,7 +25,7 @@ final class ChildCategoryTests: XCTestCase {
         }
         deinit { try? FileManager.default.removeItem(at: root) }
         func category(_ name: String, parents: [Revision] = [], order: Int64 = 0) throws -> Revision {
-            try client.commit(
+            try client.commitFixture(
                 CommitRequest(
                     classID: "Item",
                     changes: [
@@ -73,7 +73,7 @@ final class ChildCategoryTests: XCTestCase {
         let f = try Fixture()
         _ = try f.category("Root")
         for index in 0..<70 {
-            _ = try f.client.commit(
+            _ = try f.client.commitFixture(
                 CommitRequest(
                     classID: "Item", changes: ["subject": .text("Item \(index)")],
                     operationID: Identifier.make()))
@@ -173,7 +173,7 @@ final class ChildCategoryTests: XCTestCase {
         let workspace = Workspace(client: f.client)
         try workspace.refresh()
         XCTAssertEqual(try workspace.childCategories(at: nil, expectedPath: []).count, 2)
-        _ = try f.client.commit(
+        _ = try f.client.commitFixture(
             CommitRequest(
                 action: .revise, itemID: moved.itemID, expectedRevisionID: moved.revisionID,
                 changes: ["categoryParents": .list([.reference(ItemReference(root.itemID))])],
@@ -243,7 +243,7 @@ final class ChildCategoryTests: XCTestCase {
         workspace.collapsedSectionIDs = [a.itemID]
         workspace.columns = [try ViewColumn(property: "subject", title: "Name", width: 28)]
         workspace.sort = [try ItemSort(property: "subject", isAscending: false)]
-        let saved = try f.client.commit(workspace.viewRequest(name: "Saved branch")).revision
+        let saved = try f.client.commitFixture(workspace.viewRequest(name: "Saved branch")).revision
         try workspace.openView(saved)
         let before = f.store.state
         try workspace.browse(childID: b.itemID, at: 1, expectedPath: [root, parent, a, deep].map(\.itemID))
@@ -268,7 +268,7 @@ final class ChildCategoryTests: XCTestCase {
         XCTAssertEqual(workspace.categoryPath.map(\.itemID), [b.itemID, shared.itemID])
         try workspace.browse(path: [a])
         XCTAssertEqual(try workspace.childCategories(at: 0, expectedPath: [a.itemID]).count, 1)
-        _ = try f.client.commit(
+        _ = try f.client.commitFixture(
             CommitRequest(
                 action: .revise, itemID: shared.itemID, expectedRevisionID: shared.revisionID,
                 changes: ["categoryParents": .list([.reference(ItemReference(b.itemID))])],

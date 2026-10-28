@@ -135,13 +135,7 @@ final class Workspace {
                 restored.collapsedSectionIDs = location.collapsedSectionIDs
                 if let reference = location.viewToUpdate, let revisionID = reference.revisionID {
                     _ = try current(reference.itemID)
-                    struct Response: Decodable { let revision: Revision }
-                    let base = try JSON.decode(
-                        Response.self,
-                        client.call(
-                            "TractandaRevision/get",
-                            arguments: ["itemID": reference.itemID, "revisionID": revisionID])
-                    ).revision
+                    let base = try client.revision(itemID: reference.itemID, revisionID: revisionID)
                     guard base.itemID == reference.itemID, base.revisionID == revisionID else {
                         throw TractandaError("protocolError", "Unexpected saved-view revision.")
                     }
@@ -251,9 +245,8 @@ final class Workspace {
         if isSemanticSearch { return sections[index].items }
         let page = try JSON.decode(
             ItemPage.self,
-            client.call(
-                "TractandaItem/query",
-                arguments: queryArguments(
+            client.query(
+                criteria: queryArguments(
                     category: sections[index].category, position: 0, limit: MarkedItems.limit)))
         guard page.total <= MarkedItems.limit, page.ids.count == page.total else {
             throw TractandaError(
@@ -265,14 +258,7 @@ final class Workspace {
         guard Set(page.ids).count == page.ids.count else {
             throw TractandaError("protocolError", "Section query repeats item IDs.")
         }
-        struct Response: Decodable {
-            let list: [Revision]
-            let notFound: [String]
-            let unresolved: [ItemUnresolvedState]?
-            let remainingIDs: [String]?
-            let oversizedIDs: [String]?
-            let state: String
-        }
+        typealias Response = FullItemRead
         var byID: [String: Revision] = [:]
         for start in stride(from: 0, to: page.ids.count, by: Self.pageSize) {
             let ids = Array(page.ids[start..<min(start + Self.pageSize, page.ids.count)])
@@ -310,14 +296,7 @@ final class Workspace {
         positions: [Int], cursors: [String?] = [], previousCursors: [Bool] = [],
         requiring state: String? = nil
     ) throws {
-        struct Response: Decodable {
-            let list: [Revision]
-            let notFound: [String]
-            let unresolved: [ItemUnresolvedState]?
-            let state: String
-            let remainingIDs: [String]?
-            let oversizedIDs: [String]?
-        }
+        typealias Response = FullItemRead
         do {
             // Refresh names through authorization too; a hidden category must not remain a heading.
             let excludedNames = try excludedCategoryIDs.map {
@@ -336,7 +315,7 @@ final class Workspace {
                             arguments: queryArguments(
                                 category: category, position: position, limit: limit, cursor: cursor))
                         let page = try JSON.decode(ItemPage.self, pair.query)
-                        let result = try JSON.decode(Response.self, pair.get)
+                        let result = try JSON.decode(FullItemRead.self, pair.get)
                         return (page, result)
                     } catch let error as TractandaError where error.code == "responseTooLarge" && limit > 1 {
                         return try queryAndGet(position, limit: max(1, limit / 2), cursor: cursor)
@@ -720,18 +699,11 @@ final class Workspace {
     }
 
     func history(of item: Revision) throws -> [Revision] {
-        struct Response: Decodable {
-            let list: [Revision]
-            let total: Int
-        }
         return try JSON.decode(
-            Response.self,
+            JMAPHistoryResponse.self,
             client.call(
-                "TractandaItem/history",
-                arguments: [
-                    "itemID": item.itemID, "position": 0, "limit": 64,
-                ])
-        ).list
+                "TractandaItem/history", arguments: ["itemID": item.itemID, "position": 0, "limit": 64])
+        ).canonicalResult().list
     }
 
     func assignment(_ decision: String?, item: Revision, category: Revision) -> CommitRequest {
@@ -934,7 +906,7 @@ final class PendingEdit {
     }
     init(_ request: CommitRequest) { write = .request(request) }
     init(_ plan: CapturePlan) { write = .capture(plan) }
-    func send(using client: ItemClient) throws -> CommitResult {
+    func send(using client: ItemClient) throws -> MutationReceipt {
         guard case .request = write else {
             throw TractandaError("captureAsync", "Capture writes use the asynchronous client.")
         }

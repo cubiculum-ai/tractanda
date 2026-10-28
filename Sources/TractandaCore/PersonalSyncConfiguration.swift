@@ -40,16 +40,41 @@ enum PersonalSyncConfiguration {
         let fd = open(root.appendingPathComponent(name).path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else { throw FileMetadataError.posix(errno) }
         defer { close(fd) }
-        guard fsync(fd) == 0 else { throw FileMetadataError.posix(errno) }
+        guard tractanda_durable_sync(fd) == 0 else { throw FileMetadataError.posix(errno) }
         try StoreCheckpoint.syncDirectory(root)
+        guard tractanda_durable_sync(fd) == 0 else { throw FileMetadataError.posix(errno) }
     }
-    static func remove(root: URL, name: String) throws {
-        guard !name.contains("/"), !name.contains("\0") else {
+    static func remove(root: URL, name: String, afterUnlink: () throws -> Void = {}) throws {
+        guard !name.isEmpty, !name.contains("/"), !name.contains("\0"), name != ".", name != ".." else {
             throw TractandaError("invalidConfiguration", "Invalid local configuration key.")
         }
-        if unlink(root.appendingPathComponent(name).path) != 0, errno != ENOENT {
+        let owner = tractanda_uid()
+        _ = try ItemStore.personalWorkgroupUpgradeRequirement(root: root, ownerUID: owner)
+        let directory = open(root.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard directory >= 0 else { throw FileMetadataError.posix(errno) }
+        defer { close(directory) }
+        let fence = openat(directory, CanonicalReaderRequirement.fileName, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fence >= 0 else { throw FileMetadataError.posix(errno) }
+        defer { close(fence) }
+        var rootMetadata = stat()
+        var fenceMetadata = stat()
+        guard fstat(directory, &rootMetadata) == 0, fstat(fence, &fenceMetadata) == 0,
+            rootMetadata.st_uid == owner, rootMetadata.st_mode & 0o777 == 0o700,
+            fenceMetadata.st_uid == owner, fenceMetadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+            fenceMetadata.st_mode & 0o777 == 0o600, fenceMetadata.st_nlink == 1,
+            fenceMetadata.st_dev == rootMetadata.st_dev
+        else {
+            throw TractandaError(
+                "invalidPersonalProfile",
+                "Cleanup requires the retained same-filesystem private reader fence.")
+        }
+        if unlinkat(directory, name, 0) != 0, errno != ENOENT {
             throw FileMetadataError.posix(errno)
         }
-        try StoreCheckpoint.syncDirectory(root)
+        guard fsync(directory) == 0 else { throw FileMetadataError.posix(errno) }
+        try afterUnlink()
+        // Even ENOENT may follow an uncertain earlier unlink. Flush the actual root
+        // filesystem through its retained regular fence file before acknowledging cleanup.
+        guard tractanda_durable_sync(fence) == 0 else { throw FileMetadataError.posix(errno) }
     }
 }

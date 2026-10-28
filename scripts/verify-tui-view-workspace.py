@@ -86,12 +86,12 @@ def main():
             preferences = recovery.with_suffix(".views.json")
             with wire.server(native, store, socket_path) as client:
                 def create(name, fields=None, class_id="Item"):
-                    return client.commit(wire.intent(
+                    return client.commit_with_revision(wire.intent(
                         "create", "view-workspace-" + uuid.uuid4().hex, class_id=class_id,
                         changes={"subject": wire.text(name), **(fields or {})})) ["revision"]
 
                 def revise(item, changes, operation=None):
-                    return client.commit(wire.intent(
+                    return client.commit_with_revision(wire.intent(
                         "revise", operation or "view-workspace-" + uuid.uuid4().hex,
                         item=wire.item_id(item), base=wire.revision_id(item), changes=changes))["revision"]
 
