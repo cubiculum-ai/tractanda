@@ -1,6 +1,7 @@
 import CTractandaPlatform
 import Foundation
 import Synchronization
+import TractandaClient
 import XCTest
 
 @testable import TractandaCore

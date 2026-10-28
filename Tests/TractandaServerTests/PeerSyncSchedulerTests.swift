@@ -102,8 +102,8 @@ private struct CurrentSchedulerFixture {
         let replicas = try stores.map { try $0.personalSyncIdentity().replicaID }
         let config = try PersonalMembershipConfiguration(
             storeID: identity.storeID, configurationID: UUID.makeVersion1().uuidString.lowercased(),
-            members: replicas.enumerated().map {
-                .init(replicaID: $0.element, hostname: "n\($0.offset).fixture")
+            members: try replicas.enumerated().map {
+                try .init(replicaID: $0.element, hostname: "n\($0.offset).fixture")
             })
         let nonce = try UUID.makeVersion1().uuidString.lowercased()
         let preparations = try stores.map {
