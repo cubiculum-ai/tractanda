@@ -67,7 +67,9 @@ final class PeerPrincipalMappingTests: XCTestCase {
         try fixture.capacity()
         fixture.receiver = try ItemStore(
             root: fixture.receiverRoot, accounts: accounts,
-            revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            revisionProjectionEnabled: true, authorityIntakeEnabled: true,
+            firstSourceOperation: nil,
+            canonicalFormatSupport: PeerIntakeStoreTests.Fixture.historical14Support)
         try fixture.receiver.configurePeerIntake(peers: [fixture.context])
         try fixture.capacity()
     }
