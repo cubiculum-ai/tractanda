@@ -293,12 +293,30 @@ final class PersonalEntrypointTests: XCTestCase, @unchecked Sendable {
             let newPolicy = try JSONSerialization.jsonObject(with: JSON.encode(policy(["owner"])))
             let configure = try request(
                 "TractandaStore/configureAccess", ["configuration": newPolicy], accountID: accountID)
+            let profile = URL(fileURLWithPath: config.storePath)
+                .appendingPathComponent(PersonalWorkgroupProfile.name)
+            let profileBeforeDenial = try Data(contentsOf: profile)
+            func canonicalBytes() throws -> [String: Data] {
+                let items = URL(fileURLWithPath: config.storePath).appendingPathComponent("items")
+                let scan = try XCTUnwrap(
+                    FileManager.default.enumerator(at: items, includingPropertiesForKeys: nil))
+                var result: [String: Data] = [:]
+                while let file = scan.nextObject() as? URL {
+                    if try FileMetadata.read(at: file).type == .regular {
+                        result[file.path] = try Data(contentsOf: file)
+                    }
+                }
+                return result
+            }
+            let canonicalBeforeDenial = try canonicalBytes()
             let nonadmin = try await coordinator.handle(configure, forUID: accounts.bob)
             XCTAssertThrowsError(
                 try NativeMethodResult.unwrap(nonadmin, method: "TractandaStore/configureAccess")
             ) {
                 XCTAssertEqual(($0 as? TractandaError)?.code, "forbidden")
             }
+            XCTAssertEqual(try Data(contentsOf: profile), profileBeforeDenial)
+            XCTAssertEqual(try canonicalBytes(), canonicalBeforeDenial)
             await coordinator.setPooledReadBeforeFinishHookForTesting { await gate.pause() }
             let query = try request(
                 "TractandaItem/query", ["expression": "classID == \"RoleItem\""], accountID: accountID)

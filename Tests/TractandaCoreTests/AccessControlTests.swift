@@ -479,6 +479,16 @@ final class AccessControlTests: XCTestCase {
                 })
             let denied = try response(service, uid: accounts.bob, method: "TractandaStore/rebuild")
             XCTAssertEqual(denied["type"] as? String, "forbidden")
+            let deniedConfiguration = try response(
+                service, uid: accounts.bob, method: "TractandaStore/configureAccess",
+                args: [
+                    "configuration": try JSONSerialization.jsonObject(
+                        with: JSON.encode(
+                            ItemValue.object([
+                                "profile": .text(AccessConfiguration.profile), "users": .list([.text("bob")]),
+                            ])))
+                ])
+            XCTAssertEqual(deniedConfiguration["type"] as? String, "forbidden")
             XCTAssertEqual(store.state, beforeState)
             XCTAssertEqual(try store.history(item.itemID), beforeHistory)
             XCTAssertEqual(try store.get(item.itemID), item)

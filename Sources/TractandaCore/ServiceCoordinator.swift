@@ -302,7 +302,8 @@ public actor ServiceCoordinator {
             throw TractandaError("serviceBusy", "An exclusive rebuild is in progress.")
         }
         if [
-            "TractandaStore/rebuild", "TractandaAttachment/finish", "TractandaAttachment/upload",
+            "TractandaStore/rebuild", "TractandaStore/configureAccess", "TractandaAttachment/finish",
+            "TractandaAttachment/upload",
             "TractandaDocumentJob/resume", "TractandaDocumentJob/rebase",
         ].contains(request.method) || ItemService.semanticLifecycleMethod(request) != nil {
             try await submit(principal: principal) { service in

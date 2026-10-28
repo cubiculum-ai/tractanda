@@ -2741,7 +2741,9 @@ public final class ItemService {
     /// These denials are proven read-only, before generic mutation observation begins.
     /// Keep the actual Store operation's authorization and expiry defenses in place.
     func preflightNativeMutationAdmission(_ call: NativeMethodInvocation) throws {
-        if call.method == "TractandaStore/rebuild" { try store.requireAdministrator() }
+        if ["TractandaStore/rebuild", "TractandaStore/configureAccess"].contains(call.method) {
+            try store.requireAdministrator()
+        }
         if Self.semanticLifecycleMethod(call) != nil { try store.requireAdministrator() }
         if call.method == "TractandaAttachment/finish", call.callCount == 1 {
             let args = try call.dictionary()
