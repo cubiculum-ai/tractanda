@@ -131,3 +131,100 @@ A further 30 precisely enumerated failing integration methods used the retired c
 - The ported `SharedDaemonTests` keep explicit current runtime documents, empty-listener refusal, startup unwind, physical store identity and closure/port-release assertions. Current private registration framing and listener-close cancellation tests remain in `NativeCredentialRegistrationTests` and `PersonalEnrollmentDaemonTests`.
 
 The five new grouped invariants passed within the single composed macOS invocation recorded at commit `cf1f2765c52400f7b0de6133466821c44708dc7b` (83 tests, zero failures/skips). That receipt is a bounded qualification, not a full-suite or deployment claim.
+
+## Metadata enrollment/admission diagnostic reconciliation
+
+The targeted diagnostic at commit `7b43a9993186eb8b93f63b51620a24d8721a839a` executed all 64 methods in the old approval, activation and origin-admission suites: 2 passed, 61 methods failed, and one pre-existing isolated-root case was skipped. XCTest counted 62 failed assertions (61 unexpected). The following exact 61 failed method bodies were retired; no additional target/file exclusion or new skip was introduced. The two passing historical held-data/negative cases and the pre-existing privileged-custody case remain unchanged.
+
+These methods required the retired canonical approval/admission/retirement protocol. Its retrospective receipt reconsideration, transitive issuer depth and permanent bootstrap proofs do not determine current membership. The explicit captured-policy case also exercised that retired trust protocol; it was not an ordinary retained item-format reader test. Production validation was not loosened to accept its old authority-record shapes.
+
+### PeerEnrollmentActivationTests
+
+[Original source](https://github.com/cubiculum-ai/tractanda/blob/d520f9979f7b0d2887d8df48d6275ef0a77d910e/Tests/TractandaCoreTests/PeerEnrollmentActivationTests.swift)
+
+- `testAcceptedBaselineCrashBeforeActivationConfigurationResumesOnlyPrivateOwner`
+- `testActualPreparedTargetActivatesRegistersReopensAndRebuilds`
+- `testCompletedCanonicalTargetCopiesToNewDirectoryWithExactIdentityKeysAndReceipt`
+- `testDistinctCurrentGlobalAdministratorCompletesOnlyTheAcceptedOperation`
+- `testEstablishedTargetIdentityCannotBeRegeneratedOrSubstituted`
+- `testIncompleteAttachmentPayloadKeepsTargetClosedUntilExactOriginalArrives`
+- `testIndependentApprovalPinAndSourceIdentitySubstitutionFailBeforeIdentity`
+- `testInterruptedConfigurationCommitIsExactRecoverableCompletion`
+- `testLostPreparationAndRequestKeepWarmAndColdOpeningClosed`
+- `testLostWholeActivationDirectoryAndPreparationKeepWarmAndColdOpeningClosed`
+- `testMissingCanonicalApprovalSealFailsColdRecovery`
+- `testMissingPreparationDoesNotTurnActivatedTargetIntoOrdinaryUnsealedStore`
+- `testOriginalAuthorCompletionRejectsNumericUIDRemappedToAnotherName`
+- `testPendingAndInterruptedPinKeepOrdinaryOpeningClosed`
+- `testPreparedTargetCannotExposeUnattendedRuntimeCredentialsBeforeActivation`
+- `testSourceDisposedOrRevokedPairingCannotBeReadmittedByAcceptedOperation`
+- `testSourceRegistrationHistoricalCompletionSurvivesAuthorDemotionButDoesNotAuthorizeNewExport`
+- `testSourceRegistrationInterruptedAfterCommitRetainsExactBaseline`
+- `testSourceRegistrationRequiresOriginalFullPrivateBytes`
+- `testTargetLaterDisposesSourceWithoutErasingHistoricalActivation`
+- `testTargetRotationPreservesActivationAndMembershipWithoutOriginalSecret`
+- `testTargetSecretChangedRetryAndMissingEstablishedSecretFailClosed`
+- `testUnrelatedConfigurationChangeStillFencesRegisteredBaselineAndCompletion`
+- `testUnsafeActivationArtifactPresenceCannotRemoveGate`
+- `testWarmCheckpointActivationValidationSkipsUserBaselineTraversalButExplicitRebuildReadsIt`
+- `testWrongManifestAndUnlistedObjectCannotExpandFiniteIntake`
+
+### PeerEnrollmentApprovalTests
+
+[Original source](https://github.com/cubiculum-ai/tractanda/blob/d520f9979f7b0d2887d8df48d6275ef0a77d910e/Tests/TractandaCoreTests/PeerEnrollmentApprovalTests.swift)
+
+- `testAcceptedApprovalCannotBypassCredentialRevocationOrTargetDisposal`
+- `testAcceptedSealedBaselineSurvivesCanonicalOnlyIndexRebuild`
+- `testExactRetryPreservesIdentitiesAndRejectsDifferentSecretOrPreparation`
+- `testFiniteBaselineExcludesConcurrentLaterWritesAndRetainsPermanentBootstrap`
+- `testMissingOrChangedPrivateKeyCannotBeRecreatedByRetryOrRead`
+- `testPolicyChangeFencesUnacceptedOperation`
+- `testPrivateAcceptedMarkerCannotAuthorizeUnsealedApproval`
+- `testPrivateStagingNeverConfiguresOrAuthenticatesUnapprovedPeer`
+- `testReplacingBothKeysWithSameNewSecretCannotChangePrivateOperationWitness`
+- `testRevokedAdministratorBeforeSealNeverAcceptsButAcceptedBookkeepingSurvivesDemotion`
+- `testTamperedCanonicalApprovalSealCannotCompleteOrReplay`
+- `testUnfinishedEpochLossNeedsReviewAndDoesNotBlockOrdinaryService`
+
+### PeerOriginAdmissionTests
+
+[Original source](https://github.com/cubiculum-ai/tractanda/blob/d520f9979f7b0d2887d8df48d6275ef0a77d910e/Tests/TractandaCoreTests/PeerOriginAdmissionTests.swift)
+
+- `testAcceptedExplicitTargetPreservesSealedBaselineAndExactKeys`
+- `testAdmissionFrontierFencesOldInventoryCompletionWithoutInvalidatingOwnBaseline`
+- `testAdmissionRequiresBoundedCanonicalReads`
+- `testAncestorChannelRevocationAndLaterDisposalPreserveEarlierDescendantMembership`
+- `testAnchoredNonRootDecisionAndRealAuthoredRelayExportSurviveCanonicalRebuild`
+- `testCanonicalApprovalPublicationMetadataSharesTheActualReadBudget`
+- `testDerivedReceiptAdmissionPreservesHeldRejectedAndQueuesOnlyUnknown`
+- `testEarlierUnanchoredNonRootDecisionStaysInertAfterIssuerAdmission`
+- `testFreshFactoryPublicPolicyBaselineSupportsRealNonRootAuthorityAndRebuild`
+- `testFullDirtyAndMissingIndexRecoveryStillReadOriginalsAndPreserveMembership`
+- `testInterruptedRemoteAdmissionReplaysCanonicalProofAndDuplicateIsIdempotent`
+- `testMissingAdmittedOriginProofCannotBeResealedByWarmOrColdReplay`
+- `testMissingPublicPublicationCannotBeReplacedByPrivateAcceptedMarker`
+- `testMissingRetainedPackageSealFailsBeforeConfiguredOriginOrLocalSkip`
+- `testNonRootWrongMissingIssuerAndForgedHistoricalAdministratorNeverAdmit`
+- `testOnlyCanonicalExplicitTargetIsAdmittedAndTamperedIssuerFailsClosed`
+- `testOriginReplayProjectionRejectsMalformedOrMissingVerifiedMetadata`
+- `testOwnAdmissionExceptionDoesNotPermitUnrelatedConfigurationChange`
+- `testPublicMembershipRebuildDoesNotRequireOriginalPrivateSecret`
+- `testRavenAdmissionReconsidersStarletReceiptAtStashWithoutRePairing`
+- `testSelfTrustAndConfiguredDepthLimitFailClosed`
+- `testUnrelatedAdmissionFencesPreviouslyAcceptedSourceBaseline`
+- `testWarmOriginReplayUsesTypedMetadataWithoutReadingTwoLargeUserOriginals`
+
+### Retained current enrollment invariants
+
+The current equivalents use real current APIs and retain their security/storage assertions:
+
+| Invariant | Current coverage |
+| --- | --- |
+| Private invitation, single claim, exact continuation retry, no secret disclosure and mode/hardlink custody | `PersonalEnrollmentTests` invitation/claim/custody methods; `PersonalEnrollmentReplacementTests` lost-claim, malformed/foreign-candidate and publication-recovery methods |
+| Target identity/readiness fences and no ordinary content before joining activation | `PersonalEnrollmentJoiningTests.testUnjoinedFenceSurvivesEveryPreIdentityActivationBoundaryAndReopen`, `testFreshJoiningTargetAllowsIdentityAdminAndSelectionButDeniesNormalContent`, `testReadinessRequiresSameSelectionProcessJobAndSourceGeneration`; current completion requires exact persisted membership |
+| Current administrator authorization and cross-host logical UID/group mapping | `PersonalEnrollmentAuthorizationTests` source-decision, exact sender/digest/operation and administrator recheck methods; `PersonalEnrollmentAdmissionTests` name mapping, missing/ambiguous mappings and policy drift methods |
+| Finite baseline, bounded owned payload transfer, no collision overwrite and no implicit staged-data promotion | `PersonalSyncTests.testFiniteCutUsesLocalRowsWithConcurrentBackdatedUUIDAndRebuildRescan`, `testRawRoundTripIsKnownAcrossRoutesAndCollisionNeverOverwrites`, `testInterruptedIncomingPublicationAutomaticallyRecoversWithoutAdmittingAnotherStage`, `testOriginalChunksResumeFromPhysicalPrefixAndStayUnreferencedUntilRevisionApply` |
+| Warm compatible opening, canonical history/index recovery and current ACLs across all history | `PersonalWorkgroupStoreTests.testCompatibleUpgradeUsesEstablishedFenceWithoutInventoryAndStartupStillChecksContent`, `testAcknowledgedOwnedContentSurvivesAbruptProcessExitAndDisposableIndexLoss`, `testSelectedMergeHistoryOwnedDocumentAndOldPolicyItemRemainOrdinaryContent`, `testCurrentACLRevocationAndLocalPolicySurviveRebuild` |
+| Current node exclusion, authenticated native join/restart, one initiated duplex connection and nonfounder third-node coordination | `PersonalSyncTests.testRemovalNeedsRetainedMembersOnlyAndOmittedPeerCannotUseOldCredentials`; `PersonalPeerDaemonTests` actual pair/hot-revocation cases; `PersonalEnrollmentDaemonTests.testTwoNodesPairOverSingleOutboundConnectionAndReplicateHistoryAndPayload` and `testNonFounderAddsThirdNodeOnlyAfterRetainedMemberReturns` |
+
+Current membership and credentials are administrator-controlled operational configuration. Index-only recovery preserves that current configuration; fresh-cluster recovery explicitly pairs new credentials. Recovered raw items or old policy/authority items cannot recreate current trust. The rejected historical ledger is not repaired or required to certify an administrator-selected recovery set.
