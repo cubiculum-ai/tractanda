@@ -1571,9 +1571,20 @@ public final class ItemStore {
                 try control?.check()
             },
             inventoryActivity: { try control?.graphProgress() },
+            inventoryGraphActivity: {
+                if control?.status.phase != "validatingRevisionGraph" {
+                    try control?.pulse(phase: "validatingRevisionGraph")
+                }
+                try self.revisionGraphProgressForTesting?()
+                try control?.check()
+            },
             originalVerified: { try control?.pulse(originalBytes: $0) },
             pageVerified: { try control?.pulse(pages: 1) },
-            recordVerified: { try control?.pulse(records: 1) },
+            recordVerified: { url in
+                try control?.pulse(records: 1)
+                try self.afterRecoveryRecordForTesting?(url)
+                try control?.check()
+            },
             itemProjected: { try control?.pulse(items: 1) },
             projectCurrentItems: !personalBaselineImportActive,
             materialize: { graph, revisions in try self.publishPersonalMerge(graph, revisions: revisions) },

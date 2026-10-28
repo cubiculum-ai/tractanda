@@ -128,9 +128,10 @@ enum PersonalRecoveryIndex {
         limits: Limits = .init(), rebuildContextID requestedContextID: String? = nil,
         boundary: () throws -> Void, inventoryCheck: @escaping @Sendable () throws -> Void = {},
         inventoryActivity: @escaping @Sendable () throws -> Void = {},
+        inventoryGraphActivity: () throws -> Void = {},
         originalVerified: @escaping @Sendable (Int64) throws -> Void = { _ in },
         pageVerified: @escaping @Sendable () throws -> Void = {},
-        recordVerified: () throws -> Void = {}, itemProjected: () throws -> Void = {},
+        recordVerified: (URL) throws -> Void = { _ in }, itemProjected: () throws -> Void = {},
         projectCurrentItems: Bool = true,
         materialize: ((RevisionGraph, [String: Revision]) throws -> (ItemIndex.CatalogueRow, Revision))? =
             nil,
@@ -139,7 +140,8 @@ enum PersonalRecoveryIndex {
         index.personalContentProjectionMode = true
         let inventory = try PersonalRecoveryInventory.inspect(
             [source], limits: limits.inventory,
-            check: inventoryCheck, activity: inventoryActivity, originalVerified: originalVerified,
+            check: inventoryCheck, activity: inventoryActivity, graphActivity: inventoryGraphActivity,
+            originalVerified: originalVerified,
             pageVerified: pageVerified, documentReadFailureForTesting: documentReadFailureForTesting)
         guard inventory.isStructurallyComplete else { throw Incomplete(diagnostics: inventory.diagnostics) }
         // PageCorpusInput needs an operation snapshot binding. This UUID is confined to the
@@ -179,7 +181,7 @@ enum PersonalRecoveryIndex {
                 }, activity: inventoryActivity)
             // Ordinary DAG metadata is retained without old admission/reconciliation/retirement replay.
             try index.insertGraphCatalogueRow(row, graphFields: revision.fields)
-            try recordVerified()
+            try recordVerified(source.root.appendingPathComponent(location.path))
             guard projectCurrentItems else { continue }
             if try revision.provenance?.mergeProfile == RevisionMerge.personalProfile {
                 // Raw ancestry, including a merge below an ordinary child, carries its semantics

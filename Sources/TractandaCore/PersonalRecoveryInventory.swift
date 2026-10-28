@@ -90,6 +90,7 @@ enum PersonalRecoveryInventory {
         _ sources: [Source], limits: Limits = Limits(),
         check: @escaping @Sendable () throws -> Void = {},
         activity: @escaping @Sendable () throws -> Void = {},
+        graphActivity: () throws -> Void = {},
         originalVerified: @escaping @Sendable (Int64) throws -> Void = { _ in },
         pageVerified: @escaping @Sendable () throws -> Void = {}, documentReadFailureForTesting: Int32? = nil
     ) throws -> Result {
@@ -469,7 +470,10 @@ enum PersonalRecoveryInventory {
         var cursor = 0
         while cursor < ready.count {
             try Task.checkCancellation()
-            if cursor % 128 == 0 { try activity() }
+            if cursor % 128 == 0 {
+                try graphActivity()
+                try activity()
+            }
             let id = ready[cursor]
             cursor += 1
             for child in children[id] ?? [] {
