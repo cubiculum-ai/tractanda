@@ -191,13 +191,10 @@ final class NavigationAndGroupTests: XCTestCase {
                 case "duplicate": list.append(try XCTUnwrap(list.first))
                 case "missing": list.removeFirst()
                 case "unexpected":
-                    list.append(
-                        try JSONSerialization.jsonObject(with: JSON.encode(retained)) as! [String: Any])
+                    list.append(try tuiFixtureItem(retained))
                 case "unresolved":
                     list.removeFirst()
-                    result["unresolved"] = [
-                        ["itemID": ids[0], "status": "conflicted", "stateToken": "fixture-token"]
-                    ]
+                    list.append(try tuiFixtureUnresolved(ids[0]))
                 case "remaining", "oversized", "notFound":
                     list.removeFirst()
                     result[

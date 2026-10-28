@@ -136,10 +136,12 @@ final class NavigationHistoryTests: XCTestCase {
                             && !(remaining && itemID == b.itemID)
                             && !(oversized && itemID == a.itemID)
                     }
-                    result["unresolved"] =
-                        unresolved
-                        ? [["itemID": a.itemID, "status": "conflicted", "stateToken": "fixture-token"]]
-                        : []
+                    if unresolved {
+                        var readable = result["list"] as! [[String: Any]]
+                        readable.append(try tuiFixtureUnresolved(a.itemID))
+                        result["list"] = readable
+                    }
+                    result.removeValue(forKey: "unresolved")
                     result["remainingIDs"] = remaining ? [b.itemID] : []
                     result["oversizedIDs"] = oversized ? [a.itemID] : []
                 }

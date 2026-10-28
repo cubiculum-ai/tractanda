@@ -285,7 +285,16 @@ final class ItemSearchTests: XCTestCase {
         if case .pending = try XCTUnwrap(loader.take()).outcome {} else { XCTFail("No pending state") }
         if case .ready = try await ready(loader).outcome {} else { XCTFail("No ready state") }
         let requests = await transport.requests
-        let first = try JSONSerialization.jsonObject(with: requests[0]) as! [String: Any]
+        var firstSearch: [String: Any]?
+        for bytes in requests {
+            let envelope = try JSONSerialization.jsonObject(with: bytes) as! [String: Any]
+            let calls = envelope["methodCalls"] as! [[Any]]
+            if calls.first?.first as? String == "TractandaSemantic/search" {
+                firstSearch = envelope
+                break
+            }
+        }
+        let first = try XCTUnwrap(firstSearch)
         let args = (first["methodCalls"] as! [[Any]])[0][1] as! [String: Any]
         XCTAssertEqual(args["limit"] as? Int, 64)
         XCTAssertEqual(args["text"] as? String, "meaning")
@@ -314,7 +323,12 @@ final class ItemSearchTests: XCTestCase {
             XCTFail("Expected ready continuation")
         }
         let requests = await transport.requests
-        XCTAssertEqual(requests.count, 4)
+        let domainRequests = try requests.filter { bytes in
+            let envelope = try JSONSerialization.jsonObject(with: bytes) as! [String: Any]
+            return (envelope["methodCalls"] as! [[Any]])[0][0] as? String != TractandaJMAP.discoveryMethod
+        }
+        XCTAssertEqual(domainRequests.count, 4)
+        XCTAssertEqual(requests.count - domainRequests.count, 1, "One current Session discovery is expected")
     }
 
     func testSemanticMixedReadableAndUnresolvedResultsRetainReadableHits() async throws {
