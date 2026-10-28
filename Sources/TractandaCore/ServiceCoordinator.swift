@@ -333,6 +333,9 @@ public actor ServiceCoordinator {
         {
             request.replyBudget?.useCompletePublicationObservation()
         }
+        if request.method == "TractandaStore/rebuild", let rebuild = ItemService.rebuildNativeCall(request) {
+            _ = try rebuild.startOperationID()
+        }
         if !NativeMethodCatalog.readOnly.contains(request.method),
             ItemService.semanticLifecycleMethod(request) == nil
         {
@@ -1024,12 +1027,7 @@ public actor ServiceCoordinator {
             try policy.authorize(uid: uid, accounts: makeAccountDirectory())
             let arguments = call.arguments
             if call.method == "TractandaStore/rebuild" {
-                guard Set(arguments.keys) == ["operationID"],
-                    let operation = arguments["operationID"] as? String,
-                    !operation.isEmpty, operation.utf8.count <= 200, !operation.contains("\0")
-                else {
-                    throw TractandaError("invalidArguments", "Rebuild requires one bounded operationID.")
-                }
+                let operation = try call.startOperationID()
                 if let current = rebuildControl?.status ?? rebuildStatus, current.operationID == operation {
                     return try rebuildResponse(call: call, status: current)
                 }

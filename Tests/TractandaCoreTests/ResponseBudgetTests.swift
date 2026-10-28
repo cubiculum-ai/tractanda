@@ -106,7 +106,21 @@ final class ResponseBudgetTests: XCTestCase {
         }
         calls.append(["TractandaItem/history", ["itemID": item.itemID, "limit": 4], "h"])
         let mixed = try request(store, calls)
-        let response = service.handle(mixed, peerUID: store.ownerUID)
+        // The Store limit bounds one read; the common JMAP kernel independently owns the envelope.
+        let response = try store.withAccess(forUID: store.ownerUID) {
+            let (basis, discovery) = try store.nativeProtocolSessionSnapshot()
+            let definitions = NativeMethodCatalog.definitions(discovery: discovery.value) { _, _ in
+                .failure(.init("serverFail"), effects: .none)
+            }
+            let kernel = JMAPKernel(
+                methods: definitions, limits: .init(maximumResponseBytes: budget),
+                accounts: [try basis.accountAccess()], sessionState: { discovery.state })
+            return try kernel.executeSynchronously(mixed, sessionState: { discovery.state }) {
+                invocation, context in
+                service.nativeInvocationOutcome(
+                    NativeMethodInvocation(invocation, context: context), peerUID: store.ownerUID)
+            }.value.encoded()
+        }
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: response) as? [String: Any])
         let results = try XCTUnwrap(object["methodResponses"] as? [[Any]])
         XCTAssertEqual(results.count, extraQueries + 3)

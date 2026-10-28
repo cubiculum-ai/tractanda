@@ -1,9 +1,11 @@
 import Synchronization
 import XCTest
 
+import struct TractandaClient.JMAPItemRecord
 import struct TractandaClient.JMAPKernel
 import struct TractandaClient.JMAPLocalSession
 import struct TractandaClient.JMAPProblem
+import struct TractandaClient.JMAPRevisionRecord
 import enum TractandaClient.JMAPValue
 import enum TractandaClient.TractandaJMAP
 import enum TractandaClient.TractandaJMAPCodec
@@ -651,16 +653,22 @@ final class ServiceCoordinatorTests: XCTestCase {
             let getObject = try XCTUnwrap(JSONSerialization.jsonObject(with: getResponse) as? [String: Any])
             let getCall = try XCTUnwrap((getObject["methodResponses"] as? [[Any]])?.first)
             let getPayload = try XCTUnwrap(getCall[1] as? [String: Any])
-            let current = try JSON.decode(
-                [Revision].self, JSONSerialization.data(withJSONObject: getPayload["list"]!))
+            let current = try JSONDecoder().decode(
+                [JMAPItemRecord].self,
+                from: JSONSerialization.data(withJSONObject: getPayload["list"]!)
+            )
+            .map { try $0.canonicalRevision() }
             XCTAssertEqual(current.map(\.revisionID), [item.revisionID])
             let historyObject = try XCTUnwrap(
                 JSONSerialization.jsonObject(with: historyResponse) as? [String: Any])
             let historyCall = try XCTUnwrap((historyObject["methodResponses"] as? [[Any]])?.first)
             let historyPayload = try XCTUnwrap(historyCall[1] as? [String: Any])
             XCTAssertEqual(historyPayload["total"] as? Int, 3)
-            let versions = try JSON.decode(
-                [Revision].self, JSONSerialization.data(withJSONObject: historyPayload["list"]!))
+            let versions = try JSONDecoder().decode(
+                [JMAPRevisionRecord].self,
+                from: JSONSerialization.data(withJSONObject: historyPayload["list"]!)
+            )
+            .map { try $0.canonicalRevision() }
             XCTAssertEqual(versions.map(\.revisionID), [second.revisionID])
             XCTAssertNotEqual(first.revisionID, second.revisionID)
             await coordinator.setPooledReadLeaseHookForTesting(nil)
@@ -700,8 +708,11 @@ final class ServiceCoordinatorTests: XCTestCase {
             let call = try XCTUnwrap((object["methodResponses"] as? [[Any]])?.first)
             let payload = try XCTUnwrap(call[1] as? [String: Any])
             XCTAssertEqual(payload["total"] as? Int, 2)
-            let revisions = try JSON.decode(
-                [Revision].self, JSONSerialization.data(withJSONObject: payload["list"]!))
+            let revisions = try JSONDecoder().decode(
+                [JMAPRevisionRecord].self,
+                from: JSONSerialization.data(withJSONObject: payload["list"]!)
+            )
+            .map { try $0.canonicalRevision() }
             XCTAssertEqual(revisions.count, 2)
             XCTAssertEqual(revisions.last?.revisionID, first.revisionID)
             await coordinator.setPooledReadBeforeFinishHookForTesting(nil)
@@ -946,7 +957,9 @@ final class ServiceCoordinatorTests: XCTestCase {
                 JSONSerialization.jsonObject(with: JSON.encode(request)) as? [String: Any])
             let commit = try nativeRequest(root, "TractandaItem/commit", arguments, id: "write")
             let uncertain = try await coordinator.handle(commit, forUID: accounts.alice)
-            XCTAssertTrue(String(decoding: uncertain, as: UTF8.self).contains("uncertainCommit"))
+            XCTAssertThrowsError(
+                try NativeMethodResult.unwrap(uncertain, method: "TractandaItem/commit", callID: "write")
+            ) { XCTAssertEqual(($0 as? TractandaError)?.code, "serverPartialFail") }
             try await coordinator.setPersonalDurableAcknowledgementHookForTesting(nil)
             let retried = try await coordinator.handle(commit, forUID: accounts.alice)
             let retryObject = try XCTUnwrap(JSONSerialization.jsonObject(with: retried) as? [String: Any])
@@ -1010,10 +1023,10 @@ final class ServiceCoordinatorTests: XCTestCase {
             XCTAssertEqual(
                 (object["methodResponses"] as? [[Any]])?.first?[0] as? String,
                 "TractandaStore/rebuild")
-            do {
-                _ = try await reading.value
-                XCTFail("The earlier read must be fenced after rebuild admission")
-            } catch { XCTAssertEqual((error as? TractandaError)?.code, "serviceBusy") }
+            let fenced = try await reading.value
+            XCTAssertThrowsError(
+                try NativeMethodResult.unwrap(fenced, method: "TractandaItem/query", callID: "read")
+            ) { XCTAssertEqual(($0 as? TractandaError)?.code, "serviceBusy") }
             await coordinator.setPooledReadBeforeFinishHookForTesting(nil)
             let readData = try await coordinator.handle(query, forUID: accounts.service)
             XCTAssertEqual(try nativePage(readData).total, 1)
@@ -1083,8 +1096,9 @@ final class ServiceCoordinatorTests: XCTestCase {
                 uid: accounts.bob, name: "bob", primaryGroupName: "service", groupIDs: [71_003])
             await gate.release()
             let rejected = try await reading.value
-            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: rejected) as? [String: Any])
-            XCTAssertEqual(object["code"] as? String, "forbidden")
+            XCTAssertThrowsError(
+                try NativeMethodResult.unwrap(rejected, method: "TractandaItem/query", callID: "read")
+            ) { XCTAssertEqual(($0 as? TractandaError)?.code, "forbidden") }
             await coordinator.setPooledReadBeforeFinishHookForTesting(nil)
             await coordinator.close()
         }
@@ -1203,11 +1217,11 @@ final class ServiceCoordinatorTests: XCTestCase {
             await fulfillment(of: [entered], timeout: 5)
             reading.cancel()
             release.signal()
-            do {
-                _ = try await reading.value
-                XCTFail("Cancelled pooled request returned a serial response.")
-            } catch is CancellationError {
-                // A canceled worker must not retry through the serial handler.
+            let cancelled = try await reading.value
+            XCTAssertThrowsError(
+                try NativeMethodResult.unwrap(cancelled, method: "TractandaItem/query", callID: "read")
+            ) {
+                XCTAssertEqual(($0 as? TractandaError)?.code, "serverFail")
             }
             let active = await coordinator.pooledReadLeaseCountForTesting()
             XCTAssertEqual(active, 0)
@@ -1486,7 +1500,7 @@ final class ServiceCoordinatorTests: XCTestCase {
                 opening: otherRoot, makeAccountDirectory: { accounts })
             let crossStoreData = try await otherCoordinator.handle(
                 nativeRequest(
-                    root,
+                    otherRoot,
                     "TractandaItem/query", ["expression": "priority == 9", "cursor": next, "limit": 2]),
                 forUID: accounts.alice)
             let crossStore = try XCTUnwrap(
@@ -1694,9 +1708,9 @@ final class ServiceCoordinatorTests: XCTestCase {
                 uid: accounts.bob, name: "bob", primaryGroupName: "service", groupIDs: [71_003])
             await admissionGate.release()
             let rejectedData = try await rejected.value
-            let rejectedObject = try XCTUnwrap(
-                JSONSerialization.jsonObject(with: rejectedData) as? [String: Any])
-            XCTAssertEqual(rejectedObject["code"] as? String, "forbidden")
+            XCTAssertThrowsError(
+                try NativeMethodResult.unwrap(rejectedData, method: "TractandaItem/query", callID: "read")
+            ) { XCTAssertEqual(($0 as? TractandaError)?.code, "forbidden") }
             await coordinator.close()
         }
     }

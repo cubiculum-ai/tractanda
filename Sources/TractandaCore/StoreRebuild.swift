@@ -298,6 +298,16 @@ struct RebuildNativeCall {
         self.arguments = arguments
         self.replyBudget = replyBudget
     }
+    /// Pure request-shape validation; admission and actual rebuild still enforce current rights.
+    func startOperationID() throws -> String {
+        guard method == "TractandaStore/rebuild", Set(arguments.keys) == ["operationID"],
+            let operation = arguments["operationID"] as? String,
+            !operation.isEmpty, operation.utf8.count <= 200, !operation.contains("\0")
+        else {
+            throw TractandaError("invalidArguments", "Rebuild requires one bounded operationID.")
+        }
+        return operation
+    }
 }
 struct RebuildAdmission: Sendable {
     let policy: RebuildAdministratorPolicy

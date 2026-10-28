@@ -1,6 +1,13 @@
+import CTractandaPlatform
 import XCTest
 
 @testable import TractandaCore
+
+#if canImport(Darwin)
+    import Darwin
+#else
+    import Glibc
+#endif
 
 final class PersonalEnrollmentCapacityTests: XCTestCase {
     private func id() throws -> String { try UUID.makeVersion1().uuidString.lowercased() }
@@ -43,9 +50,13 @@ final class PersonalEnrollmentCapacityTests: XCTestCase {
     }
     func testSixteenMemberBinaryKeyRegistryFitsAndReopensAll480ExactRoles() throws {
         try AttachmentFixtureCapacity.requireFree()
-        let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent(
+        let supplied = FileManager.default.temporaryDirectory.appendingPathComponent(
             "enrollment-key-capacity-" + Identifier.make())
-        try PrivateConfiguration.makeDirectory(root)
+        try PrivateConfiguration.makeDirectory(supplied)
+        // Foundation symlink resolution may rewrite /private/var back to the /var link.
+        guard let physical = realpath(supplied.path, nil) else { throw FileMetadataError.posix(errno) }
+        defer { free(physical) }
+        let root = URL(fileURLWithPath: String(cString: physical), isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let members = try (0..<16).map { try PersonalMember(replicaID: id(), hostname: "node\($0).fixture") }
         let storeID = try id()
