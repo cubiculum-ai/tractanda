@@ -22,3 +22,16 @@ func nativeFixtureInvocation(_ data: Data) throws -> NativeMethodInvocation {
     }
     return NativeMethodInvocation(call.invocation, context: call.context)
 }
+
+/// Send a fixture through the production account-selection and wire-value adapters.
+func nativeFixtureRequest(
+    method: String, arguments: [String: Any], accountID: String, callID: String = "test"
+) throws -> Data {
+    let canonical = try JMAPValue.decode(JSONSerialization.data(withJSONObject: arguments))
+    let selected = try TractandaJMAP.prepareArguments(
+        method: method, arguments: canonical, accountID: accountID)
+    let wire = try TractandaJMAPCodec.argumentsToWire(method: method, arguments: selected)
+    return try NativeClientContext.envelope(calls: [
+        [method, JSONSerialization.jsonObject(with: wire.encoded()), callID]
+    ])
+}

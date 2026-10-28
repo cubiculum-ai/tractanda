@@ -94,9 +94,24 @@ final class AccessControlTests: XCTestCase {
     private func response(_ service: ItemService, uid: UInt32, method: String, args: [String: Any] = [:])
         throws -> [String: Any]
     {
-        let data = try JSONSerialization.data(withJSONObject: [
-            "using": [ItemService.capability], "methodCalls": [[method, args, "test"]],
-        ])
+        var arguments = args
+        if method == "TractandaItem/query" {
+            // ACL fixtures describe domain conditions; the current JMAP method carries them
+            // in filter and returns a total only when explicitly requested.
+            let filterKeys: Set<String> = [
+                "expression", "text", "categoryPath", "excludedCategoryIDs", "viewID", "sectionID", "at",
+                "timeZone",
+            ]
+            var filter: [String: Any] = [:]
+            for key in filterKeys {
+                if let value = arguments.removeValue(forKey: key) { filter[key] = value }
+            }
+            if !filter.isEmpty { arguments["filter"] = filter }
+            arguments["calculateTotal"] = true
+        }
+        let data = try nativeFixtureRequest(
+            method: method, arguments: arguments,
+            accountID: service.store.nativeProtocolSessionBasis.identity)
         let result =
             try JSONSerialization.jsonObject(with: service.handle(data, peerUID: uid)) as! [String: Any]
         if let responses = result["methodResponses"] as? [[Any]] { return responses[0][1] as! [String: Any] }
