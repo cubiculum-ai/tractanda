@@ -49,11 +49,10 @@ class PackageTests(unittest.TestCase):
                 with self.assertRaises(SystemExit): packager.main()
             self.assertFalse(output.exists())
 
-    def test_descriptor_binds_current_identity_manifest_and_proof(self):
-        proof = {'status': 'verified', 'fileCount': 14, 'revision': 'a8b999991fe8c521a0cec749973414eaaf823731'}
-        with patch.object(packager, 'run', return_value='arm64'), patch.object(packager, 'validate_docling_model', return_value=proof) as validate:
-            result = packager.document_descriptor(self.converter(), self.root)
-        validate.assert_called_once_with(self.root)
+    def test_slim_descriptor_binds_current_identity_manifest_without_loading_weights(self):
+        with patch.object(packager, 'run', return_value='arm64'), patch.object(packager, 'validate_docling_model') as validate:
+            result = packager.document_descriptor(self.converter(), None)
+        validate.assert_not_called()
         self.assertEqual(result['workerProtocol'], 'tractanda.native-document-worker.v1')
         self.assertEqual(result['modelManifestSHA256'], packager.digest(ROOT / packager.MODEL_MANIFEST))
         self.assertEqual(result['runtimePatchManifestSHA256'], packager.digest(ROOT / 'Packages/TractandaDocuments/RuntimePatches/manifest.json'))
@@ -89,13 +88,23 @@ class PackageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'link'): packager.merge_resource_bundle(a, self.root / 'new.bundle')
 
     def test_copied_payload_runs_second_validator_and_keeps_metadata(self):
-        converter = self.converter(); model = self.root / 'model'; model.mkdir(); (model / 'tiny').write_bytes(b'asset')
+        converter = self.converter(); model = self.root / 'model'; model.mkdir(); (model / 'config.json').write_bytes(b'asset')
         output = self.root / 'output'; (output / 'bin').mkdir(parents=True)
         for path in ['licenses/optional-embedding-host/vmlx-swift/LICENSE', 'licenses/optional-embedding-host/vmlx-swift/ACKNOWLEDGMENTS.md']:
             p = output / path; p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(b'tiny notice')
-        with patch.object(packager, 'run', return_value='arm64'), patch.object(packager, 'validate_docling_model', return_value={'revision': 'a8b999991fe8c521a0cec749973414eaaf823731'}) as validate:
+        pinned = packager.model_artifacts()['granite-docling-258m-mlx']
+        actual_validator = packager.validate_artifact_directory
+        tiny = {'files': [{'path': 'config.json', 'size': 5, 'sha256': hashlib.sha256(b'asset').hexdigest()}]}
+        def verify_tiny(directory, artifact):
+            self.assertEqual(artifact, pinned, 'Both validations must use the selected pinned catalog artifact')
+            return actual_validator(directory, tiny)
+        with patch.object(packager, 'run', return_value='arm64'), \
+                patch.object(packager, 'validate_artifact_directory', side_effect=verify_tiny) as inventory, \
+                patch.object(packager, 'validate_docling_model', return_value={'revision': pinned['revision']}) as validate:
             descriptor = packager.document_descriptor(converter, model)
             packager.copy_docling_payload(converter, model, output, descriptor)
+        self.assertEqual(inventory.call_count, 2)
+        self.assertEqual((output / descriptor['modelDirectory'] / 'config.json').read_bytes(), b'asset')
         self.assertEqual(validate.call_args_list[0].args[0], model)
         self.assertEqual(validate.call_args_list[1].args[0], output / descriptor['modelDirectory'])
         self.assertEqual(packager.digest(output / descriptor['modelManifestPath']), descriptor['modelManifestSHA256'])
@@ -200,10 +209,13 @@ class PackageTests(unittest.TestCase):
         }
         source_commit = '0123456789abcdef0123456789abcdef01234567'
         argv = ['packager', '--build-products', str(products), '--output', str(output),
-                '--embeddings-host', str(helper), '--model-directory', str(model)]
+                '--embeddings-host', str(helper), '--document-converter', str(self.converter())]
         def public(_root, destination):
             for name in ('LICENSE', 'README.md', 'NOTICE', 'Gemma-Terms.html', 'Gemma-Prohibited-Use-Policy.html'):
                 path = destination / 'licenses/Granite' / name; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b'tiny notice')
+            for name in ('LICENSE', 'ACKNOWLEDGMENTS.md'):
+                path = destination / 'licenses/optional-embedding-host/vmlx-swift' / name
+                path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b'tiny notice')
         def run(*args):
             if args[0] == '/usr/bin/lipo' and len(args) == 3 and args[1] == '-archs':
                 self.assertTrue(Path(args[2]).is_file())

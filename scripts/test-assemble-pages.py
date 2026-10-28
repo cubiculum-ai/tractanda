@@ -58,6 +58,17 @@ class PagesTests(unittest.TestCase):
                         P.assemble(self.root / defect, 'owner/repo', 'v0.1.0-poc.99' if defect == 'missing' else None)
         self.assertFalse((self.root / 'escape').exists())
 
+    def test_explicit_manual_only_bootstrap_before_first_apt_release(self):
+        releases = [{'draft': False, 'published_at': '2026-10-12', 'tag_name': 'v0.1.0-poc.14',
+                     'assets': [{'name': 'SHA256SUMS'}]}]
+        output = self.root / 'bootstrap'
+        with patch.object(P, 'ROOT', self.root), patch.object(P.apt, 'run', return_value=json.dumps(releases).encode()):
+            result = P.assemble(output, 'owner/repo')
+        self.assertIsNone(result['apt'])
+        self.assertTrue((output / 'index.html').is_file())
+        self.assertTrue((output / 'LICENSE').is_file())
+        self.assertFalse((output / 'apt').exists())
+
     def test_rotation_uses_only_explicit_paired_reviewed_prior_trust(self):
         self.archive(); key = self.root / 'old-public.asc'; key.write_bytes(b'pinned public key')
         with patch.object(P, 'ROOT', self.root), patch.object(P.apt, 'run', side_effect=self.tool_run), \

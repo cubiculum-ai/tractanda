@@ -1,10 +1,7 @@
 name: Publish manual and signed APT repository
 
-# Publish the user manual when reviewed changes reach main.
+# Deploy one combined snapshot only after publication or explicit maintainer dispatch.
 on:
-  push:
-    branches: [main]
-    paths: ['docs/**', 'LICENSE', 'NOTICE', 'scripts/apt-repository.py', 'scripts/assemble-pages.py', '.github/workflows/manual.yml']
   release:
     types: [published]
   workflow_dispatch:
