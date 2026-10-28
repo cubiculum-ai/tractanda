@@ -144,9 +144,12 @@ final class AuthorityReviewDenialTests: XCTestCase {
         let f = try Fixture()
         f.base.receiver = nil
         let directory = DynamicReviewDirectory()
+        // Preserve this explicitly historical fixture's writer format during the directory swap.
+        // Default current support would require a separate atomic transition before the tested denial.
         f.base.receiver = try ItemStore(
             root: f.base.receiverRoot, accounts: directory,
-            revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            revisionProjectionEnabled: true, authorityIntakeEnabled: true,
+            canonicalFormatSupport: PeerIntakeStoreTests.Fixture.historical14Support)
         _ = try f.base.receiver.configureAccess(
             .object([
                 "profile": .text(AccessConfiguration.profile),
@@ -183,9 +186,12 @@ final class AuthorityReviewDenialTests: XCTestCase {
         let f = try Fixture()
         f.base.receiver = nil
         let directory = DynamicReviewDirectory()
+        // Preserve this explicitly historical fixture's writer format during the directory swap.
+        // Default current support would require a separate atomic transition before the tested denial.
         f.base.receiver = try ItemStore(
             root: f.base.receiverRoot, accounts: directory,
-            revisionProjectionEnabled: true, authorityIntakeEnabled: true)
+            revisionProjectionEnabled: true, authorityIntakeEnabled: true,
+            canonicalFormatSupport: PeerIntakeStoreTests.Fixture.historical14Support)
         _ = try f.base.receiver.configureAccess(
             .object([
                 "profile": .text(AccessConfiguration.profile),

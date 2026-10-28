@@ -445,14 +445,17 @@ final class AuthorityControlIndexTests: XCTestCase {
             try f.append(a)
             let b = try f.item(parent: a, subject: "later", at: "2026-10-14T12:10:00.000Z")
             try f.append(b, parent: a)
-            let accepted = try f.commit(changes: [(a, true), (b, true)])
+            let accepted = try f.commit(changes: [(a, true), (b, true)], origin: f.origin)
             let bExposure = try f.expose(b, cut: accepted.binding)
             let neverExposed = try f.item(parent: a, subject: "pending")
             let passes = f.index.graphValidationPassesForTesting
             XCTAssertEqual(
                 try f.index.authorityItemFrontierAtCut(itemID: a.target.itemID, cut: accepted.binding), [b.id]
             )
-            let held = try f.commit(parents: [accepted.binding], changes: [(b, false)])
+            // The hold is the same source issuer's successor, not an unrelated source opinion.
+            let held = try f.commit(
+                parents: [accepted.binding], changes: [(b, false)], origin: f.origin,
+                localParent: accepted.binding)
             try f.index.setAuthorityDisposition(
                 id: b.id, evaluation: .init(disposition: .held, reason: "Verified revocation."))
             try f.index.reconcileAuthorityAcceptedItem(itemID: a.target.itemID)
