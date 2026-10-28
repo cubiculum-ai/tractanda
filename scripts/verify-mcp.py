@@ -224,21 +224,48 @@ def exercise(binary, adapter, root, checks):
             catalog_names = {tool["name"] for tool in catalog}
             assert len(catalog) == len(catalog_names), "Tool names must be unique"
             assert {
-                "tractanda_info", "tractanda_describe", "tractanda_query", "tractanda_get",
-                "tractanda_extracted_text", "tractanda_memberships", "tractanda_history",
-                "tractanda_revision", "tractanda_resolve", "tractanda_explain", "tractanda_commit",
-                "tractanda_learning_status", "tractanda_learning_train", "tractanda_learning_suggest",
-                "tractanda_learning_categories", "tractanda_learning_feedback",
-                "tractanda_learning_settings", "tractanda_learning_reset",
-                "tractanda_state", "tractanda_conflicts", "tractanda_resolve_conflict",
-                "tractanda_capture_preview", "tractanda_capture_commit",
-                "tractanda_semantic_status", "tractanda_semantic_search", "tractanda_semantic_results",
-                "tractanda_semantic_configure", "tractanda_semantic_rebuild", "tractanda_semantic_reset",
-                "tractanda_extracted_text_unit", "tractanda_attachments", "tractanda_attachment_content",
-                "tractanda_attachment_document_page", "tractanda_document_job_start",
-                "tractanda_document_job_status", "tractanda_document_job_cancel",
-                "tractanda_document_job_resume", "tractanda_document_job_rebase",
-                "tractanda_document_job_page", "tractanda_document_job_discard", "tractanda_document_jobs",
+                'tractanda_attachment_content',
+                'tractanda_attachment_document_page',
+                'tractanda_attachments',
+                'tractanda_capture_commit',
+                'tractanda_capture_preview',
+                'tractanda_commit',
+                'tractanda_conflicts',
+                'tractanda_describe',
+                'tractanda_document_job_cancel',
+                'tractanda_document_job_discard',
+                'tractanda_document_job_page',
+                'tractanda_document_job_rebase',
+                'tractanda_document_job_resume',
+                'tractanda_document_job_start',
+                'tractanda_document_job_status',
+                'tractanda_document_jobs',
+                'tractanda_explain',
+                'tractanda_extracted_text',
+                'tractanda_extracted_text_unit',
+                'tractanda_get',
+                'tractanda_get_bounded',
+                'tractanda_history',
+                'tractanda_info',
+                'tractanda_learning_categories',
+                'tractanda_learning_feedback',
+                'tractanda_learning_reset',
+                'tractanda_learning_settings',
+                'tractanda_learning_status',
+                'tractanda_learning_suggest',
+                'tractanda_learning_train',
+                'tractanda_memberships',
+                'tractanda_query',
+                'tractanda_resolve',
+                'tractanda_resolve_conflict',
+                'tractanda_revision',
+                'tractanda_semantic_configure',
+                'tractanda_semantic_rebuild',
+                'tractanda_semantic_reset',
+                'tractanda_semantic_results',
+                'tractanda_semantic_search',
+                'tractanda_semantic_status',
+                'tractanda_state',
             } == catalog_names
             for tool in catalog:
                 assert tool["inputSchema"]["additionalProperties"] is False
@@ -291,7 +318,7 @@ def exercise(binary, adapter, root, checks):
             item_id = wire.item_id(first)
             native_full = native.get(item_id)
             compact = native.call("TractandaItem/get", {
-                "ids": [item_id], "projection": "content", "maxBytes": 524288})
+                "ids": [item_id], "projection": "content"})
             assert first == compact["list"][0]
             assert client.tool("tractanda_get", {"ids": [item_id]}) == compact
             full = client.tool("tractanda_get_bounded", {"ids": [item_id], "projection": "full", "maxBytes": 524288})

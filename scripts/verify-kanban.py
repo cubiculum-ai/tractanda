@@ -179,7 +179,10 @@ def main():
                 connection.endheaders()
                 check(connection.getresponse().status == 413, 'Oversized declared body is rejected before upload')
                 connection.close()
-                check(json.loads(send_http_request(body=b'{bad')[2])['code'] == 'invalidRequest', 'Malformed native JSON is diagnosed')
+                malformed_status, malformed_headers, malformed_body = send_http_request(body=b'{bad')
+                malformed = json.loads(malformed_body)
+                check(malformed_status == 400 and malformed['type'] == 'urn:ietf:params:jmap:error:notJSON',
+                      'Malformed native JSON uses the common JMAP request problem')
                 check(method_result('Unsupported/method',{})[1]['type'] == 'unknownMethod', 'Native method errors retain their envelope')
 
                 revision = cli('get',socket,first_id)['list'][0]

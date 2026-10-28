@@ -26,7 +26,7 @@ def main():
     parser.add_argument('--import-from', dest='import_from', type=pathlib.Path)
     args = parser.parse_args()
     binary = str(pathlib.Path(args.binary).resolve())
-    with tempfile.TemporaryDirectory(prefix='tl-') as temporary:
+    with tempfile.TemporaryDirectory(prefix='tl-', dir='/tmp') as temporary:
         root = pathlib.Path(temporary)
         store, socket = root/'store', root/'server.sock'
         if args.import_from:

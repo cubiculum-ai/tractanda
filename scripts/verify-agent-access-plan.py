@@ -241,8 +241,11 @@ def _native_verify(binary):
             _write_json(snapshot_path, snapshot)
             _write_json(grants_path, grants)
             policy = client.call("TractandaItem/query", query_arguments({"expression": 'classID == "AccessConfigurationItem"'}))
-            _assert(policy["total"] == 1, "fresh store has one founding access policy")
-            founding_policy = client.get(policy["ids"][0])
+            _assert(policy["total"] == 0 and policy["ids"] == [], "personal policy is not a canonical item")
+            profile_path = store / ".tractanda-personal-profile.json"
+            profile_before = profile_path.read_bytes()
+            _assert(client.call("TractandaStore/info")["persistenceProfile"] == "personal-workgroup",
+                    "native fixture uses the current personal persistence profile")
             canonical_before = WIRE.manifest(store)
             try:
                 PLANNER.build_plan(snapshot_path, grants_path, owner, group, agent)
@@ -282,10 +285,12 @@ def _native_verify(binary):
                 )
 
             # The old planner's configuration-create phase is inapplicable to a fresh
-            # store. Keep its existing founding policy and verify it was not changed.
+            # personal store. Permission-only changes must preserve its local policy.
             info = client.call("TractandaStore/info")
             _assert(info.get("accessMode") == "multi-user", "fresh store must retain its configured access mode")
-            _assert(client.get(policy["ids"][0]) == founding_policy, "permission rewrites must preserve founding policy")
+            _assert(profile_path.read_bytes() == profile_before, "permission rewrites must preserve exact local policy")
+            _assert(client.call("TractandaItem/query", query_arguments({"expression": 'classID == "AccessConfigurationItem"'}))["total"] == 0,
+                    "permission rewrites must not mint a canonical policy item")
 
             untouched = [item_id for item_id in query_ids if item_id not in grants["read"] + grants["edit"]][0]
             current = client.get(untouched)

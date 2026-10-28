@@ -272,10 +272,11 @@ def main():
         subprocess.check_output([binary, "init", str(root / "store")])
         with wire.server(binary, root / "store", path) as client:
             with terminal(tui, path, recovery) as ui:
-                ui.wait("Store access configuration")
-                founding = client.call("TractandaItem/query", query_arguments({}))
-                assert founding["total"] == 1
-                assert client.get(founding["ids"][0])["fields"]["classID"] == wire.text("AccessConfigurationItem")
+                ui.wait("No items.")
+                initial = client.call("TractandaItem/query", query_arguments({}))
+                assert initial["total"] == 0 and initial["ids"] == []
+                assert client.call("TractandaStore/info")["persistenceProfile"] == "personal-workgroup"
+                profile_before = (root / "store/.tractanda-personal-profile.json").read_bytes()
                 assert termios.tcgetattr(ui.slave) != ui.original
                 ui.send("c"); ui.wait("Category manager")
                 ui.send(ESC + b"n"); ui.wait("New category")
@@ -374,6 +375,9 @@ def main():
                 checks.append("Actual lost native response, preserved request across TUI restart, explicit idempotent retry with one revision, and SIGTERM terminal restoration")
             finally:
                 proxy.close()
+
+            assert (root / "store/.tractanda-personal-profile.json").read_bytes() == profile_before
+            checks.append("Current personal policy remains local and unchanged through UI item workflows")
 
             # Default journals use a temporary state root here. The first window retains the
             # historical primary slot; the second gets a deterministic alternate. After that
