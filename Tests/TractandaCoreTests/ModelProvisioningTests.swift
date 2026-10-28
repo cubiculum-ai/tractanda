@@ -44,7 +44,7 @@ final class ModelProvisioningTests: XCTestCase {
         if let root = environment["TRACTANDA_MODEL_METADATA_ROOT"],
             let source = environment["TRACTANDA_MODEL_METADATA_SOURCE"],
             let rawMask = environment["TRACTANDA_MODEL_METADATA_UMASK"],
-            let mask = UInt32(rawMask, radix: 8) {
+            let mask = mode_t(rawMask, radix: 8) {
             _ = umask(mask)
             let model = artifact(revision: String(repeating: "b", count: 40))
             let rootURL = URL(fileURLWithPath: root)
