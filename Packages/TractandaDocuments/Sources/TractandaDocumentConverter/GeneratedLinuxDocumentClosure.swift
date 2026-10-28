@@ -1,6 +1,7 @@
 #if os(Linux)
     /// Exact private closure already exercised under the production install prefix.
-    /// This generated input is excluded from descriptor source hashes to avoid cycles.
+    /// This compiler input remains in descriptor source hashes; only architecture
+    /// digest literals are normalized to avoid self-reference.
     enum ApprovedLinuxDocumentClosure {
         #if arch(x86_64)
             static let sha256: String? = "8edce98a4bc2d2c3e359f79010d17c67ee08f84409ef83149f3522b0629d3cae"
