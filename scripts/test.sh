@@ -24,6 +24,7 @@ python3 scripts/test-release-status.py
 python3 scripts/test-docling-packaging.py
 python3 scripts/test-docling-model-validator.py
 python3 scripts/test-linux-docling-provenance.py
+python3 scripts/test-swift-test-wrapper.py
 run_tests() (
     log=$1; scratch=$2; shift 2
     result=0
@@ -34,7 +35,13 @@ run_tests() (
 import re,sys
 from pathlib import Path
 text=Path(sys.argv[1]).read_text()
-if re.search(r"Test (?:Suite|Case) [^\n]*failed|\berror:|No tests found",text):
+# Compiler warnings can quote source such as `phase: phase, error: error)`.
+# Remove terminal styling (including caret-escaped ANSI in captured output) and
+# only explicit numbered Swift source-context rows;
+# unnumbered caret/diagnostic rows, warnings and all runtime failures stay visible.
+text=re.sub(r'(?:\x1b|\^\[)\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)', '', text)
+text='\n'.join(line for line in text.splitlines() if not re.match(r'^\s*\d+\s*\|',line))
+if re.search(r"Test (?:Suite|Case) [^\n]*failed|\berror:|No tests found|^\s*✘[^\n]*\bfailed\b",text,re.M):
     raise SystemExit('Test output contains a failure.')
 if not re.search(r'Executed [1-9][0-9]* tests|Test run with [1-9][0-9]* tests',text):
     raise SystemExit('No completed nonempty test run was recorded.')
