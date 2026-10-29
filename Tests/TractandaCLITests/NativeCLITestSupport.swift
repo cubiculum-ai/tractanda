@@ -23,6 +23,7 @@ func currentBuiltTestCLI(anchor: AnyClass) throws -> URL {
         // product, rather than guessing a build-metadata directory layout.
         let testProducts = [
             "TractandaCLITests", "TractandaCLITests.xctest", "TractandaPackageTests.xctest",
+            "TractandaCLITests-test-runner",
         ]
         let image = try runner.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
         guard testProducts.contains(runner.lastPathComponent), image.isRegularFile == true,
