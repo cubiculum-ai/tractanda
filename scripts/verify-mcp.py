@@ -532,8 +532,8 @@ def exercise(binary, adapter, root, checks):
             assert native.call("TractandaItem/query", query_arguments({}))["total"] == before
             normal_large = client.tool_with_revision("tractanda_commit", wire.intent("create", "normal-large-result", class_id="Item", changes={
                 "subject": wire.text("Normal compact write"), "body": wire.text("x" * 300000)}))["revision"]
-            assert normal_large == native.call("TractandaItem/get", {
-                "ids": [wire.item_id(normal_large)], "projection": "content"})["list"][0]
+            assert canonical_record(normal_large) == canonical_record(native.call("TractandaItem/get", {
+                "ids": [wire.item_id(normal_large)], "projection": "content"})["list"][0])
             assert native.call("TractandaItem/query", query_arguments({}))["total"] == before + 1
             oversized_result = wire.intent("create", "oversized-result", class_id="Item", changes={"subject": wire.text("Large result"), "body": wire.text("x" * 600000)})
             saved_receipt = client.tool("tractanda_commit", oversized_result)
