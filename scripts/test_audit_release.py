@@ -122,6 +122,26 @@ class ReleaseAuditTests(unittest.TestCase):
         self.assertIn(('debian/large.txt', 'large source file requires review'), findings)
         self.assertNotIn(('.facelift/cache/generated.json', 'unexpected release path'), findings)
 
+    def test_exact_public_model_catalog_passes(self):
+        root = self.audit_fixture_repo()
+        (root / 'config').mkdir()
+        shutil.copyfile(ROOT / 'config/model-artifacts.json', root / 'config/model-artifacts.json')
+        subprocess.run(['git', 'add', '--', 'config/model-artifacts.json'], cwd=root, check=True)
+        result, report = self.run_audit(root)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(report['status'], 'passed')
+        self.assertIn('config/model-artifacts.json', {row['path'] for row in report['manifest']})
+
+    def test_unrelated_config_path_remains_rejected(self):
+        root = self.audit_fixture_repo()
+        (root / 'config').mkdir()
+        (root / 'config/local-settings.json').write_text('{"private":true}\n')
+        subprocess.run(['git', 'add', '--force', '--', 'config/local-settings.json'], cwd=root, check=True)
+        result, report = self.run_audit(root)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(('config/local-settings.json', 'unexpected release path'),
+                      {(row['path'], row['rule']) for row in report['findings']})
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -10,6 +10,7 @@ ALLOWED_ROOT = {'install.sh', '.gitignore', '.gitattributes', '.swift-format', '
 ALLOWED_DIRS = {'Sources', 'Tests', 'Packages', 'scripts', 'templates', 'examples', 'containers', 'debian',
                 'docs', '.github', 'LICENSES', 'plugins'}
 PUBLIC_CATALOGS = {'.agents/plugins/marketplace.json', '.claude-plugin/marketplace.json'}
+PUBLIC_MODEL_CATALOGS = {'config/model-artifacts.json'}
 PUBLIC_SKILL_REFERENCES = {
     'plugins/tractanda/skills/tractanda/references/connection.md',
     'plugins/tractanda/skills/tractanda/references/importing.md',
@@ -76,7 +77,8 @@ def main():
         if (args.staged and staged[name][0] not in {'100644', '100755'}) or (not args.staged and path.is_symlink()):
             findings.append({'path': name, 'rule': 'symlink requires explicit review'})
             continue
-        if parts[0] not in ALLOWED_DIRS and name not in ALLOWED_ROOT and name not in PUBLIC_CATALOGS:
+        if (parts[0] not in ALLOWED_DIRS and name not in ALLOWED_ROOT
+                and name not in PUBLIC_CATALOGS | PUBLIC_MODEL_CATALOGS):
             findings.append({'path': name, 'rule': 'unexpected release path'})
         if any(part in PRIVATE_DIRS for part in parts) and name not in PUBLIC_CATALOGS | PUBLIC_SKILL_REFERENCES:
             findings.append({'path': name, 'rule': 'private/development directory'})
