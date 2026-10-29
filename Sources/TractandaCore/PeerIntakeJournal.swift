@@ -849,14 +849,18 @@ final class PeerIntakeJournal {
                 throw TractandaError("peerObjectCollision", "Publication original differs.")
             }
             let destination: [String]
-            if let existingPath {
-                destination = existingPath.split(separator: "/").map(String.init)
-            } else if let locator = try files.readIfPresent(
-                path: canonicalPath(object, publication: publication), maximumBytes: 512),
-                let text = String(data: locator, encoding: .utf8)
+            // The synchronized locator survives index loss. A disposable index's verified
+            // path is only a hint before that durable receiver choice exists.
+            if let locator = try files.readIfPresent(
+                path: canonicalPath(object, publication: publication), maximumBytes: 512)
             {
+                guard let text = String(data: locator, encoding: .utf8) else {
+                    throw TractandaError("invalidPeerPackage", "Unsafe retained locator.")
+                }
                 _ = try retainedBytes(object, publication: publication)
                 destination = text.split(separator: "/").map(String.init)
+            } else if let existingPath {
+                destination = existingPath.split(separator: "/").map(String.init)
             } else if object.kind == .item {
                 let revision = try AuthorityRevision(originalBytes: bytes).revision
                 guard revision.revisionID == object.id else {

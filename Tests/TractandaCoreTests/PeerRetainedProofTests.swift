@@ -118,6 +118,183 @@ final class PeerRetainedProofTests: XCTestCase {
         return locators
     }
 
+    private struct LocatorReplayFixture {
+        let store: Fixture
+        let journal: PeerIntakeJournal
+        let package: FrozenPackage
+        let object: PeerPackage.Object
+        let bytes: Data
+        let oldPath: String
+        let candidatePath: String
+    }
+
+    private func locatorReplayFixture() throws -> LocatorReplayFixture {
+        let f = try Fixture()
+        try f.bootstrap()
+        let next = try f.edit(uid: f.sourceAccounts.bob, subject: "controlled locator replay")
+        let values = try f.source.peerMetadataObjects(revisionID: next.revisionID)
+        let (object, bytes) = try XCTUnwrap(values.first { Fixture.isEvidence($0, for: next.revisionID) })
+        let original = try CanonicalAuthorityOriginal(bytes)
+        XCTAssertEqual(original.recordID, object.id)
+        XCTAssertEqual(original.storeID, f.storeID)
+        let package = try frozen(
+            [(object, bytes)], context: f.context,
+            contextToken: f.receiver.peerIntakeContextToken(), phase: .sealed,
+            profile: PeerPackage.retainedOriginalProfile)
+        f.receiverAccounts.bobHasGroup = false
+        f.receiver = nil
+        try seed(package.files, root: f.receiverRoot, fixture: f)
+        let journal = PeerIntakeJournal(root: f.receiverRoot, ownerUID: tractanda_uid())
+        let oldPath = "authority/records/2026/10/29/15/08/" + object.id + ".authority"
+        let candidatePath = "authority/records/2026/10/29/15/09/" + object.id + ".authority"
+        return .init(
+            store: f, journal: journal, package: package, object: object, bytes: bytes,
+            oldPath: oldPath, candidatePath: candidatePath)
+    }
+
+    func testDurableLocatorSurvivesVerifiedIndexHintFromAnotherArrivalMinute() throws {
+        let replay = try locatorReplayFixture()
+        let f = replay.store
+        let journal = replay.journal
+        let package = replay.package
+        let object = replay.object
+        let bytes = replay.bytes
+        let oldPath = replay.oldPath
+        let candidatePath = replay.candidatePath
+        XCTAssertEqual(
+            try journal.publishOriginal(
+                object, bytes: bytes, publication: package.publication, existingPath: oldPath), oldPath)
+        // Frozen historical input may contain an independently verified copy selected by a
+        // rebuilt disposable index. No clock is changed and no network admission is performed.
+        try journal.files.writeImmutable(
+            bytes, path: candidatePath.split(separator: "/").map(String.init), maximumBytes: object.length)
+        XCTAssertEqual(
+            try journal.files.read(
+                path: candidatePath.split(separator: "/").map(String.init), maximumBytes: object.length),
+            bytes)
+        let locatorPath = try journal.canonicalPath(object, publication: package.publication)
+        let locatorURL = f.receiverRoot.appendingPathComponent(locatorPath.joined(separator: "/"))
+        let before = try journal.files.read(path: locatorPath, maximumBytes: 512)
+        let metadata = try FileMetadata.read(at: locatorURL)
+        XCTAssertEqual(before, Data(oldPath.utf8))
+        XCTAssertNotEqual(before, Data(candidatePath.utf8))
+        let report: [String: String] = [
+            "storedLocator": String(decoding: before, as: UTF8.self),
+            "verifiedIndexHint": candidatePath, "originalSHA256": object.sha256,
+            "candidateSHA256": AuthorityRecordCodec.sha256(bytes),
+        ]
+        print(
+            "CONTROLLED_LOCATOR_REPLAY "
+                + String(
+                    decoding: try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys]),
+                    as: UTF8.self))
+        defer {
+            let after = try? journal.files.read(path: locatorPath, maximumBytes: 512)
+            print("CONTROLLED_LOCATOR_AFTER " + String(decoding: after ?? Data(), as: UTF8.self))
+            XCTAssertEqual(after, before)
+            XCTAssertEqual(try? FileMetadata.read(at: locatorURL), metadata)
+        }
+        XCTAssertEqual(
+            try journal.publishOriginal(
+                object, bytes: bytes, publication: package.publication, existingPath: candidatePath), oldPath)
+        XCTAssertEqual(try journal.retainedBytes(object, publication: package.publication), bytes)
+        try f.capacity()
+    }
+
+    func testPlannedLocatorBeforeOriginalSurvivesDifferentVerifiedIndexHint() throws {
+        let r = try locatorReplayFixture()
+        let locatorPath = try r.journal.canonicalPath(r.object, publication: r.package.publication)
+        let locatorName = locatorPath.joined(separator: "/")
+        try seed(
+            [locatorName: Data(r.oldPath.utf8), r.candidatePath: r.bytes],
+            root: r.store.receiverRoot, fixture: r.store)
+        XCTAssertNil(try r.journal.retainedBytes(r.object, publication: r.package.publication))
+        let locatorURL = r.store.receiverRoot.appendingPathComponent(locatorName)
+        let candidateURL = r.store.receiverRoot.appendingPathComponent(r.candidatePath)
+        let before = try FileMetadata.read(at: locatorURL)
+        let candidateBefore = try FileMetadata.read(at: candidateURL)
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: r.store.receiverRoot.appendingPathComponent(r.oldPath).path))
+        XCTAssertEqual(
+            try r.journal.publishOriginal(
+                r.object, bytes: r.bytes, publication: r.package.publication, existingPath: r.candidatePath),
+            r.oldPath)
+        XCTAssertEqual(try r.journal.retainedBytes(r.object, publication: r.package.publication), r.bytes)
+        XCTAssertEqual(try r.journal.files.read(path: locatorPath, maximumBytes: 512), Data(r.oldPath.utf8))
+        XCTAssertEqual(try FileMetadata.read(at: locatorURL), before)
+        XCTAssertEqual(try Data(contentsOf: candidateURL), r.bytes)
+        XCTAssertEqual(try FileMetadata.read(at: candidateURL), candidateBefore)
+        try r.store.capacity()
+    }
+
+    func testCorruptOrUnsafeSavedOriginalCannotFallBackToVerifiedIndexHint() throws {
+        for unsafeMode in [false, true] {
+            let r = try locatorReplayFixture()
+            let locatorPath = try r.journal.canonicalPath(r.object, publication: r.package.publication)
+            let locatorName = locatorPath.joined(separator: "/")
+            var retained = r.bytes
+            if !unsafeMode { retained[0] ^= 1 }
+            try seed(
+                [locatorName: Data(r.oldPath.utf8), r.oldPath: retained, r.candidatePath: r.bytes],
+                root: r.store.receiverRoot, fixture: r.store)
+            let originalURL = r.store.receiverRoot.appendingPathComponent(r.oldPath)
+            if unsafeMode {
+                try FileManager.default.setAttributes(
+                    [.posixPermissions: 0o600], ofItemAtPath: originalURL.path)
+            }
+            let locatorURL = r.store.receiverRoot.appendingPathComponent(locatorName)
+            let candidateURL = r.store.receiverRoot.appendingPathComponent(r.candidatePath)
+            let locatorBefore = try FileMetadata.read(at: locatorURL)
+            let candidateBefore = try FileMetadata.read(at: candidateURL)
+            code(unsafeMode ? "documentIntegrity" : "peerObjectCollision") {
+                _ = try r.journal.publishOriginal(
+                    r.object, bytes: r.bytes, publication: r.package.publication,
+                    existingPath: r.candidatePath)
+            }
+            XCTAssertEqual(
+                try r.journal.files.read(path: locatorPath, maximumBytes: 512), Data(r.oldPath.utf8))
+            XCTAssertEqual(try FileMetadata.read(at: locatorURL), locatorBefore)
+            XCTAssertEqual(try Data(contentsOf: originalURL), retained)
+            XCTAssertEqual(try Data(contentsOf: candidateURL), r.bytes)
+            XCTAssertEqual(try FileMetadata.read(at: candidateURL), candidateBefore)
+            try r.store.capacity()
+        }
+    }
+
+    func testMalformedOrMismatchedSavedLocatorCannotFallBackToVerifiedIndexHint() throws {
+        for variant in 0..<3 {
+            let r = try locatorReplayFixture()
+            let locatorPath = try r.journal.canonicalPath(r.object, publication: r.package.publication)
+            let locatorName = locatorPath.joined(separator: "/")
+            let wrongPath = "authority/records/2026/10/29/15/08/" + (try Fixture.id()) + ".authority"
+            let locator =
+                variant == 0
+                ? Data([0xff])
+                : variant == 1 ? Data("../outside".utf8) : Data(wrongPath.utf8)
+            var files = [locatorName: locator, r.candidatePath: r.bytes]
+            if variant == 2 { files[wrongPath] = r.bytes }
+            try seed(files, root: r.store.receiverRoot, fixture: r.store)
+            let locatorURL = r.store.receiverRoot.appendingPathComponent(locatorName)
+            let candidateURL = r.store.receiverRoot.appendingPathComponent(r.candidatePath)
+            let locatorBefore = try FileMetadata.read(at: locatorURL)
+            let candidateBefore = try FileMetadata.read(at: candidateURL)
+            code("invalidPeerPackage") {
+                _ = try r.journal.publishOriginal(
+                    r.object, bytes: r.bytes, publication: r.package.publication,
+                    existingPath: r.candidatePath)
+            }
+            XCTAssertEqual(try r.journal.files.read(path: locatorPath, maximumBytes: 512), locator)
+            XCTAssertEqual(try FileMetadata.read(at: locatorURL), locatorBefore)
+            XCTAssertEqual(try Data(contentsOf: candidateURL), r.bytes)
+            XCTAssertEqual(try FileMetadata.read(at: candidateURL), candidateBefore)
+            XCTAssertFalse(
+                FileManager.default.fileExists(
+                    atPath: r.store.receiverRoot.appendingPathComponent(r.oldPath).path))
+            try r.store.capacity()
+        }
+    }
+
     private func recoverSealed(held: Bool, profile: String = PeerPackage.retainedMetadataProfile) throws {
         let f = try Fixture()
         try f.bootstrap()
