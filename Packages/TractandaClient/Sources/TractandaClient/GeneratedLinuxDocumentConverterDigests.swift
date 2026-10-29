@@ -2,6 +2,6 @@
 /// descriptor source digest with only architecture digest literals normalized.
 /// Retain superseded values in the history list.
 enum GeneratedLinuxDocumentConverterDigests {
-    static let amd64: String? = "dfa09494f380c6093469e24d701452526f27a2789272a5d25a421329845fbaee"
-    static let arm64: String? = "561cd6cf1835ff00a6b9b0bb39998665a78e52d2dcba0dad4bc88e55fda65538"
+    static let amd64: String? = "610fdf77f4d8f037ec0d6510d50023e9e8d02f79a36236e044e446150ffca013"
+    static let arm64: String? = "b40ec16204a9d32c59bb50302aeec5fabf03245e21a7a35c0a7a166af2674c92"
 }
