@@ -51,7 +51,16 @@ def prepare(arch, component_root, manifest, converter, toolchain, output):
     actual_toolchain = B.read_json(toolchain); assert actual_toolchain == component['toolchain']
     recorded = next(x for x in old_descriptor['privateDependencies'] if x['path'] == 'bin/tractanda-document-converter')
     facts = B.elf(converter, arch)
-    assert facts['needed'] == recorded['needed'] and facts['soname'] == recorded['soname'] and facts['searchPaths'] == recorded['runpath'], 'New converter requires fresh ELF closure audit'
+    needed = facts['needed']
+    direct_zlib = (arch == 'amd64' and needed.count('libz.so.1') == 1
+                   and [name for name in needed if name != 'libz.so.1'] == recorded['needed'])
+    assert (needed == recorded['needed'] or direct_zlib) and facts['soname'] == recorded['soname'] and facts['searchPaths'] == recorded['runpath'], 'New converter requires fresh ELF closure audit'
+    if direct_zlib:
+        old_zlib = [x for x in old_descriptor['osDependencies'] if x['soname'] == 'libz.so.1']
+        assert len(old_zlib) == 1 and old_zlib[0]['provider'] == 'zlib1g' and old_zlib[0]['version'] == '1:1.3.dfsg+really1.3.1-1+b1'
+        zlib_path, zlib_provider = B.system_library('libz.so.1', arch)
+        assert zlib_provider['package'] == old_zlib[0]['provider'] and zlib_provider['version'] == old_zlib[0]['version']
+        assert digest(zlib_path) == '85590dd58edf5445e18bc7193e5ebc01ac5841f1ae187e97705a662e90c6421e'
     allowed = {x['soname']: set(x['requiredSymbolVersions']) for x in old_descriptor['osDependencies']}
     previous_needs = required_versions(component_root / 'bin/tractanda-document-converter')
     for soname, versions in required_versions(converter).items():
@@ -79,6 +88,9 @@ def prepare(arch, component_root, manifest, converter, toolchain, output):
     }
     output.mkdir(mode=0o700); prov = output / 'linux-build-provenance.json'; write(prov, provenance)
     desc = dict(old_descriptor); desc['buildProvenanceSHA256'] = digest(prov); files = []
+    if direct_zlib:
+        desc['privateDependencies'] = [dict(row, needed=needed) if row['path'] == recorded['path'] else row
+                                       for row in old_descriptor['privateDependencies']]
     for row in old_descriptor['files']:
         name = B.safe_path(row['path']); entry = dict(row)
         if name == 'licenses/Docling/linux-build-provenance.json': entry.update(sha256=digest(prov), size=prov.stat().st_size, mode=0o644)
