@@ -186,9 +186,26 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         }
     }
 
+    private func readerRequirementStage(_ url: URL, root: URL) -> Bool {
+        let prefix = ".reader-requirement-"
+        let suffix = ".stage"
+        let name = url.lastPathComponent
+        guard url.deletingLastPathComponent().path == root.appendingPathComponent("store").path,
+            name.hasPrefix(prefix), name.hasSuffix(suffix)
+        else { return false }
+        let id = String(name.dropFirst(prefix.count).dropLast(suffix.count))
+        guard let uuid = UUID(uuidString: id) else { return false }
+        return uuid.uuidString == id
+    }
+
     private func operationalInventoryPath(_ path: String, root: URL) -> Bool {
         let url = URL(fileURLWithPath: path)
         let name = url.lastPathComponent
+        if readerRequirementStage(url, root: root) {
+            // Its writer has no explicit encoded-size bound. Restart the complete
+            // inventory rather than guessing a charge for a vanished stage.
+            return true
+        }
         let atomic =
             name.hasPrefix(".checkpoint-") && name.hasSuffix(".tmp")
             && UUID(uuidString: String(name.dropFirst(12).dropLast(4))) != nil
@@ -350,6 +367,85 @@ final class DocumentJobCoordinatorTests: XCTestCase {
                 })
             XCTAssertEqual(attempts, 1, "Unknown and canonical paths must not be retried")
         }
+    }
+
+    func testReaderRequirementStageDisappearanceRetriesWholeBoundedInventory() throws {
+        let root = try GuardedFixtureDirectory.create(
+            prefix: "j", source: "DocumentJobCoordinatorTests", test: name)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = root.appendingPathComponent("store")
+        try FileManager.default.createDirectory(
+            at: store, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let id = "ABCDEF12-1234-4ABC-8ABC-ABCDEF123456"
+        let stage = store.appendingPathComponent(".reader-requirement-" + id + ".stage")
+        let probe = root.appendingPathComponent("probe")
+        try Data([1]).write(to: probe)
+        try Data([1]).write(to: stage)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: stage.path)
+        var removed = false
+        try capacity(root) { url in
+            if url.path == stage.path, !removed {
+                try FileManager.default.removeItem(at: url)
+                removed = true
+            }
+        }
+        XCTAssertTrue(removed, "The enumerated reader stage must actually disappear")
+
+        try Data([1]).write(to: stage)
+        let oversized = root.appendingPathComponent("oversized-after-reader-stage")
+        var introducedOversized = false
+        XCTAssertThrowsError(
+            try capacity(root) { url in
+                if url.path == stage.path, !introducedOversized {
+                    try FileManager.default.removeItem(at: url)
+                    let fd = open(oversized.path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+                    guard fd >= 0 else { throw POSIXError(.EIO) }
+                    defer { _ = close(fd) }
+                    guard ftruncate(fd, 16 * 1024 * 1024 + 1) == 0 else { throw POSIXError(.EIO) }
+                    introducedOversized = true
+                }
+            }
+        ) { error in
+            XCTAssertEqual((error as? TractandaError)?.code, "resourceLimit")
+        }
+        XCTAssertTrue(introducedOversized, "The retry must rescan and enforce the complete cap")
+        try FileManager.default.removeItem(at: oversized)
+
+        var attempts = 0
+        XCTAssertThrowsError(
+            try capacity(root) { _ in
+                attempts += 1
+                throw NSError(
+                    domain: NSPOSIXErrorDomain, code: Int(ENOENT), userInfo: [NSFilePathErrorKey: stage.path])
+            })
+        XCTAssertEqual(attempts, 3, "Reader-stage retries remain bounded")
+        for rejected in [
+            store.appendingPathComponent("canonical-reader.json"),
+            store.appendingPathComponent(".reader-requirement-" + id.lowercased() + ".stage"),
+            store.appendingPathComponent(".reader-requirement-not-a-uuid.stage"),
+            root.appendingPathComponent("other/" + stage.lastPathComponent),
+        ] {
+            attempts = 0
+            XCTAssertThrowsError(
+                try capacity(root) { _ in
+                    attempts += 1
+                    throw NSError(
+                        domain: NSPOSIXErrorDomain, code: Int(ENOENT),
+                        userInfo: [NSFilePathErrorKey: rejected.path])
+                })
+            XCTAssertEqual(attempts, 1, "Durable, malformed and wrong-root paths must not be retried")
+        }
+        attempts = 0
+        XCTAssertThrowsError(
+            try capacity(root) { _ in
+                attempts += 1
+                throw NSError(
+                    domain: NSPOSIXErrorDomain, code: Int(EACCES), userInfo: [NSFilePathErrorKey: stage.path])
+            })
+        XCTAssertEqual(attempts, 1, "Non-ENOENT errors must not be retried")
+        try FileManager.default.createSymbolicLink(at: stage, withDestinationURL: probe)
+        XCTAssertThrowsError(try accountedBytes(stage, root: root))
+        XCTAssertThrowsError(try capacity(root), "An exact-name stage symlink must not be accepted")
     }
 
     func testFixturePhysicalPathsRejectAliasesAndEscapedRelativeEntries() throws {
@@ -570,6 +666,13 @@ final class DocumentJobCoordinatorTests: XCTestCase {
     private func accountedBytes(_ url: URL, root: URL) throws -> UInt64 {
         var metadata = stat()
         if lstat(url.path, &metadata) == 0 {
+            if readerRequirementStage(url, root: root) {
+                guard metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+                    metadata.st_uid == getuid(), metadata.st_mode & 0o077 == 0, metadata.st_nlink == 1
+                else {
+                    throw TractandaError("resourceLimit", "Unsafe reader-requirement stage in fixture.")
+                }
+            }
             guard metadata.st_size >= 0 else {
                 throw TractandaError("resourceLimit", "Fixture file size is unknown.")
             }
