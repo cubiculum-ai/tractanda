@@ -27,6 +27,17 @@ def obj(value):
     return tagged("object", value)
 
 
+def canonical_record(record):
+    """Compare domain content after checking the distinct Item/Revision DTO identities."""
+    item_id, revision_id = wire.item_id(record), wire.revision_id(record)
+    if 'itemId' in record:
+        assert record['id'] == revision_id and record['itemId'] == item_id
+    else:
+        assert record['id'] == item_id and record['revisionId'] == revision_id
+        assert record.get('resolution', {}).get('status', 'ready') == 'ready'
+    return {'formatVersion': record['formatVersion'], 'fields': record['fields']}
+
+
 def comparable_info(value):
     """Exclude adapter-local diagnostics; compare state against a fresh native read."""
     return {key: item for key, item in value.items() if key != "connection"}
@@ -324,7 +335,7 @@ def exercise(binary, adapter, root, checks):
             native_full = native.get(item_id)
             compact = native.call("TractandaItem/get", {
                 "ids": [item_id], "projection": "content"})
-            assert first == compact["list"][0]
+            assert canonical_record(first) == canonical_record(compact["list"][0])
             assert client.tool("tractanda_get", {"ids": [item_id]}) == compact
             full = client.tool("tractanda_get_bounded", {"ids": [item_id], "projection": "full", "maxBytes": 524288})
             assert full["list"] == [native_full]
@@ -407,8 +418,8 @@ def exercise(binary, adapter, root, checks):
             feedback = {"itemID": candidate_id, "categoryID": category_id, "expectedRevisionID": wire.revision_id(candidate),
                 "operationID": "accept", "action": "accept", "modelID": trained["modelID"]}
             accepted = client.tool_with_revision("tractanda_learning_feedback", feedback)["revision"]
-            assert accepted == native.call("TractandaItem/get", {
-                "ids": [candidate_id], "projection": "content"})["list"][0]
+            assert canonical_record(accepted) == canonical_record(native.call("TractandaItem/get", {
+                "ids": [candidate_id], "projection": "content"})["list"][0])
             assert client.tool("tractanda_get", {"ids": [candidate_id], "projection": "full"})["list"] == [native.get(candidate_id)]
             assert client.tool("tractanda_explain", {"itemID": candidate_id, "categoryID": category_id})["included"] is True
             explanation = client.tool("tractanda_explain", {"itemID": candidate_id, "categoryID": parent_id})
@@ -430,13 +441,13 @@ def exercise(binary, adapter, root, checks):
                 "expectedRevisionID": wire.revision_id(category), "operationID": "settings",
                 "settings": obj({"profile": wire.text("tractanda.category-learning.v1"), "threshold": tagged("real", -0.2)})})
             assert configured["revision"]["fields"]["learningSettings"]["value"]["threshold"]["value"] == -0.2
-            assert configured["revision"] == native.call("TractandaItem/get", {
-                "ids": [category_id], "projection": "content"})["list"][0]
+            assert canonical_record(configured["revision"]) == canonical_record(native.call("TractandaItem/get", {
+                "ids": [category_id], "projection": "content"})["list"][0])
             assert client.tool("tractanda_get", {"ids": [category_id], "projection": "full"})["list"] == [native.get(category_id)]
             assert client.tool("tractanda_learning_train", {"categoryID": category_id})["status"] == "ready"
             assert client.tool("tractanda_learning_reset", {"categoryID": category_id})["status"] == "untrained"
-            assert cleared == native.call("TractandaItem/get", {
-                "ids": [candidate_id], "projection": "content"})["list"][0]
+            assert canonical_record(cleared) == canonical_record(native.call("TractandaItem/get", {
+                "ids": [candidate_id], "projection": "content"})["list"][0])
             assert client.tool("tractanda_get", {"ids": [candidate_id], "projection": "full"})["list"] == [native.get(candidate_id)]
             checks.append("training from actual assignments/exclusions, suggestions in both directions, feedback/retry, manual authority, settings and reset")
 

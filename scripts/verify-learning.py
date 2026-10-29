@@ -19,6 +19,14 @@ def check(condition, message):
     print('PASS:', message, flush=True)
 
 
+
+def same_immutable_revision(item, revision):
+    assert item['id'] == ipc.item_id(item) and item['revisionId'] == ipc.revision_id(item)
+    assert revision['id'] == ipc.revision_id(revision) and revision['itemId'] == ipc.item_id(revision)
+    assert item.get('resolution', {}).get('status', 'ready') == 'ready'
+    return item['formatVersion'] == revision['formatVersion'] and item['fields'] == revision['fields']
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('binary')
@@ -112,7 +120,7 @@ def main():
                                 feedbackRequest=request,settingsRequest=settings_request,score=suggestion['score'])
             else:
                 category = manifest['categoryID']
-                check(client.get(ipc.item_id(manifest['accepted'])) == manifest['accepted'], 'Canonical-only transfer preserves the accepted revision')
+                check(same_immutable_revision(client.get(ipc.item_id(manifest['accepted'])), manifest['accepted']), 'Canonical-only transfer preserves the accepted revision')
                 check(cli('learning-status',category)['status'] == 'untrained', 'A canonical-only copy needs training, not a copied database or model')
                 check(call('feedback',**manifest['feedbackRequest'])['replayed'], 'Feedback receipt is recovered from files on the other platform')
                 check(call('settings',**manifest['settingsRequest'])['replayed'], 'Settings receipt is recovered from files on the other platform')
@@ -122,7 +130,7 @@ def main():
                 check(suggestion['itemID'] == manifest['candidateID'], 'Rebuilt model suggests the same remaining item')
                 check(abs(suggestion['score'] - manifest['score']) < 1e-9, 'Category text tokenization and scores agree across the transfer')
             check(call('reset',categoryID=category)['status'] == 'untrained', 'Per-category reset discards derived learning')
-            check(client.get(ipc.item_id(manifest['accepted'])) == manifest['accepted'], 'Reset leaves feedback and manual assignments intact')
+            check(same_immutable_revision(client.get(ipc.item_id(manifest['accepted'])), manifest['accepted']), 'Reset leaves feedback and manual assignments intact')
             client.rebuild("verify-learning-rebuild")
             check(cli('learn',category)['status'] == 'ready', 'Rebuilt index can train again from canonical files')
             if not args.import_from:
