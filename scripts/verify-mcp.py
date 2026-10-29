@@ -524,7 +524,7 @@ def exercise(binary, adapter, root, checks):
                     "name": "tractanda_get", "arguments": {"ids": [wire.item_id(moderate)]}}})
             responses = [client.receive() for _ in range(8)]
             assert {response["id"] for response in responses} == set(range(1000, 1008))
-            assert all(response["result"]["structuredContent"]["list"] == native.call(
+            assert all(decode_result("TractandaItem/get", response["result"]["structuredContent"])["list"] == native.call(
                 "TractandaItem/get", {"ids": [wire.item_id(moderate)], "projection": "content"})["list"] for response in responses)
             before = native.call("TractandaItem/query", query_arguments({}))["total"]
             too_large = wire.intent("create", "oversized-argument", class_id="Item", changes={"body": wire.text("x" * (1024 * 1024))})
