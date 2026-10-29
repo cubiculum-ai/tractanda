@@ -28,7 +28,7 @@ jobs:
       - name: Install platform and test dependencies
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends libsqlite3-dev libpam0g-dev uuid-dev python3 acl gnupg
+          apt-get install -y --no-install-recommends libsqlite3-dev libpam0g-dev uuid-dev python3 acl gnupg curl
       - name: Verify the published source tree
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"

@@ -103,7 +103,7 @@ def stage_package(bundle, stage, snapshot, arch, maintainer, copyright_bytes, re
     closure = B.runtime_closure(bundle, rows, arch, receipt['input']['dynamicLoads'])
     if closure != receipt['runtimeClosure']:
         raise ValueError('Actual runtime closure differs from its admitted bundle receipt.')
-    depends = sorted(set(closure['depends']) | {'curl', 'lsof', 'sudo', 'uuid-runtime', 'init-system-helpers'})
+    depends = sorted(set(closure['depends']) | {'ca-certificates', 'curl', 'lsof', 'sudo', 'uuid-runtime', 'init-system-helpers'})
     if any('\n' in value or ',' in value for value in depends):
         raise ValueError('Unsafe derived Debian dependency field.')
     stage.mkdir(mode=0o755)

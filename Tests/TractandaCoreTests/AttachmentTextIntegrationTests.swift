@@ -271,8 +271,14 @@ final class AttachmentTextIntegrationTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: rebuiltIndex.path))
         let recovered = try AttachmentFixtureCapacity.makeStore(
             root: restored, indexDirectory: rebuiltIndex)
-        XCTAssertEqual(
-            recovered.indexDirectory.resolvingSymlinksInPath(), rebuiltIndex.resolvingSymlinksInPath())
+        // Foundation's directory-URL spelling can differ by a trailing slash on
+        // Linux. Verify the actual rebuilt directory's filesystem identity.
+        let observedIndex = try FileMetadata.read(at: recovered.indexDirectory.resolvingSymlinksInPath())
+        let expectedIndex = try FileMetadata.read(at: rebuiltIndex.resolvingSymlinksInPath())
+        XCTAssertEqual(observedIndex.type, .directory)
+        XCTAssertEqual(expectedIndex.type, .directory)
+        XCTAssertEqual(observedIndex.device, expectedIndex.device)
+        XCTAssertEqual(observedIndex.inode, expectedIndex.inode)
         XCTAssertEqual(
             try recovered.get(saved.itemID).fields["attachmentText"], saved.fields["attachmentText"])
         XCTAssertEqual(try recovered.candidates(text: "searchable text").map(\.itemID), [saved.itemID])

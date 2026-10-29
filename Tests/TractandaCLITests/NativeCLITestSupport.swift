@@ -12,9 +12,23 @@ func currentBuiltTestCLI(anchor: AnyClass) throws -> URL {
         }
         products = bundle.deletingLastPathComponent()
     #else
-        let runner = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
-        guard runner.pathExtension == "xctest" else {
-            throw TractandaError("fixture", "Cannot identify the current SwiftPM test executable.")
+        // SwiftPM may supply an argv[0] label without the old .xctest suffix.
+        // The kernel image identifies the actual running test, never a PATH alias.
+        let path = try FileManager.default.destinationOfSymbolicLink(atPath: "/proc/self/exe")
+        guard path.hasPrefix("/"), !path.hasSuffix(" (deleted)") else {
+            throw TractandaError("fixture", "Cannot identify the current kernel test executable.")
+        }
+        let runner = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
+        // Accept this target's Swift Build runner or the native SwiftPM test
+        // product, rather than guessing a build-metadata directory layout.
+        let testProducts = [
+            "TractandaCLITests", "TractandaCLITests.xctest", "TractandaPackageTests.xctest",
+        ]
+        let image = try runner.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+        guard testProducts.contains(runner.lastPathComponent), image.isRegularFile == true,
+            image.isSymbolicLink != true, FileManager.default.isExecutableFile(atPath: runner.path)
+        else {
+            throw TractandaError("fixture", "The kernel image is not this SwiftPM test product.")
         }
         products = runner.deletingLastPathComponent()
     #endif

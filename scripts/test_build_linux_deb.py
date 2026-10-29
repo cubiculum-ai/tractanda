@@ -62,6 +62,7 @@ class LinuxDebTests(unittest.TestCase):
             self.assertIn('Bugs: https://github.com/cubiculum-ai/tractanda/issues\n', control)
             self.assertIn('Pre-Depends: python3, systemd\n',control)
             self.assertIn('libc6 (>= 2.41-12)',control)
+            self.assertIn('ca-certificates',control)
             self.assertIn('curl',control);self.assertIn('lsof',control);self.assertIn('sudo',control)
             self.assertIn('uuid-runtime', control);self.assertIn('init-system-helpers', control)
             self.assertFalse((stage/'etc').exists());self.assertFalse((stage/'var').exists())
