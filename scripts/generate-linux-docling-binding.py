@@ -4,8 +4,9 @@
 The compiler inputs include both generated Swift files. Only their two
 self-referential digest literals are normalized; the packaging registry is an
 output index and is excluded by exact path. All other source rows are bound.
-A new converter must have the same verified dynamic closure as the reviewed
-baseline; otherwise a fresh full closure audit is required.
+A new converter must match the reviewed dynamic closure, except for the
+independently audited direct zlib edge on the finite amd64 supplier bundle.
+Any other difference requires a fresh full closure audit.
 """
 import argparse, hashlib, importlib.util, json, os, re, stat, subprocess
 from pathlib import Path
@@ -39,6 +40,21 @@ def required_versions(path):
         if n and mode == 'needs' and current: needs.setdefault(current, set()).add(n.group(1))
     return needs
 
+def check_converter_elf(arch, facts, recorded, old_descriptor):
+    # This single compiler-output delta was audited against the finite Debian supplier bundle;
+    # it is not a general allowlist for new dependencies.
+    needed = facts['needed']
+    direct_zlib = (arch == 'amd64' and needed.count('libz.so.1') == 1
+                   and [name for name in needed if name != 'libz.so.1'] == recorded['needed'])
+    assert (needed == recorded['needed'] or direct_zlib) and facts['soname'] == recorded['soname'] and facts['searchPaths'] == recorded['runpath'], 'New converter requires fresh ELF closure audit'
+    if direct_zlib:
+        old_zlib = [x for x in old_descriptor['osDependencies'] if x['soname'] == 'libz.so.1']
+        assert len(old_zlib) == 1 and old_zlib[0]['provider'] == 'zlib1g' and old_zlib[0]['version'] == '1:1.3.dfsg+really1.3.1-1+b1'
+        zlib_path, zlib_provider = B.system_library('libz.so.1', arch)
+        assert zlib_provider['package'] == old_zlib[0]['provider'] and zlib_provider['version'] == old_zlib[0]['version']
+        assert digest(zlib_path) == '85590dd58edf5445e18bc7193e5ebc01ac5841f1ae187e97705a662e90c6421e'
+    return needed, direct_zlib
+
 def prepare(arch, component_root, manifest, converter, toolchain, output):
     assert arch in ('arm64', 'amd64') and not output.exists() and not output.is_symlink()
     assert component_root.is_dir() and converter.is_file() and not converter.is_symlink()
@@ -51,16 +67,7 @@ def prepare(arch, component_root, manifest, converter, toolchain, output):
     actual_toolchain = B.read_json(toolchain); assert actual_toolchain == component['toolchain']
     recorded = next(x for x in old_descriptor['privateDependencies'] if x['path'] == 'bin/tractanda-document-converter')
     facts = B.elf(converter, arch)
-    needed = facts['needed']
-    direct_zlib = (arch == 'amd64' and needed.count('libz.so.1') == 1
-                   and [name for name in needed if name != 'libz.so.1'] == recorded['needed'])
-    assert (needed == recorded['needed'] or direct_zlib) and facts['soname'] == recorded['soname'] and facts['searchPaths'] == recorded['runpath'], 'New converter requires fresh ELF closure audit'
-    if direct_zlib:
-        old_zlib = [x for x in old_descriptor['osDependencies'] if x['soname'] == 'libz.so.1']
-        assert len(old_zlib) == 1 and old_zlib[0]['provider'] == 'zlib1g' and old_zlib[0]['version'] == '1:1.3.dfsg+really1.3.1-1+b1'
-        zlib_path, zlib_provider = B.system_library('libz.so.1', arch)
-        assert zlib_provider['package'] == old_zlib[0]['provider'] and zlib_provider['version'] == old_zlib[0]['version']
-        assert digest(zlib_path) == '85590dd58edf5445e18bc7193e5ebc01ac5841f1ae187e97705a662e90c6421e'
+    needed, direct_zlib = check_converter_elf(arch, facts, recorded, old_descriptor)
     allowed = {x['soname']: set(x['requiredSymbolVersions']) for x in old_descriptor['osDependencies']}
     previous_needs = required_versions(component_root / 'bin/tractanda-document-converter')
     for soname, versions in required_versions(converter).items():

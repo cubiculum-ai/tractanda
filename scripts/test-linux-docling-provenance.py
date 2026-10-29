@@ -2,12 +2,14 @@
 """Finite source selection must bind real inputs without binding unrelated tests."""
 import hashlib, importlib.util, shutil, tempfile, unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 def load(name,path):
     spec=importlib.util.spec_from_file_location(name,path);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);return module
 N=load('normalization',ROOT/'scripts/linux-docling-provenance.py')
 P=load('producer',ROOT/'scripts/produce-linux-payload.py')
+G=load('generator',ROOT/'scripts/generate-linux-docling-binding.py')
 
 class TemplateNormalizationTests(unittest.TestCase):
     def test_only_architecture_digests_are_normalized(self):
@@ -56,4 +58,19 @@ class TemplateNormalizationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d);expected=self.fixture(root);p=root/'Packages/TractandaClient/Package.swift';p.unlink();p.symlink_to(ROOT/'Packages/TractandaClient/Package.swift')
             with self.assertRaises((AssertionError,ValueError)):N.normalized_rows(P,None,root,expected)
+class ConverterClosureTests(unittest.TestCase):
+    def test_audited_zlib_and_rejected_deltas(self):
+        recorded={'needed':['liba.so','libb.so'],'soname':None,'runpath':['$ORIGIN/../lib']}
+        descriptor={'osDependencies':[{'soname':'libz.so.1','provider':'zlib1g','version':'1:1.3.dfsg+really1.3.1-1+b1'}]}
+        facts={'needed':['liba.so','libz.so.1','libb.so'],'soname':None,'searchPaths':['$ORIGIN/../lib']}
+        provider={'package':'zlib1g','version':'1:1.3.dfsg+really1.3.1-1+b1'}
+        with patch.object(G.B,'system_library',return_value=(Path('/provider'),provider)), patch.object(G,'digest',return_value='85590dd58edf5445e18bc7193e5ebc01ac5841f1ae187e97705a662e90c6421e'):
+            self.assertEqual(G.check_converter_elf('amd64',facts,recorded,descriptor),(facts['needed'],True))
+            with self.assertRaises(AssertionError):G.check_converter_elf('amd64',{**facts,'needed':facts['needed']+['libother.so']},recorded,descriptor)
+            with self.assertRaises(AssertionError):G.check_converter_elf('arm64',facts,recorded,descriptor)
+        with patch.object(G.B,'system_library',return_value=(Path('/provider'),{**provider,'version':'wrong'})):
+            with self.assertRaises(AssertionError):G.check_converter_elf('amd64',facts,recorded,descriptor)
+        with patch.object(G.B,'system_library',return_value=(Path('/provider'),provider)), patch.object(G,'digest',return_value='0'*64):
+            with self.assertRaises(AssertionError):G.check_converter_elf('amd64',facts,recorded,descriptor)
+
 if __name__=='__main__':unittest.main(verbosity=2)
