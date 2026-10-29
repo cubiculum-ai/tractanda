@@ -192,6 +192,18 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         let atomic =
             name.hasPrefix(".checkpoint-") && name.hasSuffix(".tmp")
             && UUID(uuidString: String(name.dropFirst(12).dropLast(4))) != nil
+        let rebuildPrefix = "personal-rebuild-"
+        let rebuildSuffix = ".sqlite-journal"
+        if url.deletingLastPathComponent().path == root.appendingPathComponent("store/index").path,
+            name.hasPrefix(rebuildPrefix), name.hasSuffix(rebuildSuffix)
+        {
+            let id = String(name.dropFirst(rebuildPrefix.count).dropLast(rebuildSuffix.count))
+            if let uuid = UUID(uuidString: id), uuid.uuidString.lowercased() == id {
+                // SQLite DELETE journals can disappear during an active rebuild.
+                // Restart the whole bounded inventory; never omit or zero-charge a file.
+                return true
+            }
+        }
         if url.deletingLastPathComponent().path == root.appendingPathComponent("store").path {
             return name == ".tractanda-checkpoint-dirty" || atomic
         }
@@ -281,17 +293,63 @@ final class DocumentJobCoordinatorTests: XCTestCase {
                     domain: NSPOSIXErrorDomain, code: Int(ENOENT), userInfo: [NSFilePathErrorKey: marker])
             })
         XCTAssertEqual(attempts, 3)
+        let index = root.appendingPathComponent("store/index")
+        try FileManager.default.createDirectory(at: index, withIntermediateDirectories: true)
+        let rebuildJournal = index.appendingPathComponent(
+            "personal-rebuild-" + Identifier.make() + ".sqlite-journal")
+        try Data([1]).write(to: rebuildJournal)
+        var removedJournal = false
+        try capacity(root) { url in
+            if url.path == rebuildJournal.path, !removedJournal {
+                try FileManager.default.removeItem(at: url)
+                removedJournal = true
+            }
+        }
+        XCTAssertTrue(removedJournal, "The enumerated transient journal must actually disappear")
+        try Data([1]).write(to: rebuildJournal)
+        let oversized = root.appendingPathComponent("oversized-after-retry")
+        var introducedOversized = false
+        XCTAssertThrowsError(
+            try capacity(root) { url in
+                if url.path == rebuildJournal.path, !introducedOversized {
+                    try FileManager.default.removeItem(at: url)
+                    let fd = open(oversized.path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+                    guard fd >= 0 else { throw POSIXError(.EIO) }
+                    defer { _ = close(fd) }
+                    guard ftruncate(fd, 16 * 1024 * 1024 + 1) == 0 else { throw POSIXError(.EIO) }
+                    introducedOversized = true
+                }
+            }
+        ) { error in
+            XCTAssertEqual((error as? TractandaError)?.code, "resourceLimit")
+        }
+        XCTAssertTrue(introducedOversized, "The retry must rescan and enforce the full cap")
+        try FileManager.default.removeItem(at: oversized)
         attempts = 0
         XCTAssertThrowsError(
             try capacity(root) { _ in
                 attempts += 1
                 throw NSError(
                     domain: NSPOSIXErrorDomain, code: Int(ENOENT),
-                    userInfo: [
-                        NSFilePathErrorKey: root.appendingPathComponent("store/.tractanda/revision.json").path
-                    ])
+                    userInfo: [NSFilePathErrorKey: rebuildJournal.path])
             })
-        XCTAssertEqual(attempts, 1)
+        XCTAssertEqual(attempts, 3, "Rebuild journal retries remain bounded")
+        for rejected in [
+            index.appendingPathComponent("personal-rebuild-not-a-uuid.sqlite-journal"),
+            index.appendingPathComponent("items.sqlite-journal"),
+            root.appendingPathComponent("store/other/" + rebuildJournal.lastPathComponent),
+            root.appendingPathComponent("store/.tractanda/revision.json"),
+        ] {
+            attempts = 0
+            XCTAssertThrowsError(
+                try capacity(root) { _ in
+                    attempts += 1
+                    throw NSError(
+                        domain: NSPOSIXErrorDomain, code: Int(ENOENT),
+                        userInfo: [NSFilePathErrorKey: rejected.path])
+                })
+            XCTAssertEqual(attempts, 1, "Unknown and canonical paths must not be retried")
+        }
     }
 
     func testFixturePhysicalPathsRejectAliasesAndEscapedRelativeEntries() throws {
