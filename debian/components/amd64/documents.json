@@ -9,7 +9,7 @@
   "documentExtraction": {
     "converterPath": "bin/tractanda-document-converter",
     "identity": {
-      "converter": "tractanda.docling-native.v2-idefics3-gelu-f32+linux-raster.8edce98a4bc2d2c3e359f79010d17c67ee08f84409ef83149f3522b0629d3cae",
+      "converter": "tractanda.docling-native.v2-idefics3-gelu-f32+linux-raster.610fdf77f4d8f037ec0d6510d50023e9e8d02f79a36236e044e446150ffca013",
       "model": "ibm-granite/granite-docling-258M-mlx",
       "modelRevision": "a8b999991fe8c521a0cec749973414eaaf823731",
       "parser": "doctags-strict-v1",
@@ -81,8 +81,8 @@
     {
       "mode": 493,
       "path": "bin/tractanda-document-converter",
-      "sha256": "e31a68c6316d1ae9ab8be43980588130fad7a7f024957ee9227a6de78ce5f0be",
-      "size": 65548816
+      "sha256": "c2726a2935fc9627cff1df9acf8f636d1137e1c53d1514d266165bd125087c93",
+      "size": 66185544
     },
     {
       "mode": 493,
@@ -213,8 +213,8 @@
     {
       "mode": 420,
       "path": "lib/tractanda/document-native-closure.json",
-      "sha256": "8edce98a4bc2d2c3e359f79010d17c67ee08f84409ef83149f3522b0629d3cae",
-      "size": 44248
+      "sha256": "610fdf77f4d8f037ec0d6510d50023e9e8d02f79a36236e044e446150ffca013",
+      "size": 44269
     },
     {
       "mode": 493,
@@ -285,8 +285,8 @@
     {
       "mode": 420,
       "path": "licenses/Docling/linux-build-provenance.json",
-      "sha256": "1d40deaa695217616fe6852cb0bea88c57eddb6ec7b47e4cbfffc7dd525ad34d",
-      "size": 43381
+      "sha256": "1f4d321f08ae3ff8d70e1572f0f4a2d63daea6944082d9b5404ca0ace8da2837",
+      "size": 22391
     },
     {
       "mode": 420,
@@ -824,8 +824,8 @@
   ],
   "profile": "tractanda.linux-component-artifacts.v1",
   "recipe": {
-    "path": "scripts/export-linux-ml-component.py",
-    "sha256": "a743346562d1cc43672c2d98e01ad1a4fc45a5955865ffa20757371709954771"
+    "path": "scripts/assemble-linux-docling-component.py",
+    "sha256": "a30990d2e305c28a87b42cf0968dc17a1a8b57435000278fd7f5cce519619e3b"
   },
   "runtimeNotices": [
     "licenses/Docling/Granite-Docling-LICENSE",
@@ -927,7 +927,7 @@
     "licenses/system-build-provenance/libstdc++6-copyright"
   ],
   "runtimeRevision": "61a4b20d4ad01b10466e8fc94c50402a9f994430",
-  "sourceInputsSHA256": "9e1e64898bc67515b5352c9158dae7929dab478cd63237f46582304038ea751e",
+  "sourceInputsSHA256": "21a95e71fa5097446509bd3dde2ef721d4ea0d045851d538c79743f0a907d2bf",
   "toolchain": {
     "clangSHA256": "b566514eae95a8a59f9e50fda5352df11941fea4d71c60aab02c90674a7f2d60",
     "swiftFrontendSHA256": "aca990e29b10dd1f3e44d300517c5e8c01590bc081098e829c87b511a6856d56",

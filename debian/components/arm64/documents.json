@@ -9,7 +9,7 @@
   "documentExtraction": {
     "converterPath": "bin/tractanda-document-converter",
     "identity": {
-      "converter": "tractanda.docling-native.v2-idefics3-gelu-f32+linux-raster.26fa7c7735ee62b725fbb628e17f32f5b4f340ee47a89f89eb438bafaa886ae5",
+      "converter": "tractanda.docling-native.v2-idefics3-gelu-f32+linux-raster.b40ec16204a9d32c59bb50302aeec5fabf03245e21a7a35c0a7a166af2674c92",
       "model": "ibm-granite/granite-docling-258M-mlx",
       "modelRevision": "a8b999991fe8c521a0cec749973414eaaf823731",
       "parser": "doctags-strict-v1",
@@ -81,8 +81,8 @@
     {
       "mode": 493,
       "path": "bin/tractanda-document-converter",
-      "sha256": "60ef3e4d781d4d1416c1d626ed78fd4063eb53a058d7c0eda31e24296e615fbe",
-      "size": 62379624
+      "sha256": "99249e489414f2b629ac1fb283faeb5f938b55bea6e9e67adb4bd923dc9d71c4",
+      "size": 62970864
     },
     {
       "mode": 493,
@@ -213,7 +213,7 @@
     {
       "mode": 420,
       "path": "lib/tractanda/document-native-closure.json",
-      "sha256": "26fa7c7735ee62b725fbb628e17f32f5b4f340ee47a89f89eb438bafaa886ae5",
+      "sha256": "b40ec16204a9d32c59bb50302aeec5fabf03245e21a7a35c0a7a166af2674c92",
       "size": 44191
     },
     {
@@ -285,8 +285,8 @@
     {
       "mode": 420,
       "path": "licenses/Docling/linux-build-provenance.json",
-      "sha256": "4cbd68d7794a2d2207b6a67c0fd3156c6a0a32214ce41a0b0b219099426ace54",
-      "size": 44368
+      "sha256": "92ca4c72e528ec1c5ebcbcb66e29a10e2ca33d932dc72a6922b1b1a6a4e08a7c",
+      "size": 22393
     },
     {
       "mode": 420,
@@ -824,8 +824,8 @@
   ],
   "profile": "tractanda.linux-component-artifacts.v1",
   "recipe": {
-    "path": "scripts/export-linux-ml-component.py",
-    "sha256": "a743346562d1cc43672c2d98e01ad1a4fc45a5955865ffa20757371709954771"
+    "path": "scripts/assemble-linux-docling-component.py",
+    "sha256": "a30990d2e305c28a87b42cf0968dc17a1a8b57435000278fd7f5cce519619e3b"
   },
   "runtimeNotices": [
     "licenses/Docling/Granite-Docling-LICENSE",
@@ -927,7 +927,7 @@
     "licenses/system-build-provenance/libstdc++6-copyright"
   ],
   "runtimeRevision": "61a4b20d4ad01b10466e8fc94c50402a9f994430",
-  "sourceInputsSHA256": "056f0fd07a4c5c9d04feda8334e49ca886f9d917d0e310b8c8a3cc564c63bea7",
+  "sourceInputsSHA256": "e7ed880f9c4f62ff1bbdbc4bcab093f424911ba50973ab8502917534032c6aa0",
   "toolchain": {
     "clangSHA256": "712106992cb2e4abd378bb6b778c4b19e790df7948b1a3e0c0c518823ecf8cb5",
     "swiftFrontendSHA256": "6e1dbf14d284019b284344b49968cac64921d5999cf72b3b3d8d723340e90717",
