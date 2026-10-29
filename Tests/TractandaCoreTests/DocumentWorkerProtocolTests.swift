@@ -1,14 +1,40 @@
 import Foundation
+import TractandaClient
 import XCTest
 
 @testable import TractandaCore
 
 final class DocumentWorkerProtocolTests: XCTestCase {
-    private func bytes(_ name: String) throws -> Data {
+    private func bytes(_ name: String, activeIdentity: Bool = true) throws -> Data {
         let fixtures = try XCTUnwrap(
             Bundle.module.url(
                 forResource: "NativeDocumentWorker", withExtension: nil, subdirectory: "Fixtures"))
-        return try Data(contentsOf: fixtures.appendingPathComponent(name))
+        let frozen = try Data(contentsOf: fixtures.appendingPathComponent(name))
+        guard activeIdentity else { return frozen }
+        // The frozen vectors describe the common wire schema with the Mac identity.
+        // Change only that identity literal so active-worker tests reach the wire guards
+        // on Linux too; malformed fields and all other frozen bytes stay unchanged.
+        let text = try XCTUnwrap(String(data: frozen, encoding: .utf8))
+        return Data(
+            text.replacingOccurrences(
+                of: "\"converter\":\"tractanda.docling-native.v2-idefics3-gelu-f32\"",
+                with: "\"converter\":\"\(DocumentConverterIdentity().converter)\""
+            ).utf8)
+    }
+
+    func testPlatformCurrentBindingPreservesFrozenIdentityAdmission() throws {
+        let frozen = try bytes("binding.json", activeIdentity: false)
+        let retained = try JSONDecoder().decode(NativeDocumentBinding.self, from: frozen)
+        XCTAssertNoThrow(try retained.identity.validate(), "The frozen Mac identity remains readable")
+        #if os(Linux)
+            XCTAssertThrowsError(try NativeWorkerProtocol.binding(frozen)) {
+                XCTAssertEqual(($0 as? TractandaError)?.code, "unsupportedDocumentConverter")
+            }
+        #else
+            XCTAssertNoThrow(try NativeWorkerProtocol.binding(frozen))
+        #endif
+        let active = try NativeWorkerProtocol.binding(bytes("binding.json"))
+        XCTAssertEqual(active.identity, DocumentConverterIdentity())
     }
     func testFrozenPositiveAndNegativeWireFixturesMatchCoreIndependently() throws {
         let binding = try NativeWorkerProtocol.binding(bytes("binding.json"))
@@ -73,7 +99,8 @@ final class DocumentWorkerProtocolTests: XCTestCase {
                 Data(booleanCount.utf8), binding: binding, outstanding: nil, pageCount: 128))
     }
     func testKnownHistoricalIdentityCannotBindActiveNativeWorker() throws {
-        let original = try XCTUnwrap(String(data: bytes("binding.json"), encoding: .utf8))
+        let original = try XCTUnwrap(
+            String(data: bytes("binding.json", activeIdentity: false), encoding: .utf8))
         let historical = original.replacingOccurrences(
             of: "tractanda.docling-native.v2-idefics3-gelu-f32", with: "tractanda.docling-native.v1"
         )

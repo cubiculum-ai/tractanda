@@ -165,6 +165,25 @@ final class PeerIntakeResumeTests: XCTestCase {
             ]
         }
 
+        func replaceChunkBytes(_ bytes: Data, item: Staged, offset: Int = 0) throws {
+            let path = root.appendingPathComponent(chunkPath(item, offset: offset).joined(separator: "/"))
+            var metadata = stat()
+            guard lstat(path.path, &metadata) == 0,
+                metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+                metadata.st_uid == ownerUID, metadata.st_mode & 0o777 == 0o400,
+                metadata.st_nlink == 1
+            else { throw TractandaError("fixture", "Expected an owned immutable staged chunk") }
+            try bytes.write(to: path, options: .atomic)
+            // Atomic Data replacement creates a new file with platform-dependent mode.
+            // Restore custody so these mutations reach the digest/framing checks.
+            guard chmod(path.path, 0o400) == 0,
+                lstat(path.path, &metadata) == 0, metadata.st_uid == ownerUID,
+                metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+                metadata.st_mode & 0o777 == 0o400, metadata.st_nlink == 1
+            else { throw TractandaError("fixture", "Cannot retain immutable staged-chunk custody") }
+            try checkCapacity()
+        }
+
     }
 
     private func code(
@@ -321,7 +340,7 @@ final class PeerIntakeResumeTests: XCTestCase {
         let chunkPath = f.root.appendingPathComponent(f.chunkPath(item, offset: 0).joined(separator: "/"))
         var changed = try Data(contentsOf: chunkPath)
         changed[0] ^= 1
-        try changed.write(to: chunkPath, options: .atomic)
+        try f.replaceChunkBytes(changed, item: item)
         code("peerObjectCollision") {
             _ = try f.makeJournal().resumePage(
                 context: f.context, packageID: f.manifest.packageID,
@@ -447,12 +466,23 @@ final class PeerIntakeResumeTests: XCTestCase {
             corruptFixture.chunkPath(corruptItem, offset: 0).joined(separator: "/"))
         var changed = try Data(contentsOf: chunk)
         changed[0] ^= 1
-        try changed.write(to: chunk, options: .atomic)
+        // A writable replacement must still be refused before content checks.
+        guard chmod(chunk.path, 0o600) == 0 else {
+            throw TractandaError("fixture", "Cannot prepare unsafe chunk custody")
+        }
+        code("documentIntegrity") {
+            _ = try corruptFixture.makeJournal().resumePage(
+                context: corruptFixture.context, packageID: corruptFixture.manifest.packageID)
+        }
+        guard chmod(chunk.path, 0o400) == 0 else {
+            throw TractandaError("fixture", "Cannot restore chunk custody")
+        }
+        try corruptFixture.replaceChunkBytes(changed, item: corruptItem)
         code("peerObjectCollision") {
             _ = try corruptFixture.makeJournal().resumePage(
                 context: corruptFixture.context, packageID: corruptFixture.manifest.packageID)
         }
-        try changed.dropLast().write(to: chunk, options: .atomic)
+        try corruptFixture.replaceChunkBytes(Data(changed.dropLast()), item: corruptItem)
         code("invalidPeerPackage") {
             _ = try corruptFixture.makeJournal().resumePage(
                 context: corruptFixture.context, packageID: corruptFixture.manifest.packageID)

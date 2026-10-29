@@ -340,6 +340,7 @@ final class DocumentJobIntegrationTests: XCTestCase {
         let script = """
             #!/usr/bin/python3
             import json,sys
+            open(__file__+'.started','w').write('started')
             binding=json.load(open(sys.argv[5]))
             def emit(value):
                 result=dict(binding);result.update(value)
@@ -373,11 +374,16 @@ final class DocumentJobIntegrationTests: XCTestCase {
     // The fixture owner removes its directory only after this scope has awaited shutdown.
     private func withCoordinator(
         fixture: Fixture, converter: Bool = false, gate: PublicationGate? = nil,
+        runtimeVerifier: @escaping DocumentRuntimeVerifier = { _ in },
         body: (ServiceCoordinator) async throws -> Void
     ) async throws {
         let accounts = fixture.accounts
+        // This MCP boundary fixture uses a Python wire worker rather than an admitted
+        // Linux runtime. Keep the substitution local to the existing internal seam.
         let coordinator = try await ServiceCoordinator(
-            opening: fixture.store, documentConverter: converter ? fixture.converter : nil,
+            opening: fixture.store, embeddingProviderForTesting: nil, requireInitializedStore: true,
+            documentRuntimeVerifierForTesting: runtimeVerifier,
+            documentConverter: converter ? fixture.converter : nil,
             makeAccountDirectory: { accounts })
         if let gate {
             await coordinator.setDocumentJobPublicationHookForTesting { await gate.pause() }
@@ -474,6 +480,9 @@ final class DocumentJobIntegrationTests: XCTestCase {
             XCTAssertEqual(replay.objectValue?["jobID"]?.stringValue, jobID)
 
             try await waitForPublicationGate(gate, root: fixture.root)
+            XCTAssertTrue(
+                FileManager.default.fileExists(
+                    atPath: fixture.root.appendingPathComponent("worker.py.started").path))
             let prepublication = try await call(
                 "tractanda_document_job_status", ["jobID": .string(jobID)], gateway: gateway)
             XCTAssertEqual(prepublication.objectValue?["committed"], nil)
@@ -596,6 +605,40 @@ final class DocumentJobIntegrationTests: XCTestCase {
             XCTAssertEqual(try store.get(fixture.itemID).itemID, fixture.itemID)
         }
         try checkCapacity(at: fixture.root)
+    }
+
+    func testVerifierFailureThroughMCPPausesBeforeWorkerLaunch() async throws {
+        let fixture = try fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let executable = fixture.converter.executablePath
+        try await withCoordinator(
+            fixture: fixture, converter: true,
+            runtimeVerifier: { configuration in
+                guard configuration.executablePath == executable else {
+                    throw TractandaError("fixtureWrongExecutable", "Verifier received a different worker")
+                }
+                throw TractandaError("fixtureVerifierRejected", "Injected verifier called")
+            },
+            body: { coordinator in
+                let gateway = routedGateway(coordinator, uid: fixture.accounts.alice)
+                let started = try await call(
+                    "tractanda_document_job_start",
+                    [
+                        "itemID": .string(fixture.itemID),
+                        "expectedRevisionID": .string(fixture.revisionID),
+                        "attachmentID": .string(fixture.attachmentID),
+                        "operationID": .string(fixture.operationID),
+                    ], gateway: gateway)
+                let jobID = try XCTUnwrap(started.objectValue?["jobID"]?.stringValue)
+                let paused = try await waitForJob(jobID, gateway: gateway, root: fixture.root) {
+                    $0.objectValue?["state"]?.stringValue == "paused"
+                }
+                XCTAssertEqual(paused.objectValue?["reasonCode"]?.stringValue, "fixtureVerifierRejected")
+                XCTAssertFalse(
+                    FileManager.default.fileExists(
+                        atPath: fixture.root.appendingPathComponent("worker.py.started").path))
+            }
+        )
     }
 
 }
