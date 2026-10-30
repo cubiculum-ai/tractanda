@@ -98,6 +98,21 @@ final class DocumentWorkerProtocolTests: XCTestCase {
             try NativeWorkerProtocol.validateResponse(
                 Data(booleanCount.utf8), binding: binding, outstanding: nil, pageCount: 128))
     }
+    func testReadableUnknownProvenanceCannotBindActiveNativeWorker() throws {
+        let original = try bytes("binding.json", activeIdentity: false)
+        var wire = try XCTUnwrap(JSONSerialization.jsonObject(with: original) as? [String: Any])
+        var provenance = try XCTUnwrap(wire["identity"] as? [String: String])
+        provenance["converter"] = "future-native-build-" + String(repeating: "f", count: 64)
+        provenance["modelRevision"] = String(repeating: "b", count: 40)
+        provenance["runtimeRevision"] = String(repeating: "c", count: 40)
+        wire["identity"] = provenance
+        let data = try JSONSerialization.data(withJSONObject: wire)
+        let retained = try JSONDecoder().decode(NativeDocumentBinding.self, from: data)
+        XCTAssertNoThrow(try retained.identity.validate())
+        XCTAssertThrowsError(try retained.identity.validateCurrent())
+        XCTAssertThrowsError(try NativeWorkerProtocol.binding(data), "Readable provenance must never authorize launching a worker")
+    }
+
     func testKnownHistoricalIdentityCannotBindActiveNativeWorker() throws {
         let original = try XCTUnwrap(
             String(data: bytes("binding.json", activeIdentity: false), encoding: .utf8))

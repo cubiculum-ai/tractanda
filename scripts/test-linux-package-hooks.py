@@ -95,7 +95,8 @@ sys.exit(int(os.environ.get("MOCK_PYTHON_EXIT", "0")))
         return path
 
     def render(self, hook, *, helper=True, missing=()):
-        source = (DEBIAN / hook).read_text()
+        source = ((ROOT / "Tests/TractandaSetupTests/Fixtures/LegacyDebian/tractanda.prerm")
+                  if hook == "legacy.prerm" else (DEBIAN / hook)).read_text()
         fallback = FALLBACK.read_text()
         source = source.replace("@TRACTANDA_PACKAGE_HOOK_FALLBACK_PY@", fallback)
         source = source.replace("@TRACTANDA_PACKAGE_DESCRIPTOR_JSON@", DESCRIPTOR)
@@ -209,7 +210,6 @@ class PackageHookTests(unittest.TestCase):
 
     def test_prerm_and_abort_events_route_finitely(self):
         for hook, args, expected in (
-            ("tractanda.prerm", ("upgrade", "old"), "prerm-upgrade"),
             ("tractanda.prerm", ("remove",), "remove"),
             ("tractanda.prerm", ("failed-upgrade", "old", "new"), "abort-upgrade"),
             ("tractanda.preinst.in", ("abort-upgrade", "old"), "abort-upgrade"),
@@ -222,6 +222,24 @@ class PackageHookTests(unittest.TestCase):
             self.assertEqual(records[0]["program"], "python-hook")
             self.assertEqual(records[0]["args"], ["-I", "-", "verify-helper", str(self.harness.helper)])
             self.assertEqual(records[1]["args"], ["--package-lifecycle", expected])
+
+    def test_old_prerm_new_preinst_uses_genuine_stop_only_bridge(self):
+        old = "0.1.0~poc.15-1+personal.1793193134.fdaf8ff8b393"
+        result = self.harness.run("legacy.prerm", "upgrade", "0.1.0~poc.17-1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.harness.records()[1]["args"], ["--package-lifecycle", "prerm-upgrade"])
+        self.harness.clear()
+        result = self.harness.run("tractanda.preinst.in", "upgrade", old, "0.1.0~poc.17-1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        records = self.harness.records()
+        self.assertEqual(records[0]["args"][2], "preinst-helper")
+        self.assertEqual(records[1]["args"], ["--package-lifecycle", "prerm-upgrade"])
+        self.assertNotIn("--descriptor", records[1]["args"])
+
+    def test_future_prerm_defers_stop_to_preinst(self):
+        result = self.harness.run("tractanda.prerm", "upgrade", "0.1.0~poc.18-1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.harness.records(), [{"program": "python-hook", "args": ["-I", "-", "verify-helper", str(self.harness.helper)]}])
 
     def test_postinst_abort_remove_forms_dispatch_as_conservative_abort(self):
         for args in (("abort-remove",), ("abort-remove", "in-favour", "conflictor", "1.2")):
@@ -290,11 +308,11 @@ class PackageHookTests(unittest.TestCase):
 
         self.harness.clear()
         self.harness.env["MOCK_HELPER_EXIT"] = "42"
-        failed = self.harness.run("tractanda.prerm", "upgrade", "old")
+        failed = self.harness.run("tractanda.prerm", "remove")
         self.assertEqual(failed.returncode, 42)
         self.assertEqual(len(self.harness.records()), 2)
         self.assertEqual(self.harness.records()[0]["args"][2], "verify-helper")
-        self.assertEqual(self.harness.records()[1]["args"][-1], "prerm-upgrade")
+        self.assertEqual(self.harness.records()[1]["args"][-1], "remove")
 
 
 class SystemctlInventoryTests(unittest.TestCase):

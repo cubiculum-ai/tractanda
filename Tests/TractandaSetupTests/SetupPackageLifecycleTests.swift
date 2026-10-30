@@ -158,7 +158,8 @@ final class SetupPackageLifecycleTests: XCTestCase {
                 try engine.writeProtected(declaration.encoded() + Data([10]), to: descriptor, mode: 0o600)
             }
             return try engine.packageLifecycle(
-                .init(action: action, descriptor: declaration == nil ? nil : descriptor, instance: nil))
+                .init(action: action, descriptor: declaration == nil ? nil : descriptor, instance: nil,
+                    candidateBundle: action == .preflight ? engine.packagePayload : nil))
         }
         func configureFresh() throws {
             _ = try hook(.configure, engine.installedPackageCompatibility())
@@ -511,6 +512,140 @@ final class SetupPackageLifecycleTests: XCTestCase {
         XCTAssertEqual(try f.engine.readReceipt("a")?.freshTargetReplicaID, receipt.freshTargetReplicaID)
     }
 
+    func testUnconfiguredInstalledPackagePreflightAndUpgradeRequireNoInstance() throws {
+        let f = try fixture()
+        try f.configureFresh()
+        XCTAssertNil(try f.engine.readReceipt("a"))
+        let original = try f.engine.installedPackageCompatibility()
+        XCTAssertEqual(try f.engine.compatibilityOfInstalledUpgradeSource(), original)
+        XCTAssertNoThrow(try f.hook(.preflight, original))
+        let (incoming, bytes) = try f.next("0.1.0-poc.17")
+        _ = try f.hook(.preinst, incoming)
+        try bytes.write(to: f.manifestURL) // actual simulated dpkg unpack
+        XCTAssertTrue(try f.hook(.configure, incoming).contains("0 verified restart"))
+        XCTAssertNil(try f.engine.readReceipt("a"))
+        XCTAssertEqual(try f.engine.readPackageState()?.incoming, incoming)
+        XCTAssertEqual(try f.engine.readPackageState()?.phase, .committed)
+    }
+
+    func testHistoricalInstalledVerificationRequiresReceiptAndExactInventory() throws {
+        let f = try fixture()
+        try f.configureFresh()
+        try f.install()
+        let manifest = try f.engine.verifyHistoricalInstalledBundle()
+        XCTAssertEqual(manifest.version, (try f.engine.installedPackageCompatibility()).version)
+        let file = f.engine.packagePayload.appendingPathComponent("bin/tractanda")
+        let original = try Data(contentsOf: file)
+        try Data("tampered".utf8).write(to: file)
+        XCTAssertThrowsError(try f.engine.verifyHistoricalInstalledBundle())
+        try original.write(to: file)
+        XCTAssertNoThrow(try f.engine.verifyHistoricalInstalledBundle())
+        var receipt = try XCTUnwrap(f.engine.readReceipt("a"))
+        receipt.manifestSHA256 = String(repeating: "b", count: 64)
+        try f.engine.writeReceipt(receipt)
+        XCTAssertThrowsError(try f.engine.verifyHistoricalInstalledBundle())
+    }
+
+    func testHistoricalSameConverterDifferentRuntimeIsReceiptAnchoredData() throws {
+        let f = try fixture()
+        try f.configureFresh()
+        try f.install()
+        let prior = try JSONDecoder().decode(BundleManifest.self, from: Data(contentsOf: f.manifestURL))
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(DocumentExtractionPayload.pinned)) as? [String: Any])
+        var identity = try XCTUnwrap(object["identity"] as? [String: Any])
+        identity["converter"] = try XCTUnwrap(DocumentConverterIdentity.approvedLinuxConverter(architecture: prior.arch))
+        identity["runtimeRevision"] = String(repeating: "a", count: 40)
+        object["identity"] = identity
+        let document = try JSONDecoder().decode(DocumentExtractionPayload.self,
+            from: JSONSerialization.data(withJSONObject: object))
+        var files = prior.files
+        let paths = Set([document.converterPath, document.modelManifestPath,
+            document.runtimePatchManifestPath, document.runtimePatchPath] + document.noticePaths)
+        for path in paths {
+            let url = f.engine.packagePayload.appendingPathComponent(path)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let data = Data(("historical-" + path).utf8)
+            try data.write(to: url)
+            let mode: UInt16 = path == document.converterPath ? 0o755 : 0o644
+            try FileManager.default.setAttributes([.posixPermissions: NSNumber(value: mode)], ofItemAtPath: url.path)
+            files.append(.init(path: path, sha256: Fixture.digest(data), size: UInt64(data.count), mode: mode))
+        }
+        let historical = BundleManifest(version: prior.version, platform: prior.platform, arch: prior.arch,
+            files: files, documentExtraction: document, canonicalFormats: prior.canonicalFormats)
+        let bytes = try JSONEncoder().encode(historical)
+        try bytes.write(to: f.manifestURL)
+        let descriptor = SetupPackageCompatibility(manifestSHA256: Fixture.digest(bytes),
+            version: prior.version, arch: prior.arch, canonicalFormats: try XCTUnwrap(prior.canonicalFormats),
+            documentExtraction: document)
+        var state = try SetupPackageState(original: descriptor, instances: [])
+        state.incoming = descriptor
+        state.observed = descriptor
+        state.phase = .committed
+        try f.engine.writePackageState(state)
+        var receipt = try XCTUnwrap(f.engine.readReceipt("a"))
+        receipt.manifestSHA256 = descriptor.manifestSHA256
+        receipt.documentExtraction = document
+        try f.engine.writeReceipt(receipt)
+        XCTAssertThrowsError(try f.engine.verifyBundle(at: f.engine.packagePayload))
+        XCTAssertEqual(try f.engine.compatibilityOfInstalledUpgradeSource(), descriptor)
+        receipt.manifestSHA256 = String(repeating: "b", count: 64)
+        try f.engine.writeReceipt(receipt)
+        XCTAssertThrowsError(try f.engine.compatibilityOfInstalledUpgradeSource())
+    }
+
+    func testUnsupportedDescriptorPreflightLeavesRunningServicesAndJournalUntouched() throws {
+        let f = try fixture()
+        try f.configureFresh()
+        try f.install()
+        let original = try f.engine.installedPackageCompatibility()
+        let incompatible = SetupPackageCompatibility(
+            manifestSHA256: String(repeating: "b", count: 64), version: "1.0.0",
+            arch: original.arch, canonicalFormats: .legacy)
+        let before = try XCTUnwrap(f.engine.readPackageState())
+        let running = f.runner.running
+        let enabled = f.runner.enabled
+        let calls = f.runner.calls.count
+        XCTAssertNoThrow(try f.hook(.preflight, original))
+        let binary = f.engine.packagePayload.appendingPathComponent("bin/tractanda")
+        let actualBytes = try Data(contentsOf: binary)
+        try Data("tampered executable".utf8).write(to: binary)
+        XCTAssertThrowsError(try f.hook(.preflight, original))
+        try actualBytes.write(to: binary)
+        XCTAssertThrowsError(try f.hook(.preflight, incompatible))
+        XCTAssertThrowsError(try f.hook(.preinst, incompatible))
+        let unknownSemantic = SetupPackageCompatibility(
+            manifestSHA256: String(repeating: "c", count: 64), version: "1.0.0", arch: original.arch,
+            canonicalFormats: original.canonicalFormats, semanticProfile: "tractanda.peer-exchange.v99")
+        XCTAssertThrowsError(try f.hook(.preinst, unknownSemantic))
+        XCTAssertEqual(try f.engine.readPackageState(), before)
+        XCTAssertEqual(f.runner.running, running)
+        XCTAssertEqual(f.runner.enabled, enabled)
+        XCTAssertEqual(f.runner.calls.count, calls)
+        try f.engine.packageRuntimeGuard("a")
+    }
+
+    func testLegacyStopOnlyThenNewConfigureUsesActualIncomingPayload() throws {
+        let f = try fixture()
+        try f.configureFresh()
+        try f.install()
+        let (incoming, bytes) = try f.next("0.1.0-poc.17")
+        _ = try f.hook(.prermUpgrade) // actual old prerm stop-only contract
+        var retained = try XCTUnwrap(f.engine.readPackageState())
+        let (rejectedEarlier, _) = try f.next("0.1.0-poc.16.1")
+        retained.phase = .failed
+        retained.incoming = rejectedEarlier // historical failed attempt, not the new package
+        try f.engine.writePackageState(retained)
+        _ = try f.hook(.prermUpgrade) // old stop-only recovery keeps original intent
+        _ = try f.hook(.prermUpgrade) // new preinst calls old helper without fabricated descriptor
+        XCTAssertEqual(try f.engine.readPackageState()?.phase, .quiesced)
+        XCTAssertEqual(try f.engine.readPackageState()?.incoming, rejectedEarlier)
+        try bytes.write(to: f.manifestURL) // dpkg unpacks its actual new package
+        XCTAssertTrue(try f.hook(.configure, incoming).contains("1 verified restart"))
+        XCTAssertEqual(try f.engine.readPackageState()?.incoming, incoming)
+        try f.engine.packageRuntimeGuard("a")
+    }
+
     func testOldPrermAndRepeatedPreinstRetainOriginalRunningIntentAndBlockStarts() throws {
         let f = try fixture()
         try f.configureFresh()
@@ -590,6 +725,15 @@ final class SetupPackageLifecycleTests: XCTestCase {
         XCTAssertThrowsError(try f.engine.packageRuntimeGuard("a"))
         _ = try f.hook(.preinst, original)
         try originalBytes.write(to: f.manifestURL)
+        // A failed configure can retain a receipt for observed incoming bytes;
+        // the transaction binds both it and the actual restored original.
+        XCTAssertNoThrow(try f.engine.verifyHistoricalInstalledBundle())
+        let savedReceipt = try XCTUnwrap(f.engine.readReceipt("a"))
+        var unrelatedReceipt = savedReceipt
+        unrelatedReceipt.manifestSHA256 = String(repeating: "f", count: 64)
+        try f.engine.writeReceipt(unrelatedReceipt)
+        XCTAssertThrowsError(try f.engine.verifyHistoricalInstalledBundle())
+        try f.engine.writeReceipt(savedReceipt)
         f.failReadiness = false
         _ = try f.hook(.configure, original)
         XCTAssertEqual(try f.engine.readPackageState()?.phase, .committed)
@@ -614,7 +758,7 @@ final class SetupPackageLifecycleTests: XCTestCase {
         XCTAssertThrowsError(try f.hook(.preinst, rejected))
         let state = try XCTUnwrap(f.engine.readPackageState())
         XCTAssertEqual(state.observed?.manifestSHA256, incoming.manifestSHA256)
-        XCTAssertEqual(state.incoming, rejected)
+        XCTAssertEqual(state.incoming, incoming) // Rejected preflight did not mutate retained intent.
         XCTAssertEqual(try f.engine.sha256(f.manifestURL), incoming.manifestSHA256)
         _ = try f.hook(.preinst, original)
         XCTAssertEqual(try f.engine.readPackageState()?.phase, .awaitingUnpack)

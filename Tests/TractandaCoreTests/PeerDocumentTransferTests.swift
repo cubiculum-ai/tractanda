@@ -64,7 +64,7 @@ final class PeerDocumentTransferTests: XCTestCase {
     }
     private func tree(
         opaquePage: Data? = nil, source suppliedSource: AttachmentDocumentSource? = nil,
-        preservedWhitespace: Bool = false
+        preservedWhitespace: Bool = false, identity: DocumentConverterIdentity = .init()
     ) throws
         -> Tree
     {
@@ -118,7 +118,7 @@ final class PeerDocumentTransferTests: XCTestCase {
         var raw = try JSON.encode(
             DocumentManifest(
                 schema: "tractanda.document-manifest.v2", contentID: content,
-                publicationID: id(), source: source, identity: .init(), extractedAt: "2026-10-16T00:00:00Z",
+                publicationID: id(), source: source, identity: identity, extractedAt: "2026-10-16T00:00:00Z",
                 rootLevel: 1,
                 rootByteCount: Int64(root.count), rootSHA256: hash(root), pageCount: 2,
                 totalEncodedBytes: total, coverage: coverage))
@@ -148,6 +148,30 @@ final class PeerDocumentTransferTests: XCTestCase {
             try send(part, package: package, transfer: transfer)
         }
     }
+    func testAuthenticatedUnknownProvenanceIntakePreservesManifestBytes() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        var fields = try XCTUnwrap(JSONSerialization.jsonObject(with: JSON.encode(DocumentConverterIdentity())) as? [String: String])
+        fields["converter"] = "another-supported-data-producer"
+        fields["runtimeRevision"] = String(repeating: "d", count: 40)
+        let identity = try JSON.decode(DocumentConverterIdentity.self, JSONSerialization.data(withJSONObject: fields))
+        let package = try id()
+        let tree = try tree(preservedWhitespace: true, identity: identity)
+        try proofs(tree, package: package, transfer: f.transfer)
+        for part in tree.parts where part.0.part?.role == .page {
+            try send(part, package: package, transfer: f.transfer)
+        }
+        let binding = try f.transfer.tree(packageID: package, contentID: tree.manifest.id)
+        try f.contents.publishExact(stage: binding.stage, reference: tree.reference, manifestBytes: tree.raw)
+        let saved = try f.contents.manifest(tree.reference)
+        XCTAssertEqual(saved.identity, identity)
+        let directory = try f.contents.directory(tree.reference.contentID).reduce(f.root) { $0.appendingPathComponent($1) }
+        XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent("manifest.json")), tree.raw)
+        try f.contents.rebuildPlacement()
+        XCTAssertEqual(try f.contents.readPage(tree.reference, pageNumber: 2).status, "timeout")
+        XCTAssertThrowsError(try identity.validateCurrent())
+    }
+
     func testProofAuthorizedMultiNodePartsPublishExactPartialTreeAndRetainQuota() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.root) }

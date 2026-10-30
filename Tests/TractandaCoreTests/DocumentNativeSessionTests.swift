@@ -46,6 +46,8 @@ final class DocumentNativeSessionTests: XCTestCase {
             binding=json.load(open(sys.argv[5]))
             def emit(value):
                 result=dict(binding);result.update(value)
+                if '\(mode)'=='unexpected-build':
+                    result['identity']=dict(binding['identity']);result['identity']['runtimeRevision']='d'*40
                 print(json.dumps(result,separators=(',',':')),flush=True)
             emit({'type':'hello','pageCount':129,'modelLoaded':False,'modelForwardCalls':0})
             open('\(root.appendingPathComponent("worker-pid").path)','w').write(str(__import__('os').getpid()))
@@ -95,6 +97,12 @@ final class DocumentNativeSessionTests: XCTestCase {
             root: fixture.1.root, budgets: budgets ?? DocumentWorkerBudgets(), cancellation: .init(),
             runtimeVerifier: { _ in })
     }
+    func testReadableWorkerBuildProvenanceCannotReplaceRequestedResultIdentity() throws {
+        let f = try fixture(mode: "unexpected-build")
+        defer { try? FileManager.default.removeItem(at: f.0) }
+        XCTAssertThrowsError(try session(f), "Stored readability must not admit an unrequested worker identity")
+    }
+
     func testInjectedVerifierRunsAndFailurePreventsWorkerLaunch() throws {
         let fixture = try fixture(mode: "normal")
         defer { try? FileManager.default.removeItem(at: fixture.0) }

@@ -21,10 +21,24 @@ extension SetupEngine {
             return "Managed package startup admitted."
         }
         let incoming = try arguments.descriptor.map(capturePackageDescriptor)
+        if arguments.action == .preflight {
+            guard let incoming, let candidate = arguments.candidateBundle else {
+                throw SetupError("Missing incoming package declaration or candidate bundle.")
+            }
+            try preflightCandidatePayload(incoming, bundle: candidate)
+            try preflightPackageUpgrade(incoming)
+            return "Incoming package payload and format preflight passed; no services or package state changed."
+        }
+        if arguments.action == .preinst {
+            guard let incoming else { throw SetupError("Missing incoming package declaration.") }
+            try preflightPackageUpgrade(incoming)
+        }
         try ensureRootDirectory(roots.configuration)
         return try withInstallerLockResult {
             try recoverPackageDefinitions()
             switch arguments.action {
+            case .preflight:
+                throw SetupError("Read-only preflight cannot mutate package state.")
             case .prermUpgrade:
                 _ = try preparePackageUpgrade(incoming: nil)
                 return "All owned configured instances quiesced; original service intent retained."
@@ -159,12 +173,56 @@ extension SetupEngine {
         }
     }
 
+    /// Verify the actual candidate bytes and their root custody before considering
+    /// compatibility. This never runs a candidate converter or mutates live state.
+    func preflightCandidatePayload(_ incoming: SetupPackageCompatibility, bundle: URL) throws {
+        guard bundle.path.hasPrefix("/"), bundle.standardizedFileURL.path == bundle.path,
+            bundle.path != "/" else {
+            throw SetupError("Candidate bundle must be an absolute normalized protected path.")
+        }
+        if trustedOwnership {
+            try requireTrustedAncestry(of: bundle)
+            try requireOwned(bundle, uid: 0, directory: true)
+            guard let scan = FileManager.default.enumerator(at: bundle, includingPropertiesForKeys: nil)
+            else { throw SetupError("Cannot inspect candidate bundle custody.") }
+            var count = 0
+            for case let path as URL in scan {
+                count += 1
+                guard count <= 40_000 else { throw SetupError("Candidate bundle inventory exceeds its bound.") }
+                let attributes = try FileManager.default.attributesOfItem(atPath: path.path)
+                guard !isLink(path), let type = attributes[.type] as? FileAttributeType,
+                    type == .typeDirectory || type == .typeRegular
+                else { throw SetupError("Candidate bundle contains a link or special file.") }
+                try requireOwned(path, uid: 0, directory: type == .typeDirectory)
+            }
+        }
+        let manifest = try verifyBundle(at: bundle)
+        let digest = try sha256(bundle.appendingPathComponent("bundle-manifest.json"))
+        try incoming.requirePayload(manifest, digest: digest)
+    }
+
+    /// Pure format preflight: no service stops, startup denial, or journal mutation.
+    /// The quiescent canonical fence remains mandatory during actual preparation.
+    func preflightPackageUpgrade(_ incoming: SetupPackageCompatibility) throws {
+        let prior = try readPackageState()
+        let installed = try compatibilityOfInstalledUpgradeSource()
+        let original = (prior?.pending == true || prior?.phase == .removed) ? prior?.original : installed
+        guard let original else { throw SetupError("Package upgrade lacks its original commitment.") }
+        try incoming.requireRollingUpgrade(from: original)
+    }
+
     func preparePackageUpgrade(incoming: SetupPackageCompatibility?) throws -> SetupPackageState {
         let prior = try readPackageState()
         if let owner = prior?.owner, packageOwnerIsLive(owner) {
             throw SetupError("Another live configure operation owns this package transaction.")
         }
         let receipts = try installationReceipts()
+        let installed = try compatibilityOfInstalledUpgradeSource()
+        if let incoming {
+            let original = (prior?.pending == true || prior?.phase == .removed) ? prior?.original : installed
+            guard let original else { throw SetupError("Package upgrade lacks its original commitment.") }
+            try incoming.requireRollingUpgrade(from: original)
+        }
         try verifyPackageDefinitionFiles(receipts)
         try serviceBackend.reload()
         // Repeated hooks must inspect all roles too, including a loaded role lacking a receipt
@@ -174,7 +232,6 @@ extension SetupEngine {
                 _ = try packageServiceState(receipt, role: role)
             }
         }
-        let installed = try installedPackageCompatibility()
         var state: SetupPackageState
         if let prior, prior.pending || prior.phase == .removed {
             guard Set(prior.instances.map(\.name)) == Set(receipts.map(\.instance)) else {
@@ -186,7 +243,14 @@ extension SetupEngine {
             ].compactMap {
                 $0
             }
-            guard commitments.contains(installed.manifestSHA256) else {
+            // A historical preinst can only retain stop intent. A failed older attempt may
+            // leave its rejected incoming descriptor in the journal; it is not a commitment
+            // to this unpack. Configure has verified the real incoming manifest and payload.
+            let verifiedLegacyUnpack = prior.phase == .quiesced && incoming == installed
+                && prior.original != nil && receipts.allSatisfy {
+                    $0.manifestSHA256 == prior.original?.manifestSHA256
+                }
+            guard commitments.contains(installed.manifestSHA256) || verifiedLegacyUnpack else {
                 throw SetupError("Actual package payload is outside the retained transaction commitments.")
             }
             state = prior  // Never recapture stopped/preparing state as the original service intent.

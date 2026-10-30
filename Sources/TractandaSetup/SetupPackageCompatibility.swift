@@ -55,7 +55,9 @@ struct SetupPackageCompatibility: Codable, Equatable {
         try old.validate()
         guard upgrade == .compatible, semanticProfile == old.semanticProfile,
             semanticProfile == PeerCompatibilityDeclaration.semanticProfile, arch == old.arch,
-            embedding == old.embedding, documentExtraction == old.documentExtraction
+            embedding == old.embedding,
+            try documentExtraction?.identity.storedSemanticProfile()
+                == old.documentExtraction?.identity.storedSemanticProfile()
         else {
             throw SetupError(
                 "Package activation requires coordinated maintenance; ordinary package hooks cannot establish cluster coordination."
@@ -130,6 +132,21 @@ struct SetupPackageCompatibility: Codable, Equatable {
 
 extension SetupEngine {
     var packagePayload: URL { roots.software.appendingPathComponent("current") }
+
+    /// Recognize an older installed artifact only through its protected committed/original
+    /// package transaction and receipt-bound full inventory. Current executable admission
+    /// continues to use installedPackageCompatibility() and its exact compiled profile.
+    func compatibilityOfInstalledUpgradeSource() throws -> SetupPackageCompatibility {
+        let state = try readPackageState()
+        let previous = state?.phase == .committed ? state?.incoming : state?.original
+        let actual = try sha256(packagePayload.appendingPathComponent("bundle-manifest.json"))
+        if let previous, previous.manifestSHA256 == actual {
+            let manifest = try verifyHistoricalInstalledBundle()
+            try previous.requirePayload(manifest, digest: actual)
+            return previous
+        }
+        return try installedPackageCompatibility()
+    }
 
     func installedPackageCompatibility() throws -> SetupPackageCompatibility {
         guard roots.platform == .linux else { throw SetupError("Linux package custody is required.") }

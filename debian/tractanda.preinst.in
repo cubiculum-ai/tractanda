@@ -15,7 +15,13 @@ case "${1-}" in
   lifecycle=install ;;
  upgrade)
   [ "$#" -eq 3 ] || { echo "tractanda preinst: invalid upgrade arguments" >&2; exit 2; }
-  lifecycle=upgrade ;;
+  lifecycle=upgrade
+  # These exact published/installed versions run the historical prerm before this
+  # preinst. Their helper cannot compare a new semantic descriptor, so preserve its
+  # genuine stop-only transaction; new configure verifies the real unpacked payload.
+  case "$2" in
+   '0.1.0~poc.15-1+personal.1793193134.fdaf8ff8b393'|'0.1.0~poc.16-1'|'0.1.0~poc.16.1-1') legacy_stop_only=yes ;;
+  esac ;;
  abort-upgrade)
   [ "$#" -eq 2 ] || { echo "tractanda preinst: invalid abort-upgrade arguments" >&2; exit 2; }
   lifecycle=abort-upgrade ;;
@@ -45,7 +51,11 @@ if [ -x "$helper" ]; then
  if [ "$lifecycle" = abort-upgrade ]; then
   "$helper" --package-lifecycle abort-upgrade
  else
-  "$helper" --package-lifecycle preinst --descriptor "$descriptor"
+  if [ "${legacy_stop_only-no}" = yes ]; then
+   "$helper" --package-lifecycle prerm-upgrade
+  else
+   "$helper" --package-lifecycle preinst --descriptor "$descriptor"
+  fi
  fi
 fi
 

@@ -3,6 +3,7 @@ import Foundation
 struct SetupPackageArguments: Equatable, Sendable {
     enum Action: String, Equatable, Sendable {
         case prermUpgrade = "prerm-upgrade"
+        case preflight
         case preinst
         case configure
         case abortUpgrade = "abort-upgrade"
@@ -13,6 +14,14 @@ struct SetupPackageArguments: Equatable, Sendable {
     let action: Action
     let descriptor: URL?
     let instance: String?
+    let candidateBundle: URL?
+
+    init(action: Action, descriptor: URL?, instance: String?, candidateBundle: URL? = nil) {
+        self.action = action
+        self.descriptor = descriptor
+        self.instance = instance
+        self.candidateBundle = candidateBundle
+    }
 
     static func parse(_ arguments: [String]) throws -> Self? {
         guard let command = arguments.first else { return nil }
@@ -31,6 +40,14 @@ struct SetupPackageArguments: Equatable, Sendable {
         }
 
         switch action {
+        case .preflight:
+            guard arguments.count == 6, arguments[2] == "--descriptor",
+                let descriptor = normalizedDescriptorURL(arguments[3]), arguments[4] == "--bundle",
+                let bundle = normalizedDescriptorURL(arguments[5])
+            else {
+                throw SetupError("Use --package-lifecycle preflight --descriptor ABSOLUTE_PATH --bundle ABSOLUTE_PATH.")
+            }
+            return Self(action: action, descriptor: descriptor, instance: nil, candidateBundle: bundle)
         case .preinst, .configure:
             guard arguments.count == 4, arguments[2] == "--descriptor",
                 let descriptor = normalizedDescriptorURL(arguments[3])

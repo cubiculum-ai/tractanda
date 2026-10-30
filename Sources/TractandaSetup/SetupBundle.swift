@@ -3,6 +3,42 @@ import TractandaCore
 
 extension SetupEngine {
     public func verifyBundle(at suppliedBundle: URL) throws -> BundleManifest {
+        try verifyBundleContents(at: suppliedBundle, validation: .current)
+    }
+
+    private enum BundleValidation { case current, historicalInstalled }
+
+    /// Historical validation is available only for the installed root, anchored by the
+    /// protected package transaction and every existing installation receipt.
+    func verifyHistoricalInstalledBundle() throws -> BundleManifest {
+        guard roots.platform == .linux, let state = try readPackageState(),
+            let committed = state.phase == .committed ? state.incoming : state.original
+        else { throw SetupError("Installed package lacks a protected historical commitment.") }
+        let receipts = try installationReceipts()
+        // A failed configure can have receipts already updated to a verified incoming or
+        // observed payload while dpkg restores original bytes. Admit only these three
+        // exact protected transaction commitments, with each receipt's own full recipe.
+        let receiptCommitments = state.pending
+            ? [state.original, state.incoming, state.observed].compactMap { $0 }
+            : [committed]
+        guard (!receipts.isEmpty || state.instances.isEmpty),
+            (!state.pending || Set(receipts.map(\.instance)) == Set(state.instances.map(\.name))),
+            receipts.allSatisfy({ receipt in
+                receipt.release == packagePayload.path && receiptCommitments.contains(where: {
+                    receipt.manifestSHA256 == $0.manifestSHA256 && receipt.embedding == $0.embedding
+                        && receipt.documentExtraction == $0.documentExtraction
+                })
+            }),
+            try sha256(packagePayload.appendingPathComponent("bundle-manifest.json")) == committed.manifestSHA256
+        else { throw SetupError("Historical installed manifest differs from protected receipts.") }
+        try requirePackageRelease(packagePayload.path)
+        if trustedOwnership { try requireTrustedAncestry(of: packagePayload) }
+        let manifest = try verifyBundleContents(at: packagePayload, validation: .historicalInstalled)
+        try committed.requirePayload(manifest, digest: committed.manifestSHA256)
+        return manifest
+    }
+
+    private func verifyBundleContents(at suppliedBundle: URL, validation: BundleValidation) throws -> BundleManifest {
         let bundle = suppliedBundle.resolvingSymlinksInPath()
         let manifestURL = bundle.appendingPathComponent("bundle-manifest.json")
         let attributes = try FileManager.default.attributesOfItem(atPath: manifestURL.path)
@@ -10,7 +46,10 @@ extension SetupEngine {
             try fileSize(manifestURL) <= 4 * 1024 * 1024
         else { throw SetupError("bundle-manifest.json must be a bounded regular file.") }
         let manifest = try JSONDecoder().decode(BundleManifest.self, from: Data(contentsOf: manifestURL))
-        try manifest.validate()
+        switch validation {
+        case .current: try manifest.validate()
+        case .historicalInstalled: try manifest.validateHistoricalInstalledLinux()
+        }
         guard manifest.platform == roots.platform.rawValue else {
             throw SetupError("Bundle platform does not match this host.")
         }
@@ -56,6 +95,9 @@ extension SetupEngine {
                 throw SetupError("Bundle verification failed: \(file.path)")
             }
         }
+        // Historical bytes are receipt-anchored and fully inventoried above. Current
+        // runtime/model admission below applies only to the candidate/current bundle.
+        if case .historicalInstalled = validation { return manifest }
         let catalog = try manifest.modelProvisioningManifestPath.map {
             try ModelProvisioningCatalog.load(bundle.appendingPathComponent($0).path)
         }

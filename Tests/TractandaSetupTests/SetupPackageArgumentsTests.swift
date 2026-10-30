@@ -21,6 +21,13 @@ final class SetupPackageArgumentsTests: XCTestCase {
             XCTAssertEqual(parsed.descriptor?.path, descriptor)
             XCTAssertNil(parsed.instance)
         }
+        let preflight = try XCTUnwrap(SetupPackageArguments.parse([
+            "--package-lifecycle", "preflight", "--descriptor", descriptor,
+            "--bundle", "/root/tractanda-candidate/current",
+        ]))
+        XCTAssertEqual(preflight.action, .preflight)
+        XCTAssertEqual(preflight.descriptor?.path, descriptor)
+        XCTAssertEqual(preflight.candidateBundle?.path, "/root/tractanda-candidate/current")
     }
 
     func testRuntimeGuardIsSeparateAndValidatesInstance() throws {
@@ -44,6 +51,9 @@ final class SetupPackageArgumentsTests: XCTestCase {
             ["--package-lifecycle", "runtime-guard"],
             ["--package-lifecycle", "remove", "extra"],
             ["--package-lifecycle", "preinst"],
+            ["--package-lifecycle", "preflight", "--descriptor", "/run/incoming.json"],
+            ["--package-lifecycle", "preflight", "--descriptor", "/run/incoming.json", "--bundle", "relative"],
+            ["--package-lifecycle", "preflight", "--descriptor", "/run/incoming.json", "--bundle", "/root/../tmp"],
             ["--package-lifecycle", "configure", "--other", "/run/incoming.json"],
             ["--package-lifecycle", "preinst", "--descriptor", "relative.json"],
             ["--package-lifecycle", "preinst", "--descriptor", "/"],

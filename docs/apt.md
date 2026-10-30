@@ -22,7 +22,17 @@ apt-cache policy tractanda
 sudo apt install tractanda
 ```
 
-APT selects the host architecture. This source trusts only its named archive key and uses normal signature, index and package hash validation. Never use `trusted=yes`, disable authentication, or ignore an expired or invalid signature. Normal updates use `sudo apt update` followed by `sudo apt upgrade`; the preview channel does not install an unattended-upgrades policy.
+APT selects the host architecture. This source trusts only its named archive key and uses normal signature, index and package hash validation. Never use `trusted=yes`, disable authentication, or ignore an expired or invalid signature. To update only Tractanda, refresh and inspect the current authenticated candidate, then request an upgrade of that installed package:
+
+```sh
+sudo apt update
+apt-cache policy tractanda
+sudo apt install --only-upgrade tractanda
+```
+
+This uses the current APT source and package cache and targets Tractanda instead of requesting a system-wide upgrade. The preview channel does not install an unattended-upgrades policy.
+
+For the first transition from an installed legacy package whose `prerm` stops before the incoming `preinst`, complete the authenticated candidate preflight described in [installation](install.md) before the `--only-upgrade` command. An already installed hook cannot be made to run new checks retroactively.
 
 The site publishes a complete signed snapshot with SHA-256 by-hash indexes. Retention is bounded to the current version and at most one previous version when they fit the site budget. Release metadata expires after 90 days: maintainers must publish freshly signed metadata before expiry, using the existing key. An expired channel fails closed; direct GitHub release assets remain available with release checksums. A key rotation is an explicit reviewed operation: verify the new full fingerprint through a trusted source, then replace the per-source key file. Package builds never generate a fresh production key.
 

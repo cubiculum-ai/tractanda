@@ -4,7 +4,9 @@ helper=/opt/tractanda/current/bin/tractanda-setup
 case "${1-}" in
  upgrade)
   [ "$#" -eq 2 ] || { echo "tractanda prerm: invalid upgrade arguments" >&2; exit 2; }
-  lifecycle=prerm-upgrade ;;
+  # New preinst validates the real incoming descriptor before quiescence.
+  # Never defer removal or failed-upgrade safety handling.
+  lifecycle=defer-upgrade ;;
  remove)
   if [ "$#" -ne 1 ] && ! { [ "$#" -eq 4 ] && [ "${2-}" = in-favour ]; }; then
    echo "tractanda prerm: invalid remove arguments" >&2; exit 2
@@ -24,7 +26,7 @@ fi
 /usr/bin/python3 -I - "$@" <<'TRACTANDA_PACKAGE_HOOK_FALLBACK_EOF'
 @TRACTANDA_PACKAGE_HOOK_FALLBACK_PY@
 TRACTANDA_PACKAGE_HOOK_FALLBACK_EOF
-if [ -x "$helper" ]; then
+if [ -x "$helper" ] && [ "$lifecycle" != defer-upgrade ]; then
  "$helper" --package-lifecycle "$lifecycle"
 fi
 

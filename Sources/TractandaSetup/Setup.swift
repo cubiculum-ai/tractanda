@@ -70,6 +70,23 @@ public struct BundleManifest: Codable, Equatable, Sendable {
     }
 
     public func validate() throws {
+        try validateDocumentForCurrentRelease()
+    }
+
+    /// For a separately receipt-anchored installed package, verify its own historical
+    /// descriptor and inventory. This never admits a candidate for execution.
+    func validateHistoricalInstalledLinux() throws {
+        guard platform == "linux" else { throw SetupError("Historical package must be Linux.") }
+        try validateManifest(as: .historicalInstalledLinux)
+    }
+
+    private func validateDocumentForCurrentRelease() throws {
+        try validateManifest(as: .current)
+    }
+
+    private enum ManifestValidation { case current, historicalInstalledLinux }
+
+    private func validateManifest(as validation: ManifestValidation) throws {
         guard profile == Self.profile, !version.isEmpty, version.utf8.count <= 80,
             version.utf8.allSatisfy({ asciiLetter($0) || asciiDigit($0) || ".-_+".utf8.contains($0) })
         else { throw SetupError("Bundle version is invalid.") }
@@ -120,8 +137,34 @@ public struct BundleManifest: Codable, Equatable, Sendable {
         }
         try embedding?.validate(files: files, provisioned: modelProvisioningManifestPath != nil)
         if let documentExtraction {
-            try documentExtraction.validatePlatform(platform: platform, arch: arch)
-            try documentExtraction.validate(files: files, provisioned: modelProvisioningManifestPath != nil)
+            switch validation {
+            case .historicalInstalledLinux:
+                // A prior receipt-bound package need not match today's executable recipe.
+                // Its metadata remains data-only, bounded, and backed by its own inventory.
+                try documentExtraction.identity.validate()
+                let paths = [documentExtraction.converterPath, documentExtraction.modelManifestPath,
+                    documentExtraction.runtimePatchManifestPath, documentExtraction.runtimePatchPath]
+                    + documentExtraction.noticePaths
+                for path in paths { try Self.validateRelativePath(path) }
+                guard !documentExtraction.workerProtocol.isEmpty,
+                    documentExtraction.workerProtocol.utf8.count <= 128,
+                    !documentExtraction.runtimeRepository.isEmpty,
+                    documentExtraction.runtimeRepository.utf8.count <= 256,
+                    !documentExtraction.runtimePatchIdentifier.isEmpty,
+                    documentExtraction.runtimePatchIdentifier.utf8.count <= 128,
+                    documentExtraction.noticePaths.count <= 128,
+                    [documentExtraction.modelManifestSHA256, documentExtraction.runtimePatchManifestSHA256,
+                     documentExtraction.runtimePatchSHA256].allSatisfy({
+                         $0.utf8.count == 64 && $0.utf8.allSatisfy(asciiHex)
+                     }),
+                    paths.allSatisfy({ path in files.contains(where: { $0.path == path }) }),
+                    files.contains(where: { $0.path == documentExtraction.converterPath && $0.mode & 0o111 != 0 })
+                else { throw SetupError("Historical installed document descriptor is invalid.") }
+                try Self.validateRelativePath(documentExtraction.modelDirectory)
+            case .current:
+                try documentExtraction.validatePlatform(platform: platform, arch: arch)
+                try documentExtraction.validate(files: files, provisioned: modelProvisioningManifestPath != nil)
+            }
         } else if files.contains(where: {
             $0.path == "bin/tractanda-document-converter"
                 || $0.path.hasPrefix("models/granite-docling-258m-mlx/")
@@ -422,7 +465,12 @@ public struct DocumentExtractionPayload: Codable, Equatable, Sendable {
         } else {
             expected = nil
         }
-        guard let expected, identity.converter == expected else {
+        let current = DocumentConverterIdentity()
+        guard let expected, identity.converter == expected,
+            identity.model == current.model, identity.modelRevision == current.modelRevision,
+            identity.runtimeRevision == current.runtimeRevision,
+            identity.preprocessing == current.preprocessing, identity.parser == current.parser
+        else {
             throw SetupError(
                 "Document payload is not the finite current profile for its platform/architecture.")
         }

@@ -46,6 +46,7 @@ public typealias AttachmentSourceLocation = TractandaClient.AttachmentSourceLoca
 public typealias AttachmentDocumentRepresentation = TractandaClient.AttachmentDocumentRepresentation
 public typealias AttachmentDocumentSource = TractandaClient.AttachmentDocumentSource
 public typealias AttachmentDocumentPage = TractandaClient.AttachmentDocumentPage
+public typealias DocumentStoredSemanticProfile = TractandaClient.DocumentStoredSemanticProfile
 public typealias DocumentConverterIdentity = TractandaClient.DocumentConverterIdentity
 public typealias DocumentValue = TractandaClient.DocumentValue
 public typealias DocumentGeneratedPage = TractandaClient.DocumentGeneratedPage

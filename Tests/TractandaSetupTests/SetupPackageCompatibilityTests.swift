@@ -131,7 +131,40 @@ final class SetupPackageCompatibilityTests: XCTestCase {
                     value["runtimePatchSHA256"] = String(repeating: "b", count: 64)
                     return value
                 }()))
-        XCTAssertThrowsError(try declaration(document: changedDocument).requireRollingUpgrade(from: old))
+        // Runtime patch hashes identify the producer; retained document interpretation is unchanged.
+        XCTAssertNoThrow(try declaration(document: changedDocument).requireRollingUpgrade(from: old))
+
+        let changedParser = try JSONDecoder().decode(
+            DocumentExtractionPayload.self,
+            from: encodedObject({
+                var value = try jsonObject(JSONEncoder().encode(oldDocument))
+                var identity = try XCTUnwrap(value["identity"] as? [String: Any])
+                identity["parser"] = "unsupported-parser-v9"
+                value["identity"] = identity
+                return value
+            }()))
+        XCTAssertThrowsError(try declaration(document: changedParser).requireRollingUpgrade(from: old))
+        XCTAssertThrowsError(try declaration(document: nil).requireRollingUpgrade(from: old))
+    }
+
+    func testActualOldAndNewLinuxConverterProvenanceShareStoredSemanticContract() throws {
+        let base = try XCTUnwrap(declaration().documentExtraction)
+        func withConverter(_ digest: String) throws -> DocumentExtractionPayload {
+            var value = try jsonObject(JSONEncoder().encode(base))
+            var identity = try XCTUnwrap(value["identity"] as? [String: Any])
+            identity["converter"] = "tractanda.docling-native.v2-idefics3-gelu-f32+linux-raster." + digest
+            value["identity"] = identity
+            return try JSONDecoder().decode(DocumentExtractionPayload.self, from: encodedObject(value))
+        }
+        let old = try withConverter("8edce98a4bc2d2c3e359f79010d17c67ee08f84409ef83149f3522b0629d3cae")
+        let new = try withConverter("610fdf77f4d8f037ec0d6510d50023e9e8d02f79a36236e044e446150ffca013")
+        XCTAssertNoThrow(try declaration(document: new).requireRollingUpgrade(from: declaration(document: old)))
+        // This does not authorize the old executable as the new package payload.
+        let incoming = declaration(document: new)
+        let mismatched = BundleManifest(version: incoming.version, platform: "linux", arch: incoming.arch,
+            files: [], embedding: incoming.embedding, documentExtraction: old,
+            canonicalFormats: incoming.canonicalFormats)
+        XCTAssertThrowsError(try incoming.requirePayload(mismatched, digest: incoming.manifestSHA256))
     }
 
     func testPayloadCommitmentBindsDigestVersionArchitectureAndAllBundledRecipes() throws {

@@ -30,27 +30,48 @@ public struct DocumentConverterIdentity: Codable, Equatable, Sendable {
         case "arm64": digest = GeneratedLinuxDocumentConverterDigests.arm64
         default: return nil
         }
-        return LinuxDocumentConverterProfiles.converterNames(
-            currentDigests: [digest], historicalDigests: []
-        ).first
+        return LinuxDocumentConverterProfiles.converterName(digest: digest)
     }
 
-    public func validate() throws {
-        let current = Self()
-        let modern =
-            [LinuxDocumentConverterProfiles.macConverter] + LinuxDocumentConverterProfiles.knownConverters
-        guard (modern + ["tractanda.docling-native.v1"]).contains(converter), model == current.model,
-            modelRevision == current.modelRevision, runtimeRevision == current.runtimeRevision,
-            parser == current.parser,
-            (modern.contains(converter) && preprocessing == current.preprocessing)
-                || (converter == "tractanda.docling-native.v1"
-                    && [current.preprocessing, "opaque-rgb2048-17tiles-v1"].contains(preprocessing))
-        else {
-            throw TractandaError("unsupportedDocumentConverter", "Unsupported document converter identity.")
+    /// Supported saved-page meaning, derived from existing wire fields. This is
+    /// never encoded: changing a build fingerprint must not rewrite history.
+    public func storedSemanticProfile() throws -> DocumentStoredSemanticProfile {
+        guard Self.provenanceIdentifier(converter), Self.provenanceIdentifier(model),
+            Self.provenanceRevision(modelRevision), Self.provenanceRevision(runtimeRevision),
+            parser == "doctags-strict-v1"
+        else { throw Self.unsupportedStoredIdentity() }
+        switch preprocessing {
+        case "opaque-rgb-content-crop-hf4561-pillow123-grid-v2": return .contentCropV2
+        case "opaque-rgb2048-17tiles-v1": return .legacyCanvasV1
+        default: throw Self.unsupportedStoredIdentity()
         }
     }
 
-    /// Known historical metadata remains readable. New subprocess results must
+    /// Validate saved provenance and supported semantics; this grants no local
+    /// execution authority and never selects an executable or model.
+    public func validate() throws {
+        _ = try storedSemanticProfile()
+    }
+
+    private static func provenanceIdentifier(_ value: String) -> Bool {
+        let bytes = Array(value.utf8)
+        func alphanumeric(_ byte: UInt8) -> Bool {
+            (48...57).contains(byte) || (65...90).contains(byte) || (97...122).contains(byte)
+        }
+        return (1...256).contains(bytes.count) && bytes.first.map(alphanumeric) == true
+            && bytes.allSatisfy { alphanumeric($0) || [43, 45, 46, 47, 58, 64, 95].contains($0) }
+    }
+
+    private static func provenanceRevision(_ value: String) -> Bool {
+        [40, 64].contains(value.utf8.count)
+            && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+    }
+
+    private static func unsupportedStoredIdentity() -> TractandaError {
+        TractandaError("unsupportedDocumentConverter", "Malformed provenance or unsupported stored document semantics.")
+    }
+
+    /// Saved provenance remains readable. New subprocess results must
     /// use the active profile; there is no legacy image-generation path.
     public func validateCurrent() throws {
         guard self == Self() else {

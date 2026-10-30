@@ -46,7 +46,7 @@
         static func compiledCurrentDigest() throws -> String? {
             let current = DocumentConverterIdentity()
             if current.converter == "tractanda.docling-native.v2-idefics3-gelu-f32" { return nil }
-            try current.validate()  // Membership in the compiled finite reader table.
+            try current.validate()  // Well-formed stored provenance and supported semantics.
             try current.validateCurrent()
             let prefix = "tractanda.docling-native.v2-idefics3-gelu-f32+linux-raster."
             try require(current.converter.hasPrefix(prefix), "Linux native document profile is not admitted")

@@ -101,6 +101,16 @@ final class DocumentPackagingTests: XCTestCase {
                 DocumentExtractionPayload.self,
                 from: JSONSerialization.data(withJSONObject: object))
             XCTAssertNoThrow(try payload.validatePlatform(platform: "linux", arch: arch))
+            // Well-formed stored provenance cannot select a different active runtime.
+            var otherIdentity = identity
+            otherIdentity["runtimeRevision"] = String(repeating: "a", count: 40)
+            var otherObject = object
+            otherObject["identity"] = otherIdentity
+            let otherRuntime = try JSONDecoder().decode(
+                DocumentExtractionPayload.self,
+                from: JSONSerialization.data(withJSONObject: otherObject))
+            XCTAssertNoThrow(try otherRuntime.identity.validate())
+            XCTAssertThrowsError(try otherRuntime.validatePlatform(platform: "linux", arch: arch))
             XCTAssertThrowsError(try payload.validatePlatform(platform: "macos", arch: "arm64"))
             XCTAssertThrowsError(try payload.validatePlatform(platform: "linux", arch: "riscv64"))
             let wrongArch = arch == "arm64" ? "x86_64" : "arm64"

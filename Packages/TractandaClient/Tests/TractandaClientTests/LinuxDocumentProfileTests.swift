@@ -36,31 +36,48 @@ final class LinuxDocumentProfileTests: XCTestCase {
         try value.validate()
         XCTAssertThrowsError(try value.validateCurrent())
     }
-    func testUnapprovedWellFormedRendererDigestIsRejected() throws {
-        let known = Set(LinuxDocumentConverterProfiles.knownConverters)
-        let candidate = (0..<16).map {
-            "tractanda.docling-native.v2-idefics3-gelu-f32+linux-raster."
-                + String(repeating: String($0, radix: 16), count: 64)
-        }.first { !known.contains($0) }!
-        XCTAssertThrowsError(try identity(["converter": candidate]).validate())
+    func testUnknownBuildAndModelProvenanceIsReadableButNeverActive() throws {
+        let value = try identity([
+            "converter": "future.docling-build+linux-raster." + String(repeating: "f", count: 64),
+            "model": "future-vendor/another-model", "modelRevision": String(repeating: "b", count: 64),
+            "runtimeRevision": String(repeating: "c", count: 40),
+        ])
+        XCTAssertNoThrow(try value.validate())
+        XCTAssertEqual(try value.storedSemanticProfile(), .contentCropV2)
+        XCTAssertThrowsError(try value.validateCurrent())
+        let encoded = try JSONEncoder().encode(value)
+        let roundTrip = try JSONDecoder().decode(DocumentConverterIdentity.self, from: encoded)
+        XCTAssertEqual(roundTrip, value, "Provenance values are not normalized or rewritten")
+        let wire = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: String])
+        XCTAssertEqual(Set(wire.keys), ["converter", "model", "modelRevision", "runtimeRevision", "preprocessing", "parser"])
     }
-    func testProfileDoesNotAuthorizeDifferentModelOrParser() throws {
-        XCTAssertThrowsError(try identity(["modelRevision": String(repeating: "0", count: 40)]).validate())
+    func testUnsupportedStoredSemanticsAreStillRejected() throws {
         XCTAssertThrowsError(try identity(["parser": "unapproved-parser"]).validate())
         XCTAssertThrowsError(try identity(["preprocessing": "unapproved-preprocessing"]).validate())
+        let historical = try identity(["converter": "different-build", "preprocessing": "opaque-rgb2048-17tiles-v1"])
+        XCTAssertEqual(try historical.storedSemanticProfile(), .legacyCanvasV1)
+        XCTAssertNotEqual(try historical.storedSemanticProfile(), try DocumentConverterIdentity().storedSemanticProfile())
     }
-    func testHistoricalLinuxProfilesSurviveCurrentDigestReplacement() throws {
-        let old = String(repeating: "a", count: 64)
-        let replacement = String(repeating: "b", count: 64)
-        let prefix = LinuxDocumentConverterProfiles.macConverter + "+linux-raster."
-        let known = LinuxDocumentConverterProfiles.converterNames(
-            currentDigests: [replacement, nil], historicalDigests: [old])
-        XCTAssertEqual(Set(known), Set([prefix + old, prefix + replacement]))
-        XCTAssertFalse(known.contains(prefix + String(repeating: "c", count: 64)))
-        // History recognition does not alter the actual current-result contract.
-        let historical = try identity(["converter": prefix + old])
-        if historical != DocumentConverterIdentity() {
-            XCTAssertThrowsError(try historical.validateCurrent())
+    func testMalformedAndUnboundedProvenanceIsRejected() throws {
+        for field in ["converter", "model"] {
+            for value in ["", "bad identity", "../bad", "bad\0identity", String(repeating: "a", count: 257)] {
+                XCTAssertThrowsError(try identity([field: value]).validate(), field + ": " + value.debugDescription)
+            }
         }
+        for field in ["modelRevision", "runtimeRevision"] {
+            for value in ["", "not-a-revision", String(repeating: "a", count: 39), String(repeating: "g", count: 40), String(repeating: "a", count: 65)] {
+                XCTAssertThrowsError(try identity([field: value]).validate(), field + ": " + value.debugDescription)
+            }
+        }
+    }
+    func testCurrentPackageProfileConstructionRemainsFiniteAndStrict() throws {
+        let digest = String(repeating: "a", count: 64)
+        XCTAssertEqual(LinuxDocumentConverterProfiles.converterName(digest: digest), LinuxDocumentConverterProfiles.macConverter + "+linux-raster." + digest)
+        for invalid in [nil, "", String(repeating: "g", count: 64), String(repeating: "a", count: 63)] as [String?] {
+            XCTAssertNil(LinuxDocumentConverterProfiles.converterName(digest: invalid))
+        }
+        let historical = try identity(["converter": "a-different-runtime-build"])
+        XCTAssertNoThrow(try historical.validate())
+        XCTAssertThrowsError(try historical.validateCurrent())
     }
 }

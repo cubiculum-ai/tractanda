@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+helper=/opt/tractanda/current/bin/tractanda-setup
+case "${1-}" in
+ upgrade)
+  [ "$#" -eq 2 ] || { echo "tractanda prerm: invalid upgrade arguments" >&2; exit 2; }
+  lifecycle=prerm-upgrade ;;
+ remove)
+  if [ "$#" -ne 1 ] && ! { [ "$#" -eq 4 ] && [ "${2-}" = in-favour ]; }; then
+   echo "tractanda prerm: invalid remove arguments" >&2; exit 2
+  fi
+  lifecycle=remove ;;
+ failed-upgrade)
+  [ "$#" -eq 3 ] || { echo "tractanda prerm: invalid failed-upgrade arguments" >&2; exit 2; }
+  lifecycle=abort-upgrade ;;
+ *) echo "tractanda prerm: unsupported dpkg action" >&2; exit 2 ;;
+esac
+if [ -x "$helper" ]; then
+ set -- verify-helper "$helper"
+else
+ [ "$lifecycle" != abort-upgrade ] || { echo "tractanda prerm: no-helper abort is unsafe" >&2; exit 1; }
+ set -- "$lifecycle"
+fi
+/usr/bin/python3 -I - "$@" <<'TRACTANDA_PACKAGE_HOOK_FALLBACK_EOF'
+@TRACTANDA_PACKAGE_HOOK_FALLBACK_PY@
+TRACTANDA_PACKAGE_HOOK_FALLBACK_EOF
+if [ -x "$helper" ]; then
+ "$helper" --package-lifecycle "$lifecycle"
+fi
+
