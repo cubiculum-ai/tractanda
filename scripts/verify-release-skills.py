@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def verify(root=ROOT, bundle=None):
     root = Path(root)
     version = (root / 'VERSION').read_text().strip()
-    assert re.fullmatch(r'\d+\.\d+\.\d+-poc\.\d+', version), 'Invalid release version'
+    assert re.fullmatch(r'\d+\.\d+\.\d+-poc\.\d+(?:\.\d+)?', version), 'Invalid release version'
     for name in ('codex', 'claude'):
         manifest = json.loads((root / f'plugins/tractanda/.{name}-plugin/plugin.json').read_text())
         assert manifest['name'] == 'tractanda' and manifest['version'] == version, 'Plugin version differs'

@@ -826,6 +826,16 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             release.render_release_notes(template + '{{UNKNOWN}}', '0.1.0-poc.10', 'a' * 40, '', 'owner/repo')
 
+    def test_patch_preview_versions_are_valid_and_sort_after_their_base(self):
+        self.assertEqual(release.next_version('0.1.0-poc.16.1'), '0.1.0-poc.17')
+        self.assertEqual(release.release_version('0.1.0-poc.16'), (0, 1, 0, 16, 0))
+        self.assertEqual(release.release_version('0.1.0-poc.16.1'), (0, 1, 0, 16, 1))
+        self.assertGreater(release.release_version('0.1.0-poc.16.1'), release.release_version('0.1.0-poc.16'))
+        self.assertLess(release.release_version('0.1.0-poc.16.1'), release.release_version('0.1.0-poc.17'))
+        self.assertIsNone(release.release_version('0.1.0-poc.16.bad'))
+        template = (Path(__file__).resolve().parents[1] / 'docs/github-release-template.md').read_text()
+        self.assertIn('0.1.0-poc.16.1', release.render_release_notes(template, '0.1.0-poc.16.1', 'a' * 40, 'Patch', 'owner/repo'))
+
     def test_versions_and_scope(self):
         self.assertEqual(release.next_version('0.1.0-poc.9'), '0.1.0-poc.10')
         with self.assertRaises(ValueError):

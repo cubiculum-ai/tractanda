@@ -96,7 +96,7 @@ def git(*args, cwd=ROOT):
 
 def render_release_notes(template, version, commit, notes, repository):
     """Render self-contained user guidance from the sealed release's template."""
-    if (not re.fullmatch(r'\d+\.\d+\.\d+-poc\.\d+', version)
+    if (not re.fullmatch(r'\d+\.\d+\.\d+-poc\.\d+(?:\.\d+)?', version)
             or not re.fullmatch(r'[0-9a-f]{40}', commit)
             or not re.fullmatch(r'[\w.-]+/[\w.-]+', repository)):
         raise ValueError('Invalid release-note identity.')
@@ -172,15 +172,15 @@ def significant(paths):
 
 
 def next_version(version):
-    match = re.fullmatch(r'(\d+\.\d+\.\d+-poc\.)(\d+)', version)
+    match = re.fullmatch(r'(\d+\.\d+\.\d+-poc\.)(\d+)(?:\.\d+)?', version)
     if not match:
         raise ValueError('Expected a numbered proof-of-concept version.')
     return match[1] + str(int(match[2]) + 1)
 
 
 def release_version(path):
-    match = re.fullmatch(r'(\d+)\.(\d+)\.(\d+)-poc\.(\d+)', Path(path).name)
-    return tuple(map(int, match.groups())) if match else None
+    match = re.fullmatch(r'(\d+)\.(\d+)\.(\d+)-poc\.(\d+)(?:\.(\d+))?', Path(path).name)
+    return tuple(int(part or 0) for part in match.groups()) if match else None
 
 
 def is_verified_published(state):
