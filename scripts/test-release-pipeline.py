@@ -26,6 +26,127 @@ packager = load('packager', 'package-macos.py')
 
 
 class ReleaseTests(unittest.TestCase):
+    def transport_fixture(self, root):
+        state = {'directory': str(root), 'configuration': {'repository': 'owner/repo'},
+                 'version': '0.1.0-poc.16', 'commit': 'a' * 40, 'notes': 'Fixture',
+                 'steps': {}, 'delivery': release.delivery.public_fresh()}
+        pipeline = release.Pipeline(state)
+        files = {pipeline.package.name: b'notarized fixture', 'apt-site.tar.gz': b'signed APT fixture'}
+        assets = []
+        for arch in ('amd64', 'arm64'):
+            name = 'tractanda_0.1.0~poc.16-1_' + arch + '.deb'
+            payload = ('Debian fixture ' + arch).encode()
+            files[name] = payload
+            assets.append({'arch': arch, 'name': name, 'debianVersion': '0.1.0~poc.16-1',
+                           'sha256': hashlib.sha256(payload).hexdigest(), 'bytes': len(payload)})
+        for name, payload in files.items():
+            (root / name).write_bytes(payload)
+        artifacts = {name: release.sha(root / name) for name in files}
+        state['steps']['artifacts'] = {'result': artifacts}
+        state['delivery']['linuxAssets'] = assets
+        (root / 'SHA256SUMS').write_text(release.publication_checksums(artifacts, assets))
+        pipeline.bundle.mkdir()
+        manifest = pipeline.bundle / 'bundle-manifest.json'
+        manifest.write_text('{}')
+        state['steps']['bundle'] = {'result': {'manifestSHA256': release.sha(manifest)}}
+        return pipeline, artifacts, assets
+
+    def test_github_transport_names_bind_control_identity_and_reject_collision(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            pipeline, artifacts, assets = self.transport_fixture(Path(temporary))
+            names = release.publication_asset_names(artifacts, assets)
+            for row in assets:
+                self.assertEqual(names[row['name']], row['name'].replace('~', '.'))
+            for defect in ('name', 'arch', 'debianVersion', 'sha256', 'bytes'):
+                changed = [dict(row) for row in assets]
+                changed[0][defect] = 0 if defect == 'bytes' else 'invalid'
+                with self.subTest(defect=defect), self.assertRaises(RuntimeError):
+                    release.publication_asset_names(artifacts, changed)
+            with self.assertRaisesRegex(RuntimeError, 'collide'):
+                release.publication_asset_names({**artifacts, assets[0]['name'].replace('~', '.'): 'b' * 64}, assets)
+
+    def test_public_checksums_use_actual_transport_names_and_preserve_payload_hashes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            pipeline, artifacts, assets = self.transport_fixture(Path(temporary))
+            text = (pipeline.directory / 'SHA256SUMS').read_text()
+            parsed = {line.split('  ', 1)[1]: line.split('  ', 1)[0] for line in text.splitlines()}
+            self.assertNotIn('~', text)
+            self.assertEqual(set(parsed), set(release.publication_asset_names(artifacts, assets).values()))
+            for row in assets:
+                self.assertEqual(parsed[row['name'].replace('~', '.')], row['sha256'])
+                self.assertTrue((pipeline.directory / row['name']).exists())
+
+    def test_transport_checksum_guard_retains_canonical_byte_and_inventory_checks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            pipeline, artifacts, assets = self.transport_fixture(Path(temporary))
+            linux = {row['name']: row['sha256'] for row in assets}
+            with patch.object(pipeline, 'linux_context', return_value={}), \
+                    patch.object(release.delivery, 'verify_linux', return_value=linux):
+                pipeline.verify_artifacts()
+                (pipeline.directory / 'SHA256SUMS').write_text(''.join(f'{digest}  {name}\n' for name, digest in artifacts.items()))
+                with self.assertRaisesRegex(RuntimeError, 'checksums'):
+                    pipeline.verify_artifacts()
+                (pipeline.directory / 'SHA256SUMS').write_text(release.publication_checksums(artifacts, assets))
+                (pipeline.directory / assets[0]['name']).write_bytes(b'changed bytes')
+                with self.assertRaisesRegex(RuntimeError, 'artifact changed'):
+                    pipeline.verify_artifacts()
+
+    def test_publish_stages_exact_transport_names_and_rejects_remote_alias_or_hash(self):
+        for defect in (None, 'unknown-alias', 'wrong-hash'):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                pipeline, artifacts, assets = self.transport_fixture(root)
+                (pipeline.source / 'docs').mkdir(parents=True)
+                shutil.copyfile(Path(__file__).parents[1] / 'docs/github-release-template.md',
+                                pipeline.source / 'docs/github-release-template.md')
+                names = release.publication_asset_names(artifacts, assets)
+                expected = {names[name]: digest for name, digest in artifacts.items()}
+                expected['SHA256SUMS'] = release.sha(root / 'SHA256SUMS')
+                remote = {'target_commitish': pipeline.state['commit'], 'draft': False,
+                          'html_url': 'https://github.com/owner/repo/releases/tag/v0.1.0-poc.16',
+                          'assets': [{'name': name, 'digest': 'sha256:' + digest} for name, digest in expected.items()]}
+                if defect == 'unknown-alias': remote['assets'][0]['name'] = 'unapproved.pkg'
+                if defect == 'wrong-hash': remote['assets'][0]['digest'] = 'sha256:' + '0' * 64
+                uploaded = []
+                def run(label, args, cwd=None):
+                    if label.startswith('upload-'):
+                        path = Path(args[4]); uploaded.append(path.name)
+                        self.assertEqual(release.sha(path), expected[path.name])
+                        self.assertNotIn('~', path.name)
+                temporary_directory = tempfile.TemporaryDirectory
+                def portable(*args, **kwargs):
+                    self.assertEqual(kwargs['dir'], '/private/tmp')
+                    return temporary_directory(prefix='upload-', dir=root)
+                first = {**remote, 'assets': []} if defect is None else remote
+                with patch.object(pipeline, 'verify_artifacts'), patch.object(pipeline, 'verify_notarization'), \
+                        patch.object(pipeline, 'run_command', side_effect=run), \
+                        patch.object(release.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)), \
+                        patch.object(release, 'release_info', side_effect=[first, remote]), \
+                        patch.object(release.tempfile, 'TemporaryDirectory', side_effect=portable):
+                    if defect is not None:
+                        with self.assertRaises(RuntimeError): pipeline.publish()
+                        self.assertEqual(uploaded, [])
+                    else:
+                        result = pipeline.publish()
+                        self.assertEqual(result['sha256'], expected)
+                        self.assertEqual(set(uploaded), set(expected))
+
+    def test_completed_publication_retention_uses_exact_transport_inventory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            pipeline, artifacts, assets = self.transport_fixture(Path(temporary))
+            state = pipeline.state
+            state.update(status='complete', tree='b' * 40)
+            hashes = {release.publication_asset_names(artifacts, assets)[name]: digest for name, digest in artifacts.items()}
+            hashes.update({pipeline.archive.name: 'c' * 64, 'SHA256SUMS': release.sha(pipeline.directory / 'SHA256SUMS')})
+            state['steps'].update({'publish': {'result': {'url': 'https://github.com/owner/repo/releases/tag/v0.1.0-poc.16', 'sha256': hashes}},
+                                   'published-source': {'result': {'commit': state['commit'], 'tree': state['tree']}},
+                                   'pages': {'result': {'runID': 1}}})
+            self.assertTrue(release.is_verified_published(state))
+            row = assets[0]
+            actual = row['name'].replace('~', '.')
+            hashes[row['name']] = hashes.pop(actual)
+            self.assertFalse(release.is_verified_published(state), 'A canonical-name alias cannot replace actual remote identity')
+
     def test_install_stages_importable_activation_and_exact_source_guard(self):
         with tempfile.TemporaryDirectory() as temporary:
             pipeline = release.Pipeline({'directory': temporary, 'configuration': {

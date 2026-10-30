@@ -63,6 +63,29 @@ def sha(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
+def publication_asset_names(artifacts, linux_assets):
+    """Map admitted local Debian names to GitHub's deterministic transport names."""
+    names = {name: name for name in artifacts}
+    for asset in linux_assets:
+        canonical = f"tractanda_{asset['debianVersion']}_{asset['arch']}.deb"
+        if (asset['arch'] not in delivery.ARCHES or asset['name'] != canonical
+                or canonical not in artifacts or artifacts[canonical] != asset['sha256']
+                or type(asset['bytes']) is not int or asset['bytes'] <= 0):
+            raise RuntimeError('Publication Debian identity differs from admitted package.')
+        transport = canonical.replace('~', '.')
+        if not re.fullmatch(r'[A-Za-z0-9_.-]+', transport):
+            raise RuntimeError('Unsupported GitHub publication filename.')
+        names[canonical] = transport
+    if len(set(names.values())) != len(names):
+        raise RuntimeError('Publication transport filenames collide.')
+    return names
+
+
+def publication_checksums(artifacts, linux_assets):
+    names = publication_asset_names(artifacts, linux_assets)
+    return ''.join(f'{digest}  {names[name]}\n' for name, digest in artifacts.items())
+
+
 def command(args, cwd=ROOT, env=None):
     return subprocess.check_output([str(a) for a in args], cwd=cwd, env=env, text=True).strip()
 
@@ -186,8 +209,9 @@ def is_verified_published(state):
     if delivery.active(state):
         try:
             rows = state['delivery']['linuxAssets']
+            transport = publication_asset_names({r['name']: r['sha256'] for r in rows}, rows)
             if (len(rows) != 2 or {r['arch'] for r in rows} != set(delivery.ARCHES)
-                    or any(hashes.get(r['name']) != r['sha256'] for r in rows)
+                    or any(hashes.get(transport[r['name']]) != r['sha256'] for r in rows)
                     or not delivery.public(state) and (state['delivery']['acceptance']['candidateID'] != delivery.digest(delivery.canonical(delivery.binding(state)))
                     or state['delivery']['installAuthorization']['candidateID'] != state['delivery']['acceptance']['candidateID']
                     or steps.get('install-authorization', {}).get('result') != state['delivery']['installAuthorization']
@@ -882,7 +906,7 @@ class Pipeline:
             checksums.update(delivery.verify_linux(self.state, self.linux_context()))
         if delivery.public(self.state):
             checksums['apt-site.tar.gz'] = sha(self.directory / 'apt-site.tar.gz')
-        (self.directory / 'SHA256SUMS').write_text(''.join(f'{digest}  {name}\n' for name, digest in checksums.items()))
+        (self.directory / 'SHA256SUMS').write_text(publication_checksums(checksums, self.state.get('delivery', {}).get('linuxAssets', [])))
         return checksums
 
     def verify_notarization(self):
@@ -905,7 +929,7 @@ class Pipeline:
             expected = self.state['steps']['artifacts']['result']
             if any(expected.get(name) != value for name, value in linux.items()):
                 raise RuntimeError('Both bound Linux assets must be in the release inventory.')
-            sums = ''.join(f'{value}  {name}\n' for name, value in expected.items())
+            sums = publication_checksums(expected, self.state.get('delivery', {}).get('linuxAssets', []))
             if (self.directory / 'SHA256SUMS').read_text() != sums:
                 raise RuntimeError('Release checksums changed.')
 
@@ -1020,7 +1044,10 @@ class Pipeline:
         assets = release_info(repo, tag)
         if assets['target_commitish'] != self.state['commit']:
             raise RuntimeError('The draft/release targets a different source commit; refusing to modify it.')
-        expected = {**self.state['steps']['artifacts']['result'], 'SHA256SUMS': sha(self.directory / 'SHA256SUMS')}
+        canonical = {**self.state['steps']['artifacts']['result'], 'SHA256SUMS': sha(self.directory / 'SHA256SUMS')}
+        transport = publication_asset_names(canonical, self.state.get('delivery', {}).get('linuxAssets', []))
+        local_names = {published: name for name, published in transport.items()}
+        expected = {transport[name]: digest for name, digest in canonical.items()}
         existing = {asset['name']: asset for asset in assets['assets']}
         if len(existing) != len(assets['assets']):
             raise RuntimeError('Duplicate remote release asset names.')
@@ -1030,7 +1057,7 @@ class Pipeline:
         # artifact while an earlier large upload runs. Verify a private local snapshot.
         with tempfile.TemporaryDirectory(prefix='tractanda-upload-', dir='/private/tmp') as staging:
             fs = os.statvfs(staging)
-            needed = sum((self.directory / name).stat().st_size for name in expected if name not in existing)
+            needed = sum((self.directory / local_names[name]).stat().st_size for name in expected if name not in existing)
             if fs.f_frsize <= 0 or fs.f_bavail * fs.f_frsize < needed + delivery.RESERVE:
                 raise RuntimeError('Private upload staging capacity/reserve rejected.')
             pending = []
@@ -1040,7 +1067,7 @@ class Pipeline:
                         raise RuntimeError('Existing remote asset differs; refusing to overwrite ' + name)
                 else:
                     target = Path(staging) / name
-                    shutil.copyfile(self.directory / name, target)
+                    shutil.copyfile(self.directory / local_names[name], target)
                     if sha(target) != digest:
                         raise RuntimeError('The upload staging copy differs: ' + name)
                     pending.append(target)
