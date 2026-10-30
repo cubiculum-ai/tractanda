@@ -54,7 +54,7 @@ public struct DocumentConverterIdentity: Codable, Equatable, Sendable {
     }
 
     private static func provenanceIdentifier(_ value: String) -> Bool {
-        let bytes = Array(value.utf8)
+        let bytes = value.utf8
         func alphanumeric(_ byte: UInt8) -> Bool {
             (48...57).contains(byte) || (65...90).contains(byte) || (97...122).contains(byte)
         }
