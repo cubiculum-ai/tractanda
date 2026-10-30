@@ -16,6 +16,7 @@ struct TractandaMCPCommand {
             print(
                 """
                 Usage: tractanda-mcp [SOCKET | --profile NAME | --socket PATH] [--no-start] [--result-format both|text|structured]
+                Options: --help, --version
                 MCP 2025-11-25 over stdio. Run under the intended human or agent OS account.
                 For a different service owner, set TRACTANDA_SERVER_USER to that account's name.
                 Standard output is reserved for MCP messages during service; no login token is used.
@@ -23,6 +24,10 @@ struct TractandaMCPCommand {
                 text emits one compact JSON text content item and tools/list omits outputSchema.
                 structured emits structuredContent with empty content; it requires a structured-capable client.
                 """)
+            return
+        }
+        if arguments == ["--version"] {
+            print(RuntimeIdentity.current.version)
             return
         }
         signal(SIGPIPE, SIG_IGN)
