@@ -68,10 +68,16 @@ def ensure_layout_directory(path):
         return
     parent = os.path.dirname(path)
     ensure_layout_directory(parent)
+    # This finite helper is single-threaded. Override the private hook umask
+    # only for mkdir so the new directory is traversable at creation, including
+    # across interruption; restore before any other operation or private write.
+    previous_umask = os.umask(0o022)
     try:
         os.mkdir(path, 0o755)
     except FileExistsError:
         pass
+    finally:
+        os.umask(previous_umask)
     root_directory_chain(path)
     directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
@@ -573,6 +579,65 @@ def write_state(state):
         os.close(fd)
         os.close(parent_fd)
 
+LEGACY_DEBIAN_VERSIONS = {
+    "0.1.0~poc.15-1+personal.1793193134.fdaf8ff8b393": "0.1.0-poc.15",
+    "0.1.0~poc.16-1": "0.1.0-poc.16",
+    "0.1.0~poc.16.1-1": "0.1.0-poc.16.1",
+}
+
+def legacy_preinst_helper(arguments):
+    """Retain genuine expected payload metadata only after the old helper stops.
+
+    This is not payload/semantic admission. New configure still verifies the
+    real unpacked inventory and current execution pins before activation.
+    """
+    if len(arguments) != 4 or arguments[3] not in LEGACY_DEBIAN_VERSIONS:
+        refuse("unsupported legacy preinst source version")
+    helper, path, version = arguments[1:]
+    verify_helper(["verify-helper", helper])
+    incoming = validate_descriptor(path)
+    raw = read_private_regular(os.path.join(ACTIVE, "bundle-manifest.json"),
+                               16 * 1024 * 1024, private=False)
+    previous_manifest = decode_object(raw)
+    previous_digest = hashlib.sha256(raw).hexdigest()
+    if previous_manifest.get("version") != LEGACY_DEBIAN_VERSIONS[version]:
+        refuse("legacy Debian version differs from the installed payload")
+    query = subprocess.run(
+        ["/usr/bin/dpkg-query", "-W", "-f=${Status}\n${Version}\n", "tractanda"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, check=False)
+    lines = query.stdout.splitlines()
+    # dpkg marks its normal upgrade preinst as reinstreq/half-installed before
+    # unpack. This marker alone is not a diagnosis of a previous failed install.
+    if (query.returncode != 0 or query.stderr or len(query.stdout.encode()) > 1024
+            or len(lines) != 2 or lines[1] != version
+            or lines[0] != "install reinstreq half-installed"):
+        refuse("legacy preinst lacks the actual matching dpkg upgrade state")
+    # The old SDK must never be asked to decode the new descriptor. It sees only
+    # its own stopped payload/intent, before the protected expected binding changes.
+    stopped = subprocess.run([helper, "--package-lifecycle", "prerm-upgrade"],
+                             stdin=subprocess.DEVNULL, check=False)
+    if stopped.returncode != 0:
+        raise SystemExit(stopped.returncode)
+    state = safe_state()  # Actual stopped units, private receipts and writer locks.
+    original = state.get("original")
+    if (state["phase"] != "quiesced" or type(original) is not dict
+            or original.get("manifestSHA256") != previous_digest
+            or original.get("version") != LEGACY_DEBIAN_VERSIONS[version]
+            or any(entry["originalManifestSHA256"] != previous_digest for entry in state["instances"])
+            or state.get("incoming") not in (None, original, incoming)):
+        refuse("legacy stopped transaction differs from the original installed payload")
+    receipts = read_receipts({entry["name"] for entry in state["instances"]})
+    if any(receipt["manifestSHA256"] != previous_digest for receipt in receipts.values()):
+        refuse("legacy receipt is not bound to the original installed payload")
+    state["incoming"] = incoming
+    state["phase"] = "awaitingUnpack"
+    state["startupPermitted"] = []
+    state["owner"] = None
+    state["recoveryReason"] = "verified-legacy-preinst-expected-payload-not-admission"
+    write_state(state)
+    return 0
+
 # This leaf and receipt belong only to this installer. Never edit vendor units,
 # administrator drop-ins, uuidd.socket, or libuuid's persistent clock state.
 UUIDD_DROPIN = "/etc/systemd/system/uuidd.service.d/90-tractanda-normal-clock.conf"
@@ -750,6 +815,8 @@ def fallback(arguments):
         verify_helper(["verify-helper", arguments[1]])
         validate_descriptor(arguments[2])
         return 0
+    if action == "legacy-preinst-helper":
+        return legacy_preinst_helper(arguments)
     if action == "preinst":
         if len(arguments) != 3 or arguments[1] not in ("install", "upgrade"):
             refuse("invalid preinst fallback arguments")

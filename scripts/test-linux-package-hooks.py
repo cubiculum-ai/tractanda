@@ -232,9 +232,9 @@ class PackageHookTests(unittest.TestCase):
         result = self.harness.run("tractanda.preinst.in", "upgrade", old, "0.1.0~poc.17-1")
         self.assertEqual(result.returncode, 0, result.stderr)
         records = self.harness.records()
-        self.assertEqual(records[0]["args"][2], "preinst-helper")
-        self.assertEqual(records[1]["args"], ["--package-lifecycle", "prerm-upgrade"])
-        self.assertNotIn("--descriptor", records[1]["args"])
+        self.assertEqual(len(records), 1)  # This routing double does not execute Python's old-helper call.
+        self.assertEqual(records[0]["args"][2], "legacy-preinst-helper")
+        self.assertEqual(records[0]["args"][-1], old)
 
     def test_future_prerm_defers_stop_to_preinst(self):
         result = self.harness.run("tractanda.prerm", "upgrade", "0.1.0~poc.18-1")
@@ -338,6 +338,121 @@ class SystemctlInventoryTests(unittest.TestCase):
                     mock.patch.object(fallback.subprocess, "run", return_value=subprocess.CompletedProcess([], code, out, err)), \
                     self.assertRaises(SystemExit):
                 fallback.run_systemctl(query)
+
+
+class LegacyBootstrapTests(unittest.TestCase):
+    old = "0.1.0~poc.15-1+personal.1793193134.fdaf8ff8b393"
+
+    def invoke(self, *, version=None, status="install reinstreq half-installed", query_version=None,
+               stop_code=0, state_change=None, receipt_digest=None,
+               verify_failure=False, descriptor_failure=False, quiescence_failure=False):
+        m = module_from_template()
+        version = self.old if version is None else version
+        bundle_version = m.LEGACY_DEBIAN_VERSIONS.get(version, "0.1.0-poc.15")
+        raw = json.dumps({"version": bundle_version}).encode()
+        digest = __import__("hashlib").sha256(raw).hexdigest()
+        original = {"manifestSHA256": digest, "version": bundle_version}
+        state = {"phase": "quiesced", "original": copy.deepcopy(original), "incoming": None,
+                 "instances": [{"name": "one", "originalManifestSHA256": digest}],
+                 "startupPermitted": [], "owner": None}
+        if state_change: state_change(state)
+        incoming = json.loads(DESCRIPTOR)
+        calls, writes = [], []
+        helper = m.ACTIVE + "/bin/tractanda-setup"
+        def verified(arguments):
+            calls.append("verify-old-helper")
+            if verify_failure: raise SystemExit("untrusted old helper")
+        def descriptor(path):
+            calls.append("real-descriptor")
+            if descriptor_failure: raise SystemExit("bad actual descriptor")
+            return incoming
+        def process(argv, **kwargs):
+            if argv[0] == "/usr/bin/dpkg-query":
+                calls.append("actual-dpkg-state")
+                return subprocess.CompletedProcess(argv, 0, status + "\n" + (query_version or version) + "\n", "")
+            self.assertEqual(argv, [helper, "--package-lifecycle", "prerm-upgrade"])
+            self.assertEqual(writes, [])  # Old SDK runs before the new descriptor is stored.
+            calls.append("old-stop-only")
+            return subprocess.CompletedProcess(argv, stop_code)
+        def quiescent():
+            calls.append("quiescence-and-writer-locks")
+            if quiescence_failure: raise SystemExit("active unit or writer")
+            return state
+        def write(value):
+            calls.append("atomic-expected-binding")
+            writes.append(copy.deepcopy(value))
+        patches = (
+            mock.patch.object(m.os, "geteuid", return_value=0),
+            mock.patch.object(m, "verify_helper", side_effect=verified),
+            mock.patch.object(m, "validate_descriptor", side_effect=descriptor),
+            mock.patch.object(m, "read_private_regular", return_value=raw),
+            mock.patch.object(m.subprocess, "run", side_effect=process),
+            mock.patch.object(m, "safe_state", side_effect=quiescent),
+            mock.patch.object(m, "read_receipts", return_value={"one": {"manifestSHA256": receipt_digest or digest}}),
+            mock.patch.object(m, "write_state", side_effect=write),
+        )
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            for patch in patches: stack.enter_context(patch)
+            try:
+                result = m.fallback(["legacy-preinst-helper", helper, "/actual-descriptor", version])
+                failure = None
+            except SystemExit as error:
+                result, failure = None, error
+        return result, failure, calls, writes, original, incoming
+
+    def test_known_old_stop_precedes_real_expected_binding_and_preserves_original(self):
+        for version in module_from_template().LEGACY_DEBIAN_VERSIONS:
+            result, failure, calls, writes, original, incoming = self.invoke(version=version)
+            self.assertIsNone(failure)
+            self.assertEqual(result, 0)
+            self.assertEqual(calls, ["verify-old-helper", "real-descriptor", "actual-dpkg-state",
+                                    "old-stop-only", "quiescence-and-writer-locks", "atomic-expected-binding"])
+            self.assertEqual(len(writes), 1)
+            self.assertEqual(writes[0]["original"], original)
+            self.assertEqual(writes[0]["incoming"], incoming)
+            self.assertEqual(writes[0]["phase"], "awaitingUnpack")
+            self.assertEqual(writes[0]["startupPermitted"], [])
+            self.assertIsNone(writes[0]["owner"])
+
+    def test_unknown_old_version_cannot_enter_legacy_binding(self):
+        _, failure, calls, writes, _, _ = self.invoke(version="0.1.0~poc.99-1")
+        self.assertIsNotNone(failure); self.assertEqual(calls, []); self.assertEqual(writes, [])
+
+    def test_wrong_dpkg_version_or_nonupgrade_state_refuses_before_old_stop(self):
+        for options in ({"query_version": "other"}, {"status": "install ok installed"},
+                        {"status": "install ok half-installed"},
+                        {"status": "deinstall reinstreq half-installed"}):
+            _, failure, calls, writes, _, _ = self.invoke(**options)
+            self.assertIsNotNone(failure); self.assertNotIn("old-stop-only", calls); self.assertEqual(writes, [])
+
+    def test_untrusted_old_helper_cannot_execute_or_bind(self):
+        _, failure, calls, writes, _, _ = self.invoke(verify_failure=True)
+        self.assertIsNotNone(failure); self.assertEqual(calls, ["verify-old-helper"]); self.assertEqual(writes, [])
+
+    def test_bad_real_descriptor_cannot_execute_old_helper_or_bind(self):
+        _, failure, calls, writes, _, _ = self.invoke(descriptor_failure=True)
+        self.assertIsNotNone(failure); self.assertNotIn("old-stop-only", calls); self.assertEqual(writes, [])
+
+    def test_old_stop_failure_never_binds_expected_payload(self):
+        _, failure, calls, writes, _, _ = self.invoke(stop_code=42)
+        self.assertEqual(failure.code, 42); self.assertNotIn("quiescence-and-writer-locks", calls); self.assertEqual(writes, [])
+
+    def test_active_unit_or_writer_refusal_never_binds(self):
+        _, failure, _, writes, _, _ = self.invoke(quiescence_failure=True)
+        self.assertIsNotNone(failure); self.assertEqual(writes, [])
+
+    def test_original_receipt_or_other_pending_payload_mismatch_never_binds(self):
+        changes = [lambda s: s.update(phase="failed"),
+                   lambda s: s["original"].update(manifestSHA256="d" * 64),
+                   lambda s: s["original"].update(version="other"),
+                   lambda s: s["instances"][0].update(originalManifestSHA256="d" * 64),
+                   lambda s: s.update(incoming={"manifestSHA256": "d" * 64})]
+        for change in changes:
+            _, failure, _, writes, _, _ = self.invoke(state_change=change)
+            self.assertIsNotNone(failure); self.assertEqual(writes, [])
+        _, failure, _, writes, _, _ = self.invoke(receipt_digest="d" * 64)
+        self.assertIsNotNone(failure); self.assertEqual(writes, [])
 
 
 class FallbackUnitTests(unittest.TestCase):
@@ -747,6 +862,54 @@ class LayoutAliasTests(unittest.TestCase):
     def tearDown(self):
         self.custody.stop()
         self.temp.cleanup()
+
+    def test_new_layout_directories_are_0755_under_private_hook_umask(self):
+        previous = os.umask(0o077)
+        try:
+            self.module.ensure_layout_aliases()
+            self.assertEqual(os.umask(0o077), 0o077)
+        finally:
+            os.umask(previous)
+        for path in self.root.rglob("*"):
+            if path.is_dir() and not path.is_symlink():
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o755, str(path))
+        self.assertEqual(stat.S_IMODE(self.root.stat().st_mode), 0o700)
+
+    def test_existing_private_layout_directory_is_not_chmodded(self):
+        path = self.root / "existing"
+        path.mkdir(mode=0o700)
+        inode = path.stat().st_ino
+        self.module.ensure_layout_directory(str(path))
+        self.assertEqual(path.stat().st_ino, inode)
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o700)
+
+    def test_mkdir_race_does_not_chmod_the_other_creator_directory(self):
+        path = self.root / "raced"
+        actual_mkdir = os.mkdir
+        def another_creator(name, mode):
+            self.assertEqual(Path(name), path)
+            actual_mkdir(name, 0o700)
+            raise FileExistsError(name)
+        previous = os.umask(0o077)
+        try:
+            with mock.patch.object(self.module.os, "mkdir", side_effect=another_creator):
+                self.module.ensure_layout_directory(str(path))
+            self.assertEqual(os.umask(0o077), 0o077)
+        finally:
+            os.umask(previous)
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o700)
+
+    def test_mkdir_error_restores_private_hook_umask(self):
+        path = self.root / "denied"
+        previous = os.umask(0o077)
+        try:
+            with mock.patch.object(self.module.os, "mkdir", side_effect=PermissionError("denied")):
+                with self.assertRaises(PermissionError):
+                    self.module.ensure_layout_directory(str(path))
+            self.assertEqual(os.umask(0o077), 0o077)
+        finally:
+            os.umask(previous)
+        self.assertFalse(path.exists())
 
     def test_fresh_configure_creates_exact_leaf_aliases_and_retry_preserves_inodes(self):
         m = self.module

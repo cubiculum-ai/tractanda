@@ -20,7 +20,7 @@ case "${1-}" in
   # preinst. Their helper cannot compare a new semantic descriptor, so preserve its
   # genuine stop-only transaction; new configure verifies the real unpacked payload.
   case "$2" in
-   '0.1.0~poc.15-1+personal.1793193134.fdaf8ff8b393'|'0.1.0~poc.16-1'|'0.1.0~poc.16.1-1') legacy_stop_only=yes ;;
+   '0.1.0~poc.15-1+personal.1793193134.fdaf8ff8b393'|'0.1.0~poc.16-1'|'0.1.0~poc.16.1-1') legacy_stop_only=yes; legacy_source_version=$2 ;;
   esac ;;
  abort-upgrade)
   [ "$#" -eq 2 ] || { echo "tractanda preinst: invalid abort-upgrade arguments" >&2; exit 2; }
@@ -37,6 +37,8 @@ fi
 if [ -x "$helper" ]; then
  if [ "$lifecycle" = abort-upgrade ]; then
   set -- verify-helper "$helper"
+ elif [ "${legacy_stop_only-no}" = yes ]; then
+  set -- legacy-preinst-helper "$helper" "$descriptor" "$legacy_source_version"
  else
   set -- preinst-helper "$helper" "$descriptor"
  fi
@@ -52,7 +54,9 @@ if [ -x "$helper" ]; then
   "$helper" --package-lifecycle abort-upgrade
  else
   if [ "${legacy_stop_only-no}" = yes ]; then
-   "$helper" --package-lifecycle prerm-upgrade
+   # The bounded fallback already verified/stopped the old helper before binding
+   # the genuine expected descriptor; the old SDK must not decode that new state.
+   :
   else
    "$helper" --package-lifecycle preinst --descriptor "$descriptor"
   fi
