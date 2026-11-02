@@ -801,6 +801,83 @@ final class SetupPackageLifecycleTests: XCTestCase {
         XCTAssertEqual(f.runner.bootstraps, 1)
     }
 
+    func testStoppedProvenanceChangePinsCurrentFullRecipeWithoutStartingOrChangingCanonicalData() throws {
+        let f = try fixture()
+        try f.configureFresh()
+        try f.install()
+        _ = try f.hook(.prermUpgrade)
+        f.denyAuthentication = true
+        XCTAssertFalse(try f.engine.packagePolicyAllowsStart("a", role: .authentication))
+        var receipt = try XCTUnwrap(f.engine.readReceipt("a"))
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(DocumentExtractionPayload.pinned)) as? [String: Any])
+        var identity = try XCTUnwrap(object["identity"] as? [String: Any])
+        identity["converter"] = "tractanda.docling-native.v2-idefics3-gelu-f32+linux-raster." + String(repeating: "a", count: 64)
+        identity["runtimeRevision"] = String(repeating: "b", count: 40)
+        object["identity"] = identity
+        receipt.documentExtraction = try JSONDecoder().decode(DocumentExtractionPayload.self,
+            from: JSONSerialization.data(withJSONObject: object))
+        receipt.documentScratchDirectory = f.engine.roots.work.appendingPathComponent("a/scratch").path
+        try f.engine.writeReceipt(receipt)
+        let before = try f.canonicalBytes()
+        let current = try f.engine.verifyBundle(at: f.engine.packagePayload)
+        // Isolate the stopped-receipt transition. Full incoming payload validation
+        // belongs to configure's preceding gate and the separate native package test.
+        let incomingManifest = BundleManifest(version: "0.1.0-poc.16.2", platform: current.platform,
+            arch: current.arch, files: current.files, documentExtraction: .pinned,
+            canonicalFormats: current.canonicalFormats)
+        let incoming = SetupPackageCompatibility(
+            manifestSHA256: Fixture.digest(try JSONEncoder().encode(incomingManifest)),
+            version: incomingManifest.version, arch: current.arch,
+            canonicalFormats: try XCTUnwrap(current.canonicalFormats), documentExtraction: .pinned)
+        try f.engine.configureStoppedPackageInstance(&receipt, manifest: incomingManifest, incoming: incoming)
+        let saved = try XCTUnwrap(f.engine.readReceipt("a"))
+        XCTAssertEqual(saved.documentExtraction, .pinned)
+        XCTAssertEqual(saved.manifestSHA256, incoming.manifestSHA256)
+        XCTAssertEqual(saved.state, .active)
+        XCTAssertTrue(f.runner.running.isEmpty)
+        XCTAssertTrue(f.runner.enabled.isEmpty)
+        XCTAssertEqual(f.runner.bootstraps, 1)
+        XCTAssertEqual(try f.canonicalBytes(), before)
+    }
+
+    func testStoppedDocumentRemovalOrUnknownSemanticsPreservesReceiptAndCanonicalData() throws {
+        for unknownSemantics in [false, true] {
+            let f = try fixture()
+            try f.configureFresh()
+            try f.install()
+            _ = try f.hook(.prermUpgrade)
+            var receipt = try XCTUnwrap(f.engine.readReceipt("a"))
+            var object = try XCTUnwrap(JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(DocumentExtractionPayload.pinned)) as? [String: Any])
+            if unknownSemantics {
+                var identity = try XCTUnwrap(object["identity"] as? [String: Any])
+                identity["preprocessing"] = "unsupported-preprocessing-v99"
+                object["identity"] = identity
+            }
+            receipt.documentExtraction = try JSONDecoder().decode(DocumentExtractionPayload.self,
+                from: JSONSerialization.data(withJSONObject: object))
+            try f.engine.writeReceipt(receipt)
+            let beforeReceipt = try Data(contentsOf: f.engine.receiptURL("a"))
+            let before = try f.canonicalBytes()
+            let current = try f.engine.verifyBundle(at: f.engine.packagePayload)
+            let incomingManifest = BundleManifest(version: "0.1.0-poc.16.2", platform: current.platform,
+                arch: current.arch, files: current.files,
+                documentExtraction: unknownSemantics ? .pinned : nil,
+                canonicalFormats: current.canonicalFormats)
+            let incoming = SetupPackageCompatibility(
+                manifestSHA256: Fixture.digest(try JSONEncoder().encode(incomingManifest)),
+                version: incomingManifest.version, arch: current.arch,
+                canonicalFormats: try XCTUnwrap(current.canonicalFormats),
+                documentExtraction: incomingManifest.documentExtraction)
+            XCTAssertThrowsError(try f.engine.configureStoppedPackageInstance(
+                &receipt, manifest: incomingManifest, incoming: incoming))
+            XCTAssertEqual(try Data(contentsOf: f.engine.receiptURL("a")), beforeReceipt)
+            XCTAssertEqual(try f.canonicalBytes(), before)
+            XCTAssertTrue(f.runner.running.isEmpty)
+        }
+    }
+
     func testPackageRemovalPreservesProgramAndCanonicalBytesAndReinstallDoesNotBootstrap() throws {
         let f = try fixture()
         try f.configureFresh()

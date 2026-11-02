@@ -525,12 +525,16 @@ extension SetupEngine {
         manifest: BundleManifest, incoming: SetupPackageCompatibility
     ) throws {
         guard receipt.embedding == manifest.embedding,
-            receipt.documentExtraction == manifest.documentExtraction
+            try receipt.documentExtraction?.identity.storedSemanticProfile()
+                == manifest.documentExtraction?.identity.storedSemanticProfile()
         else {
             throw SetupError("A package cannot silently change or remove the configured bundled components.")
         }
         try verifyRegistration(receipt)
         try verifyPeerConfigurationForLoad(receipt)
+        // Configure already verified the actual incoming bundle and exact payload.
+        // Keep the instance stopped, but pin future starts to that current full recipe.
+        receipt.documentExtraction = manifest.documentExtraction
         receipt.release = packagePayload.path
         receipt.manifestSHA256 = incoming.manifestSHA256
         receipt.releases = [packagePayload.path: incoming.manifestSHA256]
