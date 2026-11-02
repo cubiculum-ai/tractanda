@@ -9,7 +9,7 @@
   "documentExtraction": {
     "converterPath": "bin/tractanda-document-converter",
     "identity": {
-      "converter": "tractanda.docling-native.v2-idefics3-gelu-f32+linux-raster.b40ec16204a9d32c59bb50302aeec5fabf03245e21a7a35c0a7a166af2674c92",
+      "converter": "tractanda.docling-native.v2-idefics3-gelu-f32+linux-raster.d4ddcdac08f8eb4dfe70646be62d2e5e6554d60e337ad7e1bffafbaad4895861",
       "model": "ibm-granite/granite-docling-258M-mlx",
       "modelRevision": "a8b999991fe8c521a0cec749973414eaaf823731",
       "parser": "doctags-strict-v1",
@@ -81,8 +81,8 @@
     {
       "mode": 493,
       "path": "bin/tractanda-document-converter",
-      "sha256": "99249e489414f2b629ac1fb283faeb5f938b55bea6e9e67adb4bd923dc9d71c4",
-      "size": 62970864
+      "sha256": "10f6ac94e21059684f9b0fbebff52e10a073aab6d0a70a7e830f875b1d72f0c6",
+      "size": 62974080
     },
     {
       "mode": 493,
@@ -213,7 +213,7 @@
     {
       "mode": 420,
       "path": "lib/tractanda/document-native-closure.json",
-      "sha256": "b40ec16204a9d32c59bb50302aeec5fabf03245e21a7a35c0a7a166af2674c92",
+      "sha256": "d4ddcdac08f8eb4dfe70646be62d2e5e6554d60e337ad7e1bffafbaad4895861",
       "size": 44191
     },
     {
@@ -285,8 +285,8 @@
     {
       "mode": 420,
       "path": "licenses/Docling/linux-build-provenance.json",
-      "sha256": "92ca4c72e528ec1c5ebcbcb66e29a10e2ca33d932dc72a6922b1b1a6a4e08a7c",
-      "size": 22393
+      "sha256": "f3b4a82b1499b5fff3110ba6a41ff289653730cf91bbfe90ad09c51da378271b",
+      "size": 22629
     },
     {
       "mode": 420,
@@ -927,7 +927,7 @@
     "licenses/system-build-provenance/libstdc++6-copyright"
   ],
   "runtimeRevision": "61a4b20d4ad01b10466e8fc94c50402a9f994430",
-  "sourceInputsSHA256": "e7ed880f9c4f62ff1bbdbc4bcab093f424911ba50973ab8502917534032c6aa0",
+  "sourceInputsSHA256": "8002b29c8219b812535a732699d27513fc18bb9429ed3ade8f86b1f5c47b10c6",
   "toolchain": {
     "clangSHA256": "712106992cb2e4abd378bb6b778c4b19e790df7948b1a3e0c0c518823ecf8cb5",
     "swiftFrontendSHA256": "6e1dbf14d284019b284344b49968cac64921d5999cf72b3b3d8d723340e90717",
