@@ -15,6 +15,13 @@ resume_peers() {
     [ -f "$script_dir/stopped-instances" ] || return 0
     resume_result=0
     while IFS= read -r peer; do
+        # .17 coordinated maintenance is deliberately stopped across reinstall/reboot.
+        # The owned Setup completion command validates and consumes this transient intent.
+        intent="$installation/layout17-intents/$peer.json"
+        if [ -e "$intent" ] || [ -L "$intent" ]; then
+            [ -f "$intent" ] && [ ! -L "$intent" ] && [ "$(/usr/bin/stat -f %u "$intent")" = 0 ] || { resume_result=1; continue; }
+            continue
+        fi
         "$bundle/bin/tractanda-setup" start --name "$peer" || resume_result=1
     done < "$script_dir/stopped-instances"
     return "$resume_result"

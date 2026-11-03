@@ -69,7 +69,7 @@ final class PersonalRecoveryInventoryTests: XCTestCase {
     }
     @discardableResult
     private func save(_ revision: Revision, _ root: URL, minute: String = "01") throws -> String {
-        let path = "items/2026/10/24/11/\(minute)/\(revision.itemID)/\(revision.revisionID).tractanda"
+        let path = "items/2026/10/24/11/\(minute)/\(revision.itemID).\(revision.revisionID).tractanda"
         try write(RecordCodec.encode(revision), root: root, path: path)
         return path
     }

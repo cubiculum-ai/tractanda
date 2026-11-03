@@ -561,6 +561,11 @@ def assemble(payload, spec_path, output, arch, maximum, embedding_runner=None, i
     if any_model_dirs != all_model_dirs or include_model_weights != all_model_dirs:
         raise ValueError('Use --include-model-weights with both complete model directories, or provide neither.')
     public_assets(payload)
+    if spec['version'] == '0.1.0-poc.17':
+        bridge = next((row for row in rows if row['path'] == 'bin/tractanda-layout17'), None)
+        if bridge is None or not bridge['mode'] & 0o111:
+            raise ValueError('The .17 one-time migration executable is required.')
+        elf(payload / bridge['path'], arch)
     closure = runtime_closure(payload, rows, arch, spec['dynamicLoads'])
     embedding, document = full_components(payload, spec, rows, embedding_runner=embedding_runner)
     formats = json.loads(run([payload / 'bin/tractanda-setup', '--canonical-format-support']), object_pairs_hook=unique)

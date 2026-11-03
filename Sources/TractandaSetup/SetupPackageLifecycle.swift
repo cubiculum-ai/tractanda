@@ -26,7 +26,7 @@ extension SetupEngine {
                 throw SetupError("Missing incoming package declaration or candidate bundle.")
             }
             try preflightCandidatePayload(incoming, bundle: candidate)
-            try preflightPackageUpgrade(incoming)
+            try preflightPackageUpgrade(incoming, bundle: candidate)
             return "Incoming package payload and format preflight passed; no services or package state changed."
         }
         if arguments.action == .preinst {
@@ -203,12 +203,12 @@ extension SetupEngine {
 
     /// Pure format preflight: no service stops, startup denial, or journal mutation.
     /// The quiescent canonical fence remains mandatory during actual preparation.
-    func preflightPackageUpgrade(_ incoming: SetupPackageCompatibility) throws {
+    func preflightPackageUpgrade(_ incoming: SetupPackageCompatibility, bundle: URL? = nil) throws {
         let prior = try readPackageState()
         let installed = try compatibilityOfInstalledUpgradeSource()
         let original = (prior?.pending == true || prior?.phase == .removed) ? prior?.original : installed
         guard let original else { throw SetupError("Package upgrade lacks its original commitment.") }
-        try incoming.requireRollingUpgrade(from: original)
+        try requirePackageUpgrade(incoming, from: original, bundle: bundle)
     }
 
     func preparePackageUpgrade(incoming: SetupPackageCompatibility?) throws -> SetupPackageState {
@@ -221,7 +221,7 @@ extension SetupEngine {
         if let incoming {
             let original = (prior?.pending == true || prior?.phase == .removed) ? prior?.original : installed
             guard let original else { throw SetupError("Package upgrade lacks its original commitment.") }
-            try incoming.requireRollingUpgrade(from: original)
+            try requirePackageUpgrade(incoming, from: original)
         }
         try verifyPackageDefinitionFiles(receipts)
         try serviceBackend.reload()
@@ -294,9 +294,9 @@ extension SetupEngine {
         do {
             try packageStopServices(receipts)
             if let incoming, let original = state.original {
-                try incoming.requireRollingUpgrade(from: original)
+                try requirePackageUpgrade(incoming, from: original)
             }
-            for receipt in receipts {
+            for receipt in receipts where incoming?.version != "0.1.0-poc.17" || receipt.state != .removed {
                 let requirement = try quiescentCanonicalRequirement(receipt)
                 if let incoming { try incoming.canonicalFormats.require(requirement) }
             }
@@ -410,7 +410,10 @@ extension SetupEngine {
         }
         if let existing, existing.phase == .committed, existing.incoming == incoming {
             try verifyPackageDefinitionFiles(receipts)
-            guard receipts.allSatisfy({ $0.manifestSHA256 == incoming.manifestSHA256 }) else {
+            guard receipts.allSatisfy({
+                incoming.version == "0.1.0-poc.17" && $0.state == .removed
+                    || $0.manifestSHA256 == incoming.manifestSHA256
+            }) else {
                 throw SetupError("Committed package receipts differ from the actual active payload.")
             }
             return "Package configuration already committed; service intent is unchanged."
@@ -426,15 +429,21 @@ extension SetupEngine {
         var stoppedByPolicy = 0
         do {
             for intent in state.instances {
-                guard var receipt = try readReceipt(intent.name), receipt.initialized,
-                    !receipt.sample || receipt.sampled
-                else {
+                guard var receipt = try readReceipt(intent.name) else {
+                    throw SetupError("A retained package instance receipt is missing.")
+                }
+                if incoming.version == "0.1.0-poc.17", receipt.state == .removed { continue }
+                guard receipt.initialized, !receipt.sample || receipt.sampled else {
                     throw SetupError(
                         "Package configure cannot initialize or seed a store; finish the explicit setup operation."
                     )
                 }
+                if incoming.version == "0.1.0-poc.17", let original = state.original,
+                    original.version == "0.1.0-poc.16.2" {
+                    _ = try migrateLayout17Store(receipt, bundle: packagePayload, incoming: incoming, original: original)
+                }
                 try incoming.canonicalFormats.require(quiescentCanonicalRequirement(receipt))
-                var allowStart = intent.wasRunning
+                var allowStart = try intent.wasRunning && readLayout17Intent(intent.name) == nil
                 if intent.wasRunning {
                     let requiredRoles: [SetupServiceRole] =
                         receipt.embedding == nil
@@ -461,7 +470,8 @@ extension SetupEngine {
             // Keep phase configuring and its live-owner guard through boot publication. If the
             // owner dies halfway, stale permits deny subsequent boot/restart, even if a link exists.
             for intent in state.instances where intent.wasEnabled {
-                guard let receipt = try readReceipt(intent.name), receipt.state == .active else { continue }
+                guard let receipt = try readReceipt(intent.name), receipt.state == .active,
+                    try readLayout17Intent(intent.name) == nil else { continue }
                 for role in [SetupServiceRole.authentication, .embeddings, .server]
                 where packageDefinitionHash(receipt, role: role) != nil {
                     try serviceBackend.enable(intent.name, role: role)

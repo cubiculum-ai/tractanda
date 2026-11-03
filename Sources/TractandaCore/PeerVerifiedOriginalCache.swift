@@ -89,9 +89,8 @@ final class PeerVerifiedOriginalCache {
             row.descriptor.length > 0
         else { throw failure() }
         if row.descriptor.kind == .item {
-            guard parts.count == 8,
-                CanonicalRecordPath.validate(
-                    row.path, itemID: parts[6], revisionID: row.descriptor.id)
+            guard let identities = CanonicalRecordPath.identities(row.path),
+                identities.revisionID == row.descriptor.id
             else { throw failure() }
         }
         let rootFD = open(root.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)

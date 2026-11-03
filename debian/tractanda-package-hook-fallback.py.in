@@ -583,7 +583,186 @@ LEGACY_DEBIAN_VERSIONS = {
     "0.1.0~poc.15-1+personal.1793193134.fdaf8ff8b393": "0.1.0-poc.15",
     "0.1.0~poc.16-1": "0.1.0-poc.16",
     "0.1.0~poc.16.1-1": "0.1.0-poc.16.1",
+    "0.1.0~poc.16.2-1": "0.1.0-poc.16.2",
 }
+
+def layout17_store_file(store, name, daemon_uid):
+    """Bounded read-only operational metadata; never interpret an item or rewrite content."""
+    root = os.open(store, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        parent = os.fstat(root)
+        if parent.st_uid != daemon_uid or stat.S_IMODE(parent.st_mode) != 0o700:
+            refuse("layout17 store is not private service-owned data")
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=root)
+        try:
+            before = os.fstat(fd)
+            if (not stat.S_ISREG(before.st_mode) or before.st_uid != daemon_uid or before.st_nlink != 1
+                    or stat.S_IMODE(before.st_mode) != 0o600 or not 0 < before.st_size <= 131072):
+                refuse("layout17 operational metadata is unsafe")
+            raw = bytearray()
+            while len(raw) < before.st_size:
+                part = os.read(fd, before.st_size - len(raw))
+                if not part:
+                    refuse("layout17 operational metadata changed")
+                raw.extend(part)
+            after = os.fstat(fd)
+            named = os.stat(name, dir_fd=root, follow_symlinks=False)
+            stamp = lambda value: (value.st_dev, value.st_ino, value.st_mode, value.st_uid,
+                                   value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+            if stamp(before) != stamp(after) or stamp(after) != stamp(named):
+                refuse("layout17 operational metadata changed")
+            return bytes(raw)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(root)
+
+
+_LAYOUT17_DOCUMENT_KEYS = {
+    "converterPath", "identity", "workerProtocol", "modelDirectory", "modelManifestPath",
+    "modelManifestSHA256", "runtimeRepository", "runtimePatchManifestPath", "runtimePatchManifestSHA256",
+    "runtimePatchIdentifier", "runtimePatchPath", "runtimePatchSHA256", "noticePaths",
+}
+_LAYOUT17_IDENTITY_KEYS = {"converter", "model", "modelRevision", "runtimeRevision", "preprocessing", "parser"}
+
+
+def layout17_document_semantics(document):
+    """Mirror DocumentConverterIdentity.storedSemanticProfile, without changing provenance.
+
+    This is a read-compatibility projection only. The authenticated new Setup still compares
+    the genuine incoming descriptor with the actual unpacked executable/model/runtime closure.
+    """
+    if document is None:
+        return None
+    if (type(document) is not dict or set(document) != _LAYOUT17_DOCUMENT_KEYS
+            or document.get("workerProtocol") != "tractanda.native-document-worker.v1"):
+        refuse("unknown layout17 document payload schema or worker protocol")
+    def relative_path(value):
+        return (type(value) is str and 0 < len(value.encode("utf-8")) <= 4096
+                and not value.startswith("/") and re.search(r"[\x00-\x1f\x7f]", value) is None
+                and all(part not in ("", ".", "..") for part in value.split("/")))
+    for key in ("converterPath", "modelDirectory", "modelManifestPath", "runtimePatchManifestPath", "runtimePatchPath"):
+        if not relative_path(document.get(key)):
+            refuse("malformed layout17 document artifact path")
+    for key in ("modelManifestSHA256", "runtimePatchManifestSHA256", "runtimePatchSHA256"):
+        if not valid_digest(document.get(key)):
+            refuse("malformed layout17 document artifact fingerprint")
+    for key in ("runtimeRepository", "runtimePatchIdentifier"):
+        value = document.get(key)
+        if type(value) is not str or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9+./:@_\-]{0,255}", value) is None:
+            refuse("malformed layout17 document artifact provenance")
+    notices = document.get("noticePaths")
+    if type(notices) is not list or len(notices) > 128 or not all(relative_path(value) for value in notices):
+        refuse("malformed layout17 document notice inventory")
+    identity = document.get("identity")
+    if type(identity) is not dict or set(identity) != _LAYOUT17_IDENTITY_KEYS:
+        refuse("unknown layout17 document identity schema")
+    for key in ("converter", "model"):
+        value = identity.get(key)
+        if (type(value) is not str or not 1 <= len(value.encode("utf-8")) <= 256
+                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9+./:@_\-]*", value) is None):
+            refuse("malformed layout17 document provenance identifier")
+    for key in ("modelRevision", "runtimeRevision"):
+        value = identity.get(key)
+        if type(value) is not str or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value) is None:
+            refuse("malformed layout17 document provenance revision")
+    if identity.get("parser") != "doctags-strict-v1":
+        refuse("unknown layout17 stored document parser semantics")
+    profiles = {
+        "opaque-rgb-content-crop-hf4561-pillow123-grid-v2": "contentCropV2",
+        "opaque-rgb2048-17tiles-v1": "legacyCanvasV1",
+    }
+    preprocessing = identity.get("preprocessing")
+    if type(preprocessing) is not str or preprocessing not in profiles:
+        refuse("unknown layout17 stored document preprocessing semantics")
+    return profiles[preprocessing]
+
+
+def layout17_pre_stop(previous, previous_digest, incoming):
+    """The finite16.2 boundary is checked BEFORE asking its authentic helper to stop."""
+    capability = "tractanda.physical-layout.flat-items.v1"
+    before, after = previous.get("canonicalFormats"), incoming.get("canonicalFormats")
+    if (previous.get("version") != "0.1.0-poc.16.2" or incoming.get("version") != "0.1.0-poc.17"
+            or incoming.get("upgrade") != "coordinated-maintenance"
+            or previous.get("arch") != incoming.get("arch")
+            or previous.get("embedding") != incoming.get("embedding")
+            or layout17_document_semantics(previous.get("documentExtraction"))
+                != layout17_document_semantics(incoming.get("documentExtraction"))
+            or type(before) is not dict or type(after) is not dict
+            or set(before) != set(after)
+            or before.get("profile") != "tractanda.canonical-formats.v1"
+            or before.get("readerLevel") != 18 or before.get("writerLevel") != 18
+            or after.get("readerLevel") != 19 or after.get("writerLevel") != 19
+            or before.get("read") != after.get("read") or before.get("write") != after.get("write")
+            or capability in before.get("capabilities", [])
+            or capability in before.get("writeCapabilities", [])
+            or after.get("capabilities") != sorted(before.get("capabilities", []) + [capability])
+            or after.get("writeCapabilities") != sorted(before.get("writeCapabilities", []) + [capability])):
+        refuse("not the finite authentic16.2 to17 physical-layout transition")
+    daemon_uid = pwd.getpwnam("daemon").pw_uid
+    root_directory_chain(RECEIPTS)
+    names = os.listdir(RECEIPTS)
+    if len(names) > 1024:
+        refuse("layout17 receipt inventory exceeds its bound")
+    for filename in names:
+        if not filename.endswith(".json") or not valid_instance(filename[:-5]):
+            refuse("unknown layout17 receipt entry")
+        name = filename[:-5]
+        receipt = decode_object(read_private_regular(os.path.join(RECEIPTS, filename)))
+        if (receipt.get("version") != 1 or receipt.get("instance") != name
+                or not valid_digest(receipt.get("manifestSHA256"))
+                or receipt.get("state") not in ("active", "preparing", "removed")):
+            refuse("layout17 receipt identity is invalid")
+        if receipt["state"] == "removed":
+            continue  # Retired data is neither an upgrade target nor a reason to stop services.
+        if (receipt.get("instance") != name or receipt.get("release") != ACTIVE
+                or receipt.get("manifestSHA256") != previous_digest
+                or receipt.get("initialized") is not True or receipt.get("state") != "active"):
+            refuse("finish the existing16.2 instance operation before layout17")
+        receipt_instance_paths(receipt, name, daemon_uid)
+        store = receipt["store"]
+        for pending in (".tractanda-first-source.json", ".tractanda-first-source-complete.json",
+                        ".personal-membership.pending.json", ".personal-baseline.json",
+                        ".tractanda-personal-profile.pending.json", "canonical-layout.pending.json"):
+            if os.path.lexists(os.path.join(store, pending)):
+                refuse("finish unsupported pending or historical16.2 operation before layout17")
+        profile = decode_object(layout17_store_file(store, ".tractanda-personal-profile.json", daemon_uid))
+        fence_raw = layout17_store_file(store, "canonical-reader.json", daemon_uid)
+        fence = decode_object(fence_raw)
+        if (profile.get("profile") != "tractanda.personal-workgroup.v1"
+                or profile.get("storeID") != fence.get("storeID")
+                or fence.get("minimumReaderLevel") not in (16, 17, 18)):
+            refuse("layout17 supports established personal/workgroup16.2 stores only")
+        membership_path = os.path.join(store, ".personal-membership.json")
+        if not os.path.lexists(membership_path):
+            continue  # A real standalone store requires no cluster declaration.
+        raw_membership = layout17_store_file(store, ".personal-membership.json", daemon_uid)
+        membership = decode_object(raw_membership)
+        members = membership.get("members")
+        if (membership.get("profile") != "tractanda.personal-membership.v1"
+                or membership.get("storeID") != profile.get("storeID")
+                or type(members) is not list or not 1 <= len(members) <= 256):
+            refuse("layout17 current membership is invalid")
+        if len(members) == 1:
+            continue
+        intent_path = os.path.join(INSTALLATION, "layout17-intents", name + ".json")
+        if not os.path.lexists(intent_path):
+            refuse("cluster layout17 requires prepare before stopping services")
+        intent = decode_object(read_private_regular(intent_path))
+        keys = {"profile", "mode", "instance", "storePath", "storeID", "replicaID", "oldManifestSHA256",
+                "newManifestSHA256", "membershipDigest", "readerRequirementSHA256",
+                "acknowledgedAllMembersUpgradedBeforeStart"}
+        if (set(intent) != keys or intent["profile"] != "tractanda.layout17-prepare.v1"
+                or intent["mode"] != "administrator-coordinated" or intent["instance"] != name
+                or intent["storePath"] != store or intent["storeID"] != profile.get("storeID")
+                or intent["replicaID"] != profile.get("replicaID")
+                or intent["oldManifestSHA256"] != previous_digest
+                or intent["newManifestSHA256"] != incoming["manifestSHA256"]
+                or intent["membershipDigest"] != hashlib.sha256(raw_membership).hexdigest()
+                or intent["readerRequirementSHA256"] != hashlib.sha256(fence_raw).hexdigest()
+                or intent["acknowledgedAllMembersUpgradedBeforeStart"] is not True):
+            refuse("cluster layout17 requires the exact transient administrator prepare intent")
+
 
 def legacy_preinst_helper(arguments):
     """Retain genuine expected payload metadata only after the old helper stops.
@@ -596,12 +775,16 @@ def legacy_preinst_helper(arguments):
     helper, path, version = arguments[1:]
     verify_helper(["verify-helper", helper])
     incoming = validate_descriptor(path)
+    if incoming.get("version") == "0.1.0-poc.17" and version != "0.1.0~poc.16.2-1":
+        refuse("install the authentic16.2 bridge source before upgrading to17")
     raw = read_private_regular(os.path.join(ACTIVE, "bundle-manifest.json"),
                                16 * 1024 * 1024, private=False)
     previous_manifest = decode_object(raw)
     previous_digest = hashlib.sha256(raw).hexdigest()
     if previous_manifest.get("version") != LEGACY_DEBIAN_VERSIONS[version]:
         refuse("legacy Debian version differs from the installed payload")
+    if version == "0.1.0~poc.16.2-1":
+        layout17_pre_stop(previous_manifest, previous_digest, incoming)
     query = subprocess.run(
         ["/usr/bin/dpkg-query", "-W", "-f=${Status}\n${Version}\n", "tractanda"],
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

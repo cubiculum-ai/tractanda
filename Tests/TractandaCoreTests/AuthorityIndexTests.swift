@@ -107,7 +107,7 @@ final class AuthorityIndexTests: XCTestCase {
             ).itemValue
             let value = try Revision(fields: fields, formatVersion: 2)
             let original = try AuthorityRevision(originalBytes: RecordCodec.encode(value))
-            let path = "items/2026/10/14/12/00/" + value.itemID + "/" + rid + ".tractanda"
+            let path = "items/2026/10/14/12/00/" + value.itemID + "." + rid + ".tractanda"
             let metadata = try write(original.originalBytes, path: path)
             return Item(
                 original: original,

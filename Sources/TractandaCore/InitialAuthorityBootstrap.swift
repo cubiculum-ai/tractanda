@@ -191,7 +191,7 @@ enum InitialAuthorityBootstrap {
             .replacingOccurrences(of: "T", with: "/").replacingOccurrences(of: ":", with: "/")
         return .init(
             original: .init(
-                path: "items/\(minute)/\(itemID)/\(revisionID).tractanda",
+                path: "items/\(minute)/\(itemID).\(revisionID).tractanda",
                 itemID: itemID, revisionID: revisionID, sha256: AuthorityRecordCodec.sha256(bytes),
                 length: bytes.count, currentAccessConfiguration: true, mode: UInt32(S_IFREG) | 0o400,
                 uid: actorUID,
@@ -582,17 +582,17 @@ extension InitialAuthorityBootstrap {
         root: URL, path: String, object: PeerPackage.Object, ownerUID: UInt32,
         readBudget: ((Int) throws -> Void)? = nil
     ) throws -> Data? {
-        let components = path.split(separator: "/", omittingEmptySubsequences: false)
+        let identities = CanonicalRecordPath.identities(path)
         guard object.kind == .item, object.length > 0,
-            object.length <= PooledCanonicalRecord.maximumRecordBytes, components.count == 8,
-            CanonicalRecordPath.validate(path, itemID: String(components[6]), revisionID: object.id)
+            object.length <= PooledCanonicalRecord.maximumRecordBytes, let identities,
+            identities.revisionID == object.id
         else { throw failure("Invalid retained canonical item path.") }
         do {
             _ = try FileMetadata.read(at: root.appendingPathComponent(path))
         } catch FileMetadataError.posix(let code) where code == ENOENT { return nil }
         try readBudget?(object.length)
         return try readCanonicalOriginal(
-            root: root, path: path, itemID: String(components[6]), revisionID: object.id,
+            root: root, path: path, itemID: identities.itemID, revisionID: object.id,
             length: object.length, sha256: object.sha256, ownerUID: ownerUID)
     }
     private static func readCanonicalOriginal(

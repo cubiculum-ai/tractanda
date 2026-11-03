@@ -239,7 +239,7 @@ final class PeerOriginalTransferTests: XCTestCase {
             }
             let binding = try XCTUnwrap(
                 bridge.binding(packageID: package, object: original.object, create: false))
-            let stage = receiver.appendingPathComponent("attachments/.staging/" + binding.stageID + ".stage")
+            let stage = receiver.appendingPathComponent("attachments/staging/" + binding.stageID + ".stage")
             if fault == "aligned" {
                 let file = try FileHandle(forWritingTo: stage)
                 try file.truncate(atOffset: UInt64(original.object.chunkBytes))
@@ -272,7 +272,7 @@ final class PeerOriginalTransferTests: XCTestCase {
             bridge.binding(packageID: package, object: original.object, create: false))
         _ = try bridge.payloads.append(id: binding.stageID, offset: 0, data: chunk)
         XCTAssertEqual(try bridge.resume(packageID: package, object: original.object).nextOffset, chunk.count)
-        let stage = receiver.appendingPathComponent("attachments/.staging/" + binding.stageID + ".stage")
+        let stage = receiver.appendingPathComponent("attachments/staging/" + binding.stageID + ".stage")
         let file = try FileHandle(forWritingTo: stage)
         try file.truncate(atOffset: 0)
         try file.synchronize()
@@ -307,7 +307,7 @@ final class PeerOriginalTransferTests: XCTestCase {
         XCTAssertTrue(complete)
         let binding = try XCTUnwrap(
             reopened.binding(packageID: package, object: original.object, create: false))
-        let stage = receiver.appendingPathComponent("attachments/.staging/" + binding.stageID + ".stage")
+        let stage = receiver.appendingPathComponent("attachments/staging/" + binding.stageID + ".stage")
         let file = try FileHandle(forWritingTo: stage)
         try file.seek(toOffset: 0)
         try file.write(contentsOf: Data([0xDA]))

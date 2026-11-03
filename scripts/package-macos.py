@@ -391,6 +391,8 @@ def main():
         'tractanda': 'ai.tractanda.server', 'tractanda-tui': 'ai.tractanda.tui',
         'tractanda-mcp': 'ai.tractanda.mcp', 'tractanda-setup': 'ai.tractanda.setup',
     }
+    if args.version == '0.1.0-poc.17':
+        identifiers['tractanda-layout17'] = 'ai.tractanda.layout17'
     for name in identifiers:
         if run('/usr/bin/lipo', '-archs', str(products / name)).strip() != 'arm64':
             raise ValueError('The initial downloadable preview targets macOS arm64.')

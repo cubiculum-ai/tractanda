@@ -76,15 +76,10 @@ struct PooledCanonicalRecord: Sendable {
     ) throws
         -> (record: Self, digest: Data)
     {
-        let components = path.split(separator: "/", omittingEmptySubsequences: false)
-        guard components.count == 8, components[7].hasSuffix(".tractanda") else {
+        guard let identities = CanonicalRecordPath.identities(path) else {
             throw PooledCanonicalRecordError.invalidPath
         }
-        let itemID = String(components[6])
-        let revisionID = String(components[7].dropLast(".tractanda".count))
-        guard CanonicalRecordPath.validate(path, itemID: itemID, revisionID: revisionID) else {
-            throw PooledCanonicalRecordError.invalidPath
-        }
+        let itemID = identities.itemID, revisionID = identities.revisionID
         let before = try metadata(for: descriptor)
         guard before.type == .regular, before.uid == ownerUID, before.mode & 0o077 == 0 else {
             throw PooledCanonicalRecordError.unsafePermissions
@@ -191,7 +186,7 @@ struct PooledCanonicalRecord: Sendable {
             throw PooledCanonicalRecordError.invalidPath
         }
         let recordComponents = relativePath.split(separator: "/").map(String.init)
-        guard rootPath != "/", recordComponents.count == 8,
+        guard rootPath != "/", recordComponents.count == 7,
             recordComponents[0] == "items",
             recordComponents.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." })
         else { throw PooledCanonicalRecordError.invalidPath }

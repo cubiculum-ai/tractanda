@@ -130,15 +130,9 @@ enum PersonalRecoveryInventory {
             var itemID = item
             var revisionID = revision
             if kind == .invalidEntry, let location {
-                let parts = location.path.split(separator: "/")
-                if parts.count == 8, parts[7].hasSuffix(".tractanda") {
-                    let pathItem = String(parts[6])
-                    let pathRevision = String(parts[7].dropLast(".tractanda".count))
-                    if CanonicalRecordPath.validate(location.path, itemID: pathItem, revisionID: pathRevision)
-                    {
-                        itemID = itemID ?? pathItem
-                        revisionID = revisionID ?? pathRevision
-                    }
+                if let identities = CanonicalRecordPath.identities(location.path) {
+                    itemID = itemID ?? identities.itemID
+                    revisionID = revisionID ?? identities.revisionID
                 }
             }
             diagnostics.append(
@@ -227,7 +221,10 @@ enum PersonalRecoveryInventory {
                     }
                     if path.count == leafDepth {
                         guard metadata.type == (directoryLeaf ? .directory : .regular) else {
-                            try problem(.invalidEntry, at: location, "Unexpected published entry type.")
+                            try problem(.invalidEntry, at: location,
+                                path.first == "items"
+                                    ? "Expected a flat itemID.revisionID.tractanda file. Use the .17 installer migration for older layouts."
+                                    : "Unexpected published entry type.")
                             return true
                         }
                         // Temporary atomic-write siblings are never published revisions.
@@ -273,7 +270,7 @@ enum PersonalRecoveryInventory {
             try descend(parent, base)
         }
         for source in sources.indices {
-            try walk(source, base: ["items"], leafDepth: 8, directoryLeaf: false) { location, _, descriptor in
+            try walk(source, base: ["items"], leafDepth: 7, directoryLeaf: false) { location, _, descriptor in
                 do {
                     let loaded = try PooledCanonicalRecord.readForInventory(
                         path: location.path, descriptor: descriptor, ownerUID: sources[source].ownerUID,

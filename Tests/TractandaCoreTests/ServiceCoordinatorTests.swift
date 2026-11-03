@@ -167,9 +167,8 @@ final class ServiceCoordinatorTests: XCTestCase {
         let components = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: date)
         let folder = items.appendingPathComponent(
             String(
-                format: "%04d/%02d/%02d/%02d/%02d/%@",
-                components.year!, components.month!, components.day!, components.hour!, components.minute!,
-                copied.itemID))
+                format: "%04d/%02d/%02d/%02d/%02d",
+                components.year!, components.month!, components.day!, components.hour!, components.minute!))
         try FileManager.default.createDirectory(
             at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         var directory = folder
@@ -178,7 +177,7 @@ final class ServiceCoordinatorTests: XCTestCase {
                 [.posixPermissions: 0o700], ofItemAtPath: directory.path)
             directory.deleteLastPathComponent()
         }
-        let path = folder.appendingPathComponent(copied.revisionID + ".tractanda")
+        let path = folder.appendingPathComponent(copied.itemID + "." + copied.revisionID + ".tractanda")
         try RecordCodec.encode(copied).write(to: path, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
     }

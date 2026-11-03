@@ -121,6 +121,24 @@ do {
         print(usage)
         exit(0)
     }
+    if internalArguments.first == "--layout17-prepare" {
+        guard internalArguments.count == 6, internalArguments[1] == "--instance",
+            internalArguments[3] == "--bundle", internalArguments[5] == "--coordinated-maintenance",
+            internalArguments[4].hasPrefix("/") else {
+            throw SetupError("Use --layout17-prepare --instance NAME --bundle ABSOLUTE_PATH --coordinated-maintenance.")
+        }
+        print(try SetupEngine().prepareLayout17(instance: internalArguments[2],
+            bundle: URL(fileURLWithPath: internalArguments[4])))
+        exit(0)
+    }
+    if internalArguments.first == "--layout17-complete" {
+        guard internalArguments.count == 4, internalArguments[1] == "--instance",
+            internalArguments[3] == "--all-members-upgraded" else {
+            throw SetupError("Use --layout17-complete --instance NAME --all-members-upgraded.")
+        }
+        print(try SetupEngine().completeLayout17(instance: internalArguments[2]))
+        exit(0)
+    }
     if let package = try SetupPackageArguments.parse(internalArguments) {
         print(try SetupEngine().packageLifecycle(package))
         exit(0)

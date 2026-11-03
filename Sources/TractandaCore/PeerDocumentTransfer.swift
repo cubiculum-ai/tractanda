@@ -358,7 +358,7 @@ final class PeerDocumentTransfer {
         guard let binding = try partBinding(package: packageID, object: object, create: true, budget: budget)
         else { preconditionFailure() }
         let base = try partPrefix(packageID, object)
-        let privatePath = ["attachments", ".staging", binding.stageID + ".stage"]
+        let privatePath = ["attachments", "staging", binding.stageID + ".stage"]
         quota.pin(path: privatePath, copyKey: Self.key(packageID, object.id))
         let acknowledged = try watermark(binding, prefix: base, budget: budget)
         do {

@@ -186,9 +186,10 @@ enum PersonalWorkgroupProfile {
             // data must be retained separately by an explicit migration, never silently imported.
             let allowed: Set<String> = [
                 "items", "attachments", "documents", ".writer.lock", ".personal-activation",
+                CanonicalPhysicalLayout.fileName,
             ]
             try POSIXDirectory.withEntries(at: root) { entry in
-                guard allowed.contains(entry) else {
+                guard allowed.contains(entry) || CanonicalPhysicalLayout.isInitialMarkerStage(entry) else {
                     throw TractandaError(
                         "personalPreparationRequired",
                         "Prepare raw content without old operational state before activation.")
@@ -226,6 +227,7 @@ enum PersonalWorkgroupProfile {
                 initialization: joining
                     ? "freshReplicaJoining"
                     : commonStoreID != nil ? "freshReplica" : fresh ? "fresh" : "selectedContent")
+            try CanonicalPhysicalLayout.completeSelectedContent(root, ownerUID: tractanda_uid())
             try persist(record, root: root, name: pendingName)
             try boundary("pendingPublished")
             try installIdentities(record, root: root, boundary: boundary)
@@ -243,8 +245,8 @@ enum PersonalWorkgroupProfile {
         // Fence the new interpretation BEFORE exposing any new operational identity. Older
         // software must fail closed even if activation stops between these durable local files.
         let requirement = CanonicalReaderRequirement(
-            storeID: record.storeID, minimumReaderLevel: readerLevel, recordFormats: [1, 2],
-            capabilities: [capability])
+            storeID: record.storeID, minimumReaderLevel: CanonicalPhysicalLayout.minimumReaderLevel, recordFormats: [1, 2],
+            capabilities: [capability, CanonicalPhysicalLayout.capability].sorted())
         if let old = try CanonicalReaderRequirement.localConfigurationBytes(
             root: root, name: CanonicalReaderRequirement.fileName, ownerUID: tractanda_uid(),
             maximumBytes: 16 * 1024)

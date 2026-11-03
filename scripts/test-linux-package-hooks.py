@@ -340,12 +340,102 @@ class SystemctlInventoryTests(unittest.TestCase):
                 fallback.run_systemctl(query)
 
 
+class Layout17PreStopTests(unittest.TestCase):
+    def check(self, defect=None):
+        m = module_from_template()
+        capability = "tractanda.physical-layout.flat-items.v1"
+        before = {"profile": "tractanda.canonical-formats.v1", "readerLevel": 18, "writerLevel": 18,
+                  "read": [1, 2], "write": [2], "capabilities": ["tractanda.personal-workgroup.v1"],
+                  "writeCapabilities": ["tractanda.personal-workgroup.v1"]}
+        after = dict(before, readerLevel=19, writerLevel=19,
+                     capabilities=sorted(before["capabilities"] + [capability]),
+                     writeCapabilities=sorted(before["writeCapabilities"] + [capability]))
+        previous = {"version": "0.1.0-poc.16.2", "arch": "x86_64", "canonicalFormats": before}
+        incoming = dict(previous, version="0.1.0-poc.17", canonicalFormats=after,
+                        manifestSHA256="b" * 64, upgrade="coordinated-maintenance")
+        if defect in ("provenance", "changedStoredSemantics", "malformedProvenance"):
+            document = json.loads((DEBIAN / "components/amd64/documents.json").read_text())["documentExtraction"]
+            previous["documentExtraction"] = document
+            changed = copy.deepcopy(document)
+            changed["identity"].update(converter="new.build-" + "f" * 64, model="historical/model.v2",
+                                       modelRevision="d" * 64, runtimeRevision="e" * 40)
+            if defect == "changedStoredSemantics": changed["identity"]["preprocessing"] = "opaque-rgb2048-17tiles-v1"
+            if defect == "malformedProvenance": changed["identity"]["converter"] = "bad\nprovenance"
+            incoming["documentExtraction"] = changed
+        profile = {"profile": "tractanda.personal-workgroup.v1", "storeID": "store", "replicaID": "replica"}
+        fence = {"storeID": "store", "minimumReaderLevel": 18}
+        membership = {"profile": "tractanda.personal-membership.v1", "storeID": "store", "members": [{}, {}]}
+        encode = lambda value: json.dumps(value, sort_keys=True).encode()
+        raw_fence, raw_membership = encode(fence), encode(membership)
+        digest = lambda raw: __import__("hashlib").sha256(raw).hexdigest()
+        receipt = {"version": 1, "instance": "a", "release": m.ACTIVE, "manifestSHA256": "a" * 64,
+                   "initialized": True, "state": "active", "store": "/store/a"}
+        intent = {"profile": "tractanda.layout17-prepare.v1", "mode": "administrator-coordinated",
+                  "instance": "a", "storePath": "/store/a", "storeID": "store", "replicaID": "replica",
+                  "oldManifestSHA256": "a" * 64, "newManifestSHA256": "b" * 64,
+                  "membershipDigest": digest(raw_membership), "readerRequirementSHA256": digest(raw_fence),
+                  "acknowledgedAllMembersUpgradedBeforeStart": True}
+        if defect == "removed":
+            receipt.update(state="removed", initialized=False, release="retired", manifestSHA256="d" * 64)
+        if defect == "wrongCandidate": intent["newManifestSHA256"] = "c" * 64
+        if defect == "changedMembership": intent["membershipDigest"] = "c" * 64
+        if defect == "changedFence": intent["readerRequirementSHA256"] = "c" * 64
+        if defect == "extraSemantics": after["capabilities"].append("unrelated")
+        def private(path, *args):
+            return encode(intent if "layout17-intents" in path else receipt)
+        def store_file(store, name, owner):
+            if defect == "removed": raise AssertionError("Removed store must remain unread")
+            return {".tractanda-personal-profile.json": encode(profile), "canonical-reader.json": raw_fence,
+                    ".personal-membership.json": raw_membership}[name]
+        def exists(path):
+            if "layout17-intents" in path: return defect != "missingIntent"
+            if path.endswith(".personal-membership.json"): return defect != "standalone"
+            return defect == "pending" and path.endswith(".personal-membership.pending.json")
+        with mock.patch.object(m, "root_directory_chain"), mock.patch.object(m.os, "listdir", return_value=["a.json"]), \
+                mock.patch.object(m, "receipt_instance_paths"), mock.patch.object(m, "read_private_regular", side_effect=private), \
+                mock.patch.object(m, "layout17_store_file", side_effect=store_file), \
+                mock.patch.object(m.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=123)), \
+                mock.patch.object(m.os.path, "lexists", side_effect=exists), \
+                mock.patch.object(m.subprocess, "run") as process:
+            m.layout17_pre_stop(previous, "a" * 64, incoming)
+            process.assert_not_called()  # This gate itself cannot stop or execute a helper.
+
+    def test_matching_cluster_intent_and_standalone_need_no_mutation(self):
+        self.check()
+        self.check("standalone")
+        self.check("removed")
+        self.check("provenance")
+
+    def test_document_provenance_changes_preserve_known_semantics_without_mutating_descriptor(self):
+        m = module_from_template()
+        original = json.loads((DEBIAN / "components/amd64/documents.json").read_text())["documentExtraction"]
+        changed = copy.deepcopy(original)
+        changed["identity"].update(converter="independent.build-" + "d" * 64, model="historical/model.v2",
+                                   modelRevision="e" * 64, runtimeRevision="f" * 40)
+        snapshot = copy.deepcopy(changed)
+        self.assertEqual(m.layout17_document_semantics(original), m.layout17_document_semantics(changed))
+        self.assertEqual(changed, snapshot)
+        for key, value in (("parser", "unknown-parser"), ("preprocessing", "unknown-profile"),
+                           ("converter", "bad\nidentifier"), ("modelRevision", "A" * 40),
+                           ("runtimeRevision", "f" * 39)):
+            bad = copy.deepcopy(changed); bad["identity"][key] = value
+            with self.subTest(key=key), self.assertRaises(SystemExit): m.layout17_document_semantics(bad)
+        legacy = copy.deepcopy(changed); legacy["identity"]["preprocessing"] = "opaque-rgb2048-17tiles-v1"
+        self.assertNotEqual(m.layout17_document_semantics(original), m.layout17_document_semantics(legacy))
+        for bad in (dict(changed, unknown="schema"), dict(changed, workerProtocol="unknown.v2")):
+            with self.assertRaises(SystemExit): m.layout17_document_semantics(bad)
+
+    def test_unprepared_changed_or_pending_cluster_refuses_before_any_stop(self):
+        for defect in ("missingIntent", "wrongCandidate", "changedMembership", "changedFence", "pending", "extraSemantics", "changedStoredSemantics", "malformedProvenance"):
+            with self.subTest(defect=defect), self.assertRaises(SystemExit): self.check(defect)
+
+
 class LegacyBootstrapTests(unittest.TestCase):
     old = "0.1.0~poc.15-1+personal.1793193134.fdaf8ff8b393"
 
     def invoke(self, *, version=None, status="install reinstreq half-installed", query_version=None,
                stop_code=0, state_change=None, receipt_digest=None,
-               verify_failure=False, descriptor_failure=False, quiescence_failure=False):
+               verify_failure=False, descriptor_failure=False, quiescence_failure=False, incoming_version=None):
         m = module_from_template()
         version = self.old if version is None else version
         bundle_version = m.LEGACY_DEBIAN_VERSIONS.get(version, "0.1.0-poc.15")
@@ -357,6 +447,7 @@ class LegacyBootstrapTests(unittest.TestCase):
                  "startupPermitted": [], "owner": None}
         if state_change: state_change(state)
         incoming = json.loads(DESCRIPTOR)
+        if incoming_version is not None: incoming["version"] = incoming_version
         calls, writes = [], []
         helper = m.ACTIVE + "/bin/tractanda-setup"
         def verified(arguments):
@@ -390,6 +481,7 @@ class LegacyBootstrapTests(unittest.TestCase):
             mock.patch.object(m, "safe_state", side_effect=quiescent),
             mock.patch.object(m, "read_receipts", return_value={"one": {"manifestSHA256": receipt_digest or digest}}),
             mock.patch.object(m, "write_state", side_effect=write),
+            mock.patch.object(m, "layout17_pre_stop", side_effect=lambda *args: calls.append("layout17-prestop")),
         )
         from contextlib import ExitStack
         with ExitStack() as stack:
@@ -406,14 +498,22 @@ class LegacyBootstrapTests(unittest.TestCase):
             result, failure, calls, writes, original, incoming = self.invoke(version=version)
             self.assertIsNone(failure)
             self.assertEqual(result, 0)
-            self.assertEqual(calls, ["verify-old-helper", "real-descriptor", "actual-dpkg-state",
-                                    "old-stop-only", "quiescence-and-writer-locks", "atomic-expected-binding"])
+            expected = ["verify-old-helper", "real-descriptor"]
+            if version == "0.1.0~poc.16.2-1": expected.append("layout17-prestop")
+            expected += ["actual-dpkg-state", "old-stop-only", "quiescence-and-writer-locks", "atomic-expected-binding"]
+            self.assertEqual(calls, expected)
             self.assertEqual(len(writes), 1)
             self.assertEqual(writes[0]["original"], original)
             self.assertEqual(writes[0]["incoming"], incoming)
             self.assertEqual(writes[0]["phase"], "awaitingUnpack")
             self.assertEqual(writes[0]["startupPermitted"], [])
             self.assertIsNone(writes[0]["owner"])
+
+    def test_layout17_requires_authentic16_2_before_legacy_stop(self):
+        _, failure, calls, writes, _, _ = self.invoke(incoming_version="0.1.0-poc.17")
+        self.assertIsNotNone(failure)
+        self.assertNotIn("old-stop-only", calls)
+        self.assertEqual(writes, [])
 
     def test_unknown_old_version_cannot_enter_legacy_binding(self):
         _, failure, calls, writes, _, _ = self.invoke(version="0.1.0~poc.99-1")

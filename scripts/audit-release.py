@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ALLOWED_ROOT = {'install.sh', '.gitignore', '.gitattributes', '.swift-format', 'Package.swift', 'Package.resolved',
                 'README.md', 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md', 'CONTRIBUTING.md',
                 'SECURITY.md', 'CHANGELOG.md', 'RELEASING.md', 'VERSION'}
-ALLOWED_DIRS = {'Sources', 'Tests', 'Packages', 'scripts', 'templates', 'examples', 'containers', 'debian',
+ALLOWED_DIRS = {'Sources', 'Tests', 'Packages', 'Tools', 'scripts', 'templates', 'examples', 'containers', 'debian',
                 'docs', '.github', 'LICENSES', 'plugins'}
 PUBLIC_CATALOGS = {'.agents/plugins/marketplace.json', '.claude-plugin/marketplace.json'}
 PUBLIC_MODEL_CATALOGS = {'config/model-artifacts.json'}

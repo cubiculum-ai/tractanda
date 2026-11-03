@@ -1430,6 +1430,11 @@ public final class ItemStore {
         writer = tractanda_lock(root.appendingPathComponent(".writer.lock").path)
         guard writer >= 0 else { throw TractandaError("storeBusy", "Another writer owns this root.") }
         do {
+            if case .selectedContent = opening, try PersonalWorkgroupProfile.load(root) == nil {
+                try CanonicalPhysicalLayout.requireNoMigration(root)
+            } else {
+                try CanonicalPhysicalLayout.prepareOpening(root, ownerUID: ownerUID)
+            }
             let record = try PersonalWorkgroupProfile.prepare(root, opening: opening, accounts: accounts)
             personalProfile = record
             let selectedBaseline = try PersonalSyncConfiguration.read(
@@ -1507,7 +1512,7 @@ public final class ItemStore {
         // Placement is a real current publication minute, independent of logical merge time.
         let minute = String(Timestamp.now().prefix(16)).replacingOccurrences(of: "-", with: "/")
             .replacingOccurrences(of: "T", with: "/").replacingOccurrences(of: ":", with: "/")
-        let path = "items/" + minute + "/" + revision.itemID + "/" + revision.revisionID + ".tractanda"
+        let path = "items/" + minute + "/" + revision.itemID + "." + revision.revisionID + ".tractanda"
         nativeReplyBudget?.markPublicationAttempt()
         try CanonicalReaderRequirement.beforePersonalMergePublication(
             root: root, ownerUID: ownerUID,
@@ -1769,6 +1774,7 @@ public final class ItemStore {
         var openingProgress: (() throws -> Void)?
         var maintenanceOpeningEvent: String?
         do {
+            try CanonicalPhysicalLayout.prepareOpening(self.root, ownerUID: ownerUID)
             defer { if targetProvisioningControl != nil { peerIntake?.progress = openingProgress } }
             // A pending local maintenance journal is never ordinary recovery authority.
             if let maintenanceOpening {
@@ -1888,6 +1894,7 @@ public final class ItemStore {
             } else {
                 _ = try canonicalStoreIdentity(creatingIfMissing: true)
             }
+            try CanonicalReaderRequirement.retainPhysicalLayoutFence(root: self.root, ownerUID: ownerUID)
             try targetProvisioningControl?()
             try initializeOrdinaryRuntime()
             if authorityIntakeEnabled {
@@ -2593,9 +2600,9 @@ public final class ItemStore {
         func part(_ range: Range<Int>) -> String { String(decoding: stamp[range], as: UTF8.self) }
         let folder = root.appendingPathComponent(
             "items/" + part(0..<4) + "/" + part(5..<7) + "/"
-                + part(8..<10) + "/" + part(11..<13) + "/" + part(14..<16) + "/" + revision.itemID)
+                + part(8..<10) + "/" + part(11..<13) + "/" + part(14..<16))
         try ensureDirectory(folder)
-        let file = folder.appendingPathComponent(revision.revisionID + ".tractanda")
+        let file = folder.appendingPathComponent(revision.itemID + "." + revision.revisionID + ".tractanda")
         let localAuthorityPackage = try sealLocalAuthority(
             revision, data: data, path: file.path, index: index, additionalControls: authorityControls,
             onSealed: { self.combinationPublicationAwaitingIndex = true })
@@ -3783,9 +3790,8 @@ public final class ItemStore {
         // Canonical record names carry their immutable revision ID. Resolve only findings;
         // a clean background scan no longer copies the entire catalogue on this queue.
         func currentRow(for path: String) -> ItemIndex.CatalogueRow? {
-            let filename = URL(fileURLWithPath: path).lastPathComponent
-            guard filename.hasSuffix(".tractanda") else { return nil }
-            let revisionID = String(filename.dropLast(".tractanda".count))
+            guard let identities = CanonicalRecordPath.identities(path) else { return nil }
+            let revisionID = identities.revisionID
             guard let index, let row = try? index.revision(revisionID) else { return nil }
             return row.path == path ? row : nil
         }
@@ -3793,7 +3799,7 @@ public final class ItemStore {
         var metadataIndicators = 0
         for finding in findings {
             if let coordinator = peerIntake, currentRow(for: finding.path) == nil, let index {
-                let name = URL(fileURLWithPath: finding.path).deletingPathExtension().lastPathComponent
+                let name = CanonicalRecordPath.identities(finding.path)?.revisionID ?? ""
                 if let retained = try index.retainedAuthorityObject(id: name), retained.path == finding.path,
                     retained.descriptor.kind == .item
                 {
@@ -4015,11 +4021,7 @@ public final class ItemStore {
                         "recoveryError", "Unexpected file ownership or permissions: \(url.path)")
                 }
                 if url.pathExtension != "tractanda" {
-                    let parts = url.lastPathComponent.components(separatedBy: ".tractanda.")
-                    if parts.count == 2, UUID(uuidString: parts[0]) != nil,
-                        parts[1].count == 6,
-                        parts[1].allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) })
-                    {
+                    if CanonicalVerifier.isLegalStagingName(url.lastPathComponent) {
                         if recoveryWarnings.count < 100 {
                             recoveryWarnings.append(
                                 "Unpublished staging file retained: \(url.lastPathComponent)")
@@ -4114,8 +4116,7 @@ public final class ItemStore {
                 try Identifier.validate(revision.itemID)
                 try Identifier.validate(revision.revisionID)
                 semanticValidationSeconds += ProcessInfo.processInfo.systemUptime - semanticsStart
-                guard url.deletingPathExtension().lastPathComponent == revision.revisionID,
-                    Self.validCanonicalRecordPath(
+                guard Self.validCanonicalRecordPath(
                         String(url.path.dropFirst(root.path.count + 1)),
                         itemID: revision.itemID, revisionID: revision.revisionID),
                     let actor = revision.fields["actor"]?.string,
@@ -4478,7 +4479,7 @@ public final class ItemStore {
         let revision = try RecordCodec.decode(data)
         try ItemSemantics.validate(revision)
         guard Data(SHA256.hash(data: data)) == location.digest,
-            url.deletingPathExtension().lastPathComponent == revisionID,
+            CanonicalRecordPath.validate(location.relativePath, itemID: location.itemID, revisionID: revisionID),
             revision.revisionID == revisionID, revision.itemID == location.itemID,
             revision.supersedes == location.parentID,
             revision.fields["actor"]?.string == location.actor,
@@ -6595,10 +6596,9 @@ public final class ItemStore {
         let c = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: date)
         let folder = root.appendingPathComponent(
             String(
-                format: "items/%04d/%02d/%02d/%02d/%02d/%@", c.year!, c.month!, c.day!, c.hour!, c.minute!,
-                revision.itemID))
+                format: "items/%04d/%02d/%02d/%02d/%02d", c.year!, c.month!, c.day!, c.hour!, c.minute!))
         try ensureDirectory(folder)
-        let path = folder.appendingPathComponent(revision.revisionID + ".tractanda").path
+        let path = folder.appendingPathComponent(revision.itemID + "." + revision.revisionID + ".tractanda").path
         if revisionProjectionEnabled || personalProfile != nil {
             try beforeProjectionCommitAuthorityForTesting?()
             try withAccess(forUID: uid) {
@@ -7456,7 +7456,7 @@ extension ItemStore {
                 ])
         }
         let relative = String(path.dropFirst(root.path.count + 1)).split(separator: "/").map(String.init)
-        guard relative.count == 8, relative[0] == "items" else {
+        guard CanonicalRecordPath.validate(relative.joined(separator: "/"), itemID: revision.itemID, revisionID: revision.revisionID) else {
             throw TractandaError("invalidAuthority", "Local publication path differs.")
         }
         if atomic {
@@ -14327,7 +14327,7 @@ extension ItemStore {
                     )
                     .replacingOccurrences(of: "T", with: "/").replacingOccurrences(of: ":", with: "/")
                     let localPath =
-                        "items/" + minute + "/" + request.itemID + "/" + revision.revisionID + ".tractanda"
+                        "items/" + minute + "/" + request.itemID + "." + revision.revisionID + ".tractanda"
                     let cutBinding = summary.binding
                     let visibility = try AuthorityRecord(
                         recordID: identity.visibilityID, storeID: coordinator.storeID,
@@ -18905,7 +18905,7 @@ extension ItemStore {
         }
         let minute = String(Timestamp.now().prefix(16)).replacingOccurrences(of: "-", with: "/")
             .replacingOccurrences(of: "T", with: "/").replacingOccurrences(of: ":", with: "/")
-        let path = "items/" + minute + "/" + revision.itemID + "/" + revision.revisionID + ".tractanda"
+        let path = "items/" + minute + "/" + revision.itemID + "." + revision.revisionID + ".tractanda"
         try StoreCheckpoint.markDirty(root: root)
         try personalSyncFiles.writeImmutable(
             bytes, path: path.split(separator: "/").map(String.init),

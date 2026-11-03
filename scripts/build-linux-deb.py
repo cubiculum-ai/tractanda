@@ -52,6 +52,14 @@ def render(source, values):
 def package_descriptor(manifest, digest, upgrade):
     if upgrade not in ('compatible', 'coordinated-maintenance'):
         raise ValueError('Explicit reviewed upgrade classification is required.')
+    if manifest.get('version') == '0.1.0-poc.17':
+        formats = manifest.get('canonicalFormats', {})
+        capability = 'tractanda.physical-layout.flat-items.v1'
+        if (upgrade != 'coordinated-maintenance' or formats.get('readerLevel') != 19
+                or formats.get('writerLevel') != 19
+                or capability not in formats.get('capabilities', [])
+                or capability not in formats.get('writeCapabilities', [])):
+            raise ValueError('The .17 physical-layout bridge requires truthful floor19 coordinated-maintenance metadata.')
     result = dict(profile='tractanda.linux-package.v1', manifestSHA256=digest,
                   version=manifest['version'], arch=manifest['arch'],
                   canonicalFormats=manifest['canonicalFormats'], semanticProfile=B.SEMANTIC_PROFILE,
@@ -112,7 +120,8 @@ def stage_package(bundle, stage, snapshot, arch, maintainer, copyright_bytes, re
         source, target = bundle / row['path'], payload / row['path']
         B.copy_verified(source, target, row, maximum)
     write(payload / 'bundle-manifest.json', snapshot.raw)
-    for command in COMMANDS:
+    selected_commands = COMMANDS + (('tractanda-layout17',) if manifest['version'] == '0.1.0-poc.17' else ())
+    for command in selected_commands:
         write(stage / 'usr/bin' / command,
               ('#!/bin/sh\nexec /opt/tractanda/current/bin/' + command + ' "$@"\n').encode(), 0o755)
     write(stage / 'usr/share/doc/tractanda/copyright', copyright_bytes)

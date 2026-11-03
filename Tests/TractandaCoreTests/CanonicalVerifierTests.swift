@@ -53,7 +53,7 @@ final class CanonicalVerifierTests: XCTestCase {
         let uid = tractanda_uid()
         var rows: [ItemIndex.CatalogueRow] = []
         for (revision, bytes) in records {
-            let relative = "items/2026/09/27/12/00/\(revision)/\(revision).tractanda"
+            let relative = "items/2026/09/27/12/00/\(revision).\(revision).tractanda"
             let url = root.appendingPathComponent(relative)
             if !missing.contains(revision) {
                 try FileManager.default.createDirectory(
@@ -255,7 +255,7 @@ final class CanonicalVerifierTests: XCTestCase {
     }
 
     func testLegalStagingNameAndConfirmedMissingRecordBlocksReadsUntilRebuild() throws {
-        let staging = URL(fileURLWithPath: "\(UUID().uuidString).tractanda.Abc123")
+        let staging = URL(fileURLWithPath: "\(Identifier.make()).\(Identifier.make()).tractanda.Abc123")
         XCTAssertTrue(CanonicalVerifier.isLegalStagingName(staging.lastPathComponent))
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
             "tractanda-verifier-store-\(Identifier.make())")

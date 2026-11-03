@@ -23,11 +23,15 @@ final class SetupPackageLifecycleTests: XCTestCase {
         var foreignUnit: String?
         var inventoryResults: [String: ProcessResult] = [:]
         var bootstraps = 0
+        var layout17Call: (([String]) throws -> ProcessResult)?
         init(_ definitions: URL) { self.definitions = definitions }
         func run(_ executable: String, _ arguments: [String], environment: [String: String]) throws
             -> ProcessResult
         {
             calls.append([executable] + arguments)
+            if executable.hasSuffix("/tractanda-layout17"), let layout17Call {
+                return try layout17Call(arguments)
+            }
             if let index = arguments.firstIndex(of: "--bootstrap-store") {
                 bootstraps += 1
                 let identity = try StoreBootstrap.initialize(

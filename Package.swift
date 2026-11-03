@@ -15,6 +15,7 @@ let package = Package(
         .executable(name: "tractanda-tui", targets: ["TractandaTUICLI"]),
         .executable(name: "tractanda-auth-helper", targets: ["TractandaAuthHelper"]),
         .executable(name: "tractanda-setup", targets: ["TractandaSetup"]),
+        .executable(name: "tractanda-layout17", targets: ["TractandaLayout17"]),
     ],
     dependencies: [
         .package(path: "Packages/TractandaClient"),
@@ -47,6 +48,15 @@ let package = Package(
                 .linkedLibrary("proc", .when(platforms: [.macOS])),
             ]),
         .executableTarget(name: "TractandaAuthHelper", dependencies: ["CTractandaPlatform"]),
+        // Finite .17 installer tooling is deliberately absent from Core and the daemon.
+        .target(name: "CTractandaLayout17", path: "Tools/Layout17Bridge", sources: ["moves.c"],
+            publicHeadersPath: ".", cSettings: [
+                .define("_DARWIN_C_SOURCE", .when(platforms: [.macOS])),
+                .define("_GNU_SOURCE", .when(platforms: [.linux])),
+            ]),
+        .executableTarget(name: "TractandaLayout17", dependencies: [
+            "CTractandaLayout17", .product(name: "Crypto", package: "swift-crypto"),
+        ], path: "Tools/Layout17Bridge", exclude: ["moves.c", "moves.h", "test_fixture.py", "test_moves.py"], sources: ["main.swift"]),
         .target(name: "CTractandaSetupMetadata", dependencies: ["CTractandaPlatform"]),
         .executableTarget(
             name: "TractandaSetup",

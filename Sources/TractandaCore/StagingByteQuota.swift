@@ -36,7 +36,7 @@ final class StagingByteQuota: @unchecked Sendable {
         try restoreJobBindings(root: root, ownerUID: ownerUID, documents: documents)
         for (id, upload) in pendingUploads {
             try retainUpload(id: id, recovering: true)
-            let stage = ["attachments", ".staging", id + ".stage"]
+            let stage = ["attachments", "staging", id + ".stage"]
             if upload.location == "published",
                 (try? FileMetadata.read(at: stage.reduce(root) { $0.appendingPathComponent($1) })) == nil
             {
@@ -52,7 +52,7 @@ final class StagingByteQuota: @unchecked Sendable {
             }
         }
         for prefix in [
-            ["attachments", ".staging"], ["attachments", ".uploads"], ["documents", ".staging"], ["copies"],
+            ["attachments", "staging"], ["attachments", ".uploads"], ["documents", ".staging"], ["copies"],
             ["jmap-blobs"],
             ["document-jobs"], ["authority", "payloads"], ["authority", "payload-work"],
             ["authority", "document-transfers"],
@@ -145,7 +145,7 @@ final class StagingByteQuota: @unchecked Sendable {
                     throw TractandaError("peerObjectCollision", "Peer payload quota binding differs.")
                 }
                 let key = "peer:" + packageID + ":" + objectID
-                let stage = ["attachments", ".staging", binding.stageID + ".stage"]
+                let stage = ["attachments", "staging", binding.stageID + ".stage"]
                 self.pin(path: stage, copyKey: key)
                 self.pin(path: base, copyKey: key)
                 if applied == nil,
@@ -239,7 +239,7 @@ final class StagingByteQuota: @unchecked Sendable {
                                 throw TractandaError(
                                     "peerObjectCollision", "Document part quota binding differs.")
                             }
-                            let stage = ["attachments", ".staging", value.stageID + ".stage"]
+                            let stage = ["attachments", "staging", value.stageID + ".stage"]
                             if (try? FileMetadata.read(
                                 at: stage.reduce(root) { $0.appendingPathComponent($1) })) != nil
                             {
@@ -285,7 +285,7 @@ final class StagingByteQuota: @unchecked Sendable {
                 self.completedGroups.insert(base.joined(separator: "/"))
             }
             for id in plan.targetIDs {
-                let path = ["attachments", ".staging", id + ".stage"]
+                let path = ["attachments", "staging", id + ".stage"]
                 if completed == nil {
                     self.pin(path: path, copyKey: key)
                     let stageURL = path.reduce(root) { $0.appendingPathComponent($1) }
@@ -456,7 +456,7 @@ final class StagingByteQuota: @unchecked Sendable {
     }
     static func group(_ path: [String]) -> String? {
         if path.count >= 2, path[0] == "jmap-blobs" { return path.prefix(2).joined(separator: "/") }
-        if path.count >= 3, path[0] == "attachments", [".staging", ".uploads"].contains(path[1]) {
+        if path.count >= 3, path[0] == "attachments", ["staging", ".uploads"].contains(path[1]) {
             return path.prefix(3).joined(separator: "/")
         }
         if path.count >= 3, path[0] == "documents", path[1] == ".staging" {
@@ -534,7 +534,7 @@ final class StagingByteQuota: @unchecked Sendable {
         guard uploads.count < 64 else {
             throw TractandaError("resourceLimit", "Upload checkpoint slots are full.")
         }
-        let stage = "attachments/.staging/" + id + ".stage"
+        let stage = "attachments/staging/" + id + ".stage"
         if !recovering, groups[stage] != nil || copyGroups.values.contains(where: { $0.contains(stage) }) {
             throw TractandaError("identifierCollision", "Original recovery identity is already retained.")
         }
@@ -548,7 +548,7 @@ final class StagingByteQuota: @unchecked Sendable {
         }
         uploads.insert(id)
         copyGroups["upload:" + id] = [
-            "attachments/.staging/" + id + ".stage", "attachments/.uploads/" + id + ".json",
+            "attachments/staging/" + id + ".stage", "attachments/.uploads/" + id + ".json",
         ]
     }
     /// One bounded atomic replacement spends its already reserved checkpoint headroom.
@@ -593,7 +593,7 @@ final class StagingByteQuota: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return AttachmentStagingUsage(
-            originalBytes: groups["attachments/.staging/" + id + ".stage"] ?? 0,
+            originalBytes: groups["attachments/staging/" + id + ".stage"] ?? 0,
             checkpointBytes: groups["attachments/.uploads/" + id + ".json"] ?? 0,
             bookkeepingReservedBytes: uploads.contains(id) ? Self.uploadCheckpointReservation : 0,
             maximumStagedBytes: maximumBytes)

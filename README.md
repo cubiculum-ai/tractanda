@@ -21,6 +21,8 @@ This is source-available evaluation software. Formats and APIs are experimental;
 
 Current source includes personal/workgroup peer synchronization, attachment/document workflows and macOS/Debian installers; live three-node qualification is distinct from the remaining broader lifecycle and fault testing. A native GUI, personal-subset mobile replication, automatic client failover and full agent-account provisioning remain future work. The macOS installer has passed isolated launchd install/restart/rollback/uninstall tests; actual reboot validation remains open. The first two previews were signed without notarization. The current release workflow requires Apple acceptance, ticket stapling and Gatekeeper verification before publishing a new installer; each release records its actual results.
 
+The unpublished `0.1.0-poc.17` release changes canonical directory names while preserving item and payload bytes. A normal standalone `.17` install automatically performs the one-time installer migration; later releases require its completion and must refuse to skip it. Older enterprise/bootstrap maintenance workflows refuse preflight and must be completed or recovered with `0.1.0-poc.16.2` first. Existing clusters use administrator-directed coordinated maintenance, not rolling migration. The layout work is not published or deployed; see the [layout migration notes](docs/release-notes.md#010-poc17--mandatory-canonical-layout-bridge-unpublished) for current scope and qualification limits.
+
 ## Start locally
 
 ```sh

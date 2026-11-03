@@ -71,6 +71,29 @@ class PackageSelectionTests(unittest.TestCase):
             self.assertEqual(sentinel.read_bytes(), b'opaque unselected copy')
             self.assertFalse(installation.exists())
 
+    def test_reinstall_keeps_prepared_layout17_peers_stopped_until_completion(self):
+        with tempfile.TemporaryDirectory(prefix='tractanda-layout17-hook-') as temp:
+            root = Path(temp); installation = root / 'Installation'; scripts = root / 'scripts'; bundle = root / 'bundle'
+            (installation / 'receipts').mkdir(parents=True); scripts.mkdir(); (bundle / 'bin').mkdir(parents=True)
+            (installation / 'receipts/default.json').write_text('{}')
+            intents = installation / 'layout17-intents'; intents.mkdir(); intent = intents / 'peer.json'; intent.write_text('{}')
+            log = root / 'calls'; setup = bundle / 'bin/tractanda-setup'
+            setup.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$CALL_LOG"\n'); setup.chmod(0o755)
+            (scripts / 'release-path').write_text(str(bundle) + '\n')
+            (scripts / 'stopped-instances').write_text('peer\n')
+            stat = root / 'stat'; stat.write_text('#!/bin/sh\necho 0\n'); stat.chmod(0o755)
+            text = (ROOT / 'scripts/macos-package/postinstall').read_text()
+            text = text.replace("installation='/Library/Tractanda/Installation'", 'installation=' + shlex.quote(str(installation)))
+            text = text.replace("configuration='/Library/Tractanda/Configuration'", 'configuration=' + shlex.quote(str(root / 'Configuration')))
+            text = text.replace('/usr/bin/stat', shlex.quote(str(stat)))
+            script = scripts / 'postinstall'; script.write_text(text)
+            environment = dict(os.environ, CALL_LOG=str(log))
+            subprocess.run(['/bin/sh', script, '', '', '/'], env=environment, capture_output=True, check=True)
+            self.assertEqual(log.read_text().splitlines(), ['upgrade --bundle ' + str(bundle) + ' --name default'])
+            intent.unlink()
+            subprocess.run(['/bin/sh', script, '', '', '/'], env=environment, capture_output=True, check=True)
+            self.assertEqual(log.read_text().splitlines()[-1], 'start --name peer')
+
     def test_fresh_software_only_sample_and_existing_upgrade(self):
         with tempfile.TemporaryDirectory(prefix='tractanda-pkg-hook-') as temp:
             root = Path(temp); base = root / 'base'; bundle = root / 'release'; scripts = root / 'scripts'

@@ -95,7 +95,7 @@ final class PersonalRecoveryIndexTests: XCTestCase {
     private func save(_ revision: Revision, _ root: URL) throws {
         try write(
             RecordCodec.encode(revision), root: root,
-            path: "items/2026/10/24/11/01/\(revision.itemID)/\(revision.revisionID).tractanda")
+            path: "items/2026/10/24/11/01/\(revision.itemID).\(revision.revisionID).tractanda")
     }
     private func fingerprint(_ root: URL) throws -> [String: String] {
         var output: [String: String] = [:]
@@ -438,7 +438,7 @@ final class PersonalRecoveryIndexTests: XCTestCase {
             let completed = try rebuild(root, output, accounts)
             let store = try ItemStore.ReadQualification(
                 recoveredContent: completed, accounts: accounts, configuration: configuration())
-            let path = "items/2026/10/24/11/01/\(original.itemID)/\(original.revisionID).tractanda"
+            let path = "items/2026/10/24/11/01/\(original.itemID).\(original.revisionID).tractanda"
             try write(Data("corrupt private fixture".utf8), root: root, path: path)
             let afterCorruption = try fingerprint(root)
             XCTAssertThrowsError(try store.get(original.itemID))

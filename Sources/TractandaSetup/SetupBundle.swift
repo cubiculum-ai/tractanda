@@ -6,7 +6,7 @@ extension SetupEngine {
         try verifyBundleContents(at: suppliedBundle, validation: .current)
     }
 
-    private enum BundleValidation { case current, historicalInstalled }
+    private enum BundleValidation { case current, historicalInstalled, layout17Original }
 
     /// Historical validation is available only for the installed root, anchored by the
     /// protected package transaction and every existing installation receipt.
@@ -24,7 +24,7 @@ extension SetupEngine {
         guard (!receipts.isEmpty || state.instances.isEmpty),
             (!state.pending || Set(receipts.map(\.instance)) == Set(state.instances.map(\.name))),
             receipts.allSatisfy({ receipt in
-                receipt.release == packagePayload.path && receiptCommitments.contains(where: {
+                receipt.state == .removed || receipt.release == packagePayload.path && receiptCommitments.contains(where: {
                     receipt.manifestSHA256 == $0.manifestSHA256 && receipt.embedding == $0.embedding
                         && receipt.documentExtraction == $0.documentExtraction
                 })
@@ -38,6 +38,25 @@ extension SetupEngine {
         return manifest
     }
 
+    /// An old Mac execution profile is provenance, not permission to execute an arbitrary
+    /// candidate. Only this exact receipt-owned immutable16.2 root can use this finite lane.
+    func verifyLayout17OwnedMacOriginal(
+        _ receipt: InstallationReceipt, release: URL, expectedDigest: String
+    ) throws -> BundleManifest {
+        guard roots.platform == .macos, try readReceipt(receipt.instance) == receipt,
+            receipt.releases[release.path] == expectedDigest,
+            release.path.hasPrefix(roots.software.appendingPathComponent("releases").path + "/"),
+            try sha256(release.appendingPathComponent("bundle-manifest.json")) == expectedDigest else {
+            throw SetupError("The .17 historical source lacks its exact protected owned-release commitment.")
+        }
+        try requirePackageRelease(release.path)
+        if trustedOwnership {
+            try requireTrustedAncestry(of: release)
+            try requireOwned(release, uid: 0, directory: true)
+        }
+        return try verifyBundleContents(at: release, validation: .layout17Original)
+    }
+
     private func verifyBundleContents(at suppliedBundle: URL, validation: BundleValidation) throws -> BundleManifest {
         let bundle = suppliedBundle.resolvingSymlinksInPath()
         let manifestURL = bundle.appendingPathComponent("bundle-manifest.json")
@@ -49,6 +68,7 @@ extension SetupEngine {
         switch validation {
         case .current: try manifest.validate()
         case .historicalInstalled: try manifest.validateHistoricalInstalledLinux()
+        case .layout17Original: try manifest.validateHistoricalLayout17Original()
         }
         guard manifest.platform == roots.platform.rawValue else {
             throw SetupError("Bundle platform does not match this host.")
@@ -97,7 +117,10 @@ extension SetupEngine {
         }
         // Historical bytes are receipt-anchored and fully inventoried above. Current
         // runtime/model admission below applies only to the candidate/current bundle.
-        if case .historicalInstalled = validation { return manifest }
+        switch validation {
+        case .historicalInstalled, .layout17Original: return manifest
+        case .current: break
+        }
         let catalog = try manifest.modelProvisioningManifestPath.map {
             try ModelProvisioningCatalog.load(bundle.appendingPathComponent($0).path)
         }

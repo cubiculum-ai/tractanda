@@ -93,7 +93,7 @@ final class PeerInventoryIndexTests: XCTestCase {
                 "subject": .text("baseline"),
             ])
             let original = try AuthorityRevision(originalBytes: RecordCodec.encode(value))
-            let path = "items/2026/10/14/12/00/" + item + "/" + rid + ".tractanda"
+            let path = "items/2026/10/14/12/00/" + item + "." + rid + ".tractanda"
             try write(original.originalBytes, path: path)
             return try .init(
                 retained: .init(

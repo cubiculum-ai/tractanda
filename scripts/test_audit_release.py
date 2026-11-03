@@ -73,6 +73,10 @@ class ReleaseAuditTests(unittest.TestCase):
             cwd=root, capture_output=True, text=True, timeout=20)
         return result, json.loads(output.read_text())
 
+    def test_one_time_layout_tool_is_public_audited_source(self):
+        namespace = __import__('runpy').run_path(str(AUDIT_SCRIPT))
+        self.assertIn('Tools', namespace['ALLOWED_DIRS'])
+
     def test_public_binary_fixture_bytes_are_exact_and_pdf_is_reproducible(self):
         namespace = __import__('runpy').run_path(str(AUDIT_SCRIPT))
         fixture_hashes = namespace['PUBLIC_BINARY_FIXTURES']

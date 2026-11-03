@@ -19,7 +19,7 @@ final class CatalogueIndexTests: XCTestCase {
         feedbackRevisionIDs: [String] = []
     ) -> ItemIndex.CatalogueRow {
         ItemIndex.CatalogueRow(
-            revisionID: id, itemID: itemID, path: "items/2026/09/27/12/00/\(itemID)/\(id).tractanda",
+            revisionID: id, itemID: itemID, path: "items/2026/09/27/12/00/\(itemID).\(id).tractanda",
             parentID: parent, actor: actor, operationID: operation ?? id,
             size: 12, inode: 5, uid: 1, mode: 0o600, modificationSeconds: 1,
             modificationNanoseconds: 0, digest: Data(repeating: 7, count: 32),

@@ -27,10 +27,10 @@ final class ClusterBoundaryRepairTests: XCTestCase {
     }
 
     private func publishFixture(_ revision: Revision, root: URL) throws -> URL {
-        let path = root.appendingPathComponent("items/2026/10/13/12/00/\(revision.itemID)")
+        let path = root.appendingPathComponent("items/2026/10/13/12/00")
         try FileManager.default.createDirectory(
             at: path, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        let file = path.appendingPathComponent(revision.revisionID + ".tractanda")
+        let file = path.appendingPathComponent(revision.itemID + "." + revision.revisionID + ".tractanda")
         try RecordCodec.encode(revision).write(to: file)
         try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: file.path)
         try StoreCheckpoint.markDirty(root: root)

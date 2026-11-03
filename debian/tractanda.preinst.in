@@ -20,7 +20,7 @@ case "${1-}" in
   # preinst. Their helper cannot compare a new semantic descriptor, so preserve its
   # genuine stop-only transaction; new configure verifies the real unpacked payload.
   case "$2" in
-   '0.1.0~poc.15-1+personal.1793193134.fdaf8ff8b393'|'0.1.0~poc.16-1'|'0.1.0~poc.16.1-1') legacy_stop_only=yes; legacy_source_version=$2 ;;
+   '0.1.0~poc.15-1+personal.1793193134.fdaf8ff8b393'|'0.1.0~poc.16-1'|'0.1.0~poc.16.1-1'|'0.1.0~poc.16.2-1') legacy_stop_only=yes; legacy_source_version=$2 ;;
   esac ;;
  abort-upgrade)
   [ "$#" -eq 2 ] || { echo "tractanda preinst: invalid abort-upgrade arguments" >&2; exit 2; }

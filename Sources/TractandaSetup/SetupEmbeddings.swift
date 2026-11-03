@@ -41,6 +41,8 @@ extension SetupEngine {
     }
     func loadEmbedding(_ receipt: InstallationReceipt) throws {
         guard receipt.embedding != nil else { return }
+        if layout17StoppedInstallation.contains(receipt.instance) { return }
+        try requireNoLayout17StartHold(receipt.instance)
         try serviceBackend.load(
             receipt.instance, role: .embeddings,
             enableAtBoot: !(try packageStartupIsConfiguring(receipt.instance)))
@@ -95,8 +97,10 @@ extension SetupEngine {
         receipt.embeddingDefinitionSHA256 = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }
             .joined()
         try writeReceipt(receipt)
-        try loadEmbedding(receipt)
-        try waitForEmbedding(receipt)
+        if try layout17MayStartDuringInstallation(receipt.instance) {
+            try loadEmbedding(receipt)
+            try waitForEmbedding(receipt)
+        }
     }
     func waitForEmbedding(_ receipt: InstallationReceipt) throws {
         guard let payload = receipt.embedding else { return }

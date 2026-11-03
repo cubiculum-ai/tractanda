@@ -371,8 +371,11 @@ struct CanonicalVerifier: Sendable {
 
     static func isLegalStagingName(_ name: String) -> Bool {
         let pieces = name.components(separatedBy: ".tractanda.")
-        guard pieces.count == 2, UUID(uuidString: pieces[0]) != nil,
-            pieces[1].count == 6,
+        guard pieces.count == 2,
+            pieces[0].split(separator: ".", omittingEmptySubsequences: false).count == 2,
+            pieces[0].split(separator: ".", omittingEmptySubsequences: false).allSatisfy({
+                (try? Identifier.validate(String($0))) != nil
+            }), pieces[1].count == 6,
             pieces[1].allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) })
         else { return false }
         return true

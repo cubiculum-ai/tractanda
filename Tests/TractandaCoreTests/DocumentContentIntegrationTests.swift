@@ -316,7 +316,7 @@ final class DocumentContentIntegrationTests: XCTestCase, @unchecked Sendable {
                 FileManager.default.fileExists(
                     atPath:
                         root.appendingPathComponent(
-                            "attachments/.staging/" + prepared.originals[0].attachmentID + ".stage"
+                            "attachments/staging/" + prepared.originals[0].attachmentID + ".stage"
                         ).path))
             let measured = try StagingByteQuota(root: root, ownerUID: getuid(), maximumBytes: .max)
             retainedBytes = measured.usedBytes

@@ -375,7 +375,7 @@ final class PayloadPlacement: @unchecked Sendable {
     }
     private func publicationIntent(_ descriptor: AttachmentDescriptor) throws -> String {
         let files = DocumentContentFiles(root: root, ownerUID: ownerUID, minimumFreeBytes: 0)
-        let base = ["attachments", ".placements", descriptor.attachmentID]
+        let base = ["attachments", "placements", descriptor.attachmentID]
         let current =
             "attachments/payloads/" + (try arrivalMinute()) + "/" + descriptor.attachmentID + ".payload"
         try Self.validate(current, id: descriptor.attachmentID)

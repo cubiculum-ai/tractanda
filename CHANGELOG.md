@@ -27,6 +27,10 @@
 - Avoid repeated semantic corpus scans while the store is unchanged; preserve queue progress after edits, deletions and failed jobs. Metadata-only revisions rebind only changed heads.
 - Reduce web project-load requests and payloads by reusing the checked category graph within a refresh, projecting category metadata and retrieving IDs alone for membership checks.
 
+## 0.1.0-poc.17 — mandatory canonical-layout bridge (unpublished)
+
+- Change `attachments/.staging` and `attachments/.placements` to `attachments/staging` and `attachments/placements`, and flatten item revision paths to `items/YYYY/MM/DD/HH/mm/<itemID>.<revisionID>.tractanda`. Preserve item bytes, IDs, schema, and payload filenames. The installer-owned resumable migration is mandatory before later readers; they require floor 19 plus the flat-items capability and refuse stores without the completion marker. Standalone installs migrate automatically. The supported personal `.16.2` bridge is distinct from enterprise/bootstrap maintenance, which must complete or recover on `.16.2` before the normal `.17` install. Clusters use the existing administrator-directed coordinated procedure; this is not a rolling migration. This candidate and its migration flow are not published or deployed, and installer/package/cluster qualification remains separate.
+
 ## 0.1.0-poc.11
 
 - Bundle Granite Embedding 311M multilingual R2 (768 dimensions, CLS/L2) through the pinned vmlx-swift runtime with tokenizer fixes #487/#514. Rebuild the helper from each sealed release source and verify every model asset before packaging.

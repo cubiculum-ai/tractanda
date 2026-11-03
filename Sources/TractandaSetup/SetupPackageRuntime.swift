@@ -24,6 +24,7 @@ extension SetupEngine {
     /// It authorizes new starts only; it is not a watchdog for an already-running daemon.
     func packageRuntimeGuard(_ instance: String) throws {
         try requireLinuxPackageRoot()
+        try requireNoLayout17StartHold(instance)
         guard SetupPackageState.validInstance(instance), let state = try readPackageState(),
             let receipt = try readReceipt(instance), receipt.initialized,
             receipt.state != .removed
@@ -96,10 +97,12 @@ extension SetupEngine {
         receipt.authenticationDefinitionSHA256 = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }
             .joined()
         try writeReceipt(receipt)
-        try serviceBackend.load(
-            receipt.instance, role: .authentication,
-            enableAtBoot: !(try packageStartupIsConfiguring(receipt.instance)))
-        try waitForAuthentication(receipt)
+        if try layout17MayStartDuringInstallation(receipt.instance) {
+            try serviceBackend.load(
+                receipt.instance, role: .authentication,
+                enableAtBoot: !(try packageStartupIsConfiguring(receipt.instance)))
+            try waitForAuthentication(receipt)
+        }
     }
     func unloadAuthentication(_ receipt: InstallationReceipt) throws {
         if roots.platform == .linux, receipt.authenticationDefinitionSHA256 != nil {
@@ -107,6 +110,8 @@ extension SetupEngine {
         }
     }
     func loadAuthentication(_ receipt: InstallationReceipt) throws {
+        if layout17StoppedInstallation.contains(receipt.instance) { return }
+        try requireNoLayout17StartHold(receipt.instance)
         guard roots.platform == .linux else { return }
         guard receipt.authenticationDefinitionSHA256 != nil else {
             throw SetupError("Owned authentication registration is missing.")

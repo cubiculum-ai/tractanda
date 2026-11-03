@@ -1025,7 +1025,7 @@ final class DocumentContentFiles: @unchecked Sendable {
             bytes > 0, bytes <= Self.maximumPeerDocumentPartBytes
         else { throw failure("Invalid private document-part destination.") }
         _ = try AuthorityRecord.persistentID(.text(destination[2]))
-        let sourcePath = ["attachments", ".staging", stageID + ".stage"]
+        let sourcePath = ["attachments", "staging", stageID + ".stage"]
         let source = try directories(Array(sourcePath.dropLast()), create: false)
         defer { closeAll(source) }
         let target = try directories(Array(destination.dropLast()), create: true)

@@ -27,7 +27,7 @@ final class ClusterCanonicalRestoreTests: XCTestCase {
         ]
         if payloads {
             paths += [
-                "attachments/payloads", "attachments/.placements", "documents/content",
+                "attachments/payloads", "attachments/placements", "documents/content",
                 "documents/.placements",
             ]
         }

@@ -36,10 +36,10 @@ final class RevisionProvenanceIntegrationTests: XCTestCase {
         let second = try Revision(fields: fields)
         var originals: [URL: Data] = [:]
         for (revision, minute) in [(first, "04"), (second, "05")] {
-            let folder = root.appendingPathComponent("items/2020/01/02/03/\(minute)/\(item)")
+            let folder = root.appendingPathComponent("items/2020/01/02/03/\(minute)")
             try FileManager.default.createDirectory(
                 at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            let path = folder.appendingPathComponent(revision.revisionID + ".tractanda")
+            let path = folder.appendingPathComponent(revision.itemID + "." + revision.revisionID + ".tractanda")
             let bytes = try RecordCodec.encode(revision)
             try bytes.write(to: path)
             try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: path.path)
@@ -183,8 +183,8 @@ final class RevisionProvenanceIntegrationTests: XCTestCase {
             second)
         XCTAssertEqual(try store.get(first.itemID, revisionID: first.revisionID), first)
         for bad in [
-            "items/2020/02/30/03/05/\(first.itemID)/\(second.revisionID).tractanda",
-            "items//2020/01/02/03/05/\(first.itemID)/\(second.revisionID).tractanda",
+            "items/2020/02/30/03/05/\(first.itemID).\(second.revisionID).tractanda",
+            "items//2020/01/02/03/05/\(first.itemID).\(second.revisionID).tractanda",
         ] {
             XCTAssertFalse(
                 CanonicalRecordPath.validate(bad, itemID: first.itemID, revisionID: second.revisionID))

@@ -65,10 +65,10 @@ final class CurrentProjectionStoreTests: XCTestCase {
             guard UInt64(bytes.count + total) <= AttachmentFixtureCapacity.fixtureCapBytes else {
                 throw TractandaError("resourceLimit", "Fixture cap")
             }
-            let directory = root.appendingPathComponent("items/2026/10/13/12/00/" + base.itemID)
+            let directory = root.appendingPathComponent("items/2026/10/13/12/00")
             try FileManager.default.createDirectory(
                 at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            let file = directory.appendingPathComponent(id + ".tractanda")
+            let file = directory.appendingPathComponent(base.itemID + "." + id + ".tractanda")
             try bytes.write(to: file)
             try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: file.path)
             originals[file] = bytes

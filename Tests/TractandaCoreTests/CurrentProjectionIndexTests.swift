@@ -72,10 +72,10 @@ final class CurrentProjectionIndexTests: XCTestCase {
             fields["revisionAncestry"] = provenance.itemValue
             let revision = try Revision(fields: fields, formatVersion: 2)
             let data = try RecordCodec.encode(revision)
-            let directory = root.appendingPathComponent("items/2026/10/13/12/00/" + revision.itemID)
+            let directory = root.appendingPathComponent("items/2026/10/13/12/00")
             try FileManager.default.createDirectory(
                 at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            let file = directory.appendingPathComponent(id + ".tractanda")
+            let file = directory.appendingPathComponent(revision.itemID + "." + id + ".tractanda")
             try data.write(to: file)
             try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: file.path)
             let m = try FileMetadata.read(at: file)

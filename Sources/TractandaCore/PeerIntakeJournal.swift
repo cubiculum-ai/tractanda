@@ -868,7 +868,7 @@ final class PeerIntakeJournal {
                 }
                 destination =
                     try ["items"] + Self.currentArrivalMinute().split(separator: "/").map(String.init)
-                    + [revision.itemID, revision.revisionID + ".tractanda"]
+                    + [revision.itemID + "." + revision.revisionID + ".tractanda"]
             } else {
                 destination =
                     try ["authority", "records"]

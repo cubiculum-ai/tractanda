@@ -36,10 +36,14 @@ MODEL_DIRS = {'embeddings': 'models/granite-embedding-311m-multilingual-r2',
               'documents': 'models/granite-docling-258m-mlx'}
 SOURCE_LIMIT = 128 * 1024**2
 SKIP = {'.git', '.build', '.swiftpm', '__pycache__'}
-SOURCE_ROOTS = ('Sources', 'Tests', 'Packages', 'scripts')
+SOURCE_ROOTS = ('Sources', 'Tests', 'Packages', 'scripts', 'Tools')
 SOURCE_FILES = ('Package.swift', 'Package.resolved', 'VERSION', 'scripts/produce-linux-payload.py',
                 'scripts/package-linux.py', 'scripts/package-macos.py', 'scripts/validate-docling-model.py',
                 'config/model-artifacts.json', 'debian/linux-runtime-inputs.json')
+
+
+def core_products(version):
+    return PRODUCTS + (('tractanda-layout17',) if version == '0.1.0-poc.17' else ())
 
 
 def sha(value):
@@ -566,7 +570,8 @@ def produce(args):
     common = ['--package-path', work / 'source', '--scratch-path', work / 'scratch',
               '--cache-path', work / 'cache', '--config-path', work / 'config', '--security-path', work / 'security']
     release = None
-    for product in PRODUCTS:
+    selected_products = core_products((work / 'source/VERSION').read_text().strip())
+    for product in selected_products:
         reported = build_core_product(swift, common, args.arch, product, work, environment, work_limit,
                                       timeout=getattr(args, 'build_timeout_seconds', DEFAULT_BUILD_TIMEOUT_SECONDS))
         if release is not None and reported != release:
@@ -580,7 +585,7 @@ def produce(args):
     # Known native SwiftPM release layout, no arbitrary output command or discovered alternate binary.
     payload = work / 'payload'
     core_changes = []
-    for product in PRODUCTS:
+    for product in selected_products:
         binary = release / product
         B.elf(binary, args.arch)
         entry = rows(release, [product])[0]
@@ -667,7 +672,7 @@ def main():
     args = parser.parse_args()
     if args.action == 'plan':
         admitted = registry(args.arch)
-        print(json.dumps(dict(profile='tractanda.linux-producer-plan.v1', arch=args.arch, products=PRODUCTS,
+        print(json.dumps(dict(profile='tractanda.linux-producer-plan.v1', arch=args.arch, products=core_products((ROOT / "VERSION").read_text().strip()),
               baseline={'buildOS': 'debian13', 'minimumCPU': B.ARCH[args.arch][2], 'swiftABI': '6.4'},
               admittedComponents=admitted, missingComponents=[v for v in COMPONENTS if admitted[v] is None],
               buildStarted=False, reserveBytes=B.RESERVE,

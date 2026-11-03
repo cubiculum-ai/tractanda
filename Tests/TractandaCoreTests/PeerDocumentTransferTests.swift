@@ -283,7 +283,7 @@ final class PeerDocumentTransferTests: XCTestCase {
         let binding = try PeerPackage.decode(
             PeerDocumentTransfer.PartBinding.self,
             Data(contentsOf: base.appendingPathComponent("binding.json")), maximum: 4096)
-        let path = f.root.appendingPathComponent("attachments/.staging/" + binding.stageID + ".stage")
+        let path = f.root.appendingPathComponent("attachments/staging/" + binding.stageID + ".stage")
         let handle = try FileHandle(forWritingTo: path)
         try handle.truncate(atOffset: 0)
         try handle.synchronize()

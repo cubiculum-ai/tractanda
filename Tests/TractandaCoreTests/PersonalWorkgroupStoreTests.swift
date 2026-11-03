@@ -119,7 +119,7 @@ final class PersonalWorkgroupStoreTests: XCTestCase {
     private func save(_ revision: Revision, root: URL) throws {
         try write(
             RecordCodec.encode(revision), root: root,
-            path: "items/2026/10/24/11/01/\(revision.itemID)/\(revision.revisionID).tractanda")
+            path: "items/2026/10/24/11/01/\(revision.itemID).\(revision.revisionID).tractanda")
     }
     private func raw(
         item: String? = nil, parents: [String] = [], second: Int = 0, subject: String = "raw",
@@ -340,6 +340,48 @@ final class PersonalWorkgroupStoreTests: XCTestCase {
             }
             XCTAssertEqual(try fingerprint(root), before)
             store = nil
+        }
+    }
+
+    func testSelectedContentRevalidatesBeforeResumingInterruptedInitialMarker() throws {
+        for length in [0, 12] {
+            try fixture { root, accounts in
+                let revision = try raw()
+                try save(revision, root: root)
+                let before = try fingerprint(root)
+                let expected = try JSON.encode([
+                    "profile": "tractanda.physical-layout.v1", "layout": "flat-items-visible-attachments.v1"])
+                let stage = root.appendingPathComponent(".physical-layout-" + Identifier.make() + ".stage")
+                try Data(expected.prefix(length)).write(to: stage)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: stage.path)
+                let store = try open(root, accounts, .selectedContent(policy()))
+                try store.withAccess(forUID: accounts.alice) {
+                    XCTAssertEqual(try store.get(revision.itemID), revision)
+                }
+                XCTAssertEqual(try fingerprint(root), before)
+                XCTAssertFalse(FileManager.default.fileExists(atPath: stage.path))
+                XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(CanonicalPhysicalLayout.fileName)), expected)
+            }
+        }
+    }
+
+    func testSelectedContentRejectsNestedLayoutWithoutPublishingMarkerOrIdentity() throws {
+        try fixture { root, accounts in
+            let revision = try raw()
+            try save(revision, root: root)
+            let flat = root.appendingPathComponent("items/2026/10/24/11/01/" + revision.itemID + "." + revision.revisionID + ".tractanda")
+            let legacy = flat.deletingLastPathComponent().appendingPathComponent(revision.itemID)
+                .appendingPathComponent(revision.revisionID + ".tractanda")
+            try FileManager.default.createDirectory(at: legacy.deletingLastPathComponent(),
+                withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            try FileManager.default.moveItem(at: flat, to: legacy)
+            let bytes = try Data(contentsOf: legacy)
+            XCTAssertThrowsError(try open(root, accounts, .selectedContent(policy())))
+            for name in [CanonicalPhysicalLayout.fileName, CanonicalReaderRequirement.fileName,
+                ".tractanda-store-identity.json", PersonalWorkgroupProfile.pendingName] {
+                XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(name).path))
+            }
+            XCTAssertEqual(try Data(contentsOf: legacy), bytes)
         }
     }
 
@@ -919,7 +961,7 @@ final class PersonalWorkgroupStoreTests: XCTestCase {
                 try raw(item: base.itemID, parents: [base.revisionID], second: 2),
             ]
             for revision in branches { try save(revision, root: root) }
-            assertCode("uninitializedPersonalProfile") { _ = try open(root, accounts, .existing) }
+            assertCode("canonicalLayoutMigrationRequired") { _ = try open(root, accounts, .existing) }
             let store = try open(root, accounts, .selectedContent(policy()))
             let history = try store.history(base.itemID)
             XCTAssertTrue(Set(branches.map(\.revisionID)).isSubset(of: history.map(\.revisionID)))

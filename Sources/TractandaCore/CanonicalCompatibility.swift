@@ -41,8 +41,9 @@ enum AtomicAuthorityCompatibility {
 public struct CanonicalFormatSupport: Codable, Equatable, Sendable {
     public static let profileName = "tractanda.canonical-formats.v1"
     public static let current = Self(
-        readerLevel: 18, writerLevel: 18, read: [1, 2], write: [2],
+        readerLevel: 19, writerLevel: 19, read: [1, 2], write: [2],
         capabilities: [
+            CanonicalPhysicalLayout.capability,
             PersonalWorkgroupProfile.capability, RevisionProvenance.personalMergeProfile,
             PersonalSyncValidation.capability,
             AtomicAuthorityFormat.profile,
@@ -53,6 +54,7 @@ public struct CanonicalFormatSupport: Codable, Equatable, Sendable {
             "tractanda.peer-originals.v1", "tractanda.document-placement.v1", "tractanda.peer-documents.v1",
         ].sorted(),
         writeCapabilities: [
+            CanonicalPhysicalLayout.capability,
             PersonalWorkgroupProfile.capability, RevisionProvenance.personalMergeProfile,
             PersonalSyncValidation.capability,
             AtomicAuthorityFormat.profile,
@@ -63,14 +65,16 @@ public struct CanonicalFormatSupport: Codable, Equatable, Sendable {
             "tractanda.peer-originals.v1", "tractanda.document-placement.v1", "tractanda.peer-documents.v1",
         ].sorted())
     package static let personalWorkgroup = Self(
-        readerLevel: 18, writerLevel: 18, read: [1, 2], write: [2],
+        readerLevel: 19, writerLevel: 19, read: [1, 2], write: [2],
         capabilities: [
+            CanonicalPhysicalLayout.capability,
             PersonalWorkgroupProfile.capability, RevisionProvenance.personalMergeProfile,
             PersonalSyncValidation.capability,
             PayloadPlacement.capability,
             "tractanda.document-placement.v1",
         ].sorted(),
         writeCapabilities: [
+            CanonicalPhysicalLayout.capability,
             PersonalWorkgroupProfile.capability, RevisionProvenance.personalMergeProfile,
             PersonalSyncValidation.capability,
             PayloadPlacement.capability,
@@ -474,6 +478,18 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
         }
         return object
     }
+    /// The physical-layout floor fences older executables before they can inventory flat paths.
+    /// This changes no item format and adds no peer protocol requirement.
+    static func retainPhysicalLayoutFence(root: URL, ownerUID: UInt32) throws {
+        let identity = try storeIdentity(root: root, ownerUID: ownerUID)
+        let prior = try load(root: root, ownerUID: ownerUID)
+        let target = Self(storeID: identity,
+            minimumReaderLevel: max(prior?.minimumReaderLevel ?? 1, CanonicalPhysicalLayout.minimumReaderLevel),
+            recordFormats: prior?.recordFormats ?? [1],
+            capabilities: Array(Set((prior?.capabilities ?? []) + [CanonicalPhysicalLayout.capability])).sorted())
+        if prior != target { try target.persist(root: root, ownerUID: ownerUID) }
+    }
+
     /// Caller has stopped the writer and holds this root's writer lock. Streaming inventory is
     /// bounded in work/bytes; it never collects history snapshots or follows record-tree links.
     public static func admitQuiescent(
@@ -526,10 +542,7 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
                         "Links/special files cannot prove canonical compatibility.")
                 }
                 if !name.hasSuffix(".tractanda") {
-                    let pieces = name.components(separatedBy: ".tractanda.")
-                    if pieces.count == 2, UUID(uuidString: pieces[0]) != nil, pieces[1].count == 6,
-                        pieces[1].allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) })
-                    {
+                    if CanonicalVerifier.isLegalStagingName(name) {
                         return true
                     }
                     throw TractandaError(
@@ -562,8 +575,9 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
         }
         try walk(root.appendingPathComponent("items"), depth: 0)
         let result = Self(
-            storeID: identity, minimumReaderLevel: max(prior?.minimumReaderLevel ?? 1, formats.max() ?? 1),
-            recordFormats: formats.sorted(), capabilities: prior?.capabilities ?? [])
+            storeID: identity, minimumReaderLevel: max(prior?.minimumReaderLevel ?? 1, CanonicalPhysicalLayout.minimumReaderLevel),
+            recordFormats: formats.sorted(),
+            capabilities: Array(Set((prior?.capabilities ?? []) + [CanonicalPhysicalLayout.capability])).sorted())
         try result.validate()
         if persist, prior != result { try result.persist(root: root, ownerUID: ownerUID) }
         return result

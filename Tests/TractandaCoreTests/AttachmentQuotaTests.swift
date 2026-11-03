@@ -54,7 +54,7 @@ final class AttachmentQuotaTests: XCTestCase {
                 Int64(bytes.count))
             XCTAssertFalse(
                 FileManager.default.fileExists(
-                    atPath: root.appendingPathComponent("attachments/.staging/" + firstID + ".stage").path))
+                    atPath: root.appendingPathComponent("attachments/staging/" + firstID + ".stage").path))
         }
         let counted = try usage(root)
         let store = try ItemStore(
@@ -213,7 +213,7 @@ final class AttachmentQuotaTests: XCTestCase {
         let parent = root.appendingPathComponent("attachments")
         try FileManager.default.createDirectory(
             at: parent, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        let stage = parent.appendingPathComponent(".staging")
+        let stage = parent.appendingPathComponent("staging")
         try Data([1]).write(to: stage)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: stage.path)
         let request = intent(revision, bytes: Data([7]), operation: "retry")

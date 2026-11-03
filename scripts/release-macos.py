@@ -36,7 +36,7 @@ CONTROL = ROOT / 'work/release-pipeline'
 DEFAULT_CONFIG = CONTROL / 'config.json'
 VERSION_FILES = ['plugins/tractanda/.codex-plugin/plugin.json',
                  'plugins/tractanda/.claude-plugin/plugin.json', '.claude-plugin/marketplace.json']
-SIGNIFICANT = ('Sources/', 'Packages/', 'Tests/', 'scripts/', 'templates/', 'examples/',
+SIGNIFICANT = ('Sources/', 'Packages/', 'Tests/', 'Tools/', 'scripts/', 'templates/', 'examples/',
                'plugins/', '.github/', 'docs/', '.claude-plugin/', '.agents/plugins/')
 
 

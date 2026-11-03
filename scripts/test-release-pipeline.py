@@ -841,6 +841,7 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             release.next_version('../bad')
         self.assertTrue(release.significant(['Sources/TractandaCore/Service.swift']))
+        self.assertTrue(release.significant(['Tools/Layout17Bridge/main.swift']))
         self.assertTrue(release.significant(['plugins/tractanda/skills/tractanda/SKILL.md']))
         self.assertFalse(release.significant(['work/notes.md', 'outputs/Tractanda-Resume.md']))
 

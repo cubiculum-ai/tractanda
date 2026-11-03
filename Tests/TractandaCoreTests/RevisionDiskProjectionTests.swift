@@ -69,10 +69,10 @@ final class RevisionDiskProjectionTests: XCTestCase {
             }
             let value = try Revision(fields: fields, formatVersion: legacy ? 1 : 2)
             let bytes = try RecordCodec.encode(value)
-            let directory = root.appendingPathComponent("items/2026/10/13/12/00/" + itemID)
+            let directory = root.appendingPathComponent("items/2026/10/13/12/00")
             try FileManager.default.createDirectory(
                 at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            let file = directory.appendingPathComponent(id + ".tractanda")
+            let file = directory.appendingPathComponent(itemID + "." + id + ".tractanda")
             try bytes.write(to: file)
             try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: file.path)
             let metadata = try FileMetadata.read(at: file)

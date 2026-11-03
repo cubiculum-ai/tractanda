@@ -132,7 +132,7 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
             try client.appendAttachment(uploadID: id, offset: 0, data: Data(repeating: 1, count: amount)),
             Int64(amount))
         let checkpointURL = directory.appendingPathComponent("attachments/.uploads/" + id + ".json")
-        let stageURL = directory.appendingPathComponent("attachments/.staging/" + id + ".stage")
+        let stageURL = directory.appendingPathComponent("attachments/staging/" + id + ".stage")
         let beforeCheckpoint = try Data(contentsOf: checkpointURL)
         let beforeCheckpointMetadata = try FileMetadata.read(at: checkpointURL)
         let beforeStage = try Data(contentsOf: stageURL)
@@ -193,7 +193,7 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
                 XCTAssertEqual(
                     try Data(
                         contentsOf: directory.appendingPathComponent(
-                            "attachments/.staging/" + id + ".stage")), initial)
+                            "attachments/staging/" + id + ".stage")), initial)
             } else {
                 XCTAssertEqual(try client.appendAttachment(uploadID: id, offset: 1024, data: chunk), 5 * 1024)
             }
@@ -508,7 +508,7 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
             try await Task.sleep(for: .milliseconds(5))
         }
         let checkpointURL = directory.appendingPathComponent("attachments/.uploads/" + id + ".json")
-        let stageURL = directory.appendingPathComponent("attachments/.staging/" + id + ".stage")
+        let stageURL = directory.appendingPathComponent("attachments/staging/" + id + ".stage")
         let beforeCheckpoint = try Data(contentsOf: checkpointURL)
         let beforeCheckpointMetadata = try FileMetadata.read(at: checkpointURL)
         let beforeStageMetadata = try FileMetadata.read(at: stageURL)
@@ -581,7 +581,7 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
             }
             XCTAssertFalse(
                 FileManager.default.fileExists(
-                    atPath: directory.appendingPathComponent("attachments/.staging/" + id + ".stage").path))
+                    atPath: directory.appendingPathComponent("attachments/staging/" + id + ".stage").path))
             XCTAssertTrue(
                 FileManager.default.fileExists(
                     atPath: directory.appendingPathComponent("attachments/.uploads/" + id + ".json").path))
@@ -663,7 +663,7 @@ final class AttachmentResumableUploadTests: XCTestCase, @unchecked Sendable {
             XCTAssertEqual(record.location, "staged")
             XCTAssertFalse(
                 FileManager.default.fileExists(
-                    atPath: directory.appendingPathComponent("attachments/.staging/" + id + ".stage").path))
+                    atPath: directory.appendingPathComponent("attachments/staging/" + id + ".stage").path))
         }
         let coordinator = try await ServiceCoordinator(opening: directory)
         let client = TractandaClient.ItemClient(transport: Transport(coordinator: coordinator, uid: getuid()))

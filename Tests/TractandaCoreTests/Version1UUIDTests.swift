@@ -32,9 +32,8 @@ final class Version1UUIDTests: XCTestCase {
         let components = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: date)
         let directory = root.appendingPathComponent(
             String(
-                format: "items/%04d/%02d/%02d/%02d/%02d/%@",
-                components.year!, components.month!, components.day!, components.hour!, components.minute!,
-                revision.itemID))
+                format: "items/%04d/%02d/%02d/%02d/%02d",
+                components.year!, components.month!, components.day!, components.hour!, components.minute!))
         try FileManager.default.createDirectory(
             at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         var parent = directory
@@ -42,7 +41,7 @@ final class Version1UUIDTests: XCTestCase {
             try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: parent.path)
             parent.deleteLastPathComponent()
         }
-        let file = directory.appendingPathComponent(revision.revisionID + ".tractanda")
+        let file = directory.appendingPathComponent(revision.itemID + "." + revision.revisionID + ".tractanda")
         let bytes = try RecordCodec.encode(revision)
         try bytes.write(to: file)
         try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: file.path)

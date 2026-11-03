@@ -25,6 +25,16 @@ F = module('linux_bundle_fixtures', 'test_package_linux.py')
 
 
 class LinuxDebTests(unittest.TestCase):
+    def test_layout17_descriptor_cannot_claim_rolling_or_hide_physical_floor(self):
+        manifest = {'version': '0.1.0-poc.17', 'arch': 'x86_64', 'embedding': None, 'documentExtraction': None,
+                    'canonicalFormats': {'readerLevel': 19, 'writerLevel': 19,
+                        'capabilities': ['tractanda.physical-layout.flat-items.v1'],
+                        'writeCapabilities': ['tractanda.physical-layout.flat-items.v1']}}
+        self.assertEqual(json.loads(D.package_descriptor(manifest, 'a' * 64, 'coordinated-maintenance'))['upgrade'], 'coordinated-maintenance')
+        with self.assertRaises(ValueError): D.package_descriptor(manifest, 'a' * 64, 'compatible')
+        manifest['canonicalFormats']['writerLevel'] = 18
+        with self.assertRaises(ValueError): D.package_descriptor(manifest, 'a' * 64, 'coordinated-maintenance')
+
     def fixture(self, parent):
         bundle = parent / 'bundle'; bundle.mkdir(); F.payload(bundle)
         catalog = bundle / 'models/manifest.json'; catalog.parent.mkdir(parents=True, exist_ok=True)

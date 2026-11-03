@@ -72,6 +72,15 @@ class ProducerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'reviewed normalized'):
                 P.registry('arm64')
 
+    def test_layout17_helper_and_sources_are_versioned_sealed_inputs(self):
+        self.assertIn('tractanda-layout17', P.core_products('0.1.0-poc.17'))
+        self.assertNotIn('tractanda-layout17', P.core_products('0.1.0-poc.18'))
+        self.assertIn('Tools', P.SOURCE_ROOTS)
+        self.put(self.root / 'Tools/Layout17Bridge/main.swift', b'first')
+        initial = P.rows(self.root, skip=P.SKIP)
+        self.put(self.root / 'Tools/Layout17Bridge/main.swift', b'changed')
+        self.assertNotEqual(initial, P.rows(self.root, skip=P.SKIP))
+
     def test_dirty_and_custom_path_sources_are_bound_and_cache_excluded(self):
         self.put(self.root / 'Sources/untracked.swift')
         self.put(self.root / 'scripts/development/first-source-conversion/custom.swift')

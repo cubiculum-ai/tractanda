@@ -77,14 +77,23 @@ public struct BundleManifest: Codable, Equatable, Sendable {
     /// descriptor and inventory. This never admits a candidate for execution.
     func validateHistoricalInstalledLinux() throws {
         guard platform == "linux" else { throw SetupError("Historical package must be Linux.") }
-        try validateManifest(as: .historicalInstalledLinux)
+        try validateManifest(as: .historicalInstalled)
+    }
+
+    /// Finite .17 bridge source only; the caller must separately prove an immutable Mac
+    /// release's exact protected installation receipt and complete inventory.
+    func validateHistoricalLayout17Original() throws {
+        guard platform == "macos", version == "0.1.0-poc.16.2" else {
+            throw SetupError("Historical .17 source must be the exact owned macOS16.2 release.")
+        }
+        try validateManifest(as: .historicalInstalled)
     }
 
     private func validateDocumentForCurrentRelease() throws {
         try validateManifest(as: .current)
     }
 
-    private enum ManifestValidation { case current, historicalInstalledLinux }
+    private enum ManifestValidation { case current, historicalInstalled }
 
     private func validateManifest(as validation: ManifestValidation) throws {
         guard profile == Self.profile, !version.isEmpty, version.utf8.count <= 80,
@@ -108,6 +117,9 @@ public struct BundleManifest: Codable, Equatable, Sendable {
         let required = ["bin/tractanda", "bin/tractanda-tui", "bin/tractanda-mcp", "bin/tractanda-setup"]
         guard required.allSatisfy({ name in files.contains { $0.path == name && $0.mode & 0o111 != 0 } })
         else { throw SetupError("Bundle is missing a required executable.") }
+        if version == "0.1.0-poc.17", !files.contains(where: {
+            $0.path == "bin/tractanda-layout17" && $0.mode & 0o111 != 0
+        }) { throw SetupError("The .17 migration bridge executable is mandatory in .17 bundles.") }
         if platform == "linux" && !names.contains("bin/tractanda-auth-helper") {
             throw SetupError("Linux bundle is missing bin/tractanda-auth-helper.")
         }
@@ -138,7 +150,7 @@ public struct BundleManifest: Codable, Equatable, Sendable {
         try embedding?.validate(files: files, provisioned: modelProvisioningManifestPath != nil)
         if let documentExtraction {
             switch validation {
-            case .historicalInstalledLinux:
+            case .historicalInstalled:
                 // A prior receipt-bound package need not match today's executable recipe.
                 // Its metadata remains data-only, bounded, and backed by its own inventory.
                 try documentExtraction.identity.validate()

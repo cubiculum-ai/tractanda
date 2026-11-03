@@ -32,6 +32,8 @@ public final class SetupEngine {
     var packageStartPolicy: ((String) throws -> Bool)?
     var packagePreparedVerification: ((InstallationReceipt, String, String) throws -> Void)?
     var packageDefinitionMutation: ((String, SetupServiceRole, Bool) throws -> Void)?
+    // Finite .17 installer scope only; never a daemon/runtime policy or CLI bypass.
+    var layout17StoppedInstallation: Set<String> = []
 
     public init(
         roots: SetupRoots = SetupRoots(), runner: any SetupProcessRunning = FoundationProcessRunner(),
@@ -240,6 +242,13 @@ public final class SetupEngine {
             if let previous, previous.state == .active, previous.manifestSHA256 != digest, !upgrade {
                 throw SetupError("This instance already has another release. Use upgrade.")
             }
+            let layout17Original = try layout17MacOriginal(previous, manifest: manifest, digest: digest)
+            let layout17WasRunning = try layout17Original != nil && previous != nil
+                && serviceBackend.isRunning(options.name)
+            if let layout17Original, let previous {
+                let incoming = try layout17Declaration(manifest, digest: digest, upgrade: .coordinatedMaintenance)
+                try layout17MacPreflight(previous, bundle: options.bundle, incoming: incoming, original: layout17Original)
+            }
             let owner = try previous?.owner ?? resolvedOwner(options)
             if let requested = options.owner, requested != owner {
                 throw SetupError("An upgrade cannot replace the initial owner.")
@@ -390,6 +399,16 @@ public final class SetupEngine {
                 // and the canonical writer guard is acquired before changing its loaded file.
                 try writeReceipt(receipt)
                 try unload(receipt.instance)
+                if let layout17Original {
+                    try unloadEmbedding(receipt)
+                    try unloadAuthentication(receipt)
+                    let incoming = try layout17Declaration(manifest, digest: digest, upgrade: .coordinatedMaintenance)
+                    let clustered = try migrateLayout17Store(receipt, bundle: release, incoming: incoming, original: layout17Original)
+                    if clustered || !layout17WasRunning {
+                        try layout17HoldInstalledMac(&receipt, clustered: clustered)
+                        return
+                    }
+                }
                 try requireCanonicalReader(receipt, quiescent: true)
                 if receipt.peerRuntimeConfiguration != nil {
                     try publishPeerBytes(
@@ -760,6 +779,7 @@ public final class SetupEngine {
         if roots.platform == .linux { try requireLinuxPackageRoot() } else { try requireRootAndPlatform() }
         try options.validate()
         try requireNoPeerConfigurationAction(options)
+        if !stopping { try requireNoLayout17StartHold(options.name) }
         try withInstallerLock {
             guard let receipt = try readReceipt(options.name),
                 receipt.state == .active || stopping && roots.platform == .linux
@@ -859,6 +879,8 @@ public final class SetupEngine {
         }
     }
     func load(_ name: String) throws {
+        if layout17StoppedInstallation.contains(name) { return }
+        try requireNoLayout17StartHold(name)
         guard let receipt = try readReceipt(name) else {
             throw SetupError("Owned registration proof is missing.")
         }
@@ -901,7 +923,7 @@ public final class SetupEngine {
         if roots.platform == .macos { try replaceRuntimeRegistration(&receipt) }
         receipt.definitionSHA256 = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
         try writeReceipt(receipt)
-        try load(receipt.instance)
+        if try layout17MayStartDuringInstallation(receipt.instance) { try load(receipt.instance) }
     }
     func serviceDefinition(_ receipt: InstallationReceipt) throws -> Data {
         try requirePackageRelease(receipt.release)

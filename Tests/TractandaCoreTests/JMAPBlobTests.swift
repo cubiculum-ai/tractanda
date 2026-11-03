@@ -457,7 +457,7 @@ final class JMAPBlobTests: XCTestCase {
             } catch { XCTAssertEqual((error as? TractandaError)?.code, "invalidSession") }
             await download.close()
             await partial.cancel()
-            let payloadStages = root.appendingPathComponent("attachments/.staging")
+            let payloadStages = root.appendingPathComponent("attachments/staging")
             let remaining = try FileManager.default.contentsOfDirectory(atPath: payloadStages.path)
             // The completed raw blob remains; the disconnected incomplete body is gone.
             XCTAssertEqual(remaining.count, 1)

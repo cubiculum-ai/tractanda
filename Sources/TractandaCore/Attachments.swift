@@ -100,13 +100,13 @@ final class AttachmentPayloadStore: @unchecked Sendable {
     /// separate from the user-supplied display filename.
     func createStaging(id: String, onCreated: () -> Void = {}) throws {
         try CanonicalMaintenanceContext.deny(
-            root: root, path: ["attachments", ".staging", id], operation: "payload stage creation")
+            root: root, path: ["attachments", "staging", id], operation: "payload stage creation")
         try Self.validateID(id)
         try ensureReserve(forAdditionalBytes: UInt64(Self.pathComponentLimit))
         guard try resolvedPayloadPath(id) == nil else {
             throw TractandaError("identifierCollision", "Attachment ID already names a published payload.")
         }
-        let directory = try openDirectoryChain(components: ["attachments", ".staging"], create: true)
+        let directory = try openDirectoryChain(components: ["attachments", "staging"], create: true)
         defer { closeAll(directory) }
         try ensureReserve(forAdditionalBytes: UInt64(Self.pathComponentLimit), descriptor: directory.last!)
         let name = Self.stageName(id)
@@ -132,12 +132,12 @@ final class AttachmentPayloadStore: @unchecked Sendable {
     @discardableResult
     func append(id: String, offset: Int64, data: Data) throws -> Int64 {
         try CanonicalMaintenanceContext.deny(
-            root: root, path: ["attachments", ".staging", id], operation: "payload stage write")
+            root: root, path: ["attachments", "staging", id], operation: "payload stage write")
         try Self.validateID(id)
         guard offset >= 0, data.count <= chunkByteLimit else {
             throw TractandaError("resourceLimit", "Attachment chunks are limited to 256 KiB.")
         }
-        let directories = try openDirectoryChain(components: ["attachments", ".staging"], create: false)
+        let directories = try openDirectoryChain(components: ["attachments", "staging"], create: false)
         defer { closeAll(directories) }
         let name = Self.stageName(id)
         let descriptor = try openRegularFile(
@@ -172,7 +172,7 @@ final class AttachmentPayloadStore: @unchecked Sendable {
         try ensureReserve(forAdditionalBytes: UInt64(data.count), descriptor: descriptor)
         // Reserve before the bounded write; failures conservatively retain the charged bytes
         // until startup reconstructs actual sizes or the stage is durably disposed.
-        try stagingQuota?.charge(data.count, path: ["attachments", ".staging", name])
+        try stagingQuota?.charge(data.count, path: ["attachments", "staging", name])
         try Self.writeAll(descriptor: descriptor, offset: offset, data: data)
         guard fsync(descriptor) == 0 else {
             throw Self.posix("Cannot synchronize attachment upload bytes.")
@@ -186,7 +186,7 @@ final class AttachmentPayloadStore: @unchecked Sendable {
 
     func stagedSize(id: String) throws -> Int64 {
         try Self.validateID(id)
-        let directories = try openDirectoryChain(components: ["attachments", ".staging"], create: false)
+        let directories = try openDirectoryChain(components: ["attachments", "staging"], create: false)
         defer { closeAll(directories) }
         let descriptor = try Self.openFile(
             in: directories.last!, name: Self.stageName(id),
@@ -252,7 +252,7 @@ final class AttachmentPayloadStore: @unchecked Sendable {
         }
 
         let stagingDirectories = try openDirectoryChain(
-            components: ["attachments", ".staging"], create: false)
+            components: ["attachments", "staging"], create: false)
         defer { closeAll(stagingDirectories) }
         let stagingParent = stagingDirectories.last!
         let stageName = Self.stageName(stageID)
@@ -331,7 +331,7 @@ final class AttachmentPayloadStore: @unchecked Sendable {
         guard stageName.withCString({ unlinkat(stagingParent, $0, 0) }) == 0,
             fsync(stagingParent) == 0
         else { throw Self.posix("Cannot clear published attachment stage.") }
-        stagingQuota?.release(path: ["attachments", ".staging", stageName])
+        stagingQuota?.release(path: ["attachments", "staging", stageName])
         putCached(attachment, metadata: publishedMetadata)
     }
 
@@ -505,11 +505,11 @@ final class AttachmentPayloadStore: @unchecked Sendable {
     /// Removes unpublished stages only. Names are validated and unlinkat never follows a link.
     func clearStaging() throws {
         let directories = try openDirectoryChain(
-            components: ["attachments", ".staging"], create: false, missingIsEmpty: true)
+            components: ["attachments", "staging"], create: false, missingIsEmpty: true)
         guard !directories.isEmpty else { return }
         defer { closeAll(directories) }
         let stagingFD = directories.last!
-        let stagingURL = root.appendingPathComponent("attachments/.staging", isDirectory: true)
+        let stagingURL = root.appendingPathComponent("attachments/staging", isDirectory: true)
         try POSIXDirectory.withEntries(at: stagingURL) { name in
             guard name.hasSuffix(".stage") else {
                 throw TractandaError(
@@ -518,7 +518,7 @@ final class AttachmentPayloadStore: @unchecked Sendable {
             let id = String(name.dropLast(".stage".count))
             try Self.validateID(id)
             try CanonicalMaintenanceContext.deny(
-                root: root, path: ["attachments", ".staging", name], operation: "payload stage deletion")
+                root: root, path: ["attachments", "staging", name], operation: "payload stage deletion")
             let status = name.withCString { unlinkat(stagingFD, $0, 0) }
             guard status == 0 || errno == ENOENT else {
                 throw Self.posix("Cannot clear attachment upload stage.")
@@ -532,11 +532,11 @@ final class AttachmentPayloadStore: @unchecked Sendable {
 
     func discardStaging(id: String) throws {
         try Self.validateID(id)
-        let directories = try openDirectoryChain(components: ["attachments", ".staging"], create: false)
+        let directories = try openDirectoryChain(components: ["attachments", "staging"], create: false)
         defer { closeAll(directories) }
         let name = Self.stageName(id)
         try CanonicalMaintenanceContext.deny(
-            root: root, path: ["attachments", ".staging", name], operation: "payload stage deletion",
+            root: root, path: ["attachments", "staging", name], operation: "payload stage deletion",
             onlyIfPresent: true)
         let status = name.withCString { unlinkat(directories.last!, $0, 0) }
         guard status == 0 || errno == ENOENT else {
@@ -545,7 +545,7 @@ final class AttachmentPayloadStore: @unchecked Sendable {
         guard fsync(directories.last!) == 0 else {
             throw Self.posix("Cannot synchronize attachment stage removal.")
         }
-        stagingQuota?.release(path: ["attachments", ".staging", name])
+        stagingQuota?.release(path: ["attachments", "staging", name])
     }
 
     // Test-only path permits tiny, isolated symlink/corruption cases without exposing a URL publicly.
@@ -559,7 +559,7 @@ final class AttachmentPayloadStore: @unchecked Sendable {
 
     func stagingURLForTesting(id: String) throws -> URL {
         try Self.validateID(id)
-        return root.appendingPathComponent("attachments/.staging/\(Self.stageName(id))")
+        return root.appendingPathComponent("attachments/staging/\(Self.stageName(id))")
     }
 
     func preparePlacement() throws {
@@ -576,9 +576,9 @@ final class AttachmentPayloadStore: @unchecked Sendable {
 
     func truncatePeerUnacknowledgedTail(stageID: String, to offset: Int64) throws {
         try CanonicalMaintenanceContext.deny(
-            root: root, path: ["attachments", ".staging", stageID], operation: "payload truncation")
+            root: root, path: ["attachments", "staging", stageID], operation: "payload truncation")
         try Self.validateID(stageID)
-        let chain = try openDirectoryChain(components: ["attachments", ".staging"], create: false)
+        let chain = try openDirectoryChain(components: ["attachments", "staging"], create: false)
         defer { closeAll(chain) }
         let fd = try openRegularFile(
             in: chain.last!, name: Self.stageName(stageID),
@@ -593,12 +593,12 @@ final class AttachmentPayloadStore: @unchecked Sendable {
             throw TractandaError("peerObjectCollision", "Cannot repair unacknowledged private peer tail.")
         }
         stagingQuota?.refund(
-            Int(before.size - UInt64(offset)), path: ["attachments", ".staging", Self.stageName(stageID)])
+            Int(before.size - UInt64(offset)), path: ["attachments", "staging", Self.stageName(stageID)])
     }
 
     func peerStage(_ stageID: String, maximumBytes: Int64) throws -> PeerOriginalFile {
         try Self.validateID(stageID)
-        let directories = try openDirectoryChain(components: ["attachments", ".staging"], create: false)
+        let directories = try openDirectoryChain(components: ["attachments", "staging"], create: false)
         do {
             let fd = try Self.openFile(
                 in: directories.last!, name: Self.stageName(stageID),
@@ -660,7 +660,7 @@ final class AttachmentPayloadStore: @unchecked Sendable {
         let chain: [Int32]
         if let stageID {
             try Self.validateID(stageID)
-            let directories = try openDirectoryChain(components: ["attachments", ".staging"], create: false)
+            let directories = try openDirectoryChain(components: ["attachments", "staging"], create: false)
             do {
                 let fd = try Self.openFile(
                     in: directories.last!, name: Self.stageName(stageID),
@@ -1140,7 +1140,7 @@ extension AttachmentPayloadStore {
                 attachment, descriptor: descriptors.last!, cacheResult: true, progress: progress)
             return try Self.metadata(for: descriptors.last!)
         }
-        let directories = try openDirectoryChain(components: ["attachments", ".staging"], create: false)
+        let directories = try openDirectoryChain(components: ["attachments", "staging"], create: false)
         defer { closeAll(directories) }
         let fd = try Self.openFile(
             in: directories.last!, name: Self.stageName(attachment.attachmentID),
@@ -1167,7 +1167,7 @@ extension AttachmentPayloadStore {
         if try publishedMetadataMatches(attachment) {
             descriptors = try openPayloadFile(id: attachment.attachmentID)
         } else {
-            let directories = try openDirectoryChain(components: ["attachments", ".staging"], create: false)
+            let directories = try openDirectoryChain(components: ["attachments", "staging"], create: false)
             do {
                 let fd = try Self.openFile(
                     in: directories.last!, name: Self.stageName(attachment.attachmentID),
@@ -1205,7 +1205,7 @@ extension AttachmentPayloadStore {
         if try isVerified(attachment) { return true }
         // A cold published original needs background revalidation, never a vanished stage.
         if try publishedMetadataMatches(attachment) { return false }
-        let directories = try openDirectoryChain(components: ["attachments", ".staging"], create: false)
+        let directories = try openDirectoryChain(components: ["attachments", "staging"], create: false)
         defer { closeAll(directories) }
         let fd = try Self.openFile(
             in: directories.last!, name: Self.stageName(attachment.attachmentID),
@@ -1229,7 +1229,7 @@ extension AttachmentPayloadStore {
 
     func saveUpload(_ upload: AttachmentUploadState) throws {
         try CanonicalMaintenanceContext.deny(
-            root: root, path: ["attachments", "uploads"], operation: "payload upload metadata write")
+            root: root, path: ["attachments", ".uploads"], operation: "payload upload metadata write")
         try upload.validate()
         let data = try JSON.encode(upload)
         guard data.count <= StagingByteQuota.uploadCheckpointReservation else {
@@ -1272,7 +1272,7 @@ extension AttachmentPayloadStore {
 
     func removeUpload(id: String) throws {
         try CanonicalMaintenanceContext.deny(
-            root: root, path: ["attachments", "uploads", id + ".json"], operation: "payload upload removal")
+            root: root, path: ["attachments", ".uploads", id + ".json"], operation: "payload upload removal")
         try Self.validateID(id)
         let chain = try openDirectoryChain(
             components: ["attachments", ".uploads"], create: false, missingIsEmpty: true)
@@ -1452,7 +1452,7 @@ extension AttachmentPayloadStore {
         _ = try Self.validated(attachment)
         let chain: [Int32]
         if staged {
-            let directories = try openDirectoryChain(components: ["attachments", ".staging"], create: false)
+            let directories = try openDirectoryChain(components: ["attachments", "staging"], create: false)
             do {
                 let fd = try openRegularFile(
                     in: directories.last!, name: Self.stageName(attachment.attachmentID),

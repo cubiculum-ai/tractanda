@@ -72,7 +72,7 @@ final class ProjectionServiceTests: XCTestCase {
                 parents: [base.revisionID], writtenFields: ["subject"], unsetFields: [], frontier: []
             ).itemValue
             let value = try Revision(fields: fields, formatVersion: 2)
-            let file = itemDirectory.appendingPathComponent(id + ".tractanda")
+            let file = itemDirectory.appendingPathComponent(base.itemID + "." + id + ".tractanda")
             try RecordCodec.encode(value).write(to: file)
             try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: file.path)
             return value

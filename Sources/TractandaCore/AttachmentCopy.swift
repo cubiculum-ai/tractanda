@@ -60,7 +60,7 @@ struct AttachmentCopyWork: Sendable {
             try files.writeImmutable(intent, path: base + ["intent.json"], maximumBytes: 16 * 1024 * 1024)
         }
         for id in plan.targetIDs {
-            stagingQuota.pin(path: ["attachments", ".staging", id + ".stage"], copyKey: plan.key)
+            stagingQuota.pin(path: ["attachments", "staging", id + ".stage"], copyKey: plan.key)
         }
         var originals: [AttachmentDescriptor] = []
         var signatures: [FileMetadata] = []

@@ -305,7 +305,7 @@ final class PeerOriginalTransfer {
             try immutable(try JSON.encode(binding), path: base + ["binding.json"])
         }
         quota.pin(
-            path: ["attachments", ".staging", binding.stageID + ".stage"], copyKey: key(packageID, object.id))
+            path: ["attachments", "staging", binding.stageID + ".stage"], copyKey: key(packageID, object.id))
         quota.pin(path: base, copyKey: key(packageID, object.id))
         return binding
     }
@@ -688,7 +688,7 @@ final class PeerOriginalTransfer {
             let binding = try PeerPackage.decode(Binding.self, bytes, maximum: 4096)
             _ = try AuthorityRecord.persistentID(.text(binding.stageID))
             let next = value.addingReportingOverflow(
-                quota.usedBytes(path: ["attachments", ".staging", binding.stageID + ".stage"]))
+                quota.usedBytes(path: ["attachments", "staging", binding.stageID + ".stage"]))
             guard !next.overflow else {
                 throw TractandaError("resourceLimit", "Peer original accounting overflow.")
             }
