@@ -1004,7 +1004,7 @@ do {
         print("Layout17 private conversion completed")
     }
 } catch {
-    fputs("tractanda-layout17: \(error)\n", stderr)
+    FileHandle.standardError.write(Data("tractanda-layout17: \(error)\n".utf8))
     exit(1)
 }
 #else
@@ -1031,7 +1031,7 @@ do {
         throw Failure("Use inspect, migrate, prepare --instance NAME --bundle ABS --coordinated-maintenance, or complete --instance NAME --all-members-upgraded.")
     }
 } catch {
-    fputs("tractanda-layout17: \(error)\n", stderr)
+    FileHandle.standardError.write(Data("tractanda-layout17: \(error)\n".utf8))
     exit(1)
 }
 #endif

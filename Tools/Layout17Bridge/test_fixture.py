@@ -255,8 +255,15 @@ class BridgeFixtureTests(unittest.TestCase):
                     asset.unlink()
                     asset.symlink_to(setup)
                 if corruption == "collision": files.append(dict(files[1], path="ASSET"))
-                manifest = {"profile": "tractanda.bundle.v1", "version": "0.1.0-poc.17", "platform": "macos",
-                            "arch": "arm64" if platform.machine() in ("arm64", "aarch64") else "x86_64", "files": files}
+                machine = platform.machine().lower()
+                if machine not in ("arm64", "aarch64", "x86_64", "amd64"):
+                    raise RuntimeError(f"Unsupported fixture architecture: {machine}")
+                system = platform.system()
+                if system not in ("Darwin", "Linux"):
+                    raise RuntimeError(f"Unsupported fixture platform: {system}")
+                manifest = {"profile": "tractanda.bundle.v1", "version": "0.1.0-poc.17",
+                            "platform": "macos" if system == "Darwin" else "linux",
+                            "arch": "arm64" if machine in ("arm64", "aarch64") else "x86_64", "files": files}
                 (source / "bundle-manifest.json").write_text(json.dumps(manifest))
                 result = subprocess.run([str(self.binary), "stage-fixture", str(source), str(stages)],
                                         capture_output=True, text=True)

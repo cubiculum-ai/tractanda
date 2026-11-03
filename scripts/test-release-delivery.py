@@ -83,6 +83,19 @@ class DeliveryTests(unittest.TestCase):
         D.attach(self.state, path, self.context)
         return entries
 
+    def transport_names(self, artifacts):
+        """Mirror the admitted V15 GitHub filename contract in synthetic expectations."""
+        linux_names = {row['name'] for row in self.state['delivery']['linuxAssets']}
+        return {name: name.replace('~', '.') if name in linux_names else name for name in artifacts}
+
+    def expected_remote_hashes(self, artifacts):
+        transport = self.transport_names(artifacts)
+        return {transport[name]: digest for name, digest in artifacts.items()}
+
+    def expected_checksum_file(self, artifacts):
+        transport = self.transport_names(artifacts)
+        return ''.join(f'{digest}  {transport[name]}\n' for name, digest in artifacts.items())
+
     def pipeline(self):
         self.attach()
         p = R.Pipeline(self.state)
@@ -93,7 +106,7 @@ class DeliveryTests(unittest.TestCase):
         hashes = {x.name: R.sha(x) for x in (p.package, p.archive)}
         hashes.update({r['name']: r['sha256'] for r in self.state['delivery']['linuxAssets']})
         self.state['steps']['artifacts'] = {'result': hashes}
-        (p.directory / 'SHA256SUMS').write_text(''.join(f'{h}  {n}\n' for n, h in hashes.items()))
+        (p.directory / 'SHA256SUMS').write_text(self.expected_checksum_file(hashes))
         for n in ('verify', 'release-build', 'package', 'notarization'):
             self.state['steps'][n] = {'result': {}}
         p.linux_context = lambda: self.context
@@ -175,6 +188,12 @@ class DeliveryTests(unittest.TestCase):
         with patch.object(p, 'verify_notarization'), patch.object(p, 'run_command', side_effect=lambda *_: p.archive.write_bytes(b'fresh archive')):
             hashes = p.package_artifacts()
         self.assertEqual(sum(n.endswith('.deb') for n in hashes), 2)
+        sums = (p.directory / 'SHA256SUMS').read_text()
+        for row in self.state['delivery']['linuxAssets']:
+            transport_name = row['name'].replace('~', '.')
+            self.assertIn(f"{row['sha256']}  {transport_name}\n", sums)
+            self.assertNotIn(f"{row['sha256']}  {row['name']}\n", sums)
+        self.assertEqual(sums, self.expected_checksum_file(hashes))
         self.state['steps']['artifacts'] = {'result': hashes}
         p.verify_artifacts()
         (p.directory / 'SHA256SUMS').write_text('changed')
@@ -343,7 +362,8 @@ class DeliveryTests(unittest.TestCase):
 
     def test_private_upload_and_remote_digest_resume_include_linux_without_second_publisher(self):
         p = self.pipeline(); path, value = self.acceptance(); D.accept(self.state, path, value['candidateID'])
-        expected = {**self.state['steps']['artifacts']['result'], 'SHA256SUMS': R.sha(p.directory / 'SHA256SUMS')}
+        canonical = {**self.state['steps']['artifacts']['result'], 'SHA256SUMS': R.sha(p.directory / 'SHA256SUMS')}
+        expected = self.expected_remote_hashes(canonical)
         uploaded = []
         def run(name, arguments, *unused):
             if name.startswith('upload-'):
@@ -380,14 +400,16 @@ class DeliveryTests(unittest.TestCase):
     def test_new_published_receipt_requires_both_linux_assets_and_exact_used_acceptance(self):
         p = self.pipeline(); path, value = self.acceptance(); accepted = D.accept(self.state, path, value['candidateID'])
         self.state['steps']['cluster-acceptance'] = {'result': accepted}
-        hashes = {**self.state['steps']['artifacts']['result'], 'SHA256SUMS': R.sha(p.directory / 'SHA256SUMS')}
+        canonical = {**self.state['steps']['artifacts']['result'], 'SHA256SUMS': R.sha(p.directory / 'SHA256SUMS')}
+        hashes = self.expected_remote_hashes(canonical)
         self.state['steps']['publish'] = {'result': {'url': 'https://github.com/owner/repo/releases/tag/v' + V, 'sha256': hashes}}
         self.state['status'] = 'complete'
         self.assertTrue(R.is_verified_published(self.state))
         self.state['steps']['cluster-acceptance'] = {'result': {}}
         self.assertFalse(R.is_verified_published(self.state))
         self.state['steps']['cluster-acceptance'] = {'result': accepted}
-        hashes.pop(self.state['delivery']['linuxAssets'][0]['name'])
+        first_linux_name = self.state['delivery']['linuxAssets'][0]['name']
+        hashes.pop(self.transport_names({first_linux_name: 'unused'})[first_linux_name])
         self.assertFalse(R.is_verified_published(self.state))
 
 
