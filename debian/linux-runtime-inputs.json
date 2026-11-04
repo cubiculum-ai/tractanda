@@ -4,11 +4,11 @@
   "architectures": {
     "amd64": {
       "embeddings": "7ce60199a57851c97651e45c2e31d05636c6b3bc40cb304cb64c52ae588356da",
-      "documents": "134c17368eadf19fcca04456b6d0619bc4446c2f3e25897881dfe537a911332e"
+      "documents": "551c050c28e2b61c19641d2f9a0126d7e6a0970e80225256822f7d38c5b66a00"
     },
     "arm64": {
       "embeddings": "8703e7221b89757c5e62ceeff2cb9f647718822aa443afdb838a7ce6c94a19cf",
-      "documents": "708f4b7d07961c36fb82b6a7e2b652685a1f22246206332aa1b2f32dc5b34399"
+      "documents": "acad56941cb73d7ea73fd5b1d13c620dfc8fc53133b5905165852ef89742949a"
     }
   }
 }
