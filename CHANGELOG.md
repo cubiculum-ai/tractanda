@@ -27,9 +27,10 @@
 - Avoid repeated semantic corpus scans while the store is unchanged; preserve queue progress after edits, deletions and failed jobs. Metadata-only revisions rebind only changed heads.
 - Reduce web project-load requests and payloads by reusing the checked category graph within a refresh, projecting category metadata and retrieving IDs alone for membership checks.
 
-## 0.1.0-poc.17 — mandatory canonical-layout bridge (unpublished)
+## 0.1.0-poc.17 — mandatory layout and record-format bridge
 
-- Change `attachments/.staging` and `attachments/.placements` to `attachments/staging` and `attachments/placements`, and flatten item revision paths to `items/YYYY/MM/DD/HH/mm/<itemID>.<revisionID>.tractanda`. Preserve item bytes, IDs, schema, and payload filenames. The installer-owned resumable migration is mandatory before later readers; they require floor 19 plus the flat-items capability and refuse stores without the completion marker. Standalone installs migrate automatically. The supported personal `.16.2` bridge is distinct from enterprise/bootstrap maintenance, which must complete or recover on `.16.2` before the normal `.17` install. Clusters use the existing administrator-directed coordinated procedure; this is not a rolling migration. This candidate and its migration flow are not published or deployed, and installer/package/cluster qualification remains separate.
+- Rename attachment staging and placement directories to `attachments/staging` and `attachments/placements`. Flatten revision paths to `items/YYYY/MM/DD/HH/mm/<itemID>.<revisionID>.tractanda` and rewrite item files to the readable `message-v1` format. Preserve item and revision IDs, logical content and history, permissions, and attachment filenames and payload bytes.
+- The one-time installer bridge supports existing personal `.16.2` stores. It runs automatically for standalone upgrades. Clusters must prepare and stop all members before upgrading, and start them only after all members have upgraded. Complete or recover older enterprise/bootstrap maintenance on `.16.2` before the bridge. Subsequent releases require the completed layout and encoding, with canonical reader floor 20 and both format capabilities. See the [migration instructions](docs/release-notes.md#010-poc17--mandatory-layout-and-record-format-bridge).
 
 ## 0.1.0-poc.11
 

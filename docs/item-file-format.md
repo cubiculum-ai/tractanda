@@ -1,6 +1,4 @@
-# Canonical item-file format: message-v1 (unpublished `.17`)
-
-> **Status: implemented in the unpublished `.17` source; not deployed.** The `.17` external helper and `MessageRecordCodec` use the format below. Package, host, and cluster qualification remain separate. This document is the current source-format reference, not a claim that `.17` is released or installed.
+# Canonical item-file format: message-v1 (`.17`)
 
 ## Scope and version layers
 
@@ -148,4 +146,4 @@ Qualification checks compare decoded `formatVersion` and the complete field map,
 6. Migrate genuine `.16.2` fixtures through the external helper and compare IDs, logical version, complete field values, body bytes, and exact `requestIdentity`. Include historical records with absent/empty fields and noncanonical legacy header forms according to the bridge's documented parser contract. Separately remove an optional receipt from a disposable migrated copy, rebuild, verify reads/history/new edits, and confirm an old retry fails with `retryReceiptUnavailable` without reexecuting.
 7. Verify that message-file encoding does not change API/configuration JSON, and that content edits create new revisions while repair/rebuild remains a separate operation.
 
-The codec and external-helper behavior have focused source tests and private fixture evidence, including receipt-loss recovery and a combined bridge-to-Core review-state fixture. The review fixture uses synthetic old-format metadata reverse-encoded from a new-Core peer fixture; it is not evidence from a `.16.2` peer runtime. The full matrix, package/host/cluster qualification, and publication have not completed. The format and migration remain unpublished and undeployed.
+The codec and external-helper behavior have focused source tests and private fixture evidence, including receipt-loss recovery and a combined bridge-to-Core review-state fixture. The review fixture uses synthetic old-format metadata reverse-encoded from a new-Core peer fixture; it is not evidence from a `.16.2` peer runtime. These fixtures cover source and private-store behavior. Distribution, host and cluster results are recorded separately with the corresponding release.
