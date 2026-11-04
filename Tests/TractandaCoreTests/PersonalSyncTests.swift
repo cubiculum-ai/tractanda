@@ -167,7 +167,12 @@ final class PersonalSyncTests: XCTestCase {
     }
     private func openDescriptorLimit() -> UInt64 {
         var limit = rlimit()
-        guard getrlimit(RLIMIT_NOFILE, &limit) == 0 else { return 0 }
+        #if canImport(Darwin)
+            let status = getrlimit(RLIMIT_NOFILE, &limit)
+        #else
+            let status = getrlimit(Int32(RLIMIT_NOFILE.rawValue), &limit)
+        #endif
+        guard status == 0 else { return 0 }
         return UInt64(limit.rlim_cur)
     }
     private func runLayout17FixtureHelper(

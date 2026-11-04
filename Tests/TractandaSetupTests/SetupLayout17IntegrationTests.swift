@@ -113,6 +113,12 @@ final class SetupLayout17IntegrationTests: XCTestCase {
                 canonicalFormats: .current, upgrade: .coordinatedMaintenance)
             base.runner.layout17Call = { [unowned self] args in
                 if args.first == "inspect" { return try self.inspect() }
+                let journal = self.base.engine.layout17JournalDirectory
+                XCTAssertTrue(args.contains(journal.path))
+                let mode =
+                    try FileManager.default.attributesOfItem(atPath: journal.path)[.posixPermissions]
+                    as? NSNumber
+                XCTAssertEqual(mode?.intValue, 0o700)
                 self.migrations += 1
                 if self.failure == "beforeFence" { return .init(status: 1, output: "injected before fence") }
                 try self.fenceAndJournal()
@@ -162,7 +168,6 @@ final class SetupLayout17IntegrationTests: XCTestCase {
             try Self.privateWrite(JSON.encode(raised), store.appendingPathComponent("canonical-reader.json"))
             try Self.privateWrite(
                 Data("{}".utf8), store.appendingPathComponent("canonical-layout.pending.json"))
-            try base.engine.ensureRootDirectory(base.engine.layout17JournalDirectory)
             try base.engine.writeProtected(
                 JSON.encode([
                     "profile": "tractanda.layout17-journal.v1", "storeID": storeID,

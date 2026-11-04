@@ -218,7 +218,9 @@ extension SetupEngine {
         let resuming = exists(store.appendingPathComponent("canonical-layout.pending.json"))
         let inspection = try layout17Inspect(receipt, bundle: bundle, resuming: resuming)
         try requireLayout17Intent(receipt, incoming: incoming, original: original, inspection: inspection)
-        try ensureRootDirectory(layout17JournalDirectory)
+        if trustedOwnership { try requireTrustedAncestry(of: layout17JournalDirectory) }
+        try ensureServiceDirectory(layout17JournalDirectory, uid: 0, mode: 0o700)
+        try layout17SyncDirectory(roots.installation)
         var arguments = [
             "migrate", "--store", receipt.store, "--journal-directory", layout17JournalDirectory.path,
         ]
