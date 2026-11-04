@@ -54,6 +54,30 @@ def data_archive(source, destination):
     ], env={**os.environ, 'COPYFILE_DISABLE': '1'}, check=True)
 
 
+def replace_script_archive(expanded, scripts):
+    archive = expanded / 'Scripts'
+    if archive.is_dir():
+        shutil.rmtree(archive)
+    elif archive.exists():
+        archive.unlink()
+    data_archive(scripts, archive)
+
+
+def flatten_component(component, expanded, members):
+    for name in ('Payload', 'Scripts'):
+        archive = expanded / name
+        if name in members:
+            names = subprocess.check_output(['/usr/bin/tar', '-tzf', str(archive)], text=True).splitlines()
+            if any(part.startswith('._') for entry in names for part in Path(entry).parts):
+                raise ValueError('AppleDouble metadata remained in the package archive.')
+    component.unlink()
+    # pkgutil --flatten rearchives Scripts even if it is already an archive.
+    # Preserve our data-only archives in the standard unsigned XAR component;
+    # productbuild signs the complete product after this step.
+    subprocess.run(['/usr/bin/xar', '--distribution', '--compression', 'none',
+                    '-cf', str(component), *members], cwd=expanded, check=True)
+
+
 def remove_component_metadata(component, stage, payload, scripts):
     """Keep Apple's package metadata, but omit synthesized AppleDouble entries.
 
@@ -61,7 +85,7 @@ def remove_component_metadata(component, stage, payload, scripts):
     protected provenance attributes. Rebuild the unsigned component's data-only
     archives and full BOM, then let productbuild sign the final product normally.
     """
-    expanded = stage / 'component'
+    expanded = stage / ('expanded-' + component.stem)
     run('/usr/sbin/pkgutil', '--expand', component, expanded)
     listing = subprocess.check_output(['/usr/bin/lsbom', str(expanded / 'Bom')], text=True)
     retained = [line for line in listing.splitlines()
@@ -70,18 +94,7 @@ def remove_component_metadata(component, stage, payload, scripts):
     bom_input.write_text('\n'.join(retained) + '\n')
     run('/usr/bin/mkbom', '-i', bom_input, expanded / 'Bom')
     data_archive(payload, expanded / 'Payload')
-    script_archive = stage / 'Scripts.cpio.gz'
-    data_archive(scripts, script_archive)
-    expanded_scripts = expanded / 'Scripts'
-    if expanded_scripts.is_dir():
-        shutil.rmtree(expanded_scripts)
-    elif expanded_scripts.exists():
-        expanded_scripts.unlink()
-    script_archive.rename(expanded_scripts)
-    for archive in (expanded / 'Payload', expanded / 'Scripts'):
-        names = subprocess.check_output(['/usr/bin/tar', '-tzf', str(archive)], text=True).splitlines()
-        if any(part.startswith('._') for name in names for part in Path(name).parts):
-            raise ValueError('AppleDouble metadata remained in the package archive.')
+    replace_script_archive(expanded, scripts)
     inventory = subprocess.check_output(['/usr/bin/lsbom', '-s', '-f', str(expanded / 'Bom')], text=True)
     expected = {p.relative_to(payload).as_posix() for p in payload.rglob('*') if p.is_file()}
     if {p.removeprefix('./') for p in inventory.splitlines()} != expected:
@@ -89,14 +102,16 @@ def remove_component_metadata(component, stage, payload, scripts):
     info = ET.parse(expanded / 'PackageInfo')
     info.getroot().find('payload').set('numberOfFiles', str(len(retained)))
     info.write(expanded / 'PackageInfo', encoding='utf-8', xml_declaration=True)
-    component.unlink()
-    # pkgutil --flatten rearchives Scripts even if it is already an archive.
-    # Preserve our data-only archives in the standard unsigned XAR component;
-    # productbuild signs the complete product after this step.
-    subprocess.run(['/usr/bin/xar', '--distribution', '--compression', 'none',
-                    '-cf', str(component), 'Bom', 'PackageInfo', 'Payload', 'Scripts'],
-                   cwd=expanded, check=True)
+    flatten_component(component, expanded, ('Bom', 'PackageInfo', 'Payload', 'Scripts'))
 
+
+def remove_sample_component_metadata(component, stage, scripts):
+    expanded = stage / ('expanded-' + component.stem)
+    run('/usr/sbin/pkgutil', '--expand', component, expanded)
+    if set(path.name for path in expanded.iterdir()) != {'PackageInfo', 'Scripts'}:
+        raise ValueError('Unexpected payload in the sample-store component.')
+    replace_script_archive(expanded, scripts)
+    flatten_component(component, expanded, ('PackageInfo', 'Scripts'))
 
 def license_html(notice, markdown, model_notices=None, document_notices=None):
     """Render the headings, paragraphs and inline markup used by this license."""
@@ -232,6 +247,7 @@ def main():
         sample_component = stage / 'TractandaSampleStore.pkg'
         run('/usr/bin/pkgbuild', '--nopayload', '--scripts', sample_scripts,
             '--identifier', sample_identifier, '--version', manifest['version'], sample_component)
+        remove_sample_component_metadata(sample_component, stage, sample_scripts)
         distribution = make_distribution(manifest, identifier, component.name,
                                          sample_identifier, sample_component.name)
         xml = stage / 'Distribution.xml'
