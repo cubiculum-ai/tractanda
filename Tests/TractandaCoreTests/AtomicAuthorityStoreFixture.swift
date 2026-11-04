@@ -62,13 +62,13 @@ final class AtomicAuthorityStoreFixture {
             expectedRequirement: prior,
             expectedRequirementSHA256: AuthorityRecordCodec.sha256(
                 Data(contentsOf: root.appendingPathComponent(CanonicalReaderRequirement.fileName))),
-            support: AtomicAuthorityCompatibility.support)
+            support: .current)
     }
     static func open(_ root: URL, accounts: any AccountDirectory) throws -> ItemStore {
         try ItemStore(
             root: root, accounts: accounts, revisionProjectionEnabled: true,
             authorityIntakeEnabled: true, firstSourceOperation: nil,
-            canonicalFormatSupport: AtomicAuthorityCompatibility.support)
+            canonicalFormatSupport: .current)
     }
     func activateAndOpen() throws {
         source = nil

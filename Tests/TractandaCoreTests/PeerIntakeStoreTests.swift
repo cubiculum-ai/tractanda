@@ -129,7 +129,7 @@ final class PeerIntakeStoreTests: XCTestCase {
                 read: current.read, write: current.write,
                 capabilities: capabilities, writeCapabilities: capabilities)
         }
-        private static func seedSharedReplica(_ root: URL, identity: Data) throws {
+        static func seedSharedReplica(_ root: URL, identity: Data) throws {
             try FileManager.default.createDirectory(
                 at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
             let writer = tractanda_lock(root.appendingPathComponent(".writer.lock").path)
@@ -348,20 +348,9 @@ final class PeerIntakeStoreTests: XCTestCase {
         let (descriptor, bytes, old) = try legacy(request)
         f.receiver = nil
         let existing = f.directory.appendingPathComponent("existing")
-        var seed: ItemStore? = try ItemStore(
-            root: existing, accounts: f.receiverAccounts, revisionProjectionEnabled: true)
-        guard try XCTUnwrap(seed).exportCatalogueForVerification().isEmpty else {
-            throw TractandaError("fixture", "Join requires an empty fixture")
-        }
-        seed = nil
-        _ = seed
-        let identityName = ".tractanda-store-identity.json"
-        try Data(contentsOf: f.sourceRoot.appendingPathComponent(identityName)).write(
-            to: existing.appendingPathComponent(identityName))
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o600], ofItemAtPath: existing.appendingPathComponent(identityName).path)
-        // Explicitly joining this empty fixture invalidates both disposable StoreID-bound indexes.
-        try FileManager.default.removeItem(at: existing.appendingPathComponent("index"))
+        let identity = try Data(
+            contentsOf: f.sourceRoot.appendingPathComponent(".tractanda-store-identity.json"))
+        try Fixture.seedSharedReplica(existing, identity: identity)
         let files = DocumentContentFiles(
             root: existing, ownerUID: tractanda_uid(), minimumFreeBytes: 10 * 1024 * 1024 * 1024)
         try files.writeImmutable(
@@ -444,7 +433,7 @@ final class PeerIntakeStoreTests: XCTestCase {
         XCTAssertEqual(retained.first?.1, objects.first?.1)
         XCTAssertEqual(
             try CanonicalReaderRequirement.load(root: f.receiverRoot, ownerUID: tractanda_uid())?
-                .minimumReaderLevel, 11)
+                .minimumReaderLevel, CanonicalFormatSupport.current.readerLevel)
         f.receiver = nil
         code("authorityModeRequired") {
             _ = try ItemStore(root: f.receiverRoot, accounts: f.receiverAccounts)
@@ -637,7 +626,7 @@ final class PeerIntakeStoreTests: XCTestCase {
             at: f.receiverRoot.appendingPathComponent("items"), includingPropertiesForKeys: nil)!
         var matches = 0
         while let file = files.nextObject() as? URL {
-            if file.lastPathComponent == revisionID + ".tractanda" {
+            if file.lastPathComponent == "\(revision.itemID).\(revisionID).tractanda" {
                 matches += 1
                 XCTAssertEqual(try Data(contentsOf: file), original)
             }

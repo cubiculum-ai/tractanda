@@ -200,7 +200,7 @@ final class PersonalEnrollmentReplacementTests: XCTestCase {
             RecordCodec.encode(record),
             path: [
                 "items", "2026", "10", "26", "00", "00",
-                record.itemID, record.revisionID + ".tractanda",
+                record.itemID + "." + record.revisionID + ".tractanda",
             ], maximumBytes: 1024 * 1024)
     }
 
@@ -489,7 +489,7 @@ final class PersonalEnrollmentReplacementTests: XCTestCase {
                         RecordCodec.encode(record),
                         path: [
                             "items", "2026", "10", "26", "00", "00",
-                            record.itemID, record.revisionID + ".tractanda",
+                            record.itemID + "." + record.revisionID + ".tractanda",
                         ], maximumBytes: 1024 * 1024)
                     target = try ItemStore.openInitialized(
                         root: root, indexDirectory: parent.appendingPathComponent("target-index"),

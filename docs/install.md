@@ -1,6 +1,6 @@
 # macOS and Debian preview installation
 
-The current checkout contains macOS and Debian installer sources; build and release availability depends on the selected artifact. Older public releases may not include the current installer behavior or layout. Raven, Stash, and Starlet now have live three-node membership on the layouts below. After exactly one managed Starlet restart, independent status checks showed all three nodes ready with the same membership digest; each observed two connected data-capable peers, and normal content/history checks passed before and after restart. Select the published release and its version-pinned instructions when installing.
+This guide covers managed macOS and Debian installations; available behavior and artifact names depend on the selected release. Follow that release's version-pinned instructions. `.17` is the mandatory bridge for existing stores; a standalone `.16.2` upgrade migrates automatically. Clusters require coordinated preparation and installation on all members while held; after every migration finishes, `complete` releases and starts each member. See the [`.17` release notes](release-notes.md#010-poc17--mandatory-layout-and-record-format-bridge) for the exact sequence.
 
 See [system requirements](system-requirements.md) for the macOS version/architecture floor and provisional RAM and disk planning guidance.
 
@@ -45,10 +45,10 @@ For the first migration from the legacy layout to per-instance ephemeral runtime
 Use the [signed preview APT repository](apt.md) for ordinary installation and updates. Direct `.deb` assets are also attached to each release; check the selected architecture against that release's `SHA256SUMS`. APT can install a downloaded local package and satisfy its dependencies from configured Debian repositories:
 
 ~~~sh
-sudo apt install ./tractanda_0.1.0~poc.16-1_amd64.deb
+sudo apt install ./tractanda_0.1.0.poc.17-1_amd64.deb
 ~~~
 
-On arm64, use `tractanda_0.1.0~poc.16-1_arm64.deb`. That package requires Debian 13 with systemd and the existing `daemon` account; Setup does not create users or groups. Dpkg owns its active files in `/opt/tractanda/current`. Installing a package does not enroll a node or establish synchronization. Follow [cluster architecture and operations](clustering.md) for peer setup.
+On arm64, use `tractanda_0.1.0.poc.17-1_arm64.deb`. That package requires Debian 13 with systemd and the existing `daemon` account; Setup does not create users or groups. Dpkg owns its active files in `/opt/tractanda/current`. Installing a package does not enroll a node or establish synchronization. Follow [cluster architecture and operations](clustering.md) for peer setup.
 
 After the package is installed, initialize a fresh standalone store and sample content by naming an existing human OS account:
 

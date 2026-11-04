@@ -65,6 +65,15 @@ final class PeerVerifiedOriginalCacheTests: XCTestCase {
             XCTAssertEqual(probe.bytes, row.descriptor.length * 2)
         }
     }
+    private func changeTime(_ file: URL) throws -> (Int64, Int64) {
+        var metadata = stat()
+        guard lstat(file.path, &metadata) == 0 else { throw FileMetadataError.posix(errno) }
+        #if canImport(Darwin)
+            return (Int64(metadata.st_ctimespec.tv_sec), Int64(metadata.st_ctimespec.tv_nsec))
+        #else
+            return (Int64(metadata.st_ctim.tv_sec), Int64(metadata.st_ctim.tv_nsec))
+        #endif
+    }
     func testMutationMissingSymlinkHardlinkAndCustodyChangesFailClosedOnHit() throws {
         for scenario in ["mutation", "missing", "symlink", "hardlink", "custody"] {
             try withOriginal { f, c, _, row in
@@ -81,15 +90,25 @@ final class PeerVerifiedOriginalCacheTests: XCTestCase {
                     let original = try c.bytes(row)
                     switch scenario {
                     case "mutation":
-                        let saved = try FileManager.default.attributesOfItem(atPath: file.path)[
-                            .modificationDate]
+                        let priorChange = try changeTime(file)
+                        let saved = try XCTUnwrap(
+                            FileManager.default.attributesOfItem(atPath: file.path)[.modificationDate])
                         var bytes = original
                         bytes[bytes.startIndex] ^= 1
                         try bytes.write(to: file)
-                        if let saved {
+                        // A Linux fixture filesystem can report the same ctime within one tick.
+                        // Restore the original mtime and observe a real ctime change before testing reuse.
+                        var advanced = false
+                        for _ in 0..<64 {
                             try FileManager.default.setAttributes(
                                 [.modificationDate: saved], ofItemAtPath: file.path)
+                            if try changeTime(file) != priorChange {
+                                advanced = true
+                                break
+                            }
+                            Thread.sleep(forTimeInterval: 0.001)
                         }
+                        XCTAssertTrue(advanced, "Fixture must observe a changed ctime")
                     case "missing": try FileManager.default.removeItem(at: file)
                     case "symlink":
                         let retained = f.directory.appendingPathComponent("retained")

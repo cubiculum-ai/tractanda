@@ -5,13 +5,8 @@ import XCTest
 @testable import TractandaCore
 
 final class AtomicAuthorityActivationTests: XCTestCase {
-    private var legacy14: CanonicalFormatSupport {
-        let capabilities = AtomicAuthorityCompatibility.support.capabilities.filter {
-            $0 != AtomicAuthorityFormat.profile
-        }
-        return .init(
-            readerLevel: 14, writerLevel: 14, read: [1, 2], write: [2],
-            capabilities: capabilities, writeCapabilities: capabilities)
+    private var nonAtomic: CanonicalFormatSupport {
+        PeerIntakeStoreTests.Fixture.historical14Support
     }
     private func canonical(_ root: URL) throws -> [String: String] {
         let ignored: Set<String> = [
@@ -51,7 +46,7 @@ final class AtomicAuthorityActivationTests: XCTestCase {
         testEstablished14CheckpointOpensReadOnlyWithoutCanonicalWritesThenExplicitActivationAllowsExactRequest()
         throws
     {
-        let f = try AtomicAuthorityStoreFixture(support: legacy14)
+        let f = try AtomicAuthorityStoreFixture(support: nonAtomic)
         let existing = try f.source.commit(
             .init(
                 classID: "Item", changes: ["subject": .text("legacy content")],
@@ -110,7 +105,7 @@ final class AtomicAuthorityActivationTests: XCTestCase {
     }
 
     func testMissing14CheckpointReportsActivationRequiredWithoutCanonicalRecovery() throws {
-        let f = try AtomicAuthorityStoreFixture(support: legacy14)
+        let f = try AtomicAuthorityStoreFixture(support: nonAtomic)
         f.source = nil
         for name in ["items.sqlite", "items.sqlite-wal", "items.sqlite-shm", "items.sqlite-journal"] {
             let path = f.sourceRoot.appendingPathComponent("index").appendingPathComponent(name)
@@ -128,10 +123,10 @@ final class AtomicAuthorityActivationTests: XCTestCase {
     }
 
     func testNamed15FreshFactoryStartsWithAtomicHeadAndOldReaderRefusesItsRequirement() throws {
-        let f = try AtomicAuthorityStoreFixture(support: AtomicAuthorityCompatibility.support)
+        let f = try AtomicAuthorityStoreFixture()
         let requirement = try XCTUnwrap(
             CanonicalReaderRequirement.load(root: f.sourceRoot, ownerUID: tractanda_uid()))
-        XCTAssertEqual(requirement.minimumReaderLevel, 15)
+        XCTAssertEqual(requirement.minimumReaderLevel, CanonicalFormatSupport.current.readerLevel)
         XCTAssertTrue(requirement.capabilities.contains(AtomicAuthorityFormat.profile))
         let index = try ItemIndex(
             path: f.sourceRoot.appendingPathComponent("index/items.sqlite").path, create: false)
@@ -156,7 +151,7 @@ final class AtomicAuthorityActivationTests: XCTestCase {
             try ItemStore(
                 root: f.sourceRoot, accounts: f.sourceAccounts,
                 revisionProjectionEnabled: true, authorityIntakeEnabled: true, firstSourceOperation: nil,
-                canonicalFormatSupport: legacy14)
+                canonicalFormatSupport: nonAtomic)
         ) {
             XCTAssertEqual(($0 as? TractandaError)?.code, "incompatibleCanonicalReader")
         }

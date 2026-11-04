@@ -193,7 +193,7 @@ final class PersonalDAGTests: XCTestCase {
         XCTAssertLessThan(bytes.count, 1024 * 1024)
         try AttachmentFixtureCapacity.requireFree(at: root)
         let path = [
-            "items", "2026", "10", "25", "10", "00", revision.itemID, revision.revisionID + ".tractanda",
+            "items", "2026", "10", "25", "10", "00", "\(revision.itemID).\(revision.revisionID).tractanda",
         ]
         try DocumentContentFiles(
             root: root, ownerUID: tractanda_uid(), minimumFreeBytes: 10 * 1024 * 1024 * 1024

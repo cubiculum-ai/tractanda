@@ -16,7 +16,7 @@ final class PeerAtomicIntakePreparationTests: XCTestCase {
     private func coordinator(_ f: Fixture, limits: PeerPackage.Limits = .init()) -> PeerIntakeCoordinator {
         let result = PeerIntakeCoordinator(
             root: f.sourceRoot, ownerUID: tractanda_uid(), storeID: f.storeID, limits: limits)
-        result.canonicalFormatSupport = AtomicAuthorityCompatibility.support
+        result.canonicalFormatSupport = .current
         return result
     }
     private func part(_ f: Fixture) throws -> (PeerPackage.Object, Data) {

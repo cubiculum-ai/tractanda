@@ -83,6 +83,10 @@ final class PeerLifecycleStoreTests: XCTestCase {
     func testRotationRejectsStaleSessionsResumeAndInventoryAndRaisesReaderGuard() throws {
         let f = try Fixture()
         try f.bootstrap()
+        let beforeRequirement = try XCTUnwrap(
+            CanonicalReaderRequirement.load(root: f.receiverRoot, ownerUID: tractanda_uid()))
+        XCTAssertEqual(beforeRequirement.minimumReaderLevel, CanonicalFormatSupport.current.readerLevel)
+        XCTAssertFalse(beforeRequirement.capabilities.contains(PeerLifecycle.capability))
         let old = f.context!
         let boundary = try f.receiver.capturePeerInventory(context: old)
         let packet = try f.packet(f.source.peerMetadataObjects(revisionID: f.base.revisionID))
@@ -107,8 +111,14 @@ final class PeerLifecycleStoreTests: XCTestCase {
             CanonicalReaderRequirement.load(
                 root: f.receiverRoot,
                 ownerUID: tractanda_uid()))
-        XCTAssertEqual(requirement.minimumReaderLevel, 11)
+        XCTAssertEqual(requirement.minimumReaderLevel, CanonicalFormatSupport.current.readerLevel)
         XCTAssertTrue(requirement.capabilities.contains(PeerLifecycle.capability))
+        let current = CanonicalFormatSupport.current
+        let withoutLifecycle = CanonicalFormatSupport(
+            readerLevel: current.readerLevel, writerLevel: current.writerLevel,
+            read: current.read, write: current.write,
+            capabilities: current.capabilities.filter { $0 != PeerLifecycle.capability })
+        XCTAssertThrowsError(try withoutLifecycle.require(requirement))
         let previousReader = CanonicalFormatSupport(
             readerLevel: 5, writerLevel: 5, read: [1, 2],
             write: [2],
@@ -311,6 +321,10 @@ final class PeerLifecycleStoreTests: XCTestCase {
     func testForeignRetirementStaysHeldAndRaisesReaderBeforeCanonicalRetention() throws {
         let f = try Fixture()
         try f.bootstrap()
+        let beforeRequirement = try XCTUnwrap(
+            CanonicalReaderRequirement.load(root: f.receiverRoot, ownerUID: tractanda_uid()))
+        XCTAssertEqual(beforeRequirement.minimumReaderLevel, CanonicalFormatSupport.current.readerLevel)
+        XCTAssertFalse(beforeRequirement.capabilities.contains(PeerLifecycle.capability))
         let page = try AuthorityRecord(
             recordID: Fixture.id(), storeID: f.storeID,
             originReplicaID: f.origin, kind: .originRetirementPage, actorPrincipal: "admin",
@@ -335,8 +349,14 @@ final class PeerLifecycleStoreTests: XCTestCase {
             CanonicalReaderRequirement.load(
                 root: f.receiverRoot,
                 ownerUID: tractanda_uid()))
-        XCTAssertEqual(requirement.minimumReaderLevel, 11)
+        XCTAssertEqual(requirement.minimumReaderLevel, CanonicalFormatSupport.current.readerLevel)
         XCTAssertTrue(requirement.capabilities.contains(PeerLifecycle.capability))
+        let current = CanonicalFormatSupport.current
+        let withoutLifecycle = CanonicalFormatSupport(
+            readerLevel: current.readerLevel, writerLevel: current.writerLevel,
+            read: current.read, write: current.write,
+            capabilities: current.capabilities.filter { $0 != PeerLifecycle.capability })
+        XCTAssertThrowsError(try withoutLifecycle.require(requirement))
         try f.receiver.rebuildIndex()
         XCTAssertEqual(try f.receiver.get(f.base.itemID), before)
         try f.capacity()

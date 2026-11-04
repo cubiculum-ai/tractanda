@@ -268,7 +268,8 @@ final class InitialAuthorityBootstrapTests: XCTestCase {
         // Independent backup contract: explicit canonical top-level allowlist, no source constants.
         let retained = [
             "items", "authority", ".tractanda-store-identity.json", ".tractanda-replica-identity.json",
-            "canonical-reader.json", ".authority-initial-capture.json", ".authority-initial-state.json",
+            "canonical-layout.json", "canonical-reader.json", ".authority-initial-capture.json",
+            ".authority-initial-state.json",
             ".authority-initial-state-sealed.json", ".authority-initial-visibility", ".peer-configuration",
             ".peer-lifecycle-operations", ".peer-retirement-activations", ".peer-review-activations",
             "attachments", "documents", ".tractanda-first-source.json",

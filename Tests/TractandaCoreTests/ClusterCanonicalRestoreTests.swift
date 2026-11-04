@@ -17,7 +17,13 @@ final class ClusterCanonicalRestoreTests: XCTestCase {
         }
         try fixture.capacity()
         let destination = fixture.directory.appendingPathComponent("canonical-restore-" + (try Fixture.id()))
+        // Copy only a verified current marker from a completed source store.
+        try CanonicalPhysicalLayout.requireNoMigration(source)
+        guard try CanonicalPhysicalLayout.load(source, ownerUID: tractanda_uid()) else {
+            throw TractandaError("fixture", "Missing retained canonical layout marker")
+        }
         var paths = [
+            CanonicalPhysicalLayout.fileName,
             "items", "authority", ".tractanda-store-identity.json", ".tractanda-replica-identity.json",
             "canonical-reader.json", ".authority-initial-capture.json", ".authority-initial-state.json",
             ".authority-initial-state-sealed.json", ".authority-initial-visibility",

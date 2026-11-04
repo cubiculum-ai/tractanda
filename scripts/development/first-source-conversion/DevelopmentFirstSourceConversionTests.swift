@@ -160,7 +160,7 @@ final class DevelopmentFirstSourceFixtureTests: XCTestCase {
             fields["modifiedAt"] = .date("2020-01-02T03:05:00.000Z")
             revisions.append(try Revision(fields: fields))
             for (offset, revision) in revisions.enumerated() {
-                let path = "items/2020/01/02/03/0\(4 + offset)/\(item)/\(revision.revisionID).tractanda"
+                let path = "items/2020/01/02/03/0\(4 + offset)/\(item).\(revision.revisionID).tractanda"
                 let file = root.appendingPathComponent(path)
                 try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true,
                     attributes: [.posixPermissions: 0o700])
@@ -327,7 +327,7 @@ final class DevelopmentFirstSourceFixtureTests: XCTestCase {
         let storeID = try Fixture.id(), replicaID = try Fixture.id(), itemID = try Fixture.id()
         let originals = try (0..<1943).map { _ -> InitialAuthorityBootstrap.Original in
             let revision = try Fixture.id()
-            return .init(path: "items/2020/01/02/03/04/\(itemID)/\(revision).tractanda",
+            return .init(path: "items/2020/01/02/03/04/\(itemID).\(revision).tractanda",
                 itemID: itemID, revisionID: revision, sha256: String(repeating: "0", count: 64),
                 length: 1, currentAccessConfiguration: false, mode: UInt32(S_IFREG) | 0o600,
                 uid: tractanda_uid(), packageID: try Fixture.id(), framingID: try Fixture.id())
@@ -414,7 +414,7 @@ final class DevelopmentFirstSourceFixtureTests: XCTestCase {
             fields["requestIdentity"] = .text(try JSON.encode(CommitRequest(classID: "Item",
                 changes: ["subject": .text("original")], operationID: operation)).base64EncodedString())
             let bytes = try RecordCodec.encode(Revision(fields: fields))
-            let path = "items/2020/01/02/03/04/\(item)/\(revision).tractanda"
+            let path = "items/2020/01/02/03/04/\(item).\(revision).tractanda"
             let url = f.root.appendingPathComponent(path)
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
                 attributes: [.posixPermissions: 0o700])
@@ -477,7 +477,7 @@ final class DevelopmentFirstSourceFixtureTests: XCTestCase {
             fields["requestIdentity"] = .text(try JSON.encode(CommitRequest(classID: "Item",
                 changes: ["subject": .text("original")], operationID: operation)).base64EncodedString())
             let bytes = try RecordCodec.encode(Revision(fields: fields))
-            let path = "items/2020/01/02/03/04/\(item)/\(revision).tractanda"
+            let path = "items/2020/01/02/03/04/\(item).\(revision).tractanda"
             let url = f.root.appendingPathComponent(path)
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
                 attributes: [.posixPermissions: 0o700])

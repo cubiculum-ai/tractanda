@@ -289,21 +289,7 @@ final class AuthorityReviewStoreTests: XCTestCase {
             try AttachmentFixtureCapacity.requireFree(at: f.directory)
             let thirdRoot = f.directory.appendingPathComponent("starlet")
             let thirdAccounts = PeerIntakeStoreTests.Accounts()
-            var third: ItemStore! = try ItemStore(
-                root: thirdRoot, accounts: thirdAccounts, revisionProjectionEnabled: true)
-            guard try third.exportCatalogueForVerification().isEmpty else {
-                throw TractandaError("fixture", "Join requires an empty fixture")
-            }
-            third = nil
-            try FileManager.default.removeItem(at: thirdRoot.appendingPathComponent("index"))
-            let storeIdentity = try Data(
-                contentsOf: f.sourceRoot.appendingPathComponent(".tractanda-store-identity.json"))
-            try storeIdentity.write(
-                to: thirdRoot.appendingPathComponent(".tractanda-store-identity.json"), options: .atomic)
-            try FileManager.default.setAttributes(
-                [.posixPermissions: 0o600],
-                ofItemAtPath: thirdRoot.appendingPathComponent(".tractanda-store-identity.json").path)
-            third = try PeerIntakeStoreTests.Fixture.open(thirdRoot, thirdAccounts)
+            var third: ItemStore! = try f.openFreshSharedReplica(thirdRoot, thirdAccounts)
             defer { third = nil }
             let origins = [f.origin, try XCTUnwrap(f.receiver.replicaID), try XCTUnwrap(third.replicaID)]
                 .sorted()

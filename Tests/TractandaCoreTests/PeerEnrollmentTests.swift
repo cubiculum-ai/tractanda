@@ -90,7 +90,7 @@ final class PeerEnrollmentTests: XCTestCase {
         })
         XCTAssertEqual(try JSON.encode(retry), before)
         XCTAssertEqual(try Data(contentsOf: alias), before)
-        code("enrollmentPending") { _ = try ItemStore(root: f.root) }
+        code("canonicalLayoutMigrationRequired") { _ = try ItemStore(root: f.root) }
     }
     func testPendingRejectsEveryOpeningModeBeforeCanonicalOrExternalIndexEffects() throws {
         let f = try Fixture()
@@ -101,7 +101,7 @@ final class PeerEnrollmentTests: XCTestCase {
             "unused-index-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: external) }
         for authority in [false, true] {
-            code("enrollmentPending") {
+            code("canonicalLayoutMigrationRequired") {
                 _ = try ItemStore(
                     root: f.root, indexDirectory: external,
                     revisionProjectionEnabled: authority, authorityIntakeEnabled: authority)

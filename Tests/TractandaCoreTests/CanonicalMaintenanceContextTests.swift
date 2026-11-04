@@ -21,12 +21,8 @@ final class CanonicalMaintenanceContextTests: XCTestCase {
             applied: Bool = true, rollback: Bool = false, seedPayloadStage: Bool = false,
             atomicSource: Bool = false, freshDerivedIndex: Bool = false, clearCompletedScratch: Bool = false
         ) throws {
-            let old = CanonicalFormatSupport(
-                readerLevel: 14, writerLevel: 14, read: [1, 2], write: [2],
-                capabilities: CanonicalFormatSupport.current.capabilities.filter {
-                    $0 != AtomicAuthorityCompatibility.capability
-                })
-            source = try AtomicAuthorityStoreFixture(support: atomicSource ? .current : old)
+            let nonAtomic = PeerIntakeStoreTests.Fixture.historical14Support
+            source = try AtomicAuthorityStoreFixture(support: atomicSource ? .current : nonAtomic)
             root = source.sourceRoot
             storeID = source.storeID
             if seedPayloadStage {
