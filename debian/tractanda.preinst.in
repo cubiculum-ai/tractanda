@@ -38,7 +38,12 @@ if [ -x "$helper" ]; then
  if [ "$lifecycle" = abort-upgrade ]; then
   set -- verify-helper "$helper"
  elif [ "${legacy_stop_only-no}" = yes ]; then
-  set -- legacy-preinst-helper "$helper" "$descriptor" "$legacy_source_version"
+  if [ "$legacy_source_version" = '0.1.0~poc.16.2-1' ]; then
+   set -- legacy-preinst-helper "$helper" "$descriptor" "$legacy_source_version" \
+    "${0%/*}/layout17-inspector.tar" '@TRACTANDA_LAYOUT17_INSPECTOR_SHA256@'
+  else
+   set -- legacy-preinst-helper "$helper" "$descriptor" "$legacy_source_version"
+  fi
  else
   set -- preinst-helper "$helper" "$descriptor"
  fi

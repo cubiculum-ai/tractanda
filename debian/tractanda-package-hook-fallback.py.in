@@ -1,7 +1,9 @@
 #!/usr/bin/python3
 """Finite Debian hook fallback. It proves OS custody only; it never reads canonical authority."""
+import contextlib
 import fcntl
 import hashlib
+import io
 import json
 import os
 import pwd
@@ -10,6 +12,8 @@ import re
 import stat
 import subprocess
 import sys
+import tarfile
+import tempfile
 import uuid
 
 INSTALLATION = "/opt/tractanda/var/lib/tractanda/Installation"
@@ -380,50 +384,53 @@ def inspect_units(instances, receipts):
     enabled = listed_units(("list-unit-files", "--no-legend", "--no-pager", "tractanda-*.service"))
     if not listed <= expected or not enabled <= expected:
         refuse("unowned managed unit exists")
-    property_argument = "--property=LoadState,ActiveState,FragmentPath,DropInPaths,NeedDaemonReload,MainPID,UnitFileState"
     for name in instances:
-        receipt = receipts[name]
-        hashes = {
-            "server": receipt.get("definitionSHA256"),
-            "embeddings": receipt.get("embeddingDefinitionSHA256"),
-            "authentication": receipt.get("authenticationDefinitionSHA256"),
-        }
-        for role, expected_hash in hashes.items():
-            unit = "tractanda-" + role + "-" + name + ".service"
-            output = run_systemctl(("show", unit, "--no-pager", property_argument), allow_not_found=True)
-            fields = {}
-            for line in output.splitlines():
-                key, separator, value = line.partition("=")
-                if not separator or key in fields:
-                    refuse("systemd state is incomplete or duplicated")
-                fields[key] = value
-            if set(fields) != UNIT_PROPERTIES or fields["MainPID"] != "0" or fields["DropInPaths"]:
-                refuse("managed unit has a process or unknown override")
-            path = os.path.join(UNIT_DIR, unit)
-            if fields["LoadState"] == "not-found":
-                if (fields["ActiveState"] != "inactive" or fields["FragmentPath"]
-                        or fields["UnitFileState"] not in ("", "not-found", "disabled")):
-                    refuse("missing unit has contradictory state")
-            elif (fields["LoadState"] != "loaded" or fields["ActiveState"] not in ("inactive", "failed")
-                    or fields["NeedDaemonReload"] != "no" or fields["UnitFileState"] != "disabled"
-                    or fields["FragmentPath"] != path):
-                refuse("unit is not owned, stopped and disabled")
-            try:
-                metadata = os.lstat(path)
-            except FileNotFoundError:
-                metadata = None
-            if metadata is not None:
-                hash_owned_unit(path, expected_hash)
-            elif expected_hash is not None:
-                refuse("receipt-owned unit definition disappeared")
-            dropins = path + ".d"
-            try:
-                drop_metadata = os.lstat(dropins)
-            except FileNotFoundError:
-                drop_metadata = None
-            if drop_metadata is not None and (
-                    not stat.S_ISDIR(drop_metadata.st_mode) or os.listdir(dropins)):
-                refuse("unit drop-in directory is not empty")
+        inspect_stopped_instance(name, receipts[name])
+
+
+def inspect_stopped_instance(name, receipt):
+    property_argument = "--property=LoadState,ActiveState,FragmentPath,DropInPaths,NeedDaemonReload,MainPID,UnitFileState"
+    hashes = {
+        "server": receipt.get("definitionSHA256"),
+        "embeddings": receipt.get("embeddingDefinitionSHA256"),
+        "authentication": receipt.get("authenticationDefinitionSHA256"),
+    }
+    for role, expected_hash in hashes.items():
+        unit = "tractanda-" + role + "-" + name + ".service"
+        output = run_systemctl(("show", unit, "--no-pager", property_argument), allow_not_found=True)
+        fields = {}
+        for line in output.splitlines():
+            key, separator, value = line.partition("=")
+            if not separator or key in fields:
+                refuse("systemd state is incomplete or duplicated")
+            fields[key] = value
+        if set(fields) != UNIT_PROPERTIES or fields["MainPID"] != "0" or fields["DropInPaths"]:
+            refuse("managed unit has a process or unknown override")
+        path = os.path.join(UNIT_DIR, unit)
+        if fields["LoadState"] == "not-found":
+            if (fields["ActiveState"] != "inactive" or fields["FragmentPath"]
+                    or fields["UnitFileState"] not in ("", "not-found", "disabled")):
+                refuse("missing unit has contradictory state")
+        elif (fields["LoadState"] != "loaded" or fields["ActiveState"] not in ("inactive", "failed")
+                or fields["NeedDaemonReload"] != "no" or fields["UnitFileState"] != "disabled"
+                or fields["FragmentPath"] != path):
+            refuse("unit is not owned, stopped and disabled")
+        try:
+            metadata = os.lstat(path)
+        except FileNotFoundError:
+            metadata = None
+        if metadata is not None:
+            hash_owned_unit(path, expected_hash)
+        elif expected_hash is not None:
+            refuse("receipt-owned unit definition disappeared")
+        dropins = path + ".d"
+        try:
+            drop_metadata = os.lstat(dropins)
+        except FileNotFoundError:
+            drop_metadata = None
+        if drop_metadata is not None and (
+                not stat.S_ISDIR(drop_metadata.st_mode) or os.listdir(dropins)):
+            refuse("unit drop-in directory is not empty")
 
 def private_directory(path, daemon_uid):
     root_directory_chain(os.path.dirname(path))
@@ -678,9 +685,163 @@ def layout17_document_semantics(document):
     return profiles[preprocessing]
 
 
+_LAYOUT17_INSPECTOR = "bin/tractanda-layout17"
+_LAYOUT17_CONTROL_MAXIMUM = 128 * 1024**2
+_LAYOUT17_LOADER = {"amd64": "/lib64/ld-linux-x86-64.so.2", "arm64": "/lib/ld-linux-aarch64.so.1"}
+_CONTROL_ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"}
+
+
+def layout17_native_command(arguments):
+    # A verified inspector may take as long as it needs to read the bounded store.
+    return subprocess.run(arguments, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, env=_CONTROL_ENV, text=True, check=False)
+
+
+def layout17_check_loader(stage, inventory):
+    arch = inventory["arch"]
+    loader = _LAYOUT17_LOADER[arch]
+    private = inventory["privateSONAMEs"]
+    system = inventory["systemLibraries"]
+    expected = set(private) | set(system)
+    loader_name = os.path.basename(loader)
+    if loader_name not in system or "libsqlite3.so.0" not in expected:
+        refuse("layout17 loader or SQLite is outside its admitted closure")
+    result = layout17_native_command([loader, "--list", os.path.join(stage, _LAYOUT17_INSPECTOR)])
+    if result.returncode or result.stderr or len(result.stdout.encode()) > 65536:
+        refuse("layout17 inspector runtime closure could not load")
+    observed = set()
+    checked_packages = set()
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if re.fullmatch(r"linux-vdso\.so\.1 \(0x[0-9a-f]+\)", line):
+            continue
+        mapping = re.fullmatch(r"([^ ]+) => (/[^ ]+) \(0x[0-9a-f]+\)", line)
+        if mapping:
+            name, path = mapping.groups()
+        else:
+            direct = re.fullmatch(r"(/[^ ]+) \(0x[0-9a-f]+\)", line)
+            if direct is None or os.path.realpath(direct[1]) != os.path.realpath(loader):
+                refuse("layout17 inspector loader reported an unknown dependency")
+            name, path = loader_name, direct[1]
+        if name not in expected:
+            refuse("layout17 inspector loaded a dependency outside its closure")
+        observed.add(name)
+        physical = os.path.realpath(path)
+        if name in private:
+            if physical != os.path.join(stage, private[name]):
+                refuse("layout17 private runtime dependency resolved outside its verified copy")
+            continue
+        if not physical.startswith("/usr/lib/"):
+            refuse("layout17 system dependency resolved outside Debian libraries")
+        root_directory_chain(os.path.dirname(physical))
+        metadata = os.lstat(physical)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0 or metadata.st_mode & 0o022:
+            refuse("layout17 system dependency has unsafe custody")
+        provider = system[name]
+        ownership = layout17_native_command(["/usr/bin/dpkg-query", "--search", path, physical])
+        owners = set()
+        for row in ownership.stdout.splitlines():
+            for candidate in (path, physical):
+                suffix = ": " + candidate
+                if row.endswith(suffix):
+                    owner = row[:-len(suffix)]
+                    if re.fullmatch(r"[a-z0-9][a-z0-9+.-]+(?::(?:amd64|arm64))?", owner):
+                        owners.add(owner.split(":", 1)[0])
+        if ownership.returncode not in (0, 1) or owners != {provider["package"]}:
+            refuse("layout17 system dependency has an unexpected Debian provider")
+        binding = (provider["package"], provider["version"])
+        if binding not in checked_packages:
+            package, minimum = binding
+            installed = layout17_native_command(["/usr/bin/dpkg-query", "-W",
+                "-f=${Status}\t${Version}\t${Architecture}\n", package])
+            fields = installed.stdout.strip().split("\t")
+            if (installed.returncode or installed.stderr or len(fields) != 3
+                    or fields[0] != "install ok installed" or fields[2] != arch
+                    or layout17_native_command(["/usr/bin/dpkg", "--compare-versions", fields[1], "ge", minimum]).returncode):
+                refuse("layout17 system dependency is not configured at the required version")
+            checked_packages.add(binding)
+    if observed != expected:
+        refuse("layout17 inspector's actual loader closure differs from its commitment")
+
+
+@contextlib.contextmanager
+def layout17_control_inspector(path, expected_sha, incoming):
+    if (not valid_digest(expected_sha) or not os.path.isabs(path) or os.path.normpath(path) != path
+            or os.path.basename(path) != "layout17-inspector.tar"):
+        refuse("layout17 requires the authenticated incoming control inspector")
+    raw = read_private_regular(path, _LAYOUT17_CONTROL_MAXIMUM, private=False)
+    if hashlib.sha256(raw).hexdigest() != expected_sha:
+        refuse("layout17 control inspector archive hash differs from the incoming hook")
+    parent = os.path.dirname(path)
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as archive:
+        members = {}
+        for member in archive:
+            if (len(members) >= 257 or member.name in members or not member.isfile()
+                    or member.uid != 0 or member.gid != 0 or member.mode & ~0o777
+                    or member.mode & 0o022 or member.size <= 0):
+                refuse("unsafe .17 control inspector archive member")
+            members[member.name] = member
+        metadata = members.pop("layout17-control.json", None)
+        if metadata is None or metadata.size > 65536 or metadata.mode != 0o644:
+            refuse("layout17 control inventory is absent or unsafe")
+        inventory = decode_object(archive.extractfile(metadata).read())
+        arch = {"x86_64": "amd64", "arm64": "arm64"}.get(incoming.get("arch"))
+        if (set(inventory) != {"profile", "manifestSHA256", "arch", "files", "privateSONAMEs", "systemLibraries"}
+                or inventory["profile"] != "tractanda.layout17-control.v1"
+                or inventory["manifestSHA256"] != incoming["manifestSHA256"] or inventory["arch"] != arch
+                or arch not in _LAYOUT17_LOADER or type(inventory["files"]) is not list
+                or type(inventory["privateSONAMEs"]) is not dict or type(inventory["systemLibraries"]) is not dict):
+            refuse("layout17 control inventory is outside the genuine incoming payload commitment")
+        rows = {}
+        for row in inventory["files"]:
+            if type(row) is not dict or set(row) != {"path", "sha256", "size", "mode"}:
+                refuse("malformed layout17 control file commitment")
+            name = row["path"]
+            if (type(name) is not str or not (name == _LAYOUT17_INSPECTOR or name.startswith("lib/"))
+                    or any(part in ("", ".", "..") for part in name.split("/"))
+                    or re.search(r"[\x00-\x20\x7f]", name) is not None
+                    or name in rows or not valid_digest(row["sha256"])):
+                refuse("unsafe layout17 control file path or hash")
+            member = members.get(name)
+            if member is None or member.size != row["size"] or member.mode != row["mode"]:
+                refuse("layout17 control file metadata differs")
+            rows[name] = row
+        private, system = inventory["privateSONAMEs"], inventory["systemLibraries"]
+        if (set(rows) != set(members) or _LAYOUT17_INSPECTOR not in rows
+                or not rows[_LAYOUT17_INSPECTOR]["mode"] & 0o111
+                or set(private.values()) != set(rows) - {_LAYOUT17_INSPECTOR}
+                or set(private) & set(system) or len(system) > 256):
+            refuse("layout17 control inventory is incomplete")
+        if not all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+\-]{0,127}", name) for name in set(private) | set(system)):
+            refuse("invalid layout17 library name")
+        for provider in system.values():
+            if (type(provider) is not dict or set(provider) != {"package", "version"}
+                    or type(provider["package"]) is not str or type(provider["version"]) is not str
+                    or re.fullmatch(r"[a-z0-9][a-z0-9+.-]{1,127}", provider["package"]) is None
+                    or re.fullmatch(r"[0-9][0-9A-Za-z.+:~\-]{0,127}", provider["version"]) is None):
+                refuse("invalid layout17 Debian dependency commitment")
+        capacity = os.statvfs(parent)
+        if sum(row["size"] for row in rows.values()) > capacity.f_bavail * capacity.f_frsize:
+            refuse("insufficient space for the private layout17 inspector")
+        with tempfile.TemporaryDirectory(prefix=".layout17-inspector-", dir=parent) as stage:
+            for name, row in rows.items():
+                target = os.path.join(stage, name)
+                os.makedirs(os.path.dirname(target), mode=0o700, exist_ok=True)
+                digest = hashlib.sha256()
+                with archive.extractfile(members[name]) as source, open(target, "xb") as destination:
+                    for block in iter(lambda: source.read(65536), b""):
+                        destination.write(block)
+                        digest.update(block)
+                if digest.hexdigest() != row["sha256"]:
+                    refuse("layout17 control executable or library bytes differ from the payload")
+                os.chmod(target, row["mode"])
+            layout17_check_loader(stage, inventory)
+            yield os.path.join(stage, _LAYOUT17_INSPECTOR)
+
+
 def layout17_pre_stop(previous, previous_digest, incoming):
     """The finite16.2 boundary is checked BEFORE asking its authentic helper to stop."""
-    capability = "tractanda.physical-layout.flat-items.v1"
+    capabilities = ["tractanda.physical-layout.flat-items.v1", "tractanda.message-items.v1"]
     before, after = previous.get("canonicalFormats"), incoming.get("canonicalFormats")
     if (previous.get("version") != "0.1.0-poc.16.2" or incoming.get("version") != "0.1.0-poc.17"
             or incoming.get("upgrade") != "coordinated-maintenance"
@@ -692,16 +853,20 @@ def layout17_pre_stop(previous, previous_digest, incoming):
             or set(before) != set(after)
             or before.get("profile") != "tractanda.canonical-formats.v1"
             or before.get("readerLevel") != 18 or before.get("writerLevel") != 18
-            or after.get("readerLevel") != 19 or after.get("writerLevel") != 19
+            or after.get("readerLevel") != 20 or after.get("writerLevel") != 20
             or before.get("read") != after.get("read") or before.get("write") != after.get("write")
-            or capability in before.get("capabilities", [])
-            or capability in before.get("writeCapabilities", [])
-            or after.get("capabilities") != sorted(before.get("capabilities", []) + [capability])
-            or after.get("writeCapabilities") != sorted(before.get("writeCapabilities", []) + [capability])):
+            or any(capability in before.get("capabilities", []) for capability in capabilities)
+            or any(capability in before.get("writeCapabilities", []) for capability in capabilities)
+            or after.get("capabilities") != sorted(before.get("capabilities", []) + capabilities)
+            or after.get("writeCapabilities") != sorted(before.get("writeCapabilities", []) + capabilities)):
         refuse("not the finite authentic16.2 to17 physical-layout transition")
     daemon_uid = pwd.getpwnam("daemon").pw_uid
+    root_directory_chain(os.path.dirname(RECEIPTS))
+    if not os.path.lexists(RECEIPTS):
+        return {}
     root_directory_chain(RECEIPTS)
     names = os.listdir(RECEIPTS)
+    targets = {}
     if len(names) > 1024:
         refuse("layout17 receipt inventory exceeds its bound")
     for filename in names:
@@ -733,9 +898,12 @@ def layout17_pre_stop(previous, previous_digest, incoming):
                 or profile.get("storeID") != fence.get("storeID")
                 or fence.get("minimumReaderLevel") not in (16, 17, 18)):
             refuse("layout17 supports established personal/workgroup16.2 stores only")
+        target = {"store": store, "storeID": profile.get("storeID"), "replicaID": profile.get("replicaID"),
+                  "readerRequirementSHA256": hashlib.sha256(fence_raw).hexdigest(), "clustered": False}
+        targets[name] = target
         membership_path = os.path.join(store, ".personal-membership.json")
         if not os.path.lexists(membership_path):
-            continue  # A real standalone store requires no cluster declaration.
+            continue
         raw_membership = layout17_store_file(store, ".personal-membership.json", daemon_uid)
         membership = decode_object(raw_membership)
         members = membership.get("members")
@@ -743,7 +911,9 @@ def layout17_pre_stop(previous, previous_digest, incoming):
                 or membership.get("storeID") != profile.get("storeID")
                 or type(members) is not list or not 1 <= len(members) <= 256):
             refuse("layout17 current membership is invalid")
-        if len(members) == 1:
+        target.update(clustered=len(members) > 1, membershipDigest=hashlib.sha256(raw_membership).hexdigest(),
+                      memberCount=len(members))
+        if not target["clustered"]:
             continue
         intent_path = os.path.join(INSTALLATION, "layout17-intents", name + ".json")
         if not os.path.lexists(intent_path):
@@ -754,14 +924,56 @@ def layout17_pre_stop(previous, previous_digest, incoming):
                 "acknowledgedAllMembersUpgradedBeforeStart"}
         if (set(intent) != keys or intent["profile"] != "tractanda.layout17-prepare.v1"
                 or intent["mode"] != "administrator-coordinated" or intent["instance"] != name
-                or intent["storePath"] != store or intent["storeID"] != profile.get("storeID")
-                or intent["replicaID"] != profile.get("replicaID")
+                or intent["storePath"] != store or intent["storeID"] != target["storeID"]
+                or intent["replicaID"] != target["replicaID"]
                 or intent["oldManifestSHA256"] != previous_digest
                 or intent["newManifestSHA256"] != incoming["manifestSHA256"]
-                or intent["membershipDigest"] != hashlib.sha256(raw_membership).hexdigest()
-                or intent["readerRequirementSHA256"] != hashlib.sha256(fence_raw).hexdigest()
+                or intent["membershipDigest"] != target["membershipDigest"]
+                or intent["readerRequirementSHA256"] != target["readerRequirementSHA256"]
                 or intent["acknowledgedAllMembersUpgradedBeforeStart"] is not True):
             refuse("cluster layout17 requires the exact transient administrator prepare intent")
+        inspect_stopped_instance(name, receipt)
+    return targets
+
+
+def layout17_inspect_targets(inspector, targets, quiescent=False):
+    for name, target in sorted(targets.items()):
+        args = [inspector, "inspect", "--store", target["store"]]
+        if quiescent:
+            args.append("--quiescent")
+        result = layout17_native_command(args)
+        if result.returncode or len(result.stdout.encode()) > 65536:
+            refuse("layout17 inspection refused " + name + ": " + result.stderr.strip()[:1024])
+        observed = decode_object(result.stdout)
+        if (observed.get("profile") != "tractanda.layout17-inspection.v1"
+                or observed.get("phase") != "unmigrated"
+                or observed.get("minimumReaderLevel") not in (16, 17, 18)
+                or observed.get("currentReaderRequirementSHA256") != target["readerRequirementSHA256"]
+                or any(observed.get(key) != target.get(key) for key in
+                       ("storeID", "replicaID", "readerRequirementSHA256", "clustered", "membershipDigest", "memberCount"))):
+            refuse("layout17 inspection identity, membership or reader requirement changed")
+
+
+def layout17_restore_original(helper, original, targets):
+    """Reconfigure the real old payload only before any layout barrier or unpack."""
+    daemon_uid = pwd.getpwnam("daemon").pw_uid
+    for target in targets.values():
+        store = target["store"]
+        fence = decode_object(layout17_store_file(store, "canonical-reader.json", daemon_uid))
+        if (fence.get("minimumReaderLevel") not in (16, 17, 18)
+                or any(os.path.lexists(os.path.join(store, name)) for name in
+                       ("canonical-layout.pending.json", "canonical-layout.json"))):
+            refuse("layout17 could not restore old service intent across an unknown reader barrier")
+    verify_helper(["verify-helper", helper])
+    with tempfile.TemporaryDirectory(prefix="tractanda-layout17-restore-", dir="/run") as stage:
+        path = os.path.join(stage, "descriptor.json")
+        with open(path, "xb") as file:
+            file.write(json.dumps(original, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode() + b"\n")
+        os.chmod(path, 0o600)
+        restored = subprocess.run([helper, "--package-lifecycle", "configure", "--descriptor", path],
+                                  stdin=subprocess.DEVNULL, check=False)
+        if restored.returncode:
+            refuse("layout17 inspection failed and genuine16.2 service-intent recovery also failed")
 
 
 def legacy_preinst_helper(arguments):
@@ -770,9 +982,9 @@ def legacy_preinst_helper(arguments):
     This is not payload/semantic admission. New configure still verifies the
     real unpacked inventory and current execution pins before activation.
     """
-    if len(arguments) != 4 or arguments[3] not in LEGACY_DEBIAN_VERSIONS:
+    if len(arguments) not in (4, 6) or arguments[3] not in LEGACY_DEBIAN_VERSIONS:
         refuse("unsupported legacy preinst source version")
-    helper, path, version = arguments[1:]
+    helper, path, version = arguments[1:4]
     verify_helper(["verify-helper", helper])
     incoming = validate_descriptor(path)
     if incoming.get("version") == "0.1.0-poc.17" and version != "0.1.0~poc.16.2-1":
@@ -783,8 +995,15 @@ def legacy_preinst_helper(arguments):
     previous_digest = hashlib.sha256(raw).hexdigest()
     if previous_manifest.get("version") != LEGACY_DEBIAN_VERSIONS[version]:
         refuse("legacy Debian version differs from the installed payload")
+    targets = {}
+    manager = contextlib.nullcontext(None)
     if version == "0.1.0~poc.16.2-1":
-        layout17_pre_stop(previous_manifest, previous_digest, incoming)
+        if len(arguments) != 6:
+            refuse("layout17 incoming control inspector is missing")
+        targets = layout17_pre_stop(previous_manifest, previous_digest, incoming)
+        manager = layout17_control_inspector(arguments[4], arguments[5], incoming)
+    elif len(arguments) != 4:
+        refuse("unexpected inspector arguments outside layout17")
     query = subprocess.run(
         ["/usr/bin/dpkg-query", "-W", "-f=${Status}\n${Version}\n", "tractanda"],
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -796,30 +1015,44 @@ def legacy_preinst_helper(arguments):
             or len(lines) != 2 or lines[1] != version
             or lines[0] != "install reinstreq half-installed"):
         refuse("legacy preinst lacks the actual matching dpkg upgrade state")
-    # The old SDK must never be asked to decode the new descriptor. It sees only
-    # its own stopped payload/intent, before the protected expected binding changes.
-    stopped = subprocess.run([helper, "--package-lifecycle", "prerm-upgrade"],
-                             stdin=subprocess.DEVNULL, check=False)
-    if stopped.returncode != 0:
-        raise SystemExit(stopped.returncode)
-    state = safe_state()  # Actual stopped units, private receipts and writer locks.
-    original = state.get("original")
-    if (state["phase"] != "quiesced" or type(original) is not dict
-            or original.get("manifestSHA256") != previous_digest
-            or original.get("version") != LEGACY_DEBIAN_VERSIONS[version]
-            or any(entry["originalManifestSHA256"] != previous_digest for entry in state["instances"])
-            or state.get("incoming") not in (None, original, incoming)):
-        refuse("legacy stopped transaction differs from the original installed payload")
-    receipts = read_receipts({entry["name"] for entry in state["instances"]})
-    if any(receipt["manifestSHA256"] != previous_digest for receipt in receipts.values()):
-        refuse("legacy receipt is not bound to the original installed payload")
-    state["incoming"] = incoming
-    state["phase"] = "awaitingUnpack"
-    state["startupPermitted"] = []
-    state["owner"] = None
-    state["recoveryReason"] = "verified-legacy-preinst-expected-payload-not-admission"
-    write_state(state)
-    return 0
+    with manager as inspector:
+        if inspector is not None:
+            layout17_inspect_targets(inspector, targets)
+        # The old SDK must never be asked to decode the new descriptor. It sees only
+        # its own stopped payload/intent, before the protected expected binding changes.
+        stopped = subprocess.run([helper, "--package-lifecycle", "prerm-upgrade"],
+                                 stdin=subprocess.DEVNULL, check=False)
+        if stopped.returncode != 0:
+            raise SystemExit(stopped.returncode)
+        state = safe_state()  # Actual stopped units, private receipts and writer locks.
+        original = state.get("original")
+        if (state["phase"] != "quiesced" or type(original) is not dict
+                or original.get("manifestSHA256") != previous_digest
+                or original.get("version") != LEGACY_DEBIAN_VERSIONS[version]
+                or any(entry["originalManifestSHA256"] != previous_digest for entry in state["instances"])
+                or state.get("incoming") not in (None, original, incoming)):
+            refuse("legacy stopped transaction differs from the original installed payload")
+        receipts = read_receipts({entry["name"] for entry in state["instances"]})
+        if any(receipt["manifestSHA256"] != previous_digest for receipt in receipts.values()):
+            refuse("legacy receipt is not bound to the original installed payload")
+        if inspector is not None:
+            if any(target["clustered"] and any(entry[key] for key in
+                    ("wasRunning", "wasEnabled", "embeddingWasRunning", "authenticationWasRunning"))
+                    for entry in state["instances"] if (target := targets.get(entry["name"])) is not None):
+                refuse("prepared cluster intent was not captured stopped and disabled")
+            try:
+                layout17_inspect_targets(inspector, targets, quiescent=True)
+            except (SystemExit, Exception):
+                layout17_restore_original(helper, original, targets)
+                raise
+        state["incoming"] = incoming
+        state["phase"] = "awaitingUnpack"
+        state["startupPermitted"] = []
+        state["owner"] = None
+        state["recoveryReason"] = ("layout17-inspected-and-quiescent-awaiting-unpack" if inspector is not None
+                                   else "verified-legacy-preinst-expected-payload-not-admission")
+        write_state(state)
+        return 0
 
 # This leaf and receipt belong only to this installer. Never edit vendor units,
 # administrator drop-ins, uuidd.socket, or libuuid's persistent clock state.
@@ -985,6 +1218,28 @@ def fallback(arguments):
         if len(arguments) != 1:
             refuse("invalid uuidd-remove arguments")
         return uuidd_remove()
+    if action == "layout17-abort-upgrade":
+        if len(arguments) != 1:
+            refuse("invalid layout17 abort arguments")
+        try:
+            state = decode_object(read_private_regular(STATE), STATE_REQUIRED, STATE_ALLOWED)
+        except FileNotFoundError:
+            return fallback(["postrm"])
+        if state.get("phase") != "committed":
+            return fallback(["postrm"])
+        # A rejected preflight may have left the original running, or the genuine old
+        # configure may have restored it. Check that old commitment without requiring
+        # its active units to be quiescent. The old postinst abort sees committed state.
+        raw = read_private_regular(os.path.join(ACTIVE, "bundle-manifest.json"),
+                                   16 * 1024 * 1024, private=False)
+        old = decode_object(raw)
+        incoming = state.get("incoming")
+        if (old.get("version") != "0.1.0-poc.16.2" or type(incoming) is not dict
+                or incoming.get("version") != old["version"]
+                or incoming.get("manifestSHA256") != hashlib.sha256(raw).hexdigest()
+                or state.get("owner") is not None or state.get("startupPermitted") != []):
+            refuse("layout17 abort lacks the authentic committed old payload")
+        return verify_helper(["verify-helper", os.path.join(ACTIVE, "bin/tractanda-setup")])
     if action == "postrm-remove":
         if len(arguments) != 1:
             refuse("invalid postrm-remove arguments")
@@ -1021,6 +1276,17 @@ def fallback(arguments):
         state = safe_state()
         if state["phase"] not in ("quiesced", "awaitingUnpack", "failed", "removed"):
             refuse("retained state is not eligible for missing-helper unpack")
+        original = state.get("original") or {}
+        if descriptor["version"] == "0.1.0-poc.17":
+            if original.get("version") == "0.1.0-poc.17":
+                if descriptor != original or descriptor.get("upgrade") != "coordinated-maintenance":
+                    refuse("layout17 missing-helper reinstall differs from the committed .17 artifact")
+            else:
+                if (original.get("version") != "0.1.0-poc.16.2" or state["phase"] != "awaitingUnpack"
+                        or state.get("incoming") != descriptor
+                        or state.get("recoveryReason") != "layout17-inspected-and-quiescent-awaiting-unpack"):
+                    refuse("layout17 missing-helper retry lacks the exact completed pre-unpack inspection")
+                return 0
         state["incoming"] = descriptor
         state["phase"] = "awaitingUnpack"
         state["startupPermitted"] = []

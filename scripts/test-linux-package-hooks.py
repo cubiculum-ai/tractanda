@@ -2,6 +2,9 @@
 """Isolated routing and fallback checks for the finite Debian maintainer hooks."""
 import importlib.machinery
 import importlib.util
+import hashlib
+import io
+import tarfile
 import json
 import os
 import platform
@@ -100,6 +103,8 @@ sys.exit(int(os.environ.get("MOCK_PYTHON_EXIT", "0")))
         fallback = FALLBACK.read_text()
         source = source.replace("@TRACTANDA_PACKAGE_HOOK_FALLBACK_PY@", fallback)
         source = source.replace("@TRACTANDA_PACKAGE_DESCRIPTOR_JSON@", DESCRIPTOR)
+        source = source.replace("@TRACTANDA_LAYOUT17_INSPECTOR_SHA256@", "b" * 64)
+        source = source.replace("@TRACTANDA_LAYOUT17_DEBIAN_VERSION@", "0.1.0~poc.17-1")
         replacements = {
             "/opt/tractanda/current/bin/tractanda-setup": str(self.helper),
             "/run/tractanda-package-descriptor.": str(self.root / "descriptor-"),
@@ -340,16 +345,126 @@ class SystemctlInventoryTests(unittest.TestCase):
                 fallback.run_systemctl(query)
 
 
+class Layout17ControlInspectorTests(unittest.TestCase):
+    def archive(self, manifest_hash='a' * 64, tamper=False):
+        data = b'fixture ELF bytes'
+        row = {'path': 'bin/tractanda-layout17', 'size': len(data), 'mode': 0o755,
+               'sha256': hashlib.sha256(data).hexdigest()}
+        inventory = {'profile': 'tractanda.layout17-control.v1', 'manifestSHA256': manifest_hash, 'arch': 'amd64',
+                     'files': [row], 'privateSONAMEs': {}, 'systemLibraries': {
+                         'libsqlite3.so.0': {'package': 'libsqlite3-0', 'version': '3.46.1-7'},
+                         'ld-linux-x86-64.so.2': {'package': 'libc6', 'version': '2.41-12'},
+                     }}
+        raw = io.BytesIO()
+        with tarfile.open(fileobj=raw, mode='w') as tar:
+            for name, value, mode in [('layout17-control.json', json.dumps(inventory).encode(), 0o644),
+                                      (row['path'], b'x' + data[1:] if tamper else data, 0o755)]:
+                entry = tarfile.TarInfo(name); entry.size = len(value); entry.mode = mode
+                tar.addfile(entry, io.BytesIO(value))
+        return raw.getvalue(), data
+
+    def test_archive_manifest_and_file_hashes_precede_execution(self):
+        m = module_from_template(); incoming = {'arch': 'x86_64', 'manifestSHA256': 'a' * 64}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / 'layout17-inspector.tar')
+            for defect in (None, 'archive', 'manifest', 'file'):
+                raw, expected = self.archive(manifest_hash='b' * 64 if defect == 'manifest' else 'a' * 64,
+                                             tamper=defect == 'file')
+                digest = 'c' * 64 if defect == 'archive' else hashlib.sha256(raw).hexdigest()
+                with self.subTest(defect=defect), mock.patch.object(m, 'read_private_regular', return_value=raw), \
+                        mock.patch.object(m, 'layout17_check_loader') as verify:
+                    if defect is None:
+                        with m.layout17_control_inspector(path, digest, incoming) as inspector:
+                            self.assertEqual(Path(inspector).read_bytes(), expected)
+                            self.assertEqual(Path(inspector).stat().st_mode & 0o777, 0o755)
+                            verify.assert_called_once()
+                        self.assertFalse(Path(inspector).exists())
+                    else:
+                        with self.assertRaises(SystemExit), m.layout17_control_inspector(path, digest, incoming):
+                            self.fail('Unverified inspector was admitted')
+                        verify.assert_not_called()
+
+    def test_old_recovery_uses_original_descriptor_and_refuses_new_reader_barrier(self):
+        m = module_from_template()
+        original = {'version': '0.1.0-poc.16.2', 'manifestSHA256': 'a' * 64}
+        targets = {'one': {'store': '/fixture/private/one'}}
+        factory = tempfile.TemporaryDirectory
+        with factory() as tmp:
+            def run(args, **kwargs):
+                self.assertEqual(args[:4], ['/old/setup', '--package-lifecycle', 'configure', '--descriptor'])
+                path = Path(args[4]); self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(json.loads(path.read_text()), original)
+                return subprocess.CompletedProcess(args, 0)
+            with mock.patch.object(m.pwd, 'getpwnam', return_value=SimpleNamespace(pw_uid=123)), \
+                    mock.patch.object(m, 'verify_helper') as verified, \
+                    mock.patch.object(m.tempfile, 'TemporaryDirectory', side_effect=lambda **_: factory(dir=tmp)), \
+                    mock.patch.object(m, 'layout17_store_file', return_value=b'{"minimumReaderLevel":18}') as fence, \
+                    mock.patch.object(m.subprocess, 'run', side_effect=run) as process:
+                m.layout17_restore_original('/old/setup', original, targets)
+                verified.assert_called_once_with(['verify-helper', '/old/setup'])
+                process.assert_called_once()
+                fence.return_value = b'{"minimumReaderLevel":20}'
+                process.reset_mock()
+                with self.assertRaises(SystemExit): m.layout17_restore_original('/old/setup', original, targets)
+                process.assert_not_called()
+
+    def test_abort_accepts_authentic_committed_old_payload_without_stopping_it(self):
+        m = module_from_template(); raw = b'{"version":"0.1.0-poc.16.2"}'
+        state = {'profile': 'tractanda.package-transaction.v1', 'operationID': 'fixture',
+                 'phase': 'committed', 'instances': [], 'startupPermitted': [],
+                 'incoming': {'version': '0.1.0-poc.16.2', 'manifestSHA256': hashlib.sha256(raw).hexdigest()}}
+        def read(path, *args, **kwargs): return json.dumps(state).encode() if path == m.STATE else raw
+        with mock.patch.object(m.os, 'geteuid', return_value=0), \
+                mock.patch.object(m, 'read_private_regular', side_effect=read), \
+                mock.patch.object(m, 'verify_helper', return_value=0) as verify, \
+                mock.patch.object(m, 'safe_state') as stop_check:
+            self.assertEqual(m.fallback(['layout17-abort-upgrade']), 0)
+            verify.assert_called_once_with(['verify-helper', m.ACTIVE + '/bin/tractanda-setup'])
+            stop_check.assert_not_called()
+            state['incoming']['manifestSHA256'] = 'b' * 64
+            verify.reset_mock()
+            with self.assertRaises(SystemExit): m.fallback(['layout17-abort-upgrade'])
+            verify.assert_not_called()
+
+    def test_loader_closure_checks_sqlite_and_rejects_shadowing(self):
+        m = module_from_template(); stage = '/verified/stage'
+        loader = '/lib64/ld-linux-x86-64.so.2'; real_loader = '/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2'
+        sqlite = '/usr/lib/x86_64-linux-gnu/libsqlite3.so.0'
+        inventory = {'arch': 'amd64', 'privateSONAMEs': {'libSwiftFixture.so': 'lib/libSwiftFixture.so'},
+                     'systemLibraries': {'libsqlite3.so.0': {'package': 'libsqlite3-0', 'version': '3.46.1-7'},
+                                         'ld-linux-x86-64.so.2': {'package': 'libc6', 'version': '2.41-12'}}}
+        for shadow in (False, True):
+            def command(args):
+                if args[1] == '--list':
+                    private = '/usr/local/lib/libSwiftFixture.so' if shadow else stage + '/lib/libSwiftFixture.so'
+                    out = (f'linux-vdso.so.1 (0xabc)\nlibSwiftFixture.so => {private} (0xabc)\n'
+                           f'libsqlite3.so.0 => {sqlite} (0xabc)\n{loader} (0xabc)\n')
+                elif args[1] == '--search':
+                    out = ('libsqlite3-0:amd64: ' if args[2] == sqlite else 'libc6:amd64: ') + args[3] + '\n'
+                elif args[1] == '-W':
+                    out = 'install ok installed\t9.0\tamd64\n'
+                else:
+                    self.assertEqual(args[1], '--compare-versions'); out = ''
+                return subprocess.CompletedProcess(args, 0, out, '')
+            with mock.patch.object(m, 'layout17_native_command', side_effect=command), \
+                    mock.patch.object(m, 'root_directory_chain'), \
+                    mock.patch.object(m.os, 'lstat', return_value=SimpleNamespace(st_uid=0, st_mode=stat.S_IFREG | 0o644)), \
+                    mock.patch.object(m.os.path, 'realpath', side_effect=lambda p: real_loader if p == loader else p):
+                if shadow:
+                    with self.assertRaises(SystemExit): m.layout17_check_loader(stage, inventory)
+                else:
+                    m.layout17_check_loader(stage, inventory)
+
 class Layout17PreStopTests(unittest.TestCase):
     def check(self, defect=None):
         m = module_from_template()
-        capability = "tractanda.physical-layout.flat-items.v1"
+        capabilities = ["tractanda.physical-layout.flat-items.v1", "tractanda.message-items.v1"]
         before = {"profile": "tractanda.canonical-formats.v1", "readerLevel": 18, "writerLevel": 18,
                   "read": [1, 2], "write": [2], "capabilities": ["tractanda.personal-workgroup.v1"],
                   "writeCapabilities": ["tractanda.personal-workgroup.v1"]}
-        after = dict(before, readerLevel=19, writerLevel=19,
-                     capabilities=sorted(before["capabilities"] + [capability]),
-                     writeCapabilities=sorted(before["writeCapabilities"] + [capability]))
+        after = dict(before, readerLevel=20, writerLevel=20,
+                     capabilities=sorted(before["capabilities"] + capabilities),
+                     writeCapabilities=sorted(before["writeCapabilities"] + capabilities))
         previous = {"version": "0.1.0-poc.16.2", "arch": "x86_64", "canonicalFormats": before}
         incoming = dict(previous, version="0.1.0-poc.17", canonicalFormats=after,
                         manifestSHA256="b" * 64, upgrade="coordinated-maintenance")
@@ -388,12 +503,14 @@ class Layout17PreStopTests(unittest.TestCase):
             return {".tractanda-personal-profile.json": encode(profile), "canonical-reader.json": raw_fence,
                     ".personal-membership.json": raw_membership}[name]
         def exists(path):
+            if path == m.RECEIPTS: return True
             if "layout17-intents" in path: return defect != "missingIntent"
             if path.endswith(".personal-membership.json"): return defect != "standalone"
             return defect == "pending" and path.endswith(".personal-membership.pending.json")
         with mock.patch.object(m, "root_directory_chain"), mock.patch.object(m.os, "listdir", return_value=["a.json"]), \
                 mock.patch.object(m, "receipt_instance_paths"), mock.patch.object(m, "read_private_regular", side_effect=private), \
                 mock.patch.object(m, "layout17_store_file", side_effect=store_file), \
+                mock.patch.object(m, "inspect_stopped_instance"), \
                 mock.patch.object(m.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=123)), \
                 mock.patch.object(m.os.path, "lexists", side_effect=exists), \
                 mock.patch.object(m.subprocess, "run") as process:
@@ -435,7 +552,8 @@ class LegacyBootstrapTests(unittest.TestCase):
 
     def invoke(self, *, version=None, status="install reinstreq half-installed", query_version=None,
                stop_code=0, state_change=None, receipt_digest=None,
-               verify_failure=False, descriptor_failure=False, quiescence_failure=False, incoming_version=None):
+               verify_failure=False, descriptor_failure=False, quiescence_failure=False, incoming_version=None,
+               early_inspection_failure=False, late_inspection_failure=False):
         m = module_from_template()
         version = self.old if version is None else version
         bundle_version = m.LEGACY_DEBIAN_VERSIONS.get(version, "0.1.0-poc.15")
@@ -448,6 +566,7 @@ class LegacyBootstrapTests(unittest.TestCase):
         if state_change: state_change(state)
         incoming = json.loads(DESCRIPTOR)
         if incoming_version is not None: incoming["version"] = incoming_version
+        elif version == "0.1.0~poc.16.2-1": incoming["version"] = "0.1.0-poc.17"
         calls, writes = [], []
         helper = m.ACTIVE + "/bin/tractanda-setup"
         def verified(arguments):
@@ -472,6 +591,10 @@ class LegacyBootstrapTests(unittest.TestCase):
         def write(value):
             calls.append("atomic-expected-binding")
             writes.append(copy.deepcopy(value))
+        def inspect(inspector, targets, quiescent=False):
+            calls.append("deep-inspect-quiescent" if quiescent else "deep-inspect-live")
+            if (quiescent and late_inspection_failure) or (not quiescent and early_inspection_failure):
+                raise SystemExit("deep inspector refused")
         patches = (
             mock.patch.object(m.os, "geteuid", return_value=0),
             mock.patch.object(m, "verify_helper", side_effect=verified),
@@ -481,13 +604,18 @@ class LegacyBootstrapTests(unittest.TestCase):
             mock.patch.object(m, "safe_state", side_effect=quiescent),
             mock.patch.object(m, "read_receipts", return_value={"one": {"manifestSHA256": receipt_digest or digest}}),
             mock.patch.object(m, "write_state", side_effect=write),
-            mock.patch.object(m, "layout17_pre_stop", side_effect=lambda *args: calls.append("layout17-prestop")),
+            mock.patch.object(m, "layout17_pre_stop", side_effect=lambda *args: calls.append("layout17-prestop") or {}),
+            mock.patch.object(m, "layout17_control_inspector", return_value=__import__("contextlib").nullcontext("/verified/inspector")),
+            mock.patch.object(m, "layout17_inspect_targets", side_effect=inspect),
+            mock.patch.object(m, "layout17_restore_original", side_effect=lambda *args: calls.append("restore-authentic-old")),
         )
         from contextlib import ExitStack
         with ExitStack() as stack:
             for patch in patches: stack.enter_context(patch)
             try:
-                result = m.fallback(["legacy-preinst-helper", helper, "/actual-descriptor", version])
+                arguments = ["legacy-preinst-helper", helper, "/actual-descriptor", version]
+                if version == "0.1.0~poc.16.2-1": arguments += ["/actual/layout17-inspector.tar", "b" * 64]
+                result = m.fallback(arguments)
                 failure = None
             except SystemExit as error:
                 result, failure = None, error
@@ -500,7 +628,11 @@ class LegacyBootstrapTests(unittest.TestCase):
             self.assertEqual(result, 0)
             expected = ["verify-old-helper", "real-descriptor"]
             if version == "0.1.0~poc.16.2-1": expected.append("layout17-prestop")
-            expected += ["actual-dpkg-state", "old-stop-only", "quiescence-and-writer-locks", "atomic-expected-binding"]
+            expected += ["actual-dpkg-state"]
+            if version == "0.1.0~poc.16.2-1": expected.append("deep-inspect-live")
+            expected += ["old-stop-only", "quiescence-and-writer-locks"]
+            if version == "0.1.0~poc.16.2-1": expected.append("deep-inspect-quiescent")
+            expected.append("atomic-expected-binding")
             self.assertEqual(calls, expected)
             self.assertEqual(len(writes), 1)
             self.assertEqual(writes[0]["original"], original)
@@ -508,6 +640,18 @@ class LegacyBootstrapTests(unittest.TestCase):
             self.assertEqual(writes[0]["phase"], "awaitingUnpack")
             self.assertEqual(writes[0]["startupPermitted"], [])
             self.assertIsNone(writes[0]["owner"])
+
+    def test_layout17_rejects_before_stop_or_restores_old_intent_after_quiescent_refusal(self):
+        version = "0.1.0~poc.16.2-1"
+        _, failure, calls, writes, _, _ = self.invoke(version=version, early_inspection_failure=True)
+        self.assertIsNotNone(failure)
+        self.assertEqual(calls[-1], "deep-inspect-live")
+        self.assertNotIn("old-stop-only", calls)
+        self.assertEqual(writes, [])
+        _, failure, calls, writes, _, _ = self.invoke(version=version, late_inspection_failure=True)
+        self.assertIsNotNone(failure)
+        self.assertEqual(calls[-3:], ["quiescence-and-writer-locks", "deep-inspect-quiescent", "restore-authentic-old"])
+        self.assertEqual(writes, [])
 
     def test_layout17_requires_authentic16_2_before_legacy_stop(self):
         _, failure, calls, writes, _, _ = self.invoke(incoming_version="0.1.0-poc.17")
@@ -722,6 +866,45 @@ class FallbackUnitTests(unittest.TestCase):
         self.assertEqual(result["observed"], before["observed"])
         self.assertEqual(result["incoming"]["manifestSHA256"], "a" * 64)
         self.assertEqual(result["recoveryReason"], "guarded-missing-helper-pre-unpack")
+
+    def test_layout17_missing_helper_requires_completed_quiescent_inspection(self):
+        descriptor = dict(json.loads(DESCRIPTOR), version="0.1.0-poc.17")
+        state = {"phase": "awaitingUnpack", "original": {"version": "0.1.0-poc.16.2"},
+                 "incoming": descriptor, "recoveryReason": "layout17-inspected-and-quiescent-awaiting-unpack"}
+        path = Path(self.fallback.STATE)
+        path.parent.mkdir(parents=True)
+        path.write_text("placeholder")
+        arguments = ["preinst", "upgrade", str(self.descriptor)]
+        with mock.patch.object(self.fallback, "validate_descriptor", return_value=descriptor), \
+             mock.patch.object(self.fallback, "safe_state", return_value=state), \
+             mock.patch.object(self.fallback, "write_state") as write:
+            self.assertEqual(self.invoke_as_root(arguments), 0)
+            for change in ({"phase": "quiesced"}, {"incoming": {}}, {"recoveryReason": None}):
+                with self.subTest(change=change), mock.patch.dict(state, change):
+                    with self.assertRaisesRegex(SystemExit, "exact completed pre-unpack inspection"):
+                        self.invoke_as_root(arguments)
+            write.assert_not_called()
+
+    def test_layout17_missing_helper_reinstall_requires_exact_original_descriptor(self):
+        original = dict(json.loads(DESCRIPTOR), version="0.1.0-poc.17", upgrade="coordinated-maintenance")
+        path = Path(self.fallback.STATE)
+        path.parent.mkdir(parents=True)
+        path.write_text("placeholder")
+        arguments = ["preinst", "upgrade", str(self.descriptor)]
+        for descriptor in (dict(original, upgrade="compatible"),
+                           dict(original, manifestSHA256="f" * 64), original):
+            with self.subTest(descriptor=descriptor):
+                state = {"phase": "awaitingUnpack", "original": original}
+                with mock.patch.object(self.fallback, "validate_descriptor", return_value=descriptor), \
+                     mock.patch.object(self.fallback, "safe_state", return_value=state), \
+                     mock.patch.object(self.fallback, "write_state") as write:
+                    if descriptor == original:
+                        self.assertEqual(self.invoke_as_root(arguments), 0)
+                        write.assert_called_once()
+                    else:
+                        with self.assertRaisesRegex(SystemExit, "differs from the committed .17 artifact"):
+                            self.invoke_as_root(arguments)
+                        write.assert_not_called()
 
     def test_remove_fallback_marks_removed_after_safe_state_proof(self):
         import uuid

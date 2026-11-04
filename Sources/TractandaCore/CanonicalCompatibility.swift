@@ -1,6 +1,7 @@
 import CTractandaPlatform
 import Crypto
 import Foundation
+import TractandaClient
 
 #if canImport(Darwin)
     import Darwin
@@ -41,9 +42,10 @@ enum AtomicAuthorityCompatibility {
 public struct CanonicalFormatSupport: Codable, Equatable, Sendable {
     public static let profileName = "tractanda.canonical-formats.v1"
     public static let current = Self(
-        readerLevel: 19, writerLevel: 19, read: [1, 2], write: [2],
+        readerLevel: MessageRecordCodec.minimumReaderLevel, writerLevel: MessageRecordCodec.minimumReaderLevel,
+        read: [1, 2], write: [2],
         capabilities: [
-            CanonicalPhysicalLayout.capability,
+            CanonicalPhysicalLayout.capability, MessageRecordCodec.capability,
             PersonalWorkgroupProfile.capability, RevisionProvenance.personalMergeProfile,
             PersonalSyncValidation.capability,
             AtomicAuthorityFormat.profile,
@@ -54,7 +56,7 @@ public struct CanonicalFormatSupport: Codable, Equatable, Sendable {
             "tractanda.peer-originals.v1", "tractanda.document-placement.v1", "tractanda.peer-documents.v1",
         ].sorted(),
         writeCapabilities: [
-            CanonicalPhysicalLayout.capability,
+            CanonicalPhysicalLayout.capability, MessageRecordCodec.capability,
             PersonalWorkgroupProfile.capability, RevisionProvenance.personalMergeProfile,
             PersonalSyncValidation.capability,
             AtomicAuthorityFormat.profile,
@@ -65,16 +67,17 @@ public struct CanonicalFormatSupport: Codable, Equatable, Sendable {
             "tractanda.peer-originals.v1", "tractanda.document-placement.v1", "tractanda.peer-documents.v1",
         ].sorted())
     package static let personalWorkgroup = Self(
-        readerLevel: 19, writerLevel: 19, read: [1, 2], write: [2],
+        readerLevel: MessageRecordCodec.minimumReaderLevel, writerLevel: MessageRecordCodec.minimumReaderLevel,
+        read: [1, 2], write: [2],
         capabilities: [
-            CanonicalPhysicalLayout.capability,
+            CanonicalPhysicalLayout.capability, MessageRecordCodec.capability,
             PersonalWorkgroupProfile.capability, RevisionProvenance.personalMergeProfile,
             PersonalSyncValidation.capability,
             PayloadPlacement.capability,
             "tractanda.document-placement.v1",
         ].sorted(),
         writeCapabilities: [
-            CanonicalPhysicalLayout.capability,
+            CanonicalPhysicalLayout.capability, MessageRecordCodec.capability,
             PersonalWorkgroupProfile.capability, RevisionProvenance.personalMergeProfile,
             PersonalSyncValidation.capability,
             PayloadPlacement.capability,
@@ -128,6 +131,8 @@ public struct CanonicalFormatSupport: Codable, Equatable, Sendable {
             writeCapabilities == Array(Set(writeCapabilities)).sorted(),
             capabilities.count <= 64, capabilities.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 128 }),
             Set(writeCapabilities).isSubset(of: capabilities),
+            !capabilities.contains(MessageRecordCodec.capability) || readerLevel >= MessageRecordCodec.minimumReaderLevel,
+            !writeCapabilities.contains(MessageRecordCodec.capability) || writerLevel >= MessageRecordCodec.minimumReaderLevel,
             !capabilities.contains(AtomicAuthorityCompatibility.capability)
                 || readerLevel >= AtomicAuthorityCompatibility.minimumReaderLevel,
             !writeCapabilities.contains(AtomicAuthorityCompatibility.capability)
@@ -186,6 +191,7 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
             recordFormats.allSatisfy({ (1...minimumReaderLevel).contains($0) }),
             capabilities == Array(Set(capabilities)).sorted(), capabilities.count <= 64,
             capabilities.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 128 }),
+            !capabilities.contains(MessageRecordCodec.capability) || minimumReaderLevel >= MessageRecordCodec.minimumReaderLevel,
             !capabilities.contains(AtomicAuthorityCompatibility.capability)
                 || minimumReaderLevel >= AtomicAuthorityCompatibility.minimumReaderLevel
         else {
@@ -478,15 +484,15 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
         }
         return object
     }
-    /// The physical-layout floor fences older executables before they can inventory flat paths.
-    /// This changes no item format and adds no peer protocol requirement.
+    /// The layout and message floors fence older executables before they inventory records.
+    /// Logical revision versions and the API wire format remain independent.
     static func retainPhysicalLayoutFence(root: URL, ownerUID: UInt32) throws {
         let identity = try storeIdentity(root: root, ownerUID: ownerUID)
         let prior = try load(root: root, ownerUID: ownerUID)
         let target = Self(storeID: identity,
-            minimumReaderLevel: max(prior?.minimumReaderLevel ?? 1, CanonicalPhysicalLayout.minimumReaderLevel),
+            minimumReaderLevel: max(prior?.minimumReaderLevel ?? 1, MessageRecordCodec.minimumReaderLevel),
             recordFormats: prior?.recordFormats ?? [1],
-            capabilities: Array(Set((prior?.capabilities ?? []) + [CanonicalPhysicalLayout.capability])).sorted())
+            capabilities: Array(Set((prior?.capabilities ?? []) + [CanonicalPhysicalLayout.capability, MessageRecordCodec.capability])).sorted())
         if prior != target { try target.persist(root: root, ownerUID: ownerUID) }
     }
 
@@ -575,9 +581,9 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
         }
         try walk(root.appendingPathComponent("items"), depth: 0)
         let result = Self(
-            storeID: identity, minimumReaderLevel: max(prior?.minimumReaderLevel ?? 1, CanonicalPhysicalLayout.minimumReaderLevel),
+            storeID: identity, minimumReaderLevel: max(prior?.minimumReaderLevel ?? 1, MessageRecordCodec.minimumReaderLevel),
             recordFormats: formats.sorted(),
-            capabilities: Array(Set((prior?.capabilities ?? []) + [CanonicalPhysicalLayout.capability])).sorted())
+            capabilities: Array(Set((prior?.capabilities ?? []) + [CanonicalPhysicalLayout.capability, MessageRecordCodec.capability])).sorted())
         try result.validate()
         if persist, prior != result { try result.persist(root: root, ownerUID: ownerUID) }
         return result
@@ -593,8 +599,10 @@ public struct CanonicalReaderRequirement: Codable, Equatable, Sendable {
         }
         let old = previous!
         let raised = Self(
-            storeID: old.storeID, minimumReaderLevel: max(old.minimumReaderLevel, format),
-            recordFormats: Set(old.recordFormats + [format]).sorted(), capabilities: old.capabilities)
+            storeID: old.storeID,
+            minimumReaderLevel: max(old.minimumReaderLevel, MessageRecordCodec.minimumReaderLevel),
+            recordFormats: Set(old.recordFormats + [format]).sorted(),
+            capabilities: Set(old.capabilities + [CanonicalPhysicalLayout.capability, MessageRecordCodec.capability]).sorted())
         try CanonicalFormatSupport.current.require(raised)
         if raised != (try load(root: root, ownerUID: ownerUID)) {
             try beforePersist?()

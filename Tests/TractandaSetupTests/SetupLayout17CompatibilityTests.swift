@@ -6,11 +6,12 @@ import XCTest
 final class SetupLayout17CompatibilityTests: XCTestCase {
     func testOnlyTheBoundPhysicalTransitionIsAdmitted() throws {
         let capability = "tractanda.physical-layout.flat-items.v1"
+        let message = "tractanda.message-items.v1"
         let oldSupport = CanonicalFormatSupport(
             readerLevel: 18, writerLevel: 18, read: [1, 2], write: [2],
             capabilities: ["tractanda.personal-workgroup.v1"],
             writeCapabilities: ["tractanda.personal-workgroup.v1"])
-        func support(_ extras: [String] = [capability], level: Int = 19) -> CanonicalFormatSupport {
+        func support(_ extras: [String] = [capability, message], level: Int = 20) -> CanonicalFormatSupport {
             CanonicalFormatSupport(
                 readerLevel: level, writerLevel: level, read: [1, 2], write: [2],
                 capabilities: (["tractanda.personal-workgroup.v1"] + extras).sorted(),
@@ -34,9 +35,11 @@ final class SetupLayout17CompatibilityTests: XCTestCase {
             .requireLayout17Transition(from: old))
         XCTAssertThrowsError(try declaration("0.1.0-poc.17", support(), .compatible)
             .requireLayout17Transition(from: old))
-        XCTAssertThrowsError(try declaration("0.1.0-poc.17", support([capability, "extra"]), .coordinatedMaintenance)
+        XCTAssertThrowsError(try declaration("0.1.0-poc.17", support([capability, message, "extra"]), .coordinatedMaintenance)
             .requireLayout17Transition(from: old))
-        XCTAssertThrowsError(try declaration("0.1.0-poc.17", support(level: 20), .coordinatedMaintenance)
+        XCTAssertThrowsError(try declaration("0.1.0-poc.17", support(level: 19), .coordinatedMaintenance)
+            .requireLayout17Transition(from: old))
+        XCTAssertThrowsError(try declaration("0.1.0-poc.17", support([capability]), .coordinatedMaintenance)
             .requireLayout17Transition(from: old))
         XCTAssertThrowsError(try declaration("0.1.0-poc.17", support(), .coordinatedMaintenance, arch: "arm64")
             .requireLayout17Transition(from: old))

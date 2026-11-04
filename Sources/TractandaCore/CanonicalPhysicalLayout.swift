@@ -1,5 +1,6 @@
 import CTractandaPlatform
 import Foundation
+import TractandaClient
 
 #if canImport(Darwin)
     import Darwin
@@ -17,9 +18,11 @@ enum CanonicalPhysicalLayout {
     private struct Marker: Codable, Equatable {
         let profile: String
         let layout: String
+        let recordEncoding: String
     }
     private static let current = Marker(
-        profile: "tractanda.physical-layout.v1", layout: "flat-items-visible-attachments.v1")
+        profile: "tractanda.physical-layout.v1", layout: "flat-items-visible-attachments.v1",
+        recordEncoding: MessageRecordCodec.encoding)
 
     static func requireNoMigration(_ root: URL) throws {
         do {
@@ -62,7 +65,7 @@ enum CanonicalPhysicalLayout {
             root: root, name: fileName, ownerUID: ownerUID, maximumBytes: 4096)
         else { return false }
         guard let object = try JSONSerialization.jsonObject(with: bytes) as? [String: Any],
-            Set(object.keys) == ["profile", "layout"],
+            Set(object.keys) == ["profile", "layout", "recordEncoding"],
             try JSON.decode(Marker.self, bytes) == current
         else { throw migrationRequired() }
         return true

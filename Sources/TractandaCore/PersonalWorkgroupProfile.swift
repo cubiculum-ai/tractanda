@@ -1,5 +1,6 @@
 import CTractandaPlatform
 import Foundation
+import TractandaClient
 
 #if canImport(Darwin)
     import Darwin
@@ -109,8 +110,8 @@ enum PersonalWorkgroupProfile {
                     "invalidPersonalProfile", "Established local runtime identities are incomplete.")
             }
             guard let fence = try CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid()),
-                fence.storeID == active.storeID, fence.minimumReaderLevel >= readerLevel,
-                fence.capabilities.contains(capability)
+                fence.storeID == active.storeID, fence.minimumReaderLevel >= MessageRecordCodec.minimumReaderLevel,
+                fence.capabilities.contains(capability), fence.capabilities.contains(MessageRecordCodec.capability)
             else {
                 throw TractandaError(
                     "invalidPersonalProfile", "Personal/workgroup reader fence is missing or weakened.")
@@ -245,15 +246,15 @@ enum PersonalWorkgroupProfile {
         // Fence the new interpretation BEFORE exposing any new operational identity. Older
         // software must fail closed even if activation stops between these durable local files.
         let requirement = CanonicalReaderRequirement(
-            storeID: record.storeID, minimumReaderLevel: CanonicalPhysicalLayout.minimumReaderLevel, recordFormats: [1, 2],
-            capabilities: [capability, CanonicalPhysicalLayout.capability].sorted())
+            storeID: record.storeID, minimumReaderLevel: MessageRecordCodec.minimumReaderLevel, recordFormats: [1, 2],
+            capabilities: [capability, CanonicalPhysicalLayout.capability, MessageRecordCodec.capability].sorted())
         if let old = try CanonicalReaderRequirement.localConfigurationBytes(
             root: root, name: CanonicalReaderRequirement.fileName, ownerUID: tractanda_uid(),
             maximumBytes: 16 * 1024)
         {
             let retained = try JSON.decode(CanonicalReaderRequirement.self, old)
-            guard retained.storeID == record.storeID, retained.minimumReaderLevel >= readerLevel,
-                retained.capabilities.contains(capability), Set([1, 2]).isSubset(of: retained.recordFormats)
+            guard retained.storeID == record.storeID, retained.minimumReaderLevel >= MessageRecordCodec.minimumReaderLevel,
+                Set(requirement.capabilities).isSubset(of: retained.capabilities), Set([1, 2]).isSubset(of: retained.recordFormats)
             else {
                 throw TractandaError(
                     "invalidPersonalProfile", "Activation reader fence differs from its local plan.")

@@ -15,7 +15,7 @@ extension ItemIndex {
                 "CREATE TABLE IF NOT EXISTS authority_review_edge(child TEXT NOT NULL,parent TEXT NOT NULL,sha256 TEXT NOT NULL,PRIMARY KEY(child,parent))",
                 "CREATE INDEX IF NOT EXISTS authority_review_children ON authority_review_edge(parent,child)",
                 "CREATE TABLE IF NOT EXISTS authority_review_head(target TEXT NOT NULL,id TEXT NOT NULL,PRIMARY KEY(target,id))",
-                "CREATE TABLE IF NOT EXISTS authority_review_applied(decision TEXT PRIMARY KEY,sha256 TEXT NOT NULL,revision TEXT NOT NULL,digest TEXT NOT NULL,control TEXT NOT NULL,control_digest TEXT NOT NULL,origin TEXT NOT NULL,actor TEXT NOT NULL,operation TEXT NOT NULL,request TEXT NOT NULL,recovery INTEGER NOT NULL,UNIQUE(origin,actor,operation))",
+                "CREATE TABLE IF NOT EXISTS authority_review_applied(decision TEXT PRIMARY KEY,sha256 TEXT NOT NULL,revision TEXT NOT NULL,digest TEXT NOT NULL,control TEXT NOT NULL,control_digest TEXT NOT NULL,origin TEXT NOT NULL,actor TEXT NOT NULL,operation TEXT NOT NULL,recovery INTEGER NOT NULL,UNIQUE(origin,actor,operation))",
                 "CREATE INDEX IF NOT EXISTS authority_review_resolution ON authority_review_applied(revision,recovery,decision)",
             ] { try execute(sql) }
         }
@@ -657,14 +657,14 @@ extension ItemIndex {
     }
     private func reviewRecordApplication(_ plan: AuthorityStore.VerifiedReviewPlan, recovery: Bool) throws {
         let d = plan.event.record
-        let request = plan.resolution.revision.fields["requestIdentity"]?.string ?? ""
+        // The resolution digest already binds every revision byte, including any retry receipt.
         let values = [
             d.record.recordID, d.sha256, plan.event.resolution.revisionID, plan.event.resolution.sha256,
             plan.control.binding.recordID, plan.control.binding.sha256, d.record.originReplicaID,
-            d.record.actorPrincipal, plan.operationID, request,
+            d.record.actorPrincipal, plan.operationID,
         ]
         let s = try corpusPrepare(
-            "SELECT decision,sha256,revision,digest,control,control_digest,origin,actor,operation,request FROM authority_review_applied WHERE decision=? OR (origin=? AND actor=? AND operation=?)",
+            "SELECT decision,sha256,revision,digest,control,control_digest,origin,actor,operation FROM authority_review_applied WHERE decision=? OR (origin=? AND actor=? AND operation=?)",
             [d.record.recordID, d.record.originReplicaID, d.record.actorPrincipal, plan.operationID])
         let status = catalogueStep(s)
         if status == SQLITE_ROW {
@@ -684,7 +684,7 @@ extension ItemIndex {
         sqlite3_finalize(s)
         guard status == SQLITE_DONE else { throw graphSQLiteError() }
         try execute(
-            "INSERT INTO authority_review_applied VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO authority_review_applied VALUES(?,?,?,?,?,?,?,?,?,?)",
             values + [recovery ? "1" : "0"])
     }
     /// One exact reviewed C may replace several PRE policy snapshots. Each pair

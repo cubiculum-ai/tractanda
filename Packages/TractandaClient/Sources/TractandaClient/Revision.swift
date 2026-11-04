@@ -24,10 +24,13 @@ public struct Revision: Codable, Equatable, Sendable {
         guard (formatVersion == 2) == (fields["revisionAncestry"] != nil) else {
             throw TractandaError("invalidRecord", "Format 1 is legacy; format 2 requires canonical ancestry.")
         }
-        for name in ["itemID", "revisionID", "classID", "actor", "operationID", "requestIdentity"] {
+        for name in ["itemID", "revisionID", "classID", "actor", "operationID"] {
             guard let value = fields[name]?.string, !value.isEmpty else {
                 throw TractandaError("invalidRecord", "Missing/invalid \(name).")
             }
+        }
+        if let receipt = fields["requestIdentity"], receipt.string?.isEmpty != false {
+            throw TractandaError("invalidRecord", "Invalid optional requestIdentity.")
         }
         try Identifier.validate(itemID)
         try Identifier.validate(revisionID)

@@ -1019,6 +1019,16 @@ final class MCPTests: XCTestCase {
         XCTAssertFalse(advice.contains("retry identical arguments"))
     }
 
+    func testUnavailableRetryReceiptDirectsCallerToExistingHistory() throws {
+        let result = try MCPAdapter.toolFailure(
+            TractandaError("retryReceiptUnavailable", "The exact original request is unavailable."),
+            operationID: "committed-operation")
+        let advice = try XCTUnwrap(result.structuredContent?.objectValue?["retryAdvice"]?.stringValue)
+        XCTAssertTrue(advice.contains("committed revision"))
+        XCTAssertTrue(advice.contains("history"))
+        XCTAssertFalse(advice.contains("retry identical arguments"))
+    }
+
     func testResultFormatsAndOutputSchemaContracts() throws {
         let data = Data(#"{"maximum":9223372036854775807}"#.utf8)
         let both = try MCPAdapter.toolResult(data: data, resultFormat: .both)

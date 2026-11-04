@@ -55,8 +55,10 @@ let package = Package(
                 .define("_GNU_SOURCE", .when(platforms: [.linux])),
             ]),
         .executableTarget(name: "TractandaLayout17", dependencies: [
-            "CTractandaLayout17", .product(name: "Crypto", package: "swift-crypto"),
-        ], path: "Tools/Layout17Bridge", exclude: ["moves.c", "moves.h", "test_fixture.py", "test_moves.py"], sources: ["main.swift"]),
+            "CTractandaLayout17", "CSQLite", "TractandaCore", .product(name: "Crypto", package: "swift-crypto"),
+            .product(name: "TractandaClient", package: "TractandaClient"),
+        ], path: "Tools/Layout17Bridge", exclude: ["moves.c", "moves.h", "test_fixture.py", "test_moves.py"],
+            sources: ["main.swift", "LegacyRecordCodec.swift", "PersonalRevisionMetadata.swift", "TransientDescriptorMap.swift"]),
         .target(name: "CTractandaSetupMetadata", dependencies: ["CTractandaPlatform"]),
         .executableTarget(
             name: "TractandaSetup",
@@ -145,6 +147,10 @@ let package = Package(
             name: "FirstSourceConversionTests", dependencies: ["TractandaCore"],
             path: "scripts/development/first-source-conversion", exclude: ["README.md", "run.py"]),
         .testTarget(name: "TractandaSetupTests", dependencies: ["TractandaSetup", "TractandaCLI"]),
+        .testTarget(name: "TractandaLayout17Tests", dependencies: [
+            "TractandaLayout17", "TractandaCore", .product(name: "TractandaClient", package: "TractandaClient"),
+            .product(name: "Crypto", package: "swift-crypto"),
+        ]),
         .testTarget(
             name: "TractandaVectorsTests", dependencies: ["TractandaVectors", "CSQLite", "CTractandaVec1"]),
         .testTarget(name: "TractandaMCPTests", dependencies: ["TractandaMCP", "TractandaCore"]),

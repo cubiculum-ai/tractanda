@@ -172,14 +172,16 @@ package enum NativeMethodCatalog {
         "TractandaStore/describe",
         "TractandaStore/info",
         "TractandaStore/rebuildStatus",
+        "TractandaSync/reviews",
+
     ]
     package static let compactReceipts: Set<String> = [
         "TractandaItem/commit", "TractandaItem/commitCapture", "TractandaItem/resolveConflict",
         "TractandaSync/acceptReview", "TractandaLearning/settings", "TractandaLearning/feedback",
     ]
-    // These paths publish ordinary item revisions; auxiliary copy/review cleanup is observed too.
+    // Observe ordinary revisions and auxiliary writes, including upload admission and cleanup.
     package static let completelyObserved = compactReceipts.union([
-        "TractandaItem/setSharing", "TractandaCategory/installTemplate",
+        "TractandaItem/setSharing", "TractandaCategory/installTemplate", "TractandaAttachment/begin",
     ])
     package static let itemWrites = compactReceipts.union([
         "TractandaItem/setSharing", "TractandaCategory/installTemplate", "TractandaAttachment/begin",

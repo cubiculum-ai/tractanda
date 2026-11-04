@@ -1,5 +1,6 @@
 import CTractandaPlatform
 import XCTest
+import TractandaClient
 
 @testable import TractandaCore
 
@@ -29,7 +30,8 @@ final class CanonicalPhysicalLayoutTests: XCTestCase {
     func testFreshMarkerRestartCompletesInterruptedConstantWritesAndAtomicPublication() throws {
         try AttachmentFixtureCapacity.requireFree()
         let expected = try JSON.encode([
-            "profile": "tractanda.physical-layout.v1", "layout": "flat-items-visible-attachments.v1"])
+            "profile": "tractanda.physical-layout.v1", "layout": "flat-items-visible-attachments.v1",
+            "recordEncoding": "message-v1"])
         for length in [0, 1, expected.count / 2, expected.count - 1, expected.count] {
             let root = (try GuardedFixtureDirectory.parent()).appendingPathComponent(
                 "tractanda-initial-marker-" + Identifier.make())
@@ -91,10 +93,10 @@ final class CanonicalPhysicalLayoutTests: XCTestCase {
         let marker = root.appendingPathComponent(CanonicalPhysicalLayout.fileName)
         let markerBytes = try Data(contentsOf: marker)
         let oldReader = CanonicalFormatSupport(readerLevel: 18, writerLevel: 18, read: [1, 2], write: [2],
-            capabilities: CanonicalFormatSupport.current.capabilities.filter { $0 != CanonicalPhysicalLayout.capability },
-            writeCapabilities: CanonicalFormatSupport.current.writeCapabilities.filter { $0 != CanonicalPhysicalLayout.capability })
+            capabilities: CanonicalFormatSupport.current.capabilities.filter { $0 != CanonicalPhysicalLayout.capability && $0 != MessageRecordCodec.capability },
+            writeCapabilities: CanonicalFormatSupport.current.writeCapabilities.filter { $0 != CanonicalPhysicalLayout.capability && $0 != MessageRecordCodec.capability })
         let fence = try XCTUnwrap(CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid()))
-        XCTAssertEqual(fence.minimumReaderLevel, 19)
+        XCTAssertEqual(fence.minimumReaderLevel, 20)
         XCTAssertThrowsError(try oldReader.require(fence))
         store = nil
         try FileManager.default.removeItem(at: marker)
@@ -102,6 +104,12 @@ final class CanonicalPhysicalLayoutTests: XCTestCase {
             XCTAssertEqual(($0 as? TractandaError)?.code, "canonicalLayoutMigrationRequired")
         }
         XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(row.path)), bytes)
+        let layoutOnly = try JSON.encode([
+            "profile": "tractanda.physical-layout.v1", "layout": "flat-items-visible-attachments.v1"])
+        try PrivateConfiguration.write(layoutOnly, to: marker)
+        XCTAssertThrowsError(try ItemStore(root: root)) {
+            XCTAssertEqual(($0 as? TractandaError)?.code, "canonicalLayoutMigrationRequired")
+        }
         try PrivateConfiguration.write(markerBytes, to: marker)
         try Data("{}".utf8).write(to: root.appendingPathComponent(CanonicalPhysicalLayout.pendingFileName))
         XCTAssertThrowsError(try ItemStore(root: root)) {
@@ -132,7 +140,9 @@ final class CanonicalPhysicalLayoutTests: XCTestCase {
         for row in rows {
             XCTAssertTrue(CanonicalRecordPath.validate(row.path, itemID: row.itemID, revisionID: row.revisionID))
             XCTAssertEqual(row.path.split(separator: "/").count, 7)
-            originalBytes[row.path] = try Data(contentsOf: root.appendingPathComponent(row.path))
+            let bytes = try Data(contentsOf: root.appendingPathComponent(row.path))
+            XCTAssertTrue(String(decoding: bytes, as: UTF8.self).contains("X-Tractanda-Encoding: message-v1\r\n"))
+            originalBytes[row.path] = bytes
         }
         store = nil
         try FileManager.default.removeItem(at: root.appendingPathComponent("index"))

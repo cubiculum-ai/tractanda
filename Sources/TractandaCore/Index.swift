@@ -9,8 +9,8 @@ import Foundation
 #endif
 
 final class ItemIndex {
-    static let catalogueSchemaVersion = "21"
-    static let catalogueEngine = "tractanda-sqlite-catalogue-v18"
+    static let catalogueSchemaVersion = "22"
+    static let catalogueEngine = "tractanda-sqlite-catalogue-v19"
     static let catalogueRowByteWindow = 8 * 1024 * 1024 + 4096
     static let cataloguePageByteWindow = catalogueRowByteWindow
     static let headSummaryFieldNames: Set<String> = [

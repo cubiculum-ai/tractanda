@@ -1270,7 +1270,7 @@ public final class ItemService {
                     ["name": "operationID", "kind": "text", "editing": "server-owned"],
                     [
                         "name": "requestIdentity", "kind": "text",
-                        "editing": "server-owned and withheld by content projection",
+                        "editing": "optional server-owned retry receipt, withheld by content projection",
                     ],
                     [
                         "name": "revisionAncestry", "kind": "object",

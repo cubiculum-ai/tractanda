@@ -67,8 +67,8 @@ final class AtomicAuthorityCompatibilityTests: XCTestCase {
     }
 
     func testDeclaredSupportStillRequiresExplicitFloor15Activation() throws {
-        XCTAssertEqual(CanonicalFormatSupport.current.readerLevel, 19)
-        XCTAssertEqual(CanonicalFormatSupport.current.writerLevel, 19)
+        XCTAssertEqual(CanonicalFormatSupport.current.readerLevel, 20)
+        XCTAssertEqual(CanonicalFormatSupport.current.writerLevel, 20)
         XCTAssertTrue(
             CanonicalFormatSupport.current.capabilities.contains(AtomicAuthorityCompatibility.capability))
         let support = AtomicAuthorityCompatibility.support

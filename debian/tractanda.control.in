@@ -6,7 +6,7 @@ Bugs: @TRACTANDA_BUGS_URL@
 Section: utils
 Priority: optional
 Depends: @TRACTANDA_RUNTIME_DEPENDS@
-Pre-Depends: python3, systemd
+Pre-Depends: @TRACTANDA_PRE_DEPENDS@
 Installed-Size: @TRACTANDA_INSTALLED_KIB@
 Description: Tractanda shared canonical store and clients
  Shared server, terminal and MCP clients, local Granite embeddings and

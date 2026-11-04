@@ -27,13 +27,52 @@ F = module('linux_bundle_fixtures', 'test_package_linux.py')
 class LinuxDebTests(unittest.TestCase):
     def test_layout17_descriptor_cannot_claim_rolling_or_hide_physical_floor(self):
         manifest = {'version': '0.1.0-poc.17', 'arch': 'x86_64', 'embedding': None, 'documentExtraction': None,
-                    'canonicalFormats': {'readerLevel': 19, 'writerLevel': 19,
-                        'capabilities': ['tractanda.physical-layout.flat-items.v1'],
-                        'writeCapabilities': ['tractanda.physical-layout.flat-items.v1']}}
+                    'canonicalFormats': {'readerLevel': 20, 'writerLevel': 20,
+                        'capabilities': ['tractanda.physical-layout.flat-items.v1', 'tractanda.message-items.v1'],
+                        'writeCapabilities': ['tractanda.physical-layout.flat-items.v1', 'tractanda.message-items.v1']}}
         self.assertEqual(json.loads(D.package_descriptor(manifest, 'a' * 64, 'coordinated-maintenance'))['upgrade'], 'coordinated-maintenance')
         with self.assertRaises(ValueError): D.package_descriptor(manifest, 'a' * 64, 'compatible')
         manifest['canonicalFormats']['writerLevel'] = 18
         with self.assertRaises(ValueError): D.package_descriptor(manifest, 'a' * 64, 'coordinated-maintenance')
+        manifest['canonicalFormats']['writerLevel'] = 20
+        manifest['canonicalFormats']['writeCapabilities'].remove('tractanda.message-items.v1')
+        with self.assertRaises(ValueError): D.package_descriptor(manifest, 'a' * 64, 'coordinated-maintenance')
+
+    def test_layout17_control_contains_only_exact_reachable_payload_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); payload = root / 'payload'; payload.mkdir()
+            members = {'bin/tractanda-layout17': b'helper', 'lib/libSwiftFixture.so': b'private runtime',
+                       'lib/unused-worker.so': b'unrelated'}
+            rows = []
+            for name, data in members.items():
+                path = payload / name; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(data)
+                rows.append({'path': name, 'size': len(data), 'mode': 0o755 if name.startswith('bin/') else 0o644,
+                             'sha256': hashlib.sha256(data).hexdigest()})
+            sqlite = {'soname': 'libsqlite3.so.0', 'package': 'libsqlite3-0', 'version': '3.46.1-7',
+                      'path': '/usr/lib/x86_64-linux-gnu/libsqlite3.so.0.8.6'}
+            loader = {'soname': 'ld-linux-x86-64.so.2', 'package': 'libc6', 'version': '2.41-12',
+                      'path': '/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2'}
+            closure = {'privateELF': list(members), 'osLibraries': [sqlite, loader], 'edges': {
+                'bin/tractanda-layout17': [{'soname': 'libSwiftFixture.so', 'private': 'lib/libSwiftFixture.so'},
+                    {'soname': sqlite['soname'], 'system': sqlite['path']}],
+                'lib/libSwiftFixture.so': [{'soname': loader['soname'], 'system': loader['path']}],
+                sqlite['soname']: [], loader['soname']: [], 'lib/unused-worker.so': [],
+            }}
+            manifest = {'files': rows}
+            commitment = D.layout17_control_inventory(manifest, closure, 'amd64', 'a' * 64)
+            self.assertEqual([r['path'] for r in commitment['files']], ['bin/tractanda-layout17', 'lib/libSwiftFixture.so'])
+            self.assertEqual(set(commitment['systemLibraries']), {sqlite['soname'], loader['soname']})
+            archive = root / 'DEBIAN' / D.LAYOUT17_CONTROL_ARCHIVE
+            digest = D.stage_layout17_control(payload, archive, commitment, 1)
+            self.assertEqual(digest, hashlib.sha256(archive.read_bytes()).hexdigest())
+            with tarfile.open(archive) as t:
+                self.assertEqual(t.getnames(), ['layout17-control.json', 'bin/tractanda-layout17', 'lib/libSwiftFixture.so'])
+                self.assertEqual(json.load(t.extractfile('layout17-control.json')), commitment)
+                for name in ('bin/tractanda-layout17', 'lib/libSwiftFixture.so'):
+                    self.assertEqual(t.extractfile(name).read(), members[name])
+            closure['edges']['bin/tractanda-layout17'].pop()
+            with self.assertRaisesRegex(ValueError, 'SQLite'):
+                D.layout17_control_inventory(manifest, closure, 'amd64', 'a' * 64)
 
     def fixture(self, parent):
         bundle = parent / 'bundle'; bundle.mkdir(); F.payload(bundle)

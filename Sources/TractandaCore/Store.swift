@@ -3054,7 +3054,7 @@ public final class ItemStore {
         }
         let identity = try JSON.encode(request).base64EncodedString()
         if let prior = try priorOperation(request.operationID, uid: uid, kind: .resolution) {
-            guard prior.fields["requestIdentity"]?.string == identity else {
+            guard try Self.retryReceipt(prior) == identity else {
                 throw TractandaError(
                     "operationMismatch", "This resolution operation already has another intent.")
             }
@@ -3350,6 +3350,14 @@ public final class ItemStore {
                 "operationOriginRequired", "An imported legacy receipt cannot replay a local operation.")
         }
     }
+    private static func retryReceipt(_ revision: Revision) throws -> String {
+        guard let receipt = revision.fields["requestIdentity"]?.string else {
+            throw TractandaError(
+                "retryReceiptUnavailable", "This operation already has a committed revision, but its retry receipt is unavailable.")
+        }
+        return receipt
+    }
+
     private func priorOperation(
         _ id: String, uid: UInt32,
         kind: RevisionProvenance.Kind = .authored
@@ -5468,8 +5476,7 @@ public final class ItemStore {
         let current = try get(request.itemID)
         // Replay survives a lost reply and restart; intent includes exact source bytes and base revision.
         if let prior = try priorOperation(request.operationID, uid: accessContext!.uid) {
-            guard let encoded = prior.fields["requestIdentity"]?.string,
-                let bytes = Data(base64Encoded: encoded),
+            guard let bytes = try Data(base64Encoded: Self.retryReceipt(prior)),
                 let original = try? JSON.decode(CommitRequest.self, bytes),
                 original.itemID == request.itemID,
                 original.expectedRevisionID == request.expectedRevisionID,
@@ -5481,6 +5488,7 @@ public final class ItemStore {
             else {
                 throw TractandaError("operationMismatch", "Operation already committed a different intent.")
             }
+            nativeReplyBudget?.markPublicationAttempt()  // The replay may retire a staged upload.
             let replay = try commitInternal(attachmentCommitRequest(request, descriptor: descriptor))
             try attachmentPayloads.removeUpload(id: descriptor.attachmentID)
             attachmentUploads.removeValue(forKey: descriptor.attachmentID)
@@ -5488,6 +5496,9 @@ public final class ItemStore {
                 uploadID: nil, attachment: descriptor, offset: descriptor.byteCount,
                 chunkBytes: 262_144, expiresAt: nil, committed: AttachmentCommitResult(replay))
         }
+        // Receipt lookup and intent verification above are read-only. Origin recovery,
+        // expiry, renewal and new stage/checkpoint publication below can have effects.
+        nativeReplyBudget?.markPublicationAttempt()
         try requireActivePublishingOrigin()
         try requireEdit(current, changesPermissions: false)
         guard current.revisionID == request.expectedRevisionID else {
@@ -5571,7 +5582,7 @@ public final class ItemStore {
         let upload = try attachmentUpload(uploadID)
         if let prior = try priorOperation(upload.request.operationID, uid: accessContext!.uid) {
             let request = try attachmentCommitRequest(upload.request, descriptor: upload.descriptor)
-            guard prior.fields["requestIdentity"]?.string == (try JSON.encode(request).base64EncodedString())
+            guard try Self.retryReceipt(prior) == JSON.encode(request).base64EncodedString()
             else {
                 throw TractandaError("operationMismatch", "Committed upload differs from exact retry.")
             }
@@ -5660,8 +5671,7 @@ public final class ItemStore {
         identity: DocumentConverterIdentity
     ) throws -> AttachmentCommitResult? {
         guard let prior = try priorOperation(operationID, uid: accessContext!.uid) else { return nil }
-        guard let encoded = prior.fields["requestIdentity"]?.string,
-            let data = Data(base64Encoded: encoded),
+        guard let data = try Data(base64Encoded: Self.retryReceipt(prior)),
             let original = try? JSON.decode(CommitRequest.self, data),
             original.action == .revise, original.itemID == itemID,
             original.expectedRevisionID == expectedRevisionID, original.unset.isEmpty,
@@ -5922,8 +5932,7 @@ public final class ItemStore {
         }
         let current = try get(itemID)
         if let prior = try priorOperation(operationID, uid: accessContext!.uid) {
-            guard let identity = prior.fields["requestIdentity"]?.string,
-                let data = Data(base64Encoded: identity),
+            guard let data = try Data(base64Encoded: Self.retryReceipt(prior)),
                 let original = try? JSON.decode(CommitRequest.self, data),
                 original.action == .revise, original.itemID == itemID,
                 original.expectedRevisionID == expectedRevisionID, original.unset.isEmpty,
@@ -6267,7 +6276,8 @@ public final class ItemStore {
         else {
             throw TractandaError("invalidArguments", "Supply a nonempty operationID of at most 200 bytes.")
         }
-        // Canonical request bytes are retained rather than relying on a disposable receipt table.
+        // Keep exact intent on new commits. Rebuilt operation mappings also recognize a
+        // committed revision whose optional receipt was discarded.
         let identity = try JSON.encode(request).base64EncodedString()
         if let previous = try priorOperation(request.operationID, uid: uid) {
             if revisionProjectionEnabled {
@@ -6279,7 +6289,7 @@ public final class ItemStore {
                     throw TractandaError("forbidden", "Item access is denied.")
                 }
             }
-            guard previous.fields["requestIdentity"]?.string == identity else {
+            guard try Self.retryReceipt(previous) == identity else {
                 throw TractandaError(
                     "operationMismatch", "This operationID already committed a different edit.")
             }
@@ -12429,8 +12439,7 @@ extension ItemStore {
                 throw TractandaError(
                     "recoveryError", "Document commit receipt points to an unavailable revision.")
             }
-            guard let encoded = prior.fields["requestIdentity"]?.string,
-                let data = Data(base64Encoded: encoded),
+            guard let data = try Data(base64Encoded: Self.retryReceipt(prior)),
                 let original = try? JSON.decode(CommitRequest.self, data),
                 original.action == .revise, original.itemID == intent.source.itemID,
                 original.expectedRevisionID == record.checkpoint.expectedRevisionID,
@@ -12523,7 +12532,8 @@ extension ItemStore {
         var record = DocumentJobRecord(intent: intent)
         try record.validate()
         // Reject operation reuse before acquiring a durable new admission.
-        if try priorOperation(request.operationID, uid: actor) != nil {
+        if let prior = try priorOperation(request.operationID, uid: actor) {
+            _ = try Self.retryReceipt(prior)
             throw TractandaError("operationMismatch", "Operation already committed outside this job.")
         }
         try stagingByteQuota.retainJob(id: intent.jobID, initialBytes: Int64(try JSON.encode(record).count))
@@ -12543,7 +12553,13 @@ extension ItemStore {
         let record = try documentJobAuthority(id)
         if record.checkpoint.committed != nil { return record.status }
         // A read never rewrites another actor's checkpoint or acquires its producer.
-        return try reconciledDocumentJob(record).status
+        do { return try reconciledDocumentJob(record).status }
+        catch let error as TractandaError where error.code == "retryReceiptUnavailable" {
+            var paused = record
+            paused.checkpoint.state = "paused"
+            paused.checkpoint.reasonCode = error.code
+            return paused.status
+        }
     }
     func listDocumentJobs(afterJobID: String? = nil, limit: Int = 32) throws -> DocumentJobList {
         if accessContext == nil {
@@ -12800,12 +12816,20 @@ extension ItemStore {
     func recoverDocumentJobs(configurationSHA256: String) throws {
         for id in documentJobs.keys.sorted() {
             guard let record = documentJobs[id] else { continue }
-            if record.checkpoint.state == "completed" {
-                try archiveDocumentJob(record)
-            } else if record.checkpoint.discarded {
-                _ = try controlDocumentJob(id, action: "discard", configurationSHA256: configurationSHA256)
-            } else if record.checkpoint.state != "cancelled" {
-                _ = try controlDocumentJob(id, action: "resume", configurationSHA256: configurationSHA256)
+            do {
+                if record.checkpoint.state == "completed" {
+                    try archiveDocumentJob(record)
+                } else if record.checkpoint.discarded {
+                    _ = try controlDocumentJob(id, action: "discard", configurationSHA256: configurationSHA256)
+                } else if record.checkpoint.state != "cancelled" {
+                    _ = try controlDocumentJob(id, action: "resume", configurationSHA256: configurationSHA256)
+                }
+            } catch let error as TractandaError where error.code == "retryReceiptUnavailable" {
+                var paused = record
+                try paused.checkpoint.fence()
+                paused.checkpoint.state = "paused"
+                paused.checkpoint.reasonCode = error.code
+                try saveDocumentJob(paused)
             }
         }
     }
@@ -13997,8 +14021,8 @@ extension ItemStore {
                                     == request.revisionID,
                                 try AuthorityBinding(value: decision.payload["evidence"]!)
                                     == request.evidence,
-                                c.fields["requestIdentity"] == .text(encodedRequest.base64EncodedString()),
-                                c.fields["actor"] == .text("user:" + account.name)
+                                c.fields["actor"] == .text("user:" + account.name),
+                                try Self.retryReceipt(c) == encodedRequest.base64EncodedString()
                             else {
                                 throw TractandaError(
                                     "operationMismatch",
@@ -19252,7 +19276,7 @@ extension ItemStore {
         }
         if let row = prior.first {
             let revision = try PooledCanonicalRecord.read(row: row, root: root, ownerUID: ownerUID).revision
-            guard revision.fields["requestIdentity"]?.string == identity else {
+            guard try Self.retryReceipt(revision) == identity else {
                 throw TractandaError("operationMismatch", "Sharing operation already names another intent.")
             }
             return metadata
@@ -19384,7 +19408,7 @@ extension ItemStore {
         }
         let identity = try JSON.encode(request).base64EncodedString()
         if let prior = try priorOperation(request.operationID, uid: context.uid, kind: .resolution) {
-            guard prior.fields["requestIdentity"]?.string == identity else {
+            guard try Self.retryReceipt(prior) == identity else {
                 throw TractandaError(
                     "operationMismatch", "Resolution operation already names another intent.")
             }
@@ -19525,7 +19549,7 @@ extension ItemStore {
             ] as [String: ItemValue]
         ).base64EncodedString()
         if let prior = try priorOperation(operationID, uid: accessContext!.uid, kind: .resolution) {
-            guard prior.fields["requestIdentity"]?.string == identity else {
+            guard try Self.retryReceipt(prior) == identity else {
                 throw TractandaError("operationMismatch", "Review resolution already names another intent.")
             }
             nativeReplyBudget?.markPublicationAttempt()
@@ -19793,8 +19817,7 @@ extension ItemStore {
             mediaType: request.mediaType, byteCount: 0, sha256: request.blobID)
         let size: Int64
         if let prior = try priorOperation(request.operationID, uid: accessContext!.uid) {
-            guard let encoded = prior.fields["requestIdentity"]?.string,
-                let data = Data(base64Encoded: encoded),
+            guard let data = try Data(base64Encoded: Self.retryReceipt(prior)),
                 let original = try? JSON.decode(CommitRequest.self, data),
                 let descriptor = try AttachmentDescriptor.descriptors(in: original.changes).last,
                 descriptor.sha256 == request.blobID

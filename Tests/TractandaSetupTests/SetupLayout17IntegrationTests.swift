@@ -43,7 +43,7 @@ final class SetupLayout17IntegrationTests: XCTestCase {
             }
             let current = try XCTUnwrap(CanonicalReaderRequirement.load(root: store, ownerUID: tractanda_uid()))
             originalRequirement = .init(storeID: storeID, minimumReaderLevel: 18,
-                recordFormats: current.recordFormats, capabilities: current.capabilities.filter { $0 != "tractanda.physical-layout.flat-items.v1" })
+                recordFormats: current.recordFormats, capabilities: current.capabilities.filter { !["tractanda.physical-layout.flat-items.v1", "tractanda.message-items.v1"].contains($0) })
             let oldBytes = try JSON.encode(originalRequirement)
             originalHash = Self.digest(oldBytes)
             try Self.privateWrite(oldBytes, store.appendingPathComponent("canonical-reader.json"))
@@ -51,8 +51,8 @@ final class SetupLayout17IntegrationTests: XCTestCase {
             let prior = try JSON.decode(BundleManifest.self, Data(contentsOf: base.manifestURL))
             let currentSupport = CanonicalFormatSupport.current
             let oldSupport = CanonicalFormatSupport(readerLevel: 18, writerLevel: 18, read: currentSupport.read,
-                write: currentSupport.write, capabilities: currentSupport.capabilities.filter { $0 != "tractanda.physical-layout.flat-items.v1" },
-                writeCapabilities: currentSupport.writeCapabilities.filter { $0 != "tractanda.physical-layout.flat-items.v1" })
+                write: currentSupport.write, capabilities: currentSupport.capabilities.filter { !["tractanda.physical-layout.flat-items.v1", "tractanda.message-items.v1"].contains($0) },
+                writeCapabilities: currentSupport.writeCapabilities.filter { !["tractanda.physical-layout.flat-items.v1", "tractanda.message-items.v1"].contains($0) })
             let oldManifest = BundleManifest(version: "0.1.0-poc.16.2", platform: "linux", arch: prior.arch,
                 files: prior.files, canonicalFormats: oldSupport)
             let oldManifestBytes = try JSON.encode(oldManifest)
@@ -83,9 +83,9 @@ final class SetupLayout17IntegrationTests: XCTestCase {
                 self.migrations += 1
                 if self.failure == "beforeFence" { return .init(status: 1, output: "injected before fence") }
                 try self.fenceAndJournal()
-                if self.failure == "afterFence" { return .init(status: 1, output: "injected after reader19") }
+                if self.failure == "afterFence" { return .init(status: 1, output: "injected after reader20") }
                 try Self.privateWrite(JSON.encode(["profile": "tractanda.physical-layout.v1",
-                    "layout": "flat-items-visible-attachments.v1"]), self.store.appendingPathComponent("canonical-layout.json"))
+                    "layout": "flat-items-visible-attachments.v1", "recordEncoding": "message-v1"]), self.store.appendingPathComponent("canonical-layout.json"))
                 try FileManager.default.removeItem(at: self.store.appendingPathComponent("canonical-layout.pending.json"))
                 return .init(status: 0)
             }
@@ -108,9 +108,9 @@ final class SetupLayout17IntegrationTests: XCTestCase {
             return .init(status: 0, output: String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self))
         }
         func fenceAndJournal() throws {
-            let raised = CanonicalReaderRequirement(storeID: storeID, minimumReaderLevel: 19,
+            let raised = CanonicalReaderRequirement(storeID: storeID, minimumReaderLevel: 20,
                 recordFormats: originalRequirement.recordFormats,
-                capabilities: (originalRequirement.capabilities + ["tractanda.physical-layout.flat-items.v1"]).sorted())
+                capabilities: (originalRequirement.capabilities + ["tractanda.physical-layout.flat-items.v1", "tractanda.message-items.v1"]).sorted())
             try Self.privateWrite(JSON.encode(raised), store.appendingPathComponent("canonical-reader.json"))
             try Self.privateWrite(Data("{}".utf8), store.appendingPathComponent("canonical-layout.pending.json"))
             try base.engine.ensureRootDirectory(base.engine.layout17JournalDirectory)
@@ -170,6 +170,50 @@ final class SetupLayout17IntegrationTests: XCTestCase {
         _ = try f.base.engine.completeLayout17(instance: "a")
         XCTAssertEqual(f.migrations, 1)
     }
+    func testCommitted17ReinstallPreservesServiceIntentWithoutMigration() throws {
+        for clustered in [false, true] {
+            let f = try Fixture(clustered: clustered)
+            if clustered { try f.prepare() } else { try f.preflight() }
+            try f.unpack()
+            try f.configure()
+            let running = f.base.runner.running
+            let enabled = f.base.runner.enabled
+            let hold = try f.base.engine.readLayout17Intent("a")
+            XCTAssertEqual(hold != nil, clustered)
+            XCTAssertEqual(running.isEmpty, clustered)
+
+            let otherArtifact = SetupPackageCompatibility(manifestSHA256: String(repeating: "a", count: 64),
+                version: f.incoming.version, arch: f.incoming.arch, canonicalFormats: .current,
+                upgrade: .coordinatedMaintenance)
+            let otherSemantics = SetupPackageCompatibility(manifestSHA256: f.incoming.manifestSHA256,
+                version: f.incoming.version, arch: f.incoming.arch, canonicalFormats: .current,
+                semanticProfile: "different-semantic-profile", upgrade: .coordinatedMaintenance)
+            let relabeledArtifact = SetupPackageCompatibility(manifestSHA256: otherArtifact.manifestSHA256,
+                version: f.incoming.version, arch: f.incoming.arch, canonicalFormats: .current)
+            for declaration in [otherArtifact, otherSemantics, relabeledArtifact] {
+                XCTAssertThrowsError(try f.base.hook(.preinst, declaration))
+                XCTAssertEqual(try f.base.engine.readPackageState()?.phase, .committed)
+                XCTAssertEqual(f.base.runner.running, running)
+                XCTAssertEqual(f.base.runner.enabled, enabled)
+            }
+
+            _ = try f.base.hook(.preinst, f.incoming)
+            XCTAssertEqual(try f.base.engine.readPackageState()?.phase, .awaitingUnpack)
+            XCTAssertTrue(f.base.runner.running.isEmpty)
+            try f.configure()
+            XCTAssertEqual(try f.base.engine.readPackageState()?.phase, .committed)
+            XCTAssertEqual(try f.base.engine.readLayout17Intent("a"), hold)
+            XCTAssertEqual(f.base.runner.running, running)
+            XCTAssertEqual(f.base.runner.enabled, enabled)
+            XCTAssertEqual(f.migrations, 1)
+            if clustered {
+                XCTAssertThrowsError(try f.base.engine.packageRuntimeGuard("a"))
+                _ = try f.base.engine.completeLayout17(instance: "a")
+                XCTAssertFalse(f.base.runner.running.isEmpty)
+            }
+        }
+    }
+
     func testCompletionStartFailureAndConsumedIntentRestartRemainRecoverable() throws {
         let f = try Fixture(clustered: true)
         try f.prepare(); try f.unpack(); try f.configure()
@@ -183,13 +227,13 @@ final class SetupLayout17IntegrationTests: XCTestCase {
         XCTAssertFalse(f.base.runner.running.isEmpty)
         XCTAssertEqual(f.migrations, 1)
     }
-    func testActual17PayloadResumesAfterReader19FailureWithoutOldReaderRollback() throws {
+    func testActual17PayloadResumesAfterReader20FailureWithoutOldReaderRollback() throws {
         let f = try Fixture(clustered: true)
         try f.prepare(); try f.unpack()
         f.failure = "afterFence"
         XCTAssertThrowsError(try f.configure())
         let raised = try XCTUnwrap(CanonicalReaderRequirement.load(root: f.store, ownerUID: tractanda_uid()))
-        XCTAssertEqual(raised.minimumReaderLevel, 19)
+        XCTAssertEqual(raised.minimumReaderLevel, 20)
         XCTAssertThrowsError(try f.original.canonicalFormats.require(raised))
         XCTAssertTrue(f.base.runner.running.isEmpty)
         XCTAssertEqual(try f.base.engine.readPackageState()?.original, f.original)

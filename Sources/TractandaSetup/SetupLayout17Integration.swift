@@ -77,7 +77,7 @@ extension SetupEngine {
         let value = try JSONDecoder().decode(SetupLayout17Inspection.self, from: bytes)
         guard value.profile == "tractanda.layout17-inspection.v1",
             SetupPackageCompatibility.isDigest(value.readerRequirementSHA256),
-            (16...19).contains(value.minimumReaderLevel),
+            (16...20).contains(value.minimumReaderLevel),
             UUID(uuidString: value.storeID)?.version1Components != nil,
             UUID(uuidString: value.replicaID)?.version1Components != nil,
             value.storeID != value.replicaID,
@@ -114,7 +114,7 @@ extension SetupEngine {
             intent.newManifestSHA256 == incoming.manifestSHA256,
             intent.membershipDigest == inspection.membershipDigest,
             intent.readerRequirementSHA256 == inspection.readerRequirementSHA256
-                || inspection.minimumReaderLevel == 19
+                || inspection.minimumReaderLevel == 20
                     && intent.readerRequirementSHA256 == inspection.originalReaderRequirementSHA256
         else {
             throw SetupError("Clustered .17 migration requires the exact transient administrator prepare intent before stopping services. Run tractanda-layout17 prepare for this instance and candidate.")
@@ -136,6 +136,14 @@ extension SetupEngine {
     /// Called after exact incoming payload verification and before any stop or state mutation.
     func requirePackageUpgrade(_ incoming: SetupPackageCompatibility,
                                from original: SetupPackageCompatibility, bundle: URL? = nil) throws {
+        if incoming.version == "0.1.0-poc.17", original.version == "0.1.0-poc.17" {
+            // The installed commitment was verified against the actual payload. Exact
+            // reinstall does not change format or authorize releasing a held instance.
+            guard incoming.upgrade == .coordinatedMaintenance, incoming == original else {
+                throw SetupError("The .17 reinstall differs from the verified installed package.")
+            }
+            return
+        }
         if incoming.version == "0.1.0-poc.17", original.version == "0.1.0-poc.16.2" {
             try preflightLayout17Stores(incoming, original: original, bundle: bundle)
         } else { try incoming.requireRollingUpgrade(from: original) }
@@ -159,12 +167,13 @@ extension SetupEngine {
             let owner = try layout17StoreOwner(store)
             let marker = try layout17PrivateStoreFile(store, name: "canonical-layout.json", owner: owner)
             guard let object = try JSONSerialization.jsonObject(with: marker) as? [String: String],
-                object == ["profile": "tractanda.physical-layout.v1", "layout": "flat-items-visible-attachments.v1"] else {
+                object == ["profile": "tractanda.physical-layout.v1", "layout": "flat-items-visible-attachments.v1", "recordEncoding": "message-v1"] else {
                 throw SetupError("The completed .17 layout marker is invalid.")
             }
             let requirement = try quiescentCanonicalRequirement(receipt)
-            guard requirement.minimumReaderLevel >= 19,
-                requirement.capabilities.contains("tractanda.physical-layout.flat-items.v1") else {
+            guard requirement.minimumReaderLevel >= 20,
+                requirement.capabilities.contains("tractanda.physical-layout.flat-items.v1"),
+                requirement.capabilities.contains("tractanda.message-items.v1") else {
                 throw SetupError("The completed .17 layout lost its reader fence.")
             }
             try incoming.canonicalFormats.require(requirement)
@@ -321,12 +330,13 @@ extension SetupEngine {
             let owner = try layout17StoreOwner(root)
             let marker = try layout17PrivateStoreFile(root, name: "canonical-layout.json", owner: owner)
             guard let markerObject = try JSONSerialization.jsonObject(with: marker) as? [String: String],
-                markerObject == ["profile": "tractanda.physical-layout.v1", "layout": "flat-items-visible-attachments.v1"] else {
+                markerObject == ["profile": "tractanda.physical-layout.v1", "layout": "flat-items-visible-attachments.v1", "recordEncoding": "message-v1"] else {
                 throw SetupError("The .17 completion marker is missing or unknown.")
             }
             let requirement = try layout17CurrentRequirement(receipt)
-            guard (intent == nil || requirement.storeID == intent?.storeID), requirement.minimumReaderLevel >= 19,
-                requirement.capabilities.contains("tractanda.physical-layout.flat-items.v1") else {
+            guard (intent == nil || requirement.storeID == intent?.storeID), requirement.minimumReaderLevel >= 20,
+                requirement.capabilities.contains("tractanda.physical-layout.flat-items.v1"),
+                requirement.capabilities.contains("tractanda.message-items.v1") else {
                 throw SetupError("The .17 reader fence differs from its prepared store.")
             }
             let inspection = try layout17CompletedInspection(receipt)
@@ -393,9 +403,10 @@ extension SetupEngine {
         let requirement = try layout17CurrentRequirement(receipt)
         let marker = try layout17PrivateStoreFile(root, name: "canonical-layout.json", owner: owner)
         guard let object = try JSONSerialization.jsonObject(with: marker) as? [String: String],
-            object == ["profile": "tractanda.physical-layout.v1", "layout": "flat-items-visible-attachments.v1"],
-            requirement.minimumReaderLevel >= 19,
-            requirement.capabilities.contains("tractanda.physical-layout.flat-items.v1") else {
+            object == ["profile": "tractanda.physical-layout.v1", "layout": "flat-items-visible-attachments.v1", "recordEncoding": "message-v1"],
+            requirement.minimumReaderLevel >= 20,
+            requirement.capabilities.contains("tractanda.physical-layout.flat-items.v1"),
+            requirement.capabilities.contains("tractanda.message-items.v1") else {
             throw SetupError("The completed .17 store lost its marker or reader fence.")
         }
         let profile = try JSONSerialization.jsonObject(with:

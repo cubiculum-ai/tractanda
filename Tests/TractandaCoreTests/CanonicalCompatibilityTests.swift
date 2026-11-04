@@ -40,11 +40,11 @@ final class CanonicalCompatibilityTests: XCTestCase {
     func testPhysicalFloorIsRetainedAndPublicationExtendsRecordFormatsMonotonically() throws {
         let root = try root()
         defer { try? FileManager.default.removeItem(at: root) }
-        XCTAssertEqual(try CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid())?.minimumReaderLevel, 19)
+        XCTAssertEqual(try CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid())?.minimumReaderLevel, 20)
         let initial = try CanonicalReaderRequirement.withWriterLock(root: root, ownerUID: tractanda_uid()) {
             try CanonicalReaderRequirement.admitQuiescent(root: root, ownerUID: tractanda_uid())
         }
-        XCTAssertEqual(initial.minimumReaderLevel, 19)
+        XCTAssertEqual(initial.minimumReaderLevel, 20)
         XCTAssertThrowsError(try CanonicalFormatSupport.legacy.require(initial))
         let store = try ItemStore(root: root)
         let revision = try store.commit(
@@ -52,7 +52,7 @@ final class CanonicalCompatibilityTests: XCTestCase {
         ).revision
         XCTAssertEqual(revision.formatVersion, 2)
         let raised = try XCTUnwrap(CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid()))
-        XCTAssertEqual(raised.minimumReaderLevel, 19)
+        XCTAssertEqual(raised.minimumReaderLevel, 20)
         XCTAssertThrowsError(try CanonicalFormatSupport.legacy.require(raised))
         let repeated = try CanonicalReaderRequirement.admitQuiescent(root: root, ownerUID: tractanda_uid())
         XCTAssertEqual(repeated, raised)
@@ -70,12 +70,12 @@ final class CanonicalCompatibilityTests: XCTestCase {
         let request = CommitRequest(
             classID: "Item", changes: ["subject": .text("content")], operationID: "first2")
         XCTAssertThrowsError(try store.commit(request))
-        XCTAssertEqual(try CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid())?.minimumReaderLevel, 19)
+        XCTAssertEqual(try CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid())?.minimumReaderLevel, 20)
         XCTAssertEqual(try store.exportCatalogueForVerification().count, 0)
         store.beforeCanonicalReaderRequirementForTesting = nil
         let revision = try store.commit(request).revision
         XCTAssertEqual(
-            try CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid())?.minimumReaderLevel, 19)
+            try CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid())?.minimumReaderLevel, 20)
         let rows = try store.exportCatalogueForVerification()
         let path = root.appendingPathComponent(try XCTUnwrap(rows.first).path)
         let original = try Data(contentsOf: path)
@@ -92,7 +92,7 @@ final class CanonicalCompatibilityTests: XCTestCase {
             try CanonicalReaderRequirement.admitQuiescent(root: root, ownerUID: tractanda_uid())
         }
         XCTAssertEqual(required.recordFormats, [1, 2])
-        XCTAssertEqual(required.minimumReaderLevel, 19)
+        XCTAssertEqual(required.minimumReaderLevel, 20)
         XCTAssertNoThrow(try CanonicalFormatSupport.current.require(required))
         XCTAssertThrowsError(try CanonicalFormatSupport.legacy.require(required))
         XCTAssertEqual(try Data(contentsOf: old.0), old.1)
@@ -151,6 +151,6 @@ final class CanonicalCompatibilityTests: XCTestCase {
                     root: root, ownerUID: tractanda_uid(), maximumRecords: 1)
             }
         ) { XCTAssertEqual(($0 as? TractandaError)?.code, "resourceLimit") }
-        XCTAssertEqual(try CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid())?.minimumReaderLevel, 19)
+        XCTAssertEqual(try CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid())?.minimumReaderLevel, 20)
     }
 }

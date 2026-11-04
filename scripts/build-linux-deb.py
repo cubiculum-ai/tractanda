@@ -6,6 +6,7 @@ release, signing and publication are separate actions. The producer/assembler ga
 """
 import argparse
 import hashlib
+import io
 import importlib.util
 import json
 import os
@@ -54,12 +55,12 @@ def package_descriptor(manifest, digest, upgrade):
         raise ValueError('Explicit reviewed upgrade classification is required.')
     if manifest.get('version') == '0.1.0-poc.17':
         formats = manifest.get('canonicalFormats', {})
-        capability = 'tractanda.physical-layout.flat-items.v1'
-        if (upgrade != 'coordinated-maintenance' or formats.get('readerLevel') != 19
-                or formats.get('writerLevel') != 19
-                or capability not in formats.get('capabilities', [])
-                or capability not in formats.get('writeCapabilities', [])):
-            raise ValueError('The .17 physical-layout bridge requires truthful floor19 coordinated-maintenance metadata.')
+        capabilities = {'tractanda.physical-layout.flat-items.v1', 'tractanda.message-items.v1'}
+        if (upgrade != 'coordinated-maintenance' or formats.get('readerLevel') != 20
+                or formats.get('writerLevel') != 20
+                or not capabilities.issubset(formats.get('capabilities', []))
+                or not capabilities.issubset(formats.get('writeCapabilities', []))):
+            raise ValueError('The .17 layout/message bridge requires truthful floor20 coordinated-maintenance metadata.')
     result = dict(profile='tractanda.linux-package.v1', manifestSHA256=digest,
                   version=manifest['version'], arch=manifest['arch'],
                   canonicalFormats=manifest['canonicalFormats'], semanticProfile=B.SEMANTIC_PROFILE,
@@ -89,6 +90,70 @@ def write(path, data, mode=0o644):
     path.chmod(mode)
 
 
+LAYOUT17_CONTROL_ARCHIVE = 'layout17-inspector.tar'
+LAYOUT17_INSPECTOR = 'bin/tractanda-layout17'
+MAX_LAYOUT17_CONTROL_BYTES = 128 * 1024**2
+
+
+def layout17_control_inventory(manifest, closure, arch, digest):
+    """Select the inspector's transitive ELF closure from the verified payload."""
+    by_path = {row['path']: row for row in manifest['files']}
+    providers = {row['soname']: row for row in closure['osLibraries']}
+    private = {LAYOUT17_INSPECTOR}
+    sonames, system, visited = {}, {}, set()
+    queue = [LAYOUT17_INSPECTOR]
+    if LAYOUT17_INSPECTOR not in closure['privateELF']:
+        raise ValueError('The .17 inspector must be a manifest-listed native executable.')
+    while queue:
+        source = queue.pop()
+        if source in visited:
+            continue
+        visited.add(source)
+        for edge in closure['edges'][source]:
+            name = edge['soname']
+            if 'private' in edge:
+                path = edge['private']
+                if path not in closure['privateELF'] or sonames.setdefault(name, path) != path:
+                    raise ValueError('Invalid .17 private inspector dependency.')
+                private.add(path)
+                queue.append(path)
+            else:
+                provider = providers[name]
+                if provider['path'] != edge['system']:
+                    raise ValueError('Invalid .17 system inspector dependency.')
+                system[name] = {k: provider[k] for k in ('package', 'version')}
+                queue.append(name)
+    if 'libsqlite3.so.0' not in set(sonames) | set(system):
+        raise ValueError('The .17 inspector closure must account for SQLite.')
+    rows = [by_path[path] for path in sorted(private)]
+    if not by_path[LAYOUT17_INSPECTOR]['mode'] & 0o111:
+        raise ValueError('The .17 control inspector is not executable.')
+    return dict(profile='tractanda.layout17-control.v1', manifestSHA256=digest,
+                arch=arch, files=rows, privateSONAMEs=sonames, systemLibraries=system)
+
+
+def stage_layout17_control(payload, control, inventory, epoch):
+    """Put the exact signed-payload executable and private dependencies in the control archive."""
+    metadata = B.canonical(inventory) + b'\n'
+    rows = inventory['files']
+    if len(metadata) > 64 * 1024 or sum(row['size'] for row in rows) + len(metadata) > MAX_LAYOUT17_CONTROL_BYTES:
+        raise ValueError('The .17 control inspector exceeds its byte window.')
+    control.parent.mkdir(mode=0o755, exist_ok=True)
+    with tarfile.open(control, 'w') as archive:
+        header = tarfile.TarInfo('layout17-control.json')
+        header.size, header.mode, header.mtime = len(metadata), 0o644, epoch
+        archive.addfile(header, io.BytesIO(metadata))
+        for row in rows:
+            header = tarfile.TarInfo(row['path'])
+            header.size, header.mode, header.mtime = row['size'], row['mode'], epoch
+            with (payload / row['path']).open('rb') as stream:
+                archive.addfile(header, stream)
+    control.chmod(0o644)
+    if control.stat().st_size > MAX_LAYOUT17_CONTROL_BYTES:
+        raise ValueError('The .17 control archive exceeds its byte window.')
+    return B.digest(control)
+
+
 def stage_package(bundle, stage, snapshot, arch, maintainer, copyright_bytes, revision, upgrade, epoch, maximum):
     if not isinstance(snapshot, B.ManifestSnapshot):
         raise ValueError('An immutable admitted manifest snapshot is required.')
@@ -114,6 +179,11 @@ def stage_package(bundle, stage, snapshot, arch, maintainer, copyright_bytes, re
     depends = sorted(set(closure['depends']) | {'ca-certificates', 'curl', 'lsof', 'sudo', 'uuid-runtime', 'init-system-helpers'})
     if any('\n' in value or ',' in value for value in depends):
         raise ValueError('Unsafe derived Debian dependency field.')
+    inspector = None
+    if manifest['version'] == '0.1.0-poc.17':
+        inspector = layout17_control_inventory(manifest, closure, arch, snapshot.sha256)
+        B.capacity(stage.parent, sum(v['size'] for v in manifest['files'])
+                   + sum(v['size'] for v in inspector['files']) + 1024**2, maximum)
     stage.mkdir(mode=0o755)
     payload = stage / 'opt/tractanda/current'
     for row in manifest['files']:
@@ -126,6 +196,12 @@ def stage_package(bundle, stage, snapshot, arch, maintainer, copyright_bytes, re
               ('#!/bin/sh\nexec /opt/tractanda/current/bin/' + command + ' "$@"\n').encode(), 0o755)
     write(stage / 'usr/share/doc/tractanda/copyright', copyright_bytes)
     descriptor = package_descriptor(manifest, snapshot.sha256, upgrade)
+    control_hash = '-'
+    pre_depends = {'python3', 'systemd'}
+    if inspector is not None:
+        control_hash = stage_layout17_control(payload, stage / 'DEBIAN' / LAYOUT17_CONTROL_ARCHIVE, inspector, epoch)
+        pre_depends.update(row['package'] + ' (>= ' + row['version'] + ')'
+                           for row in inspector['systemLibraries'].values())
     fallback = (ROOT / 'debian/tractanda-package-hook-fallback.py.in').read_text()
     if '@TRACTANDA_' in fallback:
         raise ValueError('Embedded fallback source contains an unresolved marker.')
@@ -133,6 +209,8 @@ def stage_package(bundle, stage, snapshot, arch, maintainer, copyright_bytes, re
         data = render((ROOT / 'debian' / template).read_text(), {
             'TRACTANDA_PACKAGE_DESCRIPTOR_JSON': descriptor,
             'TRACTANDA_PACKAGE_HOOK_FALLBACK_PY': fallback,
+            'TRACTANDA_LAYOUT17_INSPECTOR_SHA256': control_hash,
+            'TRACTANDA_LAYOUT17_DEBIAN_VERSION': version if inspector is not None else '-',
         })
         write(stage / 'DEBIAN' / name, data, 0o755)
     files = B.inventory(stage)
@@ -140,6 +218,7 @@ def stage_package(bundle, stage, snapshot, arch, maintainer, copyright_bytes, re
     control = render((ROOT / 'debian/tractanda.control.in').read_text(), {
         'TRACTANDA_DEBIAN_VERSION': version, 'TRACTANDA_DEBIAN_ARCH': arch,
         'TRACTANDA_MAINTAINER': maintainer, 'TRACTANDA_RUNTIME_DEPENDS': ', '.join(depends),
+        'TRACTANDA_PRE_DEPENDS': ', '.join(sorted(pre_depends)),
         'TRACTANDA_INSTALLED_KIB': str(installed_kib), 'TRACTANDA_BUGS_URL': BUGS_URL,
     })
     write(stage / 'DEBIAN/control', control)
