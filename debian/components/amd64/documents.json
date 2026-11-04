@@ -9,7 +9,7 @@
   "documentExtraction": {
     "converterPath": "bin/tractanda-document-converter",
     "identity": {
-      "converter": "tractanda.docling-native.v2-idefics3-gelu-f32+linux-raster.70c4dccbc9ba294a0b4effea7e2f47005fea85f4155f8587adc8987c6806b726",
+      "converter": "tractanda.docling-native.v2-idefics3-gelu-f32+linux-raster.4d5b73350265f8c8d00fd14c84bb52865a218113ecf4407d500c021e55cc5f44",
       "model": "ibm-granite/granite-docling-258M-mlx",
       "modelRevision": "a8b999991fe8c521a0cec749973414eaaf823731",
       "parser": "doctags-strict-v1",
@@ -81,7 +81,7 @@
     {
       "mode": 493,
       "path": "bin/tractanda-document-converter",
-      "sha256": "57d0e99ea64171d6d855b6a2e0a324a1ac6f3b28cc5d8362b27005bf11387946",
+      "sha256": "1590d20a9230c3488819df948c4dfee2677774d0704549fe5d574208490dd2a3",
       "size": 66350824
     },
     {
@@ -213,7 +213,7 @@
     {
       "mode": 420,
       "path": "lib/tractanda/document-native-closure.json",
-      "sha256": "70c4dccbc9ba294a0b4effea7e2f47005fea85f4155f8587adc8987c6806b726",
+      "sha256": "4d5b73350265f8c8d00fd14c84bb52865a218113ecf4407d500c021e55cc5f44",
       "size": 44269
     },
     {
@@ -285,7 +285,7 @@
     {
       "mode": 420,
       "path": "licenses/Docling/linux-build-provenance.json",
-      "sha256": "b2f05825115f619ebda2e926d864dccd365e7c6075f251c712c17a86918e20a8",
+      "sha256": "e7d8d3f72ecb4cabc06fa9a02af0be54616eedef83903f0cf2a2a43b9511ae14",
       "size": 23757
     },
     {
@@ -927,7 +927,7 @@
     "licenses/system-build-provenance/libstdc++6-copyright"
   ],
   "runtimeRevision": "61a4b20d4ad01b10466e8fc94c50402a9f994430",
-  "sourceInputsSHA256": "9a2418be461ebd1bb7d3bf80bda83e085f47318890eff2e5155c972dabe19989",
+  "sourceInputsSHA256": "49c909f3636fc761e1204fdcf71958f9c7485d8d46170273c8da297c239fab15",
   "toolchain": {
     "clangSHA256": "b566514eae95a8a59f9e50fda5352df11941fea4d71c60aab02c90674a7f2d60",
     "swiftFrontendSHA256": "aca990e29b10dd1f3e44d300517c5e8c01590bc081098e829c87b511a6856d56",

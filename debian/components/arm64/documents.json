@@ -9,7 +9,7 @@
   "documentExtraction": {
     "converterPath": "bin/tractanda-document-converter",
     "identity": {
-      "converter": "tractanda.docling-native.v2-idefics3-gelu-f32+linux-raster.3656ce0831bd76ade008db31dded22b78058a4c60c0f7342bb0de3faab797ff7",
+      "converter": "tractanda.docling-native.v2-idefics3-gelu-f32+linux-raster.fc12ebc137327bb8a9cecabde2a8334cbadc8ab132f2af59eaad53e73a6ed814",
       "model": "ibm-granite/granite-docling-258M-mlx",
       "modelRevision": "a8b999991fe8c521a0cec749973414eaaf823731",
       "parser": "doctags-strict-v1",
@@ -81,8 +81,8 @@
     {
       "mode": 493,
       "path": "bin/tractanda-document-converter",
-      "sha256": "949775691c4a14aa66553367470c0e3cc6e8da3d38e4faaa2192708f1d605c35",
-      "size": 63146928
+      "sha256": "182fb07cb7cd64ec70953d9937951a5dfac54db39144d610c7db21eebec4630d",
+      "size": 63142832
     },
     {
       "mode": 493,
@@ -213,7 +213,7 @@
     {
       "mode": 420,
       "path": "lib/tractanda/document-native-closure.json",
-      "sha256": "3656ce0831bd76ade008db31dded22b78058a4c60c0f7342bb0de3faab797ff7",
+      "sha256": "fc12ebc137327bb8a9cecabde2a8334cbadc8ab132f2af59eaad53e73a6ed814",
       "size": 44191
     },
     {
@@ -285,7 +285,7 @@
     {
       "mode": 420,
       "path": "licenses/Docling/linux-build-provenance.json",
-      "sha256": "d9fd5614b4a49f1d2f62fe0575baa0ac9da25331158d5e6b5ba46c1fe4590e9d",
+      "sha256": "047333882a53f2084a98de06ee7d0c4e80d8d4446759bbbec0854583591bf44d",
       "size": 23759
     },
     {
@@ -927,7 +927,7 @@
     "licenses/system-build-provenance/libstdc++6-copyright"
   ],
   "runtimeRevision": "61a4b20d4ad01b10466e8fc94c50402a9f994430",
-  "sourceInputsSHA256": "0a4f697ce67df737e31b3082f6ba20a18e1cf55ff62ad85233c812e06a508cf2",
+  "sourceInputsSHA256": "e68ee86027b8bbd5dee628eac34ceddbed8436e72266fda14d258dac09811b97",
   "toolchain": {
     "clangSHA256": "712106992cb2e4abd378bb6b778c4b19e790df7948b1a3e0c0c518823ecf8cb5",
     "swiftFrontendSHA256": "6e1dbf14d284019b284344b49968cac64921d5999cf72b3b3d8d723340e90717",
