@@ -261,9 +261,11 @@ final class PersonalDAGTests: XCTestCase {
             XCTAssertEqual(try first.provenance?.mergeProfile, RevisionMerge.personalProfile)
             XCTAssertEqual(Set(try store!.history(base.itemID).map(\.revisionID)).count, 4)
             XCTAssertEqual(try ItemPermissions(XCTUnwrap(first.fields["permissions"])).mode, 0o600)
+            let requirement = try XCTUnwrap(
+                CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid()))
             XCTAssertEqual(
-                try CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid())?
-                    .minimumReaderLevel, 17)
+                requirement.minimumReaderLevel, CanonicalFormatSupport.personalWorkgroup.readerLevel)
+            XCTAssertTrue(requirement.capabilities.contains(RevisionMerge.personalProfile))
             store = nil
             try FileManager.default.removeItem(at: root.appendingPathComponent("index"))
             store = try open(root, accounts, .existing)
@@ -291,8 +293,15 @@ final class PersonalDAGTests: XCTestCase {
             XCTAssertEqual(try store!.itemState(base.itemID).frontier, frontier)
             XCTAssertEqual(try store!.get(base.itemID), merged)
             let fence = try XCTUnwrap(CanonicalReaderRequirement.load(root: copy, ownerUID: tractanda_uid()))
-            XCTAssertEqual(fence.minimumReaderLevel, 17)
+            let current = CanonicalFormatSupport.personalWorkgroup
+            XCTAssertEqual(fence.minimumReaderLevel, current.readerLevel)
             XCTAssertTrue(fence.capabilities.contains(RevisionMerge.personalProfile))
+            let withoutMerge = CanonicalFormatSupport(
+                readerLevel: current.readerLevel, writerLevel: current.writerLevel,
+                read: current.read, write: current.write,
+                capabilities: current.capabilities.filter { $0 != RevisionMerge.personalProfile },
+                writeCapabilities: current.writeCapabilities.filter { $0 != RevisionMerge.personalProfile })
+            XCTAssertThrowsError(try withoutMerge.require(fence))
             let old = CanonicalFormatSupport(
                 readerLevel: 16, writerLevel: 16, read: [1, 2], write: [2],
                 capabilities: [PersonalWorkgroupProfile.capability])
