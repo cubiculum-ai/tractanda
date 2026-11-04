@@ -100,6 +100,7 @@ final class ServiceCoordinatorTests: XCTestCase {
     private func seedOriginalStoreIdentity(root: URL, ownerUID: UInt32) throws {
         try FileManager.default.createDirectory(
             at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try CanonicalPhysicalLayout.prepareOpening(root, ownerUID: ownerUID)
         let storeID = try UUID.makeVersion1().uuidString.lowercased()
         try PrivateConfiguration.write(
             try JSON.encode(OriginalStoreIdentity(formatVersion: 1, storeID: storeID)),
@@ -1745,7 +1746,7 @@ final class ServiceCoordinatorTests: XCTestCase {
                 as? [URL] ?? []
             let record = try XCTUnwrap(
                 files.first {
-                    $0.lastPathComponent == item.revisionID + ".tractanda"
+                    $0.lastPathComponent == "\(item.itemID).\(item.revisionID).tractanda"
                 })
             XCTAssertEqual(record.path.withCString { chmod($0, mode_t(0o600)) }, 0)
             let handle = try FileHandle(forWritingTo: record)

@@ -208,12 +208,12 @@ final class ExternalIndexDirectoryTests: XCTestCase {
         let target = root.appendingPathComponent("identity-target")
         try PrivateConfiguration.write(Data("{}".utf8), to: target)
         try FileManager.default.createSymbolicLink(at: identity, withDestinationURL: target)
-        assertCode("privateConfiguration") { _ = try ItemStore(root: root) }
+        assertCode("unknownCanonicalCompatibility") { _ = try ItemStore(root: root) }
 
         try FileManager.default.removeItem(at: identity)
         try identityData.write(to: identity)
         try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: identity.path)
-        assertCode("privateConfiguration") { _ = try ItemStore(root: root) }
+        assertCode("unknownCanonicalCompatibility") { _ = try ItemStore(root: root) }
     }
 
     func testBoundV2IndexFailsClosedWhenCanonicalIdentityIsMissing() throws {
@@ -228,7 +228,9 @@ final class ExternalIndexDirectoryTests: XCTestCase {
         store = nil
         try FileManager.default.removeItem(at: identityURL(root))
 
-        assertCode("indexBindingMismatch") { _ = try ItemStore(root: root, indexDirectory: external) }
+        assertCode("unknownCanonicalCompatibility") {
+            _ = try ItemStore(root: root, indexDirectory: external)
+        }
         XCTAssertFalse(FileManager.default.fileExists(atPath: identityURL(root).path))
     }
 

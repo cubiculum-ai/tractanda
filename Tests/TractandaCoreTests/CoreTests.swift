@@ -454,7 +454,7 @@ final class CoreTests: XCTestCase {
         let first = try store!.commit(CommitRequest(classID: "Item", operationID: "first")).revision
         _ = try edit(store!, first, ["subject": .text("Second")])
         let firstPath = try XCTUnwrap(
-            files(root).first { $0.lastPathComponent == first.revisionID + ".tractanda" })
+            files(root).first { $0.lastPathComponent == "\(first.itemID).\(first.revisionID).tractanda" })
         // A competing canonical successor must be diagnosed, never chosen by filename/date.
         var fields = first.fields
         fields["supersedes"] = .text(first.revisionID)
@@ -467,7 +467,7 @@ final class CoreTests: XCTestCase {
         ).itemValue
         let branch = try Revision(fields: fields, formatVersion: 2)
         let branchPath = firstPath.deletingLastPathComponent().appendingPathComponent(
-            branch.revisionID + ".tractanda")
+            "\(branch.itemID).\(branch.revisionID).tractanda")
         try RecordCodec.encode(branch).write(to: branchPath)
         try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: branchPath.path)
         // Offline edits require an explicit full rebuild under the checkpoint trust policy.
@@ -585,9 +585,9 @@ final class CoreTests: XCTestCase {
         latestFields["modifiedAt"] = .date("2000-01-01T00:00:00Z")
         let latest = try Revision(fields: latestFields, formatVersion: writtenLatest.formatVersion)
         let firstPath = try XCTUnwrap(
-            files(root).first { $0.lastPathComponent == first.revisionID + ".tractanda" })
+            files(root).first { $0.lastPathComponent == "\(first.itemID).\(first.revisionID).tractanda" })
         let latestPath = try XCTUnwrap(
-            files(root).first { $0.lastPathComponent == latest.revisionID + ".tractanda" })
+            files(root).first { $0.lastPathComponent == "\(latest.itemID).\(latest.revisionID).tractanda" })
         try RecordCodec.encode(latest).write(to: latestPath, options: .atomic)
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o600], ofItemAtPath: latestPath.path)
@@ -660,7 +660,9 @@ final class CoreTests: XCTestCase {
                 classID: "Item", changes: ["subject": .text("nested")], operationID: "nested")
         ).revision
         let record = try XCTUnwrap(
-            files(root).first { $0.lastPathComponent == revision.revisionID + ".tractanda" })
+            files(root).first {
+                $0.lastPathComponent == "\(revision.itemID).\(revision.revisionID).tractanda"
+            })
         let nested = root.appendingPathComponent("items/archive", isDirectory: true)
         try FileManager.default.createDirectory(
             at: nested, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])

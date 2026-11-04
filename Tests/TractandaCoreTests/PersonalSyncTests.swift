@@ -536,7 +536,8 @@ final class PersonalSyncTests: XCTestCase {
         .writeImmutable(
             bytes,
             path: [
-                "items", "2026", "10", "25", "10", "00", revision.itemID, revision.revisionID + ".tractanda",
+                "items", "2026", "10", "25", "10", "00",
+                "\(revision.itemID).\(revision.revisionID).tractanda",
             ], maximumBytes: 1024 * 1024)
     }
 
@@ -1688,7 +1689,7 @@ final class PersonalSyncTests: XCTestCase {
                 CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid()))
             // Isolated fault-injection metadata only: exercise the first sync-fence raise again.
             let prior = CanonicalReaderRequirement(
-                storeID: current.storeID, minimumReaderLevel: 16,
+                storeID: current.storeID, minimumReaderLevel: current.minimumReaderLevel,
                 recordFormats: current.recordFormats,
                 capabilities: current.capabilities.filter {
                     $0 != PersonalSyncValidation.capability && $0 != RevisionProvenance.personalMergeProfile
@@ -1719,7 +1720,7 @@ final class PersonalSyncTests: XCTestCase {
             XCTAssertEqual((replies[0][1] as? [String: Any])?["type"] as? String, "serverPartialFail")
             let raised = try XCTUnwrap(CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid()))
             XCTAssertTrue(raised.capabilities.contains(PersonalSyncValidation.capability))
-            XCTAssertGreaterThanOrEqual(raised.minimumReaderLevel, 18)
+            XCTAssertEqual(raised.minimumReaderLevel, prior.minimumReaderLevel)
             pair.a.afterCanonicalReaderRequirementForTesting = nil
             pair.a.personalSyncAfterRevisionPublicationForTesting = nil
         }

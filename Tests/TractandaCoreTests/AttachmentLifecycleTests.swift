@@ -606,7 +606,7 @@ final class AttachmentLifecycleTests: XCTestCase {
             at: root.appendingPathComponent("items"), includingPropertiesForKeys: nil)
         var target: URL?
         while let url = records?.nextObject() as? URL {
-            if url.lastPathComponent == other.revisionID + ".tractanda" {
+            if url.lastPathComponent == "\(other.itemID).\(other.revisionID).tractanda" {
                 target = url
                 break
             }
@@ -649,6 +649,7 @@ final class AttachmentLifecycleTests: XCTestCase {
             try? FileManager.default.removeItem(at: root)
             try? FileManager.default.removeItem(at: alias)
         }
+        _ = try AttachmentFixtureCapacity.makeStore(root: root)
         let originals = root.appendingPathComponent("attachments/payloads", isDirectory: true)
         try FileManager.default.createDirectory(
             at: originals, withIntermediateDirectories: true,

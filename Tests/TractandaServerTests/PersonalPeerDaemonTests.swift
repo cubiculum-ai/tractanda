@@ -412,7 +412,9 @@ final class PersonalPeerDaemonTests: XCTestCase, @unchecked Sendable {
                 }
                 try files.writeImmutable(
                     bytes,
-                    path: ["items", "2026", "10", "25", "10", "00", itemID, revisionID + ".tractanda"],
+                    path: [
+                        "items", "2026", "10", "25", "10", "00", itemID + "." + revisionID + ".tractanda",
+                    ],
                     maximumBytes: 4096)
                 previous = revision
             }

@@ -14,6 +14,7 @@ final class Version1UUIDTests: XCTestCase {
     private func seedOriginalStoreIdentity(root: URL) throws {
         try FileManager.default.createDirectory(
             at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try CanonicalPhysicalLayout.prepareOpening(root, ownerUID: tractanda_uid())
         let storeID = try UUID.makeVersion1().uuidString.lowercased()
         let identityURL = root.appendingPathComponent(".tractanda-store-identity.json")
         try PrivateConfiguration.write(
@@ -244,6 +245,6 @@ final class Version1UUIDTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: published.file), published.bytes)
         XCTAssertEqual(
             try FileManager.default.contentsOfDirectory(atPath: published.directory.path),
-            [oldRevisionID + ".tractanda"])
+            ["\(oldItemID).\(oldRevisionID).tractanda"])
     }
 }

@@ -77,7 +77,7 @@ final class DocumentPlacementTests: XCTestCase {
             "A valid derived lookup or final miss must not enumerate canonical document archives")
     }
 
-    func testPlacementPublicationAdvancesReaderFloorAndGatesOldReader() throws {
+    func testPlacementPublicationAddsRequiredCapabilityAndGatesOldReader() throws {
         let (root, store, source) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
         let writer = try store.begin(source: source, identity: .init())
@@ -85,7 +85,8 @@ final class DocumentPlacementTests: XCTestCase {
 
         let storeID = try CanonicalReaderRequirement.storeIdentity(root: root, ownerUID: getuid())
         let oldReader = CanonicalFormatSupport(
-            readerLevel: 9, writerLevel: 9, read: [1, 2], write: [2],
+            readerLevel: CanonicalFormatSupport.current.readerLevel,
+            writerLevel: CanonicalFormatSupport.current.writerLevel, read: [1, 2], write: [2],
             capabilities: CanonicalFormatSupport.current.capabilities.filter {
                 $0 != "tractanda.document-placement.v1" && $0 != AtomicAuthorityCompatibility.capability
             },
@@ -98,9 +99,10 @@ final class DocumentPlacementTests: XCTestCase {
         try PrivateConfiguration.write(
             JSON.encode(requirement), to: root.appendingPathComponent(CanonicalReaderRequirement.fileName))
 
+        XCTAssertNoThrow(try oldReader.require(requirement))
         store.beforeDirectoryPublicationForTesting = {
             let raised = try XCTUnwrap(CanonicalReaderRequirement.load(root: root, ownerUID: getuid()))
-            XCTAssertGreaterThanOrEqual(raised.minimumReaderLevel, 10)
+            XCTAssertEqual(raised.minimumReaderLevel, requirement.minimumReaderLevel)
             XCTAssertTrue(raised.capabilities.contains("tractanda.document-placement.v1"))
             XCTAssertThrowsError(try oldReader.require(raised)) {
                 XCTAssertEqual(($0 as? TractandaError)?.code, "incompatibleCanonicalReader")
@@ -109,7 +111,7 @@ final class DocumentPlacementTests: XCTestCase {
 
         let reference = try writer.publish()
         let retained = try XCTUnwrap(CanonicalReaderRequirement.load(root: root, ownerUID: getuid()))
-        XCTAssertGreaterThanOrEqual(retained.minimumReaderLevel, 10)
+        XCTAssertEqual(retained.minimumReaderLevel, requirement.minimumReaderLevel)
         XCTAssertTrue(retained.capabilities.contains("tractanda.document-placement.v1"))
         XCTAssertEqual(try store.readPage(reference, pageNumber: 1).pageNumber, 1)
     }

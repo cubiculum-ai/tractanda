@@ -524,7 +524,7 @@ final class SetupPackageLifecycleTests: XCTestCase {
         let original = try f.engine.installedPackageCompatibility()
         XCTAssertEqual(try f.engine.compatibilityOfInstalledUpgradeSource(), original)
         XCTAssertNoThrow(try f.hook(.preflight, original))
-        let (incoming, bytes) = try f.next("0.1.0-poc.17")
+        let (incoming, bytes) = try f.next("0.1.0-poc.16.2")
         _ = try f.hook(.preinst, incoming)
         try bytes.write(to: f.manifestURL)  // actual simulated dpkg unpack
         XCTAssertTrue(try f.hook(.configure, incoming).contains("0 verified restart"))
@@ -645,7 +645,7 @@ final class SetupPackageLifecycleTests: XCTestCase {
         let f = try fixture()
         try f.configureFresh()
         try f.install()
-        let (incoming, bytes) = try f.next("0.1.0-poc.17")
+        let (incoming, bytes) = try f.next("0.1.0-poc.16.2")
         _ = try f.hook(.prermUpgrade)  // actual old prerm stop-only contract
         var retained = try XCTUnwrap(f.engine.readPackageState())
         let (rejectedEarlier, _) = try f.next("0.1.0-poc.16.1")
@@ -949,7 +949,7 @@ final class SetupPackageLifecycleTests: XCTestCase {
         XCTAssertEqual(try f.engine.readPackageState()?.phase, .committed)
     }
 
-    func testOlderDebCannotReplaceFailedPayloadWhenActualCanonicalFloorHasAdvanced() throws {
+    func testOlderDebCannotReplaceFailedPayloadWhenActualCanonicalRequirementHasAdvanced() throws {
         let f = try fixture()
         try f.configureFresh()
         try f.install()
@@ -957,8 +957,7 @@ final class SetupPackageLifecycleTests: XCTestCase {
         let receipt = try XCTUnwrap(f.engine.readReceipt("a"))
         let store = URL(fileURLWithPath: receipt.store)
         let before = try XCTUnwrap(CanonicalReaderRequirement.load(root: store, ownerUID: getuid()))
-        XCTAssertEqual(before.minimumReaderLevel, PersonalWorkgroupProfile.readerLevel)
-        XCTAssertLessThan(before.minimumReaderLevel, CanonicalFormatSupport.personalWorkgroup.readerLevel)
+        XCTAssertFalse(before.capabilities.contains(PersonalSyncValidation.capability))
         let olderSupport = CanonicalFormatSupport(
             readerLevel: before.minimumReaderLevel, writerLevel: before.minimumReaderLevel,
             read: before.recordFormats, write: before.recordFormats,
@@ -972,8 +971,8 @@ final class SetupPackageLifecycleTests: XCTestCase {
             manifestSHA256: Fixture.digest(try JSONEncoder().encode(previousManifest)),
             version: previousManifest.version, arch: current.arch, canonicalFormats: olderSupport)
         let captured = try f.engine.preparePackageUpgrade(incoming: current)
-        // Explicit failed-after-unpack recovery fixture: original reader was admitted at the real
-        // captured floor, actual bytes now support current, and the original running intent survives.
+        // Explicit failed-after-unpack recovery fixture: original reader was admitted for the real
+        // captured requirement, actual bytes now support current, and the original running intent survives.
         var failed = try SetupPackageState(original: older, instances: captured.instances)
         failed.incoming = current
         failed.observed = current
@@ -985,7 +984,7 @@ final class SetupPackageLifecycleTests: XCTestCase {
         }
         let raised = try XCTUnwrap(CanonicalReaderRequirement.load(root: store, ownerUID: getuid()))
         XCTAssertEqual(raised.minimumReaderLevel, CanonicalFormatSupport.personalWorkgroup.readerLevel)
-        XCTAssertGreaterThan(raised.minimumReaderLevel, before.minimumReaderLevel)
+        XCTAssertEqual(raised.minimumReaderLevel, before.minimumReaderLevel)
         XCTAssertEqual(raised.storeID, before.storeID)
         XCTAssertTrue(Set(before.capabilities).isSubset(of: Set(raised.capabilities)))
         XCTAssertTrue(raised.capabilities.contains(PersonalSyncValidation.capability))

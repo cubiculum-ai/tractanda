@@ -210,7 +210,7 @@ final class LazyHistoryTests: XCTestCase {
             FileManager.default.enumerator(at: items, includingPropertiesForKeys: nil)?
             .allObjects as? [URL] ?? []
         let record = try XCTUnwrap(
-            recordURLs.first { $0.lastPathComponent == current.revisionID + ".tractanda" })
+            recordURLs.first { $0.lastPathComponent == "\(current.itemID).\(current.revisionID).tractanda" })
         XCTAssertEqual(record.path.withCString { chmod($0, mode_t(0o600)) }, 0)
         do {
             let handle = try FileHandle(forWritingTo: record)

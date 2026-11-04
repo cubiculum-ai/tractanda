@@ -91,8 +91,8 @@ final class PeerRetirementTimeIndexTests: XCTestCase {
                 "INSERT INTO authority_review_event VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 [d, sha, item, b, sha, b, sha, "reviewDecision", c, sha, b, sha])
             try index.execute(
-                "INSERT INTO authority_review_applied VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                [d, sha, c, sha, b, sha, origin, "admin", "fixture", "", "0"])
+                "INSERT INTO authority_review_applied(decision,sha256,revision,digest,control,control_digest,origin,actor,operation,recovery) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                [d, sha, c, sha, b, sha, origin, "admin", "fixture", "0"])
             XCTAssertFalse(
                 try PeerLifecycle.revisionIsRemoved(
                     revisionID: c, effectiveAt: "2026-10-15T12:00:00.0000000Z"))

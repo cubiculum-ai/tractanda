@@ -755,7 +755,7 @@ final class SetupLayoutMigrationTests: XCTestCase {
                 let identity = try store.personalSyncIdentity()
                 return (revision.itemID, revision.revisionID, identity.storeID, identity.replicaID)
             }()
-            let (incoming, incomingManifest) = try package.next("0.1.0-poc.17")
+            let (incoming, incomingManifest) = try package.next("0.1.0-poc.16.2")
             _ = try package.hook(.prermUpgrade)
             _ = try package.hook(.preinst, incoming)
             try incomingManifest.write(to: package.manifestURL)

@@ -588,7 +588,9 @@ final class CheckpointTests: XCTestCase {
         let file = try XCTUnwrap(
             FileManager.default.enumerator(
                 at: root.appendingPathComponent("items"), includingPropertiesForKeys: nil)?.allObjects
-                .compactMap { $0 as? URL }.first { $0.lastPathComponent == item.revisionID + ".tractanda" })
+                .compactMap { $0 as? URL }.first {
+                    $0.lastPathComponent == "\(item.itemID).\(item.revisionID).tractanda"
+                })
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
         try Data("corrupt".utf8).write(to: file)
         XCTAssertThrowsError(try store.rebuildIndex())
@@ -633,7 +635,8 @@ final class CheckpointTests: XCTestCase {
             FileManager.default.enumerator(
                 at: root.appendingPathComponent("items"), includingPropertiesForKeys: nil)?.allObjects
                 .compactMap { $0 as? URL }.first {
-                    $0.lastPathComponent == configured.revision.revisionID + ".tractanda"
+                    $0.lastPathComponent
+                        == "\(configured.revision.itemID).\(configured.revision.revisionID).tractanda"
                 })
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
         try Data("corrupt configuration".utf8).write(to: file)

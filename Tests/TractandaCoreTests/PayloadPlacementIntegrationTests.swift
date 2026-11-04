@@ -36,7 +36,7 @@ final class PayloadPlacementIntegrationTests: XCTestCase {
             (revision, descriptor) = try attach(store)
             let required = try XCTUnwrap(
                 CanonicalReaderRequirement.load(root: root, ownerUID: UInt32(getuid())))
-            XCTAssertEqual(required.minimumReaderLevel, 8)
+            XCTAssertEqual(required.minimumReaderLevel, CanonicalFormatSupport.personalWorkgroup.readerLevel)
             XCTAssertTrue(required.capabilities.contains(PayloadPlacement.capability))
             XCTAssertFalse(required.capabilities.contains(AuthorityStore.capability))
         }
