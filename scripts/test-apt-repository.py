@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Signed repository fixture checks; keys are ephemeral and never used in production."""
+import hashlib
 import importlib.util
 import io
 import os
@@ -17,12 +18,16 @@ A = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(A)
 
 
-def deb(path, arch, version='0.1.0~poc.16-1'):
+def deb(path, arch, version='0.1.0~poc.16-1', extra_control=()):
     control = f'Package: tractanda\nVersion: {version}\nArchitecture: {arch}\nMaintainer: Test <test@example.invalid>\nDescription: Private package fixture\n'.encode()
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode='w:xz') as stream:
         entry = tarfile.TarInfo('./control'); entry.size = len(control)
         stream.addfile(entry, io.BytesIO(control))
+        for name, payload in extra_control:
+            entry = tarfile.TarInfo('./' + name)
+            entry.size = len(payload)
+            stream.addfile(entry, io.BytesIO(payload))
     with path.open('wb') as stream:
         stream.write(b'!<arch>\n')
         for name, raw in (('debian-binary', b'2.0\n'), ('control.tar.xz', buffer.getvalue())):
@@ -30,6 +35,53 @@ def deb(path, arch, version='0.1.0~poc.16-1'):
             stream.write(raw)
             if len(raw) % 2: stream.write(b'\n')
     return path
+
+
+class ControlArchiveTests(unittest.TestCase):
+    def test_only_the_layout_inspector_may_exceed_ordinary_control_limit(self):
+        payload = hashlib.shake_256(b'bounded fixture control inspector').digest(5 * 1024**2)
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            accepted = deb(directory / 'accepted.deb', 'amd64', '0.1.0~poc.17-1',
+                           [('layout17-inspector.tar', payload)])
+            self.assertGreater(accepted.stat().st_size, A.CONTROL_METADATA_LIMIT)
+            self.assertEqual(A.package(accepted)[1]['Version'], '0.1.0~poc.17-1')
+            refused = deb(directory / 'refused.deb', 'amd64', extra_control=[('other', b'0' * (5 * 1024**2))])
+            with self.assertRaisesRegex(ValueError, 'ordinary Debian control metadata'):
+                A.package(refused)
+
+    def test_expanded_budget_and_inspector_version_are_checked(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            ordinary = deb(directory / 'ordinary.deb', 'amd64')
+            with patch.object(A, 'CONTROL_STREAM_LIMIT', 8 * 1024):
+                with self.assertRaisesRegex(ValueError, 'Expanded Debian control archive'):
+                    A.package(ordinary)
+            foreign = deb(directory / 'foreign.deb', 'arm64', extra_control=[('layout17-inspector.tar', b'test')])
+            with self.assertRaisesRegex(ValueError, 'poc.17 bridge'):
+                A.package(foreign)
+
+    def test_oversized_inspector_and_unsafe_paths_are_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            oversized = deb(directory / 'oversized.deb', 'amd64', '0.1.0~poc.17-1',
+                            [('layout17-inspector.tar', b'12345')])
+            with patch.object(A, 'CONTROL_INSPECTOR_LIMIT', 4):
+                with self.assertRaisesRegex(ValueError, 'inspector member'):
+                    A.package(oversized)
+            unsafe = deb(directory / 'unsafe.deb', 'arm64', extra_control=[('../unexpected', b'x')])
+            with self.assertRaisesRegex(ValueError, 'Unsafe repository path'):
+                A.package(unsafe)
+
+    def test_duplicate_control_or_inspector_remains_invalid(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            for name, members in (
+                ('duplicate-control', [('control', b'duplicate')]),
+                ('duplicate-inspector', [('layout17-inspector.tar', b'first'), ('layout17-inspector.tar', b'second')]),
+            ):
+                with self.subTest(name=name), self.assertRaises(ValueError):
+                    A.package(deb(directory / (name + '.deb'), 'arm64', extra_control=members))
 
 
 class RepositoryTests(unittest.TestCase):

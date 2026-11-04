@@ -5,10 +5,12 @@ The signing key stays in the caller's private GNUPGHOME or existing GPG agent.
 Only the exported public key, signed metadata and package bytes enter the site.
 """
 import argparse
+import bz2
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 import email.utils
+import gzip
 import hashlib
-import io
 import json
 import lzma
 import os
@@ -21,6 +23,10 @@ import tarfile
 
 ARCHES = ('amd64', 'arm64')
 SITE_LIMIT = 950 * 1024**2  # Includes manual, signatures and metadata below Pages' 1 GB cap.
+CONTROL_METADATA_LIMIT = 4 * 1024**2
+CONTROL_INSPECTOR_LIMIT = 128 * 1024**2
+CONTROL_XZ_MEMORY_LIMIT = 128 * 1024**2
+CONTROL_STREAM_LIMIT = CONTROL_METADATA_LIMIT + CONTROL_INSPECTOR_LIMIT + 1024**2
 
 
 def run(args, **kwargs):
@@ -60,6 +66,95 @@ def safe_relative(name):
     return path
 
 
+class _ControlInput:
+    def __init__(self, stream, limit, *, exact=False):
+        self.stream = stream
+        self.remaining = limit
+        self.exact = exact
+
+    def read(self, size=-1):
+        if size == 0:
+            return b""
+        if self.remaining == 0:
+            if not self.exact:
+                require(not self.stream.read(1), "Expanded Debian control archive exceeds its bound")
+            return b""
+        amount = self.remaining if size < 0 else min(self.remaining, size)
+        data = self.stream.read(amount)
+        require(not self.exact or len(data) == amount, "Truncated Debian control archive")
+        self.remaining -= len(data)
+        return data
+
+
+class _XZControlInput:
+    def __init__(self, frame):
+        self.frame = frame
+        self.decoder = lzma.LZMADecompressor(format=lzma.FORMAT_XZ, memlimit=CONTROL_XZ_MEMORY_LIMIT)
+
+    def read(self, size):
+        chunks = []
+        while size > 0 and not self.decoder.eof:
+            if self.decoder.needs_input:
+                compressed = self.frame.read(64 * 1024)
+                require(bool(compressed), "Truncated Debian XZ control archive")
+            else:
+                compressed = b""
+            chunk = self.decoder.decompress(compressed, max_length=size)
+            chunks.append(chunk)
+            size -= len(chunk)
+        if self.decoder.eof:
+            require(not self.decoder.unused_data and self.frame.remaining == 0,
+                    "Unexpected bytes after Debian XZ control archive")
+        return b"".join(chunks)
+
+
+def _control_text(stream, archive_name, size):
+    require(0 < size <= CONTROL_STREAM_LIMIT, "Unbounded Debian control archive")
+    frame = _ControlInput(stream, size, exact=True)
+    readers = {
+        "control.tar": lambda: nullcontext(frame),
+        "control.tar.xz": lambda: nullcontext(_XZControlInput(frame)),
+        "control.tar.gz": lambda: gzip.GzipFile(fileobj=frame),
+        "control.tar.bz2": lambda: bz2.BZ2File(frame),
+    }
+    require(archive_name in readers, "Unsupported Debian control archive")
+    control = None
+    inspector = False
+    metadata_size = 0
+    seen = set()
+    with readers[archive_name]() as decoded:
+        bounded = _ControlInput(decoded, CONTROL_STREAM_LIMIT)
+        with tarfile.open(fileobj=bounded, mode="r|") as archive:
+            for count, member in enumerate(archive, 1):
+                require(count <= 64, "Too many Debian control archive entries")
+                name = member.name.removeprefix("./")
+                if member.isdir() and member.name in (".", "./"):
+                    require(member.size == 0, "Invalid Debian control directory")
+                    continue
+                require(safe_relative(name).as_posix() == name and name not in seen,
+                        "Duplicate or noncanonical Debian control path")
+                seen.add(name)
+                if member.isdir():
+                    require(member.size == 0, "Invalid Debian control directory")
+                    continue
+                require(member.isfile() and member.size >= 0, "Invalid Debian control archive member")
+                if name == "layout17-inspector.tar":
+                    require(not inspector and 0 < member.size <= CONTROL_INSPECTOR_LIMIT,
+                            "Invalid Debian layout inspector member")
+                    inspector = True
+                    continue
+                metadata_size += member.size
+                require(metadata_size <= CONTROL_METADATA_LIMIT, "Unbounded ordinary Debian control metadata")
+                if name == "control":
+                    require(control is None and 0 < member.size < 1024**2, "Invalid Debian control member")
+                    control = archive.extractfile(member).read().decode()
+        while bounded.read(64 * 1024):
+            pass
+    require(control is not None, "Missing Debian control member")
+    require(inspector or size <= CONTROL_METADATA_LIMIT, "Unbounded Debian control archive")
+    return control, inspector
+
+
 def package(path):
     path = Path(path).resolve(strict=True)
     require(path.is_file() and not path.is_symlink(), 'Regular Debian package required')
@@ -73,13 +168,8 @@ def package(path):
             name, size = header[:16].decode().strip().rstrip('/'), int(header[48:58])
             require(0 <= size < 2**31, 'Unbounded ar member')
             if name.startswith('control.tar'):
-                require(size <= 4 * 1024**2, 'Unbounded Debian control archive')
-                raw = stream.read(size)
-                with tarfile.open(fileobj=io.BytesIO(raw), mode='r:*') as archive:
-                    entries = [m for m in archive.getmembers() if m.name.lstrip('./') == 'control']
-                    require(len(entries) == 1 and entries[0].isfile() and entries[0].size < 1024**2,
-                            'Invalid Debian control member')
-                    control = archive.extractfile(entries[0]).read().decode()
+                require(size <= os.fstat(stream.fileno()).st_size - stream.tell(), 'Truncated Debian control archive')
+                control, inspector = _control_text(stream, name, size)
                 break
             stream.seek(size + size % 2, 1)
     require(control is not None, 'Missing Debian control archive')
@@ -87,6 +177,8 @@ def package(path):
     require(fields.get('Package') == 'tractanda' and fields.get('Architecture') in ARCHES,
             'Only Tractanda amd64/arm64 packages are admitted')
     require(re.fullmatch(r'[0-9][A-Za-z0-9.+~:-]*', fields.get('Version', '')), 'Invalid Debian version')
+    require(not inspector or re.fullmatch(r"0\.1\.0~poc\.17-[1-9][0-9A-Za-z.+]*", fields["Version"]),
+            "The large layout inspector belongs only to the poc.17 bridge")
     name = f"tractanda_{fields['Version'].replace(':', '%3a')}_{fields['Architecture']}.deb"
     require('%' not in name, 'Epoch versions require an explicit repository naming policy')
     return path, fields, 'pool/main/t/tractanda/' + name
