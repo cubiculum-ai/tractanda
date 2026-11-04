@@ -1856,7 +1856,7 @@ public final class ItemStore {
                 try ensureDirectory(self.root.appendingPathComponent("items"))
                 try CanonicalReaderRequirement.beforeTargetEnrollmentPublication(
                     root: self.root, ownerUID: ownerUID, support: canonicalFormatSupport)
-                if targetProvisioningPending, canonicalFormatSupport.writerLevel >= 15 {
+                if targetProvisioningPending, canWriteAtomicAuthority {
                     guard let prior = try CanonicalReaderRequirement.load(root: self.root, ownerUID: ownerUID)
                     else {
                         throw PeerEnrollmentActivation.failure(
@@ -7947,7 +7947,7 @@ extension ItemStore {
     func beginPeerIntake(context: PeerPackage.Context, manifestBytes: Data) throws -> PeerPackage.Status {
         try requireAuthorityWriterActivation()
         let coordinator = try requirePeerIntake()
-        if canonicalFormatSupport.writerLevel >= 15, targetProvisioningScope == nil,
+        if canWriteAtomicAuthority, targetProvisioningScope == nil,
             try coordinator.configuration()?.bootstrap == nil
         {
             throw TractandaError(
@@ -12309,7 +12309,7 @@ extension ItemStore {
             try CanonicalReaderRequirement.beforeAuthorityPublication(
                 root: root, ownerUID: ownerUID, support: canonicalFormatSupport)
             let old = try coordinator.configuration()
-            if old?.bootstrap == nil, canonicalFormatSupport.writerLevel >= 15 {
+            if old?.bootstrap == nil, canWriteAtomicAuthority {
                 // FIRST fully validated baseline admission only. Existing configured stores
                 // hit the read-only barrier above and require coordinated explicit activation.
                 guard let prior = try CanonicalReaderRequirement.load(root: root, ownerUID: ownerUID) else {
@@ -15263,10 +15263,14 @@ extension ItemStore {
         }
         return result
     }
+    private var canWriteAtomicAuthority: Bool {
+        canonicalFormatSupport.writeCapabilities.contains(AtomicAuthorityFormat.profile)
+    }
+
     /// A new reader can inspect an established old-format authority store, but it cannot
     /// append old controls or complete canonical work until explicit coordinated activation.
     private func requiresAtomicAuthorityActivation() throws -> Bool {
-        guard authorityIntakeEnabled, canonicalFormatSupport.writerLevel >= 15,
+        guard authorityIntakeEnabled, canWriteAtomicAuthority,
             let requirement = try CanonicalReaderRequirement.load(root: root, ownerUID: ownerUID),
             requirement.capabilities.contains(AuthorityStore.capability),
             try peerIntake?.configuration()?.bootstrap != nil
@@ -15287,7 +15291,7 @@ extension ItemStore {
         try requireAuthorityWriterActivation()
         if personalProfile != nil { try requirePersonalWriteCapacity() }
         guard authorityIntakeEnabled, let origin = replicaID, let index else { return }
-        if canonicalFormatSupport.writerLevel >= 15, try peerIntake?.configuration()?.bootstrap == nil {
+        if canWriteAtomicAuthority, try peerIntake?.configuration()?.bootstrap == nil {
             throw TractandaError(
                 "authorityBootstrapRequired",
                 "Initialize a verified canonical baseline before ordinary authority publication.")
@@ -17077,7 +17081,7 @@ extension ItemStore {
                     return done
                 }
                 try requireProvisioningClosure(record.baseline, context: record.targetContext)
-                if canonicalFormatSupport.writerLevel >= 15,
+                if canWriteAtomicAuthority,
                     try c.configuration(readBudget: c.admissionReadBudget())?.bootstrap == nil,
                     let physical = atomicReceiveWork[record.baseline.packageID], physical.prepared
                 {

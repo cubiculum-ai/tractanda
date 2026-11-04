@@ -63,7 +63,7 @@ enum CanonicalPhysicalLayout {
         )
     }
 
-    private static func load(_ root: URL, ownerUID: UInt32) throws -> Bool {
+    static func load(_ root: URL, ownerUID: UInt32) throws -> Bool {
         guard
             let bytes = try CanonicalReaderRequirement.localConfigurationBytes(
                 root: root, name: fileName, ownerUID: ownerUID, maximumBytes: 4096)

@@ -179,6 +179,10 @@ final class InitialAuthorityBootstrapTests: XCTestCase {
         let prepared = try directory()
         defer { try? FileManager.default.removeItem(at: prepared) }
         _ = try PeerEnrollment.prepareTarget(root: prepared, commonStoreID: id(), sourceReplicaID: id())
+        // Preparation verified this test target was empty before retaining its private receipt.
+        try CanonicalReaderRequirement.withWriterLock(root: prepared, ownerUID: tractanda_uid()) {
+            try CanonicalPhysicalLayout.completeSelectedContent(prepared, ownerUID: tractanda_uid())
+        }
         XCTAssertThrowsError(try create(prepared, operation: id())) {
             XCTAssertEqual(($0 as? TractandaError)?.code, "enrollmentPending")
         }

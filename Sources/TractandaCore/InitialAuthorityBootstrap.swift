@@ -370,6 +370,11 @@ enum InitialAuthorityBootstrap {
         }
         // Before any Store identity, directory or bootstrap may be created, reject all foreign state.
         try POSIXDirectory.withEntries(at: root) { name in
+            if name == CanonicalPhysicalLayout.fileName,
+                try CanonicalPhysicalLayout.load(root, ownerUID: ownerUID)
+            {
+                return true
+            }
             guard name == ".writer.lock" else {
                 throw failure("Fresh creation needs an empty dedicated root.")
             }

@@ -87,24 +87,17 @@ final class PeerIntakeStoreTests: XCTestCase {
                         ], operationID: "create")
                 ).revision
             }
+            let requirement = try XCTUnwrap(
+                CanonicalReaderRequirement.load(root: sourceRoot, ownerUID: tractanda_uid()))
+            XCTAssertEqual(requirement.minimumReaderLevel, CanonicalFormatSupport.current.readerLevel)
+            XCTAssertFalse(requirement.capabilities.contains(AtomicAuthorityFormat.profile))
             origin = try XCTUnwrap(base.provenance).originReplicaID
             let identityName = ".tractanda-store-identity.json"
             let identity = try Data(contentsOf: sourceRoot.appendingPathComponent(identityName))
             let value = try JSONSerialization.jsonObject(with: identity) as! [String: Any]
             storeID = try XCTUnwrap(value["storeID"] as? String)
-            // Explicit fixture clone joins with the same logical StoreID and a fresh local
-            // ReplicaID. No existing receiver content or identity is discarded.
-            receiver = try ItemStore(
-                root: receiverRoot, accounts: receiverAccounts, revisionProjectionEnabled: true)
-            guard try receiver.exportCatalogueForVerification().isEmpty else {
-                throw TractandaError("fixture", "Join requires an empty fixture")
-            }
-            receiver = nil
-            try identity.write(to: receiverRoot.appendingPathComponent(identityName), options: .atomic)
-            try FileManager.default.setAttributes(
-                [.posixPermissions: 0o600],
-                ofItemAtPath: receiverRoot.appendingPathComponent(identityName).path)
-            try FileManager.default.removeItem(at: receiverRoot.appendingPathComponent("index"))
+            // Select the shared StoreID before opening this empty private fixture.
+            try Self.seedSharedReplica(receiverRoot, identity: identity)
             receiver = try Self.open(receiverRoot, receiverAccounts)
             context = try PeerPackage.Context(
                 peerID: "raven", storeID: storeID,
@@ -126,15 +119,27 @@ final class PeerIntakeStoreTests: XCTestCase {
             else { return false }
             return target.revisionID == revisionID
         }
-        // Historical14 input fixture: deliberately authors standalone pre-bootstrap history.
-        // Actual15 factory/enrollment/replication use their separate native initialized fixtures.
+        // Exercise retained non-atomic authority behavior with the current
+        // physical layout and record encoding. Atomic publication is absent.
         static var historical14Support: CanonicalFormatSupport {
-            let capabilities = CanonicalFormatSupport.current.capabilities.filter {
-                $0 != AtomicAuthorityFormat.profile
-            }
+            let current = CanonicalFormatSupport.current
+            let capabilities = current.capabilities.filter { $0 != AtomicAuthorityFormat.profile }
             return .init(
-                readerLevel: 14, writerLevel: 14, read: [1, 2], write: [2],
+                readerLevel: current.readerLevel, writerLevel: current.writerLevel,
+                read: current.read, write: current.write,
                 capabilities: capabilities, writeCapabilities: capabilities)
+        }
+        private static func seedSharedReplica(_ root: URL, identity: Data) throws {
+            try FileManager.default.createDirectory(
+                at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            let writer = tractanda_lock(root.appendingPathComponent(".writer.lock").path)
+            guard writer >= 0 else {
+                throw TractandaError("fixture", "Could not lock the empty test replica")
+            }
+            defer { tractanda_unlock(writer) }
+            try CanonicalPhysicalLayout.prepareOpening(root, ownerUID: tractanda_uid())
+            try PrivateConfiguration.write(
+                identity, to: root.appendingPathComponent(".tractanda-store-identity.json"))
         }
         static func open(_ root: URL, _ accounts: Accounts) throws -> ItemStore {
             try AttachmentFixtureCapacity.requireFree()
@@ -149,11 +154,9 @@ final class PeerIntakeStoreTests: XCTestCase {
                 !(try FileManager.default.contentsOfDirectory(atPath: directory.path))
                     .contains(root.lastPathComponent)
             else { throw TractandaError("fixture", "Shared replica requires a new direct child root.") }
-            try FileManager.default.createDirectory(
-                at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
             let identityName = ".tractanda-store-identity.json"
             let original = try Data(contentsOf: sourceRoot.appendingPathComponent(identityName))
-            try PrivateConfiguration.write(original, to: root.appendingPathComponent(identityName))
+            try Self.seedSharedReplica(root, identity: original)
             let store = try Self.open(root, accounts)
             XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(identityName)), original)
             XCTAssertNotNil(store.replicaID)

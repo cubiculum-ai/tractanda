@@ -7,8 +7,7 @@ extension PeerIntakeCoordinator {
         guard let value = try CanonicalReaderRequirement.load(root: root, ownerUID: ownerUID) else {
             return false
         }
-        guard value.minimumReaderLevel >= 15 || value.capabilities.contains(AtomicAuthorityFormat.profile)
-        else { return false }
+        guard value.capabilities.contains(AtomicAuthorityFormat.profile) else { return false }
         try requireAtomicCanonicalActivation()
         return true
     }
