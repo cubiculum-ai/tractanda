@@ -18725,6 +18725,12 @@ extension ItemStore {
         }
         let revision = try RecordCodec.decode(bytes)
         try ItemSemantics.validate(revision)
+        try personalVerifyRevisionIdentity(revision, descriptor: descriptor)
+        return (bytes, revision)
+    }
+    private func personalVerifyRevisionIdentity(_ revision: Revision, descriptor: PersonalObjectDescriptor)
+        throws
+    {
         let parents = try revision.provenance?.parents ?? revision.supersedes.map { [$0] } ?? []
         guard revision.itemID == descriptor.itemID, revision.revisionID == descriptor.id,
             parents == descriptor.parentRevisionIDs
@@ -18732,7 +18738,6 @@ extension ItemStore {
             throw TractandaError(
                 "peerObjectCollision", "Revision bytes do not bind the requested identity and ancestry.")
         }
-        return (bytes, revision)
     }
     private func personalRows(_ itemID: String) throws -> [ItemIndex.CatalogueRow] {
         guard let index else {
@@ -19554,6 +19559,9 @@ extension ItemStore {
         guard let index, let account = accessContext?.account,
             var review = try personalIncomingReviews().first(where: { $0.reviewID == reviewID })
         else { throw TractandaError("notFound", "Pending incoming review is unavailable.") }
+        guard review.descriptor.kind == .revision, let itemID = review.descriptor.itemID else {
+            throw TractandaError("invalidPersonalObject", "A retained review must name a revision.")
+        }
         let operationID = "personal-review:" + reviewID
         let identity = try JSON.encode(
             [
@@ -19575,7 +19583,7 @@ extension ItemStore {
                 revision: prior, wasReplayed: true, isIndexReady: true, warnings: [],
                 itemState: try itemState(prior.itemID))
         }
-        let current = try index.currentProjection(itemID: review.descriptor.itemID!)?.state
+        let current = try index.currentProjection(itemID: itemID)?.state
         if let expectedStateToken {
             guard current?.stateToken == expectedStateToken else {
                 throw TractandaError(
@@ -19587,8 +19595,33 @@ extension ItemStore {
                     "stateConflict", "Review context changed; supply the refreshed current state token.")
             }
         }
-        let (bytes, incoming) = try personalRawRevision(review.descriptor)
-        let (graph, revisions) = try personalGraph(incoming.itemID, adding: incoming)
+        let incoming: Revision
+        let stagedBytes: Data?
+        if let row = try index.revision(review.descriptor.id) {
+            // Ordinary peer admission may have published this exact revision and
+            // retired its private stage while retaining the operator's review.
+            guard try personalDescriptor(row) == review.descriptor else {
+                throw TractandaError(
+                    "peerObjectCollision", "Review descriptor differs from the canonical revision.")
+            }
+            let verified = try PooledCanonicalRecord.read(row: row, root: root, ownerUID: ownerUID)
+            guard verified.metadata.size == UInt64(review.descriptor.byteCount) else {
+                throw PooledCanonicalRecordError.digestMismatch
+            }
+            try personalVerifyRevisionIdentity(verified.revision, descriptor: review.descriptor)
+            // A missing binding is normal after retirement. An existing binding still
+            // commits to a complete stage and must not hide missing or corrupt bytes.
+            if try personalStage(review.descriptor, create: false) != nil {
+                _ = try personalRawRevision(review.descriptor)
+            }
+            incoming = verified.revision
+            stagedBytes = nil
+        } else {
+            let (bytes, revision) = try personalRawRevision(review.descriptor)
+            incoming = revision
+            stagedBytes = bytes
+        }
+        let (graph, revisions) = try personalGraph(itemID, adding: stagedBytes == nil ? nil : incoming)
         let resolution = try personalResolutionRevision(
             itemID: incoming.itemID, graph: graph, revisions: revisions,
             changes: changes, unset: unset, operationID: operationID, identity: identity,
@@ -19598,7 +19631,7 @@ extension ItemStore {
         try index.execute("BEGIN IMMEDIATE")
         var transactionOpen = true
         do {
-            if try index.revision(incoming.revisionID) == nil {
+            if let bytes = stagedBytes, try index.revision(incoming.revisionID) == nil {
                 let row = try personalPublishBytes(bytes, revision: incoming)
                 try index.insertGraphCatalogueRow(row, graphFields: incoming.fields)
             }

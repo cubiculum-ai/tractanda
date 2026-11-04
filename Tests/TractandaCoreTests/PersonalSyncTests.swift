@@ -1400,6 +1400,170 @@ final class PersonalSyncTests: XCTestCase {
         }
     }
 
+    func testCanonicalBackedReviewSurvivesPeerRetirementAndIndexRebuild() throws {
+        try fixture { pair, accounts in
+            let base = try create(pair.a, accounts: accounts)
+            _ = try send(
+                base, from: pair.a, to: pair.b,
+                sourceBinding: pair.bindingA, targetBinding: pair.bindingB)
+            let offline = try pair.b.withAccess(forUID: accounts.bob) {
+                try pair.b.commit(
+                    .init(
+                        action: .revise, itemID: base.itemID, expectedRevisionID: base.revisionID,
+                        changes: ["body": .text("offline contribution")],
+                        operationID: "canonical-backed-offline")
+                ).revision
+            }
+            let restricted = try pair.a.withAccess(forUID: accounts.alice) {
+                try pair.a.changePersonalSharing(
+                    itemID: base.itemID, expectedRevisionID: base.revisionID,
+                    permissions: permissions(0o600), operationID: "canonical-backed-restrict")
+            }
+            let held = try send(
+                offline, from: pair.b, to: pair.a,
+                sourceBinding: pair.bindingB, targetBinding: pair.bindingA)
+            XCTAssertEqual(held.status, .reviewRequired)
+            let review = try XCTUnwrap(pair.a.personalIncomingReviews().first)
+            let bindingName = try review.descriptor.key + ".json"
+            let stagedBinding = pair.first.root.appendingPathComponent(".personal-sync/stages/" + bindingName)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: stagedBinding.path))
+
+            _ = try pair.a.withAccess(forUID: accounts.alice) {
+                try pair.a.changePersonalSharing(
+                    itemID: base.itemID, expectedRevisionID: restricted.revisionID,
+                    permissions: permissions(), operationID: "canonical-backed-restore")
+            }
+            let admitted = try send(
+                offline, from: pair.b, to: pair.a,
+                sourceBinding: pair.bindingB, targetBinding: pair.bindingA)
+            XCTAssertNotEqual(admitted.status, .reviewRequired)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: stagedBinding.path))
+            XCTAssertEqual(try pair.a.personalIncomingReviews(), [review])
+            XCTAssertEqual(try pair.a.get(base.itemID, revisionID: offline.revisionID), offline)
+            let admittedCurrent = try pair.a.get(base.itemID)
+            _ = try pair.a.withAccess(forUID: accounts.alice) {
+                try pair.a.changePersonalSharing(
+                    itemID: base.itemID, expectedRevisionID: admittedCurrent.revisionID,
+                    permissions: permissions(0o600), operationID: "canonical-backed-restrict-again")
+            }
+
+            let before = try pair.a.history(base.itemID)
+            let catalogueRow = try XCTUnwrap(
+                pair.a.exportCatalogueForVerification().first { $0.revisionID == offline.revisionID })
+            let canonical = pair.first.root.appendingPathComponent(catalogueRow.path)
+            let immutableBytes = try Data(contentsOf: canonical)
+            pair.first.store = nil
+            try FileManager.default.removeItem(at: pair.first.root.appendingPathComponent("index"))
+            pair.first.store = try ItemStore(
+                personalRoot: pair.first.root, opening: .existing, accounts: accounts)
+            XCTAssertEqual(try pair.a.personalIncomingReviews(), [review])
+            XCTAssertEqual(try pair.a.history(base.itemID), before)
+            let state = try pair.a.itemState(base.itemID)
+            try pair.a.withAccess(forUID: accounts.bob) {
+                assertCode("forbidden") { _ = try pair.a.get(base.itemID, revisionID: offline.revisionID) }
+                assertCode("forbidden") {
+                    _ = try pair.a.acceptPersonalIncomingReview(
+                        review.reviewID, expectedStateToken: state.stateToken)
+                }
+            }
+            assertCode("stateConflict") { _ = try pair.a.acceptPersonalIncomingReview(review.reviewID) }
+
+            let service = ItemService(store: pair.a)
+            let accountID = try pair.a.nativeProtocolSessionBasis.identity
+            let request = try nativeFixtureEnvelope(
+                calls: [
+                    [
+                        "TractandaSync/acceptReview",
+                        ["reviewID": review.reviewID, "expectedStateToken": state.stateToken],
+                        "resolve-known",
+                    ]
+                ], accountID: accountID)
+            func accept() throws -> MutationReceipt {
+                try JSON.decode(
+                    MutationReceipt.self,
+                    NativeMethodResult.unwrap(
+                        service.handle(request, peerUID: tractanda_uid()),
+                        method: "TractandaSync/acceptReview", callID: "resolve-known"))
+            }
+            let resolved = try accept()
+            XCTAssertFalse(resolved.wasReplayed)
+            XCTAssertEqual(try pair.a.personalIncomingReviews().first?.disposition, "accepted")
+            XCTAssertEqual(try pair.a.history(base.itemID).count, before.count + 1)
+            XCTAssertEqual(try Data(contentsOf: canonical), immutableBytes)
+            XCTAssertEqual(try pair.a.get(base.itemID, revisionID: offline.revisionID), offline)
+            XCTAssertEqual(try pair.a.get(base.itemID).fields["permissions"], permissions(0o600))
+            XCTAssertTrue(try accept().wasReplayed)
+            XCTAssertEqual(try pair.a.history(base.itemID).count, before.count + 1)
+        }
+    }
+
+    func testCanonicalBackedRejectedReviewRefusesDifferentOrUnavailableBytes() throws {
+        try fixture { pair, accounts in
+            let original = try create(pair.a, accounts: accounts, permission: permissions(0o600))
+            let stored = try descriptor(pair.a, revision: original)
+            let reviewID = try id()
+            let state = try pair.a.itemState(original.itemID)
+            let files = DocumentContentFiles(
+                root: pair.first.root, ownerUID: tractanda_uid(), minimumFreeBytes: 10 * 1024 * 1024 * 1024)
+            func saveReview(_ value: PersonalObjectDescriptor) throws -> URL {
+                let review = PersonalIncomingReview(
+                    reviewID: reviewID, descriptor: value, sourceReplicaID: pair.bindingA.remoteReplicaID,
+                    currentFrontier: state.frontier ?? [], baseRevisionIDs: value.parentRevisionIDs,
+                    reason: "authorReviewRequired", disposition: "rejected")
+                let name = try value.key + ".json"
+                try files.replacePersonalSyncMetadata(
+                    JSON.encode(review), path: [".personal-sync", "reviews", name])
+                return pair.first.root.appendingPathComponent(".personal-sync/reviews/" + name)
+            }
+            for (hash, parents) in [
+                (String(repeating: "a", count: 64), stored.parentRevisionIDs),
+                (stored.sha256, [try id()]),
+            ] {
+                let mismatched = try PersonalObjectDescriptor(
+                    kind: .revision, id: stored.id, byteCount: stored.byteCount,
+                    sha256: hash, itemID: stored.itemID, parentRevisionIDs: parents)
+                let wrongReview = try saveReview(mismatched)
+                assertCode("peerObjectCollision") {
+                    _ = try pair.a.acceptPersonalIncomingReview(
+                        reviewID, expectedStateToken: state.stateToken)
+                }
+                try FileManager.default.removeItem(at: wrongReview)
+            }
+            _ = try saveReview(stored)
+
+            let row = try XCTUnwrap(
+                pair.a.exportCatalogueForVerification().first { $0.revisionID == original.revisionID })
+            let canonical = pair.first.root.appendingPathComponent(row.path)
+            let backup = pair.first.root.deletingLastPathComponent().appendingPathComponent("original-record")
+            let bytes = try Data(contentsOf: canonical)
+            try FileManager.default.moveItem(at: canonical, to: backup)
+            XCTAssertThrowsError(
+                try pair.a.acceptPersonalIncomingReview(reviewID, expectedStateToken: state.stateToken)
+            ) {
+                XCTAssertEqual($0 as? PooledCanonicalRecordError, .openFailed(ENOENT))
+            }
+            var corrupt = bytes
+            corrupt[corrupt.startIndex] ^= 1
+            try corrupt.write(to: canonical)
+            try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: canonical.path)
+            XCTAssertThrowsError(
+                try pair.a.acceptPersonalIncomingReview(reviewID, expectedStateToken: state.stateToken)
+            ) {
+                XCTAssertEqual($0 as? PooledCanonicalRecordError, .digestMismatch)
+            }
+            try FileManager.default.removeItem(at: canonical)
+            try FileManager.default.moveItem(at: backup, to: canonical)
+            let missingStage = try PersonalSyncStage(descriptor: stored, stageID: id())
+            let stageBinding = [".personal-sync", "stages", try stored.key + ".json"]
+            try files.writeImmutable(JSON.encode(missingStage), path: stageBinding, maximumBytes: 16384)
+            XCTAssertThrowsError(
+                try pair.a.acceptPersonalIncomingReview(reviewID, expectedStateToken: state.stateToken))
+            XCTAssertEqual(try pair.a.personalIncomingReviews().first?.disposition, "rejected")
+            XCTAssertEqual(try pair.a.history(original.itemID), [original])
+            XCTAssertEqual(try ItemPermissions(XCTUnwrap(original.fields["permissions"])).mode, 0o600)
+        }
+    }
+
     func testConvertedLegacyReviewStagesRemainExplicitlyReviewableInNativeCore() throws {
         guard let helperPath = ProcessInfo.processInfo.environment["TRACTANDA_LAYOUT17_FIXTURE_HELPER"] else {
             throw XCTSkip(

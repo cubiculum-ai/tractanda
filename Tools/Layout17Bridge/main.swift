@@ -487,7 +487,8 @@ private func pendingPersonalRevisions(_ root: Int32, owner: uid_t, map: Transien
     }
     return count
 }
-private func pendingPersonalReviews(_ root: Int32, owner: uid_t, map: TransientDescriptorMap) throws -> Int {
+private func pendingPersonalReviews(_ root: Int32, owner: uid_t, map: TransientDescriptorMap,
+                                    allowMixed: Bool = false) throws -> Int {
     guard try metadata(root, ".personal-sync") != nil else { return 0 }
     let sync = try directory(root, ".personal-sync", owner: owner); defer { close(sync) }
     guard try metadata(sync, "reviews") != nil else { return 0 }
@@ -520,11 +521,11 @@ private func pendingPersonalReviews(_ root: Int32, owner: uid_t, map: TransientD
         let oldKey = try descriptor.key
         let staged = try map.newKey(oldKey: oldKey, staged: true)
         let directCanonical = try map.newKey(oldKey: oldKey, staged: false)
-        let canonical = try directCanonical ?? (map.hasCanonicalNewKey(oldKey) ? oldKey : nil)
+        let canonical = try directCanonical ?? (allowMixed && map.hasCanonicalNewKey(oldKey) ? oldKey : nil)
         if review.disposition == "accepted" {
             try check(canonical != nil, "Accepted review \(review.reviewID) has no matching canonical revision")
         } else {
-            try check(staged != nil, "Unaccepted review \(review.reviewID) has no complete retained stage; recover it on 16.2")
+            try check(staged != nil || canonical != nil, "Unaccepted review \(review.reviewID) has neither a complete retained stage nor a matching canonical revision; recover it on 16.2")
         }
         guard let newKey = staged ?? canonical else { throw Failure("Review descriptor cannot be mapped") }
         if let staged, let canonical { try check(staged == canonical, "Review descriptor mapping differs") }
@@ -568,7 +569,7 @@ private func deepPreflight(_ root: Int32, owner: uid_t, allowMixed: Bool = false
     })
     try attachmentTree(root, owner: owner, allowMoved: allowMixed, move: nil)
     let stages = try pendingPersonalRevisions(root, owner: owner, map: map, mixed: allowMixed, queue: queue)
-    let reviews = try pendingPersonalReviews(root, owner: owner, map: map)
+    let reviews = try pendingPersonalReviews(root, owner: owner, map: map, allowMixed: allowMixed)
     return (map, stages, reviews)
 }
 private func validateConvertedPersonal(_ root: Int32, owner: uid_t) throws {
@@ -993,7 +994,6 @@ private func planCanonicalReview(_ root: Int32, owner: uid_t, revision: Revision
     guard try metadata(reviews, name) != nil else { return nil }
     let (bytes, _) = try readBoundedRecord(reviews, name, owner: owner, expectedMode: 0o400)
     let review = try decodePersonalReview(bytes, descriptor: pair.0)
-    try check(review.disposition == "accepted", "Unaccepted review unexpectedly lacks a retained stage")
     return .init(oldDescriptor: pair.0, newDescriptor: pair.1, oldReviewSHA256: digest(bytes),
                  newReview: try JSON.encode(review.replacingDescriptor(pair.1)))
 }

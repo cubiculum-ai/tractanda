@@ -219,6 +219,120 @@ class BridgeFixtureTests(unittest.TestCase):
                     self.check_content(store)
                     self.check_pending_reviews(store, fixture, root)
 
+    def make_canonical_backed_review(self, store, parent, disposition):
+        fixture = self.make_pending_reviews(store, parent, disposition)
+        (store / ".personal-sync/stages" / (fixture["oldStageKey"] + ".json")).unlink()
+        (store / ".personal-sync/reviews" / (fixture["oldStageKey"] + ".json")).unlink()
+        (store / "attachments/.staging" / (fixture["stageID"] + ".stage")).unlink()
+        path = store / ".personal-sync/reviews" / (fixture["acceptedKey"] + ".json")
+        review = json.loads(path.read_text())
+        review["disposition"] = disposition
+        path.chmod(0o600)
+        path.write_text(json.dumps(review, sort_keys=True))
+        path.chmod(0o400)
+        return fixture, review, path
+
+    def test_canonical_backed_review_resumes(self):
+        cuts = ("review-intent", "review-published", "review-retired", "review-cleared",
+                "revision-published", "revision-retired", "move-cleared")
+        for disposition in ("pending", "rejected"):
+            for cut in cuts:
+                with self.subTest(disposition=disposition, cut=cut), tempfile.TemporaryDirectory(prefix="layout17-canonical-review-", dir=TEMP_ROOT) as temp:
+                    root = Path(temp); store, journal = root / "store", root / "journal"
+                    shutil.copytree(FIXTURE / "store", store); journal.mkdir(mode=0o700)
+                    fixture, original, _ = self.make_canonical_backed_review(store, root, disposition)
+                    failed = subprocess.run([str(self.binary), str(store), str(journal)],
+                        env=dict(os.environ, LAYOUT17_TEST_FAULT=cut), capture_output=True, text=True)
+                    self.assertEqual(failed.returncode, 90, failed.stderr)
+                    resumed = subprocess.run([str(self.binary), str(store), str(journal)], capture_output=True, text=True)
+                    self.assertEqual(resumed.returncode, 0, resumed.stderr)
+                    self.check_content(store)
+                    reviews = list((store / ".personal-sync/reviews").glob("*.json"))
+                    self.assertEqual(len(reviews), 1)
+                    review = json.loads(reviews[0].read_text())
+                    for field in ("reviewID", "sourceReplicaID", "currentFrontier", "baseRevisionIDs", "reason", "disposition"):
+                        self.assertEqual(review[field], original[field])
+                    old = Path(fixture["acceptedPath"])
+                    new = old.parent.parent / (old.parent.name + "." + old.name)
+                    raw = (store / new).read_bytes()
+                    self.assertEqual(review["descriptor"]["sha256"], hashlib.sha256(raw).hexdigest())
+                    self.assertEqual(review["descriptor"]["byteCount"], len(raw))
+                    self.assertEqual(reviews[0].stem, self.descriptor_key(review["descriptor"], root))
+
+    def test_future_canonical_descriptor_refuses_before_mutation(self):
+        with tempfile.TemporaryDirectory(prefix="layout17-future-review-", dir=TEMP_ROOT) as temp:
+            root = Path(temp); store, journal = root / "store", root / "journal"
+            converted, converted_journal = root / "converted", root / "converted-journal"
+            shutil.copytree(FIXTURE / "store", store)
+            shutil.copytree(FIXTURE / "store", converted)
+            journal.mkdir(mode=0o700); converted_journal.mkdir(mode=0o700)
+            fixture, review, path = self.make_canonical_backed_review(store, root, "pending")
+            result = subprocess.run([str(self.binary), str(converted), str(converted_journal)],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            old = Path(fixture["acceptedPath"])
+            new = old.parent.parent / (old.parent.name + "." + old.name)
+            future = (converted / new).read_bytes()
+            review["descriptor"]["sha256"] = hashlib.sha256(future).hexdigest()
+            review["descriptor"]["byteCount"] = len(future)
+            path.unlink()
+            path = path.parent / (self.descriptor_key(review["descriptor"], root) + ".json")
+            path.write_text(json.dumps(review, sort_keys=True)); path.chmod(0o400)
+            before = path.read_bytes()
+            failed = subprocess.run([str(self.binary), str(store), str(journal)], capture_output=True, text=True)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertFalse((store / "canonical-layout.pending.json").exists())
+            self.assertEqual(list(journal.iterdir()), [])
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual((store / old).read_bytes(), (FIXTURE / "store" / old).read_bytes())
+
+    def test_matching_stage_and_canonical_review_resume(self):
+        with tempfile.TemporaryDirectory(prefix="layout17-review-both-", dir=TEMP_ROOT) as temp:
+            root = Path(temp); store, journal = root / "store", root / "journal"
+            shutil.copytree(FIXTURE / "store", store); journal.mkdir(mode=0o700)
+            fixture, review, _ = self.make_canonical_backed_review(store, root, "pending")
+            stage = store / "attachments/.staging" / (fixture["stageID"] + ".stage")
+            stage.write_bytes((store / fixture["acceptedPath"]).read_bytes()); stage.chmod(0o600)
+            binding = store / ".personal-sync/stages" / (fixture["acceptedKey"] + ".json")
+            binding.write_text(json.dumps({"descriptor": review["descriptor"], "stageID": fixture["stageID"]}, sort_keys=True))
+            binding.chmod(0o400)
+            failed = subprocess.run([str(self.binary), str(store), str(journal)],
+                env=dict(os.environ, LAYOUT17_TEST_FAULT="stage-data-published"), capture_output=True, text=True)
+            self.assertEqual(failed.returncode, 90, failed.stderr)
+            resumed = subprocess.run([str(self.binary), str(store), str(journal)], capture_output=True, text=True)
+            self.assertEqual(resumed.returncode, 0, resumed.stderr)
+            self.check_content(store)
+            reviews = list((store / ".personal-sync/reviews").glob("*.json"))
+            self.assertEqual(len(reviews), 1)
+            converted = json.loads(reviews[0].read_text())
+            self.assertEqual(converted["reviewID"], review["reviewID"])
+            self.assertEqual(converted["disposition"], "pending")
+            self.assertEqual(hashlib.sha256((store / "attachments/staging" / stage.name).read_bytes()).hexdigest(),
+                             converted["descriptor"]["sha256"])
+
+    def test_canonical_backed_review_missing_or_mismatched_refuses(self):
+        for case in ("missing", "mismatch", "corrupt"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory(prefix="layout17-review-refusal-", dir=TEMP_ROOT) as temp:
+                root = Path(temp); store, journal = root / "store", root / "journal"
+                shutil.copytree(FIXTURE / "store", store); journal.mkdir(mode=0o700)
+                fixture, review, path = self.make_canonical_backed_review(store, root, "pending")
+                canonical = store / fixture["acceptedPath"]
+                if case == "missing":
+                    canonical.unlink()
+                elif case == "corrupt":
+                    canonical.chmod(0o600); canonical.write_bytes(b"corrupt"); canonical.chmod(0o400)
+                else:
+                    review["descriptor"]["sha256"] = "0" * 64
+                    path.unlink()
+                    path = path.parent / (self.descriptor_key(review["descriptor"], root) + ".json")
+                    path.write_text(json.dumps(review, sort_keys=True)); path.chmod(0o400)
+                before = path.read_bytes()
+                failed = subprocess.run([str(self.binary), str(store), str(journal)], capture_output=True, text=True)
+                self.assertNotEqual(failed.returncode, 0)
+                self.assertFalse((store / "canonical-layout.pending.json").exists())
+                self.assertEqual(list(journal.iterdir()), [])
+                self.assertEqual(path.read_bytes(), before)
+
     def test_incomplete_revision_stage_refuses_before_mutation(self):
         with tempfile.TemporaryDirectory(prefix="layout17-incomplete-", dir=TEMP_ROOT) as temp:
             root = Path(temp); store, journal = root / "store", root / "journal"
