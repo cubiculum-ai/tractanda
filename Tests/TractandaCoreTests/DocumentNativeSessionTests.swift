@@ -100,7 +100,8 @@ final class DocumentNativeSessionTests: XCTestCase {
     func testReadableWorkerBuildProvenanceCannotReplaceRequestedResultIdentity() throws {
         let f = try fixture(mode: "unexpected-build")
         defer { try? FileManager.default.removeItem(at: f.0) }
-        XCTAssertThrowsError(try session(f), "Stored readability must not admit an unrequested worker identity")
+        XCTAssertThrowsError(
+            try session(f), "Stored readability must not admit an unrequested worker identity")
     }
 
     func testInjectedVerifierRunsAndFailurePreventsWorkerLaunch() throws {

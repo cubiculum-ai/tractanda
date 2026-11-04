@@ -8,7 +8,9 @@ extension SetupPackageCompatibility {
     func requireLayout17Transition(from old: Self) throws {
         try validate()
         try old.validate()
-        let capabilities: Set<String> = ["tractanda.physical-layout.flat-items.v1", "tractanda.message-items.v1"]
+        let capabilities: Set<String> = [
+            "tractanda.physical-layout.flat-items.v1", "tractanda.message-items.v1",
+        ]
         let before = old.canonicalFormats
         let after = canonicalFormats
         guard old.version == "0.1.0-poc.16.2", version == "0.1.0-poc.17",

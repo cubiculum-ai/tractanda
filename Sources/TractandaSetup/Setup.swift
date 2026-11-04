@@ -117,9 +117,13 @@ public struct BundleManifest: Codable, Equatable, Sendable {
         let required = ["bin/tractanda", "bin/tractanda-tui", "bin/tractanda-mcp", "bin/tractanda-setup"]
         guard required.allSatisfy({ name in files.contains { $0.path == name && $0.mode & 0o111 != 0 } })
         else { throw SetupError("Bundle is missing a required executable.") }
-        if version == "0.1.0-poc.17", !files.contains(where: {
-            $0.path == "bin/tractanda-layout17" && $0.mode & 0o111 != 0
-        }) { throw SetupError("The .17 migration bridge executable is mandatory in .17 bundles.") }
+        if version == "0.1.0-poc.17",
+            !files.contains(where: {
+                $0.path == "bin/tractanda-layout17" && $0.mode & 0o111 != 0
+            })
+        {
+            throw SetupError("The .17 migration bridge executable is mandatory in .17 bundles.")
+        }
         if platform == "linux" && !names.contains("bin/tractanda-auth-helper") {
             throw SetupError("Linux bundle is missing bin/tractanda-auth-helper.")
         }
@@ -154,8 +158,11 @@ public struct BundleManifest: Codable, Equatable, Sendable {
                 // A prior receipt-bound package need not match today's executable recipe.
                 // Its metadata remains data-only, bounded, and backed by its own inventory.
                 try documentExtraction.identity.validate()
-                let paths = [documentExtraction.converterPath, documentExtraction.modelManifestPath,
-                    documentExtraction.runtimePatchManifestPath, documentExtraction.runtimePatchPath]
+                let paths =
+                    [
+                        documentExtraction.converterPath, documentExtraction.modelManifestPath,
+                        documentExtraction.runtimePatchManifestPath, documentExtraction.runtimePatchPath,
+                    ]
                     + documentExtraction.noticePaths
                 for path in paths { try Self.validateRelativePath(path) }
                 guard !documentExtraction.workerProtocol.isEmpty,
@@ -165,17 +172,22 @@ public struct BundleManifest: Codable, Equatable, Sendable {
                     !documentExtraction.runtimePatchIdentifier.isEmpty,
                     documentExtraction.runtimePatchIdentifier.utf8.count <= 128,
                     documentExtraction.noticePaths.count <= 128,
-                    [documentExtraction.modelManifestSHA256, documentExtraction.runtimePatchManifestSHA256,
-                     documentExtraction.runtimePatchSHA256].allSatisfy({
-                         $0.utf8.count == 64 && $0.utf8.allSatisfy(asciiHex)
-                     }),
+                    [
+                        documentExtraction.modelManifestSHA256, documentExtraction.runtimePatchManifestSHA256,
+                        documentExtraction.runtimePatchSHA256,
+                    ].allSatisfy({
+                        $0.utf8.count == 64 && $0.utf8.allSatisfy(asciiHex)
+                    }),
                     paths.allSatisfy({ path in files.contains(where: { $0.path == path }) }),
-                    files.contains(where: { $0.path == documentExtraction.converterPath && $0.mode & 0o111 != 0 })
+                    files.contains(where: {
+                        $0.path == documentExtraction.converterPath && $0.mode & 0o111 != 0
+                    })
                 else { throw SetupError("Historical installed document descriptor is invalid.") }
                 try Self.validateRelativePath(documentExtraction.modelDirectory)
             case .current:
                 try documentExtraction.validatePlatform(platform: platform, arch: arch)
-                try documentExtraction.validate(files: files, provisioned: modelProvisioningManifestPath != nil)
+                try documentExtraction.validate(
+                    files: files, provisioned: modelProvisioningManifestPath != nil)
             }
         } else if files.contains(where: {
             $0.path == "bin/tractanda-document-converter"

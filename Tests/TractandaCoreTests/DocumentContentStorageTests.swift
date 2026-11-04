@@ -38,22 +38,27 @@ final class DocumentContentStorageTests: XCTestCase {
     func testUnknownProvenanceRemainsReadableAndByteExactAfterPlacementRebuild() throws {
         let (root, store, source) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
-        var fields = try XCTUnwrap(JSONSerialization.jsonObject(with: JSON.encode(DocumentConverterIdentity())) as? [String: String])
+        var fields = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSON.encode(DocumentConverterIdentity())) as? [String: String])
         fields["converter"] = "future-renderer-build-" + String(repeating: "f", count: 64)
         fields["modelRevision"] = String(repeating: "b", count: 40)
         fields["runtimeRevision"] = String(repeating: "c", count: 40)
-        let identity = try JSON.decode(DocumentConverterIdentity.self, JSONSerialization.data(withJSONObject: fields))
+        let identity = try JSON.decode(
+            DocumentConverterIdentity.self, JSONSerialization.data(withJSONObject: fields))
         let writer = try store.begin(source: source, identity: identity)
         try writer.append(page(1, source: source, text: "saved provenance"))
         let reference = try writer.publish()
         let manifest = try store.manifest(reference)
-        let path = try store.directory(reference.contentID).reduce(root) { $0.appendingPathComponent($1) }.appendingPathComponent("manifest.json")
+        let path = try store.directory(reference.contentID).reduce(root) { $0.appendingPathComponent($1) }
+            .appendingPathComponent("manifest.json")
         let originalBytes = try Data(contentsOf: path)
         XCTAssertEqual(manifest.identity, identity)
         try store.validate(reference, source: source, identity: identity, extractedAt: manifest.extractedAt)
         try store.rebuildPlacement()
         XCTAssertEqual(try store.readPage(reference, pageNumber: 1).page?.parsed.text, "saved provenance")
-        XCTAssertEqual(try Data(contentsOf: path), originalBytes, "Read/rebuild must not re-sign or normalize provenance")
+        XCTAssertEqual(
+            try Data(contentsOf: path), originalBytes, "Read/rebuild must not re-sign or normalize provenance"
+        )
         XCTAssertThrowsError(try identity.validateCurrent())
     }
 

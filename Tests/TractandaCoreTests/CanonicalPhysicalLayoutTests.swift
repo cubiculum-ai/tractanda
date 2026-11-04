@@ -1,12 +1,13 @@
 import CTractandaPlatform
-import XCTest
 import TractandaClient
+import XCTest
 
 @testable import TractandaCore
 
 final class CanonicalPhysicalLayoutTests: XCTestCase {
     func testOnlyFlatCanonicalItemPathsCarryBothIdentities() throws {
-        let item = Identifier.make(), revision = Identifier.make()
+        let item = Identifier.make()
+        let revision = Identifier.make()
         let valid = "items/2026/11/03/15/42/\(item).\(revision).tractanda"
         XCTAssertTrue(CanonicalRecordPath.validate(valid, itemID: item, revisionID: revision))
         let identities = try XCTUnwrap(CanonicalRecordPath.identities(valid))
@@ -31,7 +32,8 @@ final class CanonicalPhysicalLayoutTests: XCTestCase {
         try AttachmentFixtureCapacity.requireFree()
         let expected = try JSON.encode([
             "profile": "tractanda.physical-layout.v1", "layout": "flat-items-visible-attachments.v1",
-            "recordEncoding": "message-v1"])
+            "recordEncoding": "message-v1",
+        ])
         for length in [0, 1, expected.count / 2, expected.count - 1, expected.count] {
             let root = (try GuardedFixtureDirectory.parent()).appendingPathComponent(
                 "tractanda-initial-marker-" + Identifier.make())
@@ -65,18 +67,27 @@ final class CanonicalPhysicalLayoutTests: XCTestCase {
             let writer = tractanda_lock(root.appendingPathComponent(".writer.lock").path)
             XCTAssertGreaterThanOrEqual(writer, 0)
             defer { tractanda_unlock(writer) }
-            let name = kind == "unknownName" ? ".physical-layout-unknown.stage"
+            let name =
+                kind == "unknownName"
+                ? ".physical-layout-unknown.stage"
                 : ".physical-layout-" + Identifier.make() + ".stage"
             let stage = root.appendingPathComponent(name)
             let bytes = Data((kind == "unknownBytes" ? "unexpected" : "{").utf8)
             try bytes.write(to: stage)
-            try FileManager.default.setAttributes([.posixPermissions: kind == "wrongMode" ? 0o644 : 0o600],
+            try FileManager.default.setAttributes(
+                [.posixPermissions: kind == "wrongMode" ? 0o644 : 0o600],
                 ofItemAtPath: stage.path)
-            if kind == "otherContent" { try Data("retained".utf8).write(to: root.appendingPathComponent("retained")) }
-            if kind == "hardLink" { try FileManager.default.linkItem(at: stage, to: root.appendingPathComponent("other-link")) }
+            if kind == "otherContent" {
+                try Data("retained".utf8).write(to: root.appendingPathComponent("retained"))
+            }
+            if kind == "hardLink" {
+                try FileManager.default.linkItem(at: stage, to: root.appendingPathComponent("other-link"))
+            }
             XCTAssertThrowsError(try CanonicalPhysicalLayout.prepareOpening(root, ownerUID: tractanda_uid()))
             XCTAssertEqual(try Data(contentsOf: stage), bytes)
-            XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(CanonicalPhysicalLayout.fileName).path))
+            XCTAssertFalse(
+                FileManager.default.fileExists(
+                    atPath: root.appendingPathComponent(CanonicalPhysicalLayout.fileName).path))
         }
     }
 
@@ -86,15 +97,22 @@ final class CanonicalPhysicalLayoutTests: XCTestCase {
             "tractanda-layout-guard-" + Identifier.make())
         defer { try? FileManager.default.removeItem(at: root) }
         var store: ItemStore? = try ItemStore(root: root)
-        let revision = try store!.commit(CommitRequest(
-            classID: "Item", changes: ["subject": .text("retained")], operationID: "retained")).revision
+        let revision = try store!.commit(
+            CommitRequest(
+                classID: "Item", changes: ["subject": .text("retained")], operationID: "retained")
+        ).revision
         let row = try XCTUnwrap(store!.exportCatalogueForVerification().first)
         let bytes = try Data(contentsOf: root.appendingPathComponent(row.path))
         let marker = root.appendingPathComponent(CanonicalPhysicalLayout.fileName)
         let markerBytes = try Data(contentsOf: marker)
-        let oldReader = CanonicalFormatSupport(readerLevel: 18, writerLevel: 18, read: [1, 2], write: [2],
-            capabilities: CanonicalFormatSupport.current.capabilities.filter { $0 != CanonicalPhysicalLayout.capability && $0 != MessageRecordCodec.capability },
-            writeCapabilities: CanonicalFormatSupport.current.writeCapabilities.filter { $0 != CanonicalPhysicalLayout.capability && $0 != MessageRecordCodec.capability })
+        let oldReader = CanonicalFormatSupport(
+            readerLevel: 18, writerLevel: 18, read: [1, 2], write: [2],
+            capabilities: CanonicalFormatSupport.current.capabilities.filter {
+                $0 != CanonicalPhysicalLayout.capability && $0 != MessageRecordCodec.capability
+            },
+            writeCapabilities: CanonicalFormatSupport.current.writeCapabilities.filter {
+                $0 != CanonicalPhysicalLayout.capability && $0 != MessageRecordCodec.capability
+            })
         let fence = try XCTUnwrap(CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid()))
         XCTAssertEqual(fence.minimumReaderLevel, 20)
         XCTAssertThrowsError(try oldReader.require(fence))
@@ -105,7 +123,8 @@ final class CanonicalPhysicalLayoutTests: XCTestCase {
         }
         XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(row.path)), bytes)
         let layoutOnly = try JSON.encode([
-            "profile": "tractanda.physical-layout.v1", "layout": "flat-items-visible-attachments.v1"])
+            "profile": "tractanda.physical-layout.v1", "layout": "flat-items-visible-attachments.v1",
+        ])
         try PrivateConfiguration.write(layoutOnly, to: marker)
         XCTAssertThrowsError(try ItemStore(root: root)) {
             XCTAssertEqual(($0 as? TractandaError)?.code, "canonicalLayoutMigrationRequired")
@@ -115,7 +134,8 @@ final class CanonicalPhysicalLayoutTests: XCTestCase {
         XCTAssertThrowsError(try ItemStore(root: root)) {
             XCTAssertEqual(($0 as? TractandaError)?.code, "canonicalLayoutMigrationRequired")
         }
-        try FileManager.default.removeItem(at: root.appendingPathComponent(CanonicalPhysicalLayout.pendingFileName))
+        try FileManager.default.removeItem(
+            at: root.appendingPathComponent(CanonicalPhysicalLayout.pendingFileName))
         store = try ItemStore(root: root)
         XCTAssertEqual(try store!.get(revision.itemID), revision)
         store = nil
@@ -131,17 +151,20 @@ final class CanonicalPhysicalLayoutTests: XCTestCase {
             CommitRequest(classID: "Item", changes: ["subject": .text("layout needle")], operationID: "first")
         ).revision
         let second = try XCTUnwrap(store).commit(
-            CommitRequest(action: .revise, itemID: first.itemID, expectedRevisionID: first.revisionID,
+            CommitRequest(
+                action: .revise, itemID: first.itemID, expectedRevisionID: first.revisionID,
                 changes: ["body": .text("preserved")], operationID: "second")
         ).revision
         let rows = try XCTUnwrap(store).exportCatalogueForVerification()
         XCTAssertEqual(rows.count, 2)
         var originalBytes: [String: Data] = [:]
         for row in rows {
-            XCTAssertTrue(CanonicalRecordPath.validate(row.path, itemID: row.itemID, revisionID: row.revisionID))
+            XCTAssertTrue(
+                CanonicalRecordPath.validate(row.path, itemID: row.itemID, revisionID: row.revisionID))
             XCTAssertEqual(row.path.split(separator: "/").count, 7)
             let bytes = try Data(contentsOf: root.appendingPathComponent(row.path))
-            XCTAssertTrue(String(decoding: bytes, as: UTF8.self).contains("X-Tractanda-Encoding: message-v1\r\n"))
+            XCTAssertTrue(
+                String(decoding: bytes, as: UTF8.self).contains("X-Tractanda-Encoding: message-v1\r\n"))
             originalBytes[row.path] = bytes
         }
         store = nil
@@ -154,8 +177,11 @@ final class CanonicalPhysicalLayoutTests: XCTestCase {
         for (path, bytes) in originalBytes {
             XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(path)), bytes)
         }
-        XCTAssertFalse(FileManager.default.fileExists(atPath:
-            root.appendingPathComponent(rows[0].path).deletingLastPathComponent().appendingPathComponent(first.itemID).path))
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath:
+                    root.appendingPathComponent(rows[0].path).deletingLastPathComponent()
+                    .appendingPathComponent(first.itemID).path))
         store = nil
     }
 }

@@ -23,7 +23,8 @@ enum CanonicalRecordPath {
         guard components.count == 7 else { return nil }
         let name = components[6].split(separator: ".", omittingEmptySubsequences: false)
         guard name.count == 3, name[2] == "tractanda" else { return nil }
-        let itemID = String(name[0]), revisionID = String(name[1])
+        let itemID = String(name[0])
+        let revisionID = String(name[1])
         return validate(path, itemID: itemID, revisionID: revisionID) ? (itemID, revisionID) : nil
     }
 }

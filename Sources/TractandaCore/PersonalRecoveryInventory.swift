@@ -221,7 +221,8 @@ enum PersonalRecoveryInventory {
                     }
                     if path.count == leafDepth {
                         guard metadata.type == (directoryLeaf ? .directory : .regular) else {
-                            try problem(.invalidEntry, at: location,
+                            try problem(
+                                .invalidEntry, at: location,
                                 path.first == "items"
                                     ? "Expected a flat itemID.revisionID.tractanda file. Use the .17 installer migration for older layouts."
                                     : "Unexpected published entry type.")

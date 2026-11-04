@@ -3353,7 +3353,8 @@ public final class ItemStore {
     private static func retryReceipt(_ revision: Revision) throws -> String {
         guard let receipt = revision.fields["requestIdentity"]?.string else {
             throw TractandaError(
-                "retryReceiptUnavailable", "This operation already has a committed revision, but its retry receipt is unavailable.")
+                "retryReceiptUnavailable",
+                "This operation already has a committed revision, but its retry receipt is unavailable.")
         }
         return receipt
     }
@@ -4124,7 +4125,8 @@ public final class ItemStore {
                 try Identifier.validate(revision.itemID)
                 try Identifier.validate(revision.revisionID)
                 semanticValidationSeconds += ProcessInfo.processInfo.systemUptime - semanticsStart
-                guard Self.validCanonicalRecordPath(
+                guard
+                    Self.validCanonicalRecordPath(
                         String(url.path.dropFirst(root.path.count + 1)),
                         itemID: revision.itemID, revisionID: revision.revisionID),
                     let actor = revision.fields["actor"]?.string,
@@ -4487,7 +4489,8 @@ public final class ItemStore {
         let revision = try RecordCodec.decode(data)
         try ItemSemantics.validate(revision)
         guard Data(SHA256.hash(data: data)) == location.digest,
-            CanonicalRecordPath.validate(location.relativePath, itemID: location.itemID, revisionID: revisionID),
+            CanonicalRecordPath.validate(
+                location.relativePath, itemID: location.itemID, revisionID: revisionID),
             revision.revisionID == revisionID, revision.itemID == location.itemID,
             revision.supersedes == location.parentID,
             revision.fields["actor"]?.string == location.actor,
@@ -6608,7 +6611,8 @@ public final class ItemStore {
             String(
                 format: "items/%04d/%02d/%02d/%02d/%02d", c.year!, c.month!, c.day!, c.hour!, c.minute!))
         try ensureDirectory(folder)
-        let path = folder.appendingPathComponent(revision.itemID + "." + revision.revisionID + ".tractanda").path
+        let path = folder.appendingPathComponent(revision.itemID + "." + revision.revisionID + ".tractanda")
+            .path
         if revisionProjectionEnabled || personalProfile != nil {
             try beforeProjectionCommitAuthorityForTesting?()
             try withAccess(forUID: uid) {
@@ -7466,7 +7470,10 @@ extension ItemStore {
                 ])
         }
         let relative = String(path.dropFirst(root.path.count + 1)).split(separator: "/").map(String.init)
-        guard CanonicalRecordPath.validate(relative.joined(separator: "/"), itemID: revision.itemID, revisionID: revision.revisionID) else {
+        guard
+            CanonicalRecordPath.validate(
+                relative.joined(separator: "/"), itemID: revision.itemID, revisionID: revision.revisionID)
+        else {
             throw TractandaError("invalidAuthority", "Local publication path differs.")
         }
         if atomic {
@@ -12553,8 +12560,9 @@ extension ItemStore {
         let record = try documentJobAuthority(id)
         if record.checkpoint.committed != nil { return record.status }
         // A read never rewrites another actor's checkpoint or acquires its producer.
-        do { return try reconciledDocumentJob(record).status }
-        catch let error as TractandaError where error.code == "retryReceiptUnavailable" {
+        do { return try reconciledDocumentJob(record).status } catch let error as TractandaError
+            where error.code == "retryReceiptUnavailable"
+        {
             var paused = record
             paused.checkpoint.state = "paused"
             paused.checkpoint.reasonCode = error.code
@@ -12820,7 +12828,8 @@ extension ItemStore {
                 if record.checkpoint.state == "completed" {
                     try archiveDocumentJob(record)
                 } else if record.checkpoint.discarded {
-                    _ = try controlDocumentJob(id, action: "discard", configurationSHA256: configurationSHA256)
+                    _ = try controlDocumentJob(
+                        id, action: "discard", configurationSHA256: configurationSHA256)
                 } else if record.checkpoint.state != "cancelled" {
                     _ = try controlDocumentJob(id, action: "resume", configurationSHA256: configurationSHA256)
                 }

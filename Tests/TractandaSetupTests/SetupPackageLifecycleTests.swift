@@ -162,7 +162,8 @@ final class SetupPackageLifecycleTests: XCTestCase {
                 try engine.writeProtected(declaration.encoded() + Data([10]), to: descriptor, mode: 0o600)
             }
             return try engine.packageLifecycle(
-                .init(action: action, descriptor: declaration == nil ? nil : descriptor, instance: nil,
+                .init(
+                    action: action, descriptor: declaration == nil ? nil : descriptor, instance: nil,
                     candidateBundle: action == .preflight ? engine.packagePayload : nil))
         }
         func configureFresh() throws {
@@ -525,7 +526,7 @@ final class SetupPackageLifecycleTests: XCTestCase {
         XCTAssertNoThrow(try f.hook(.preflight, original))
         let (incoming, bytes) = try f.next("0.1.0-poc.17")
         _ = try f.hook(.preinst, incoming)
-        try bytes.write(to: f.manifestURL) // actual simulated dpkg unpack
+        try bytes.write(to: f.manifestURL)  // actual simulated dpkg unpack
         XCTAssertTrue(try f.hook(.configure, incoming).contains("0 verified restart"))
         XCTAssertNil(try f.engine.readReceipt("a"))
         XCTAssertEqual(try f.engine.readPackageState()?.incoming, incoming)
@@ -555,31 +556,42 @@ final class SetupPackageLifecycleTests: XCTestCase {
         try f.configureFresh()
         try f.install()
         let prior = try JSONDecoder().decode(BundleManifest.self, from: Data(contentsOf: f.manifestURL))
-        var object = try XCTUnwrap(JSONSerialization.jsonObject(
-            with: JSONEncoder().encode(DocumentExtractionPayload.pinned)) as? [String: Any])
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(DocumentExtractionPayload.pinned)) as? [String: Any])
         var identity = try XCTUnwrap(object["identity"] as? [String: Any])
-        identity["converter"] = try XCTUnwrap(DocumentConverterIdentity.approvedLinuxConverter(architecture: prior.arch))
+        identity["converter"] = try XCTUnwrap(
+            DocumentConverterIdentity.approvedLinuxConverter(architecture: prior.arch))
         identity["runtimeRevision"] = String(repeating: "a", count: 40)
         object["identity"] = identity
-        let document = try JSONDecoder().decode(DocumentExtractionPayload.self,
+        let document = try JSONDecoder().decode(
+            DocumentExtractionPayload.self,
             from: JSONSerialization.data(withJSONObject: object))
         var files = prior.files
-        let paths = Set([document.converterPath, document.modelManifestPath,
-            document.runtimePatchManifestPath, document.runtimePatchPath] + document.noticePaths)
+        let paths = Set(
+            [
+                document.converterPath, document.modelManifestPath,
+                document.runtimePatchManifestPath, document.runtimePatchPath,
+            ] + document.noticePaths)
         for path in paths {
             let url = f.engine.packagePayload.appendingPathComponent(path)
-            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             let data = Data(("historical-" + path).utf8)
             try data.write(to: url)
             let mode: UInt16 = path == document.converterPath ? 0o755 : 0o644
-            try FileManager.default.setAttributes([.posixPermissions: NSNumber(value: mode)], ofItemAtPath: url.path)
-            files.append(.init(path: path, sha256: Fixture.digest(data), size: UInt64(data.count), mode: mode))
+            try FileManager.default.setAttributes(
+                [.posixPermissions: NSNumber(value: mode)], ofItemAtPath: url.path)
+            files.append(
+                .init(path: path, sha256: Fixture.digest(data), size: UInt64(data.count), mode: mode))
         }
-        let historical = BundleManifest(version: prior.version, platform: prior.platform, arch: prior.arch,
+        let historical = BundleManifest(
+            version: prior.version, platform: prior.platform, arch: prior.arch,
             files: files, documentExtraction: document, canonicalFormats: prior.canonicalFormats)
         let bytes = try JSONEncoder().encode(historical)
         try bytes.write(to: f.manifestURL)
-        let descriptor = SetupPackageCompatibility(manifestSHA256: Fixture.digest(bytes),
+        let descriptor = SetupPackageCompatibility(
+            manifestSHA256: Fixture.digest(bytes),
             version: prior.version, arch: prior.arch, canonicalFormats: try XCTUnwrap(prior.canonicalFormats),
             documentExtraction: document)
         var state = try SetupPackageState(original: descriptor, instances: [])
@@ -634,17 +646,17 @@ final class SetupPackageLifecycleTests: XCTestCase {
         try f.configureFresh()
         try f.install()
         let (incoming, bytes) = try f.next("0.1.0-poc.17")
-        _ = try f.hook(.prermUpgrade) // actual old prerm stop-only contract
+        _ = try f.hook(.prermUpgrade)  // actual old prerm stop-only contract
         var retained = try XCTUnwrap(f.engine.readPackageState())
         let (rejectedEarlier, _) = try f.next("0.1.0-poc.16.1")
         retained.phase = .failed
-        retained.incoming = rejectedEarlier // historical failed attempt, not the new package
+        retained.incoming = rejectedEarlier  // historical failed attempt, not the new package
         try f.engine.writePackageState(retained)
-        _ = try f.hook(.prermUpgrade) // old stop-only recovery keeps original intent
-        _ = try f.hook(.prermUpgrade) // new preinst calls old helper without fabricated descriptor
+        _ = try f.hook(.prermUpgrade)  // old stop-only recovery keeps original intent
+        _ = try f.hook(.prermUpgrade)  // new preinst calls old helper without fabricated descriptor
         XCTAssertEqual(try f.engine.readPackageState()?.phase, .quiesced)
         XCTAssertEqual(try f.engine.readPackageState()?.incoming, rejectedEarlier)
-        try bytes.write(to: f.manifestURL) // dpkg unpacks its actual new package
+        try bytes.write(to: f.manifestURL)  // dpkg unpacks its actual new package
         XCTAssertTrue(try f.hook(.configure, incoming).contains("1 verified restart"))
         XCTAssertEqual(try f.engine.readPackageState()?.incoming, incoming)
         try f.engine.packageRuntimeGuard("a")
@@ -762,7 +774,7 @@ final class SetupPackageLifecycleTests: XCTestCase {
         XCTAssertThrowsError(try f.hook(.preinst, rejected))
         let state = try XCTUnwrap(f.engine.readPackageState())
         XCTAssertEqual(state.observed?.manifestSHA256, incoming.manifestSHA256)
-        XCTAssertEqual(state.incoming, incoming) // Rejected preflight did not mutate retained intent.
+        XCTAssertEqual(state.incoming, incoming)  // Rejected preflight did not mutate retained intent.
         XCTAssertEqual(try f.engine.sha256(f.manifestURL), incoming.manifestSHA256)
         _ = try f.hook(.preinst, original)
         XCTAssertEqual(try f.engine.readPackageState()?.phase, .awaitingUnpack)
@@ -813,13 +825,16 @@ final class SetupPackageLifecycleTests: XCTestCase {
         f.denyAuthentication = true
         XCTAssertFalse(try f.engine.packagePolicyAllowsStart("a", role: .authentication))
         var receipt = try XCTUnwrap(f.engine.readReceipt("a"))
-        var object = try XCTUnwrap(JSONSerialization.jsonObject(
-            with: JSONEncoder().encode(DocumentExtractionPayload.pinned)) as? [String: Any])
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(DocumentExtractionPayload.pinned)) as? [String: Any])
         var identity = try XCTUnwrap(object["identity"] as? [String: Any])
-        identity["converter"] = "tractanda.docling-native.v2-idefics3-gelu-f32+linux-raster." + String(repeating: "a", count: 64)
+        identity["converter"] =
+            "tractanda.docling-native.v2-idefics3-gelu-f32+linux-raster." + String(repeating: "a", count: 64)
         identity["runtimeRevision"] = String(repeating: "b", count: 40)
         object["identity"] = identity
-        receipt.documentExtraction = try JSONDecoder().decode(DocumentExtractionPayload.self,
+        receipt.documentExtraction = try JSONDecoder().decode(
+            DocumentExtractionPayload.self,
             from: JSONSerialization.data(withJSONObject: object))
         receipt.documentScratchDirectory = f.engine.roots.work.appendingPathComponent("a/scratch").path
         try f.engine.writeReceipt(receipt)
@@ -827,7 +842,8 @@ final class SetupPackageLifecycleTests: XCTestCase {
         let current = try f.engine.verifyBundle(at: f.engine.packagePayload)
         // Isolate the stopped-receipt transition. Full incoming payload validation
         // belongs to configure's preceding gate and the separate native package test.
-        let incomingManifest = BundleManifest(version: "0.1.0-poc.16.2", platform: current.platform,
+        let incomingManifest = BundleManifest(
+            version: "0.1.0-poc.16.2", platform: current.platform,
             arch: current.arch, files: current.files, documentExtraction: .pinned,
             canonicalFormats: current.canonicalFormats)
         let incoming = SetupPackageCompatibility(
@@ -852,20 +868,23 @@ final class SetupPackageLifecycleTests: XCTestCase {
             try f.install()
             _ = try f.hook(.prermUpgrade)
             var receipt = try XCTUnwrap(f.engine.readReceipt("a"))
-            var object = try XCTUnwrap(JSONSerialization.jsonObject(
-                with: JSONEncoder().encode(DocumentExtractionPayload.pinned)) as? [String: Any])
+            var object = try XCTUnwrap(
+                JSONSerialization.jsonObject(
+                    with: JSONEncoder().encode(DocumentExtractionPayload.pinned)) as? [String: Any])
             if unknownSemantics {
                 var identity = try XCTUnwrap(object["identity"] as? [String: Any])
                 identity["preprocessing"] = "unsupported-preprocessing-v99"
                 object["identity"] = identity
             }
-            receipt.documentExtraction = try JSONDecoder().decode(DocumentExtractionPayload.self,
+            receipt.documentExtraction = try JSONDecoder().decode(
+                DocumentExtractionPayload.self,
                 from: JSONSerialization.data(withJSONObject: object))
             try f.engine.writeReceipt(receipt)
             let beforeReceipt = try Data(contentsOf: f.engine.receiptURL("a"))
             let before = try f.canonicalBytes()
             let current = try f.engine.verifyBundle(at: f.engine.packagePayload)
-            let incomingManifest = BundleManifest(version: "0.1.0-poc.16.2", platform: current.platform,
+            let incomingManifest = BundleManifest(
+                version: "0.1.0-poc.16.2", platform: current.platform,
                 arch: current.arch, files: current.files,
                 documentExtraction: unknownSemantics ? .pinned : nil,
                 canonicalFormats: current.canonicalFormats)
@@ -874,8 +893,9 @@ final class SetupPackageLifecycleTests: XCTestCase {
                 version: incomingManifest.version, arch: current.arch,
                 canonicalFormats: try XCTUnwrap(current.canonicalFormats),
                 documentExtraction: incomingManifest.documentExtraction)
-            XCTAssertThrowsError(try f.engine.configureStoppedPackageInstance(
-                &receipt, manifest: incomingManifest, incoming: incoming))
+            XCTAssertThrowsError(
+                try f.engine.configureStoppedPackageInstance(
+                    &receipt, manifest: incomingManifest, incoming: incoming))
             XCTAssertEqual(try Data(contentsOf: f.engine.receiptURL("a")), beforeReceipt)
             XCTAssertEqual(try f.canonicalBytes(), before)
             XCTAssertTrue(f.runner.running.isEmpty)

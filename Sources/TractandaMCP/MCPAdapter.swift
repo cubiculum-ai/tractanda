@@ -263,11 +263,14 @@ public enum MCPAdapter {
             let advice: String
             switch failure.code {
             case "invalidArguments":
-                advice = "Correct the rejected arguments. This request did not commit, but it does not prove an earlier attempt with this operationID did not commit; reconcile that uncertainty first. If no earlier attempt committed, submit the corrected mutation with this operationID. If it did commit, retry its exact original arguments."
+                advice =
+                    "Correct the rejected arguments. This request did not commit, but it does not prove an earlier attempt with this operationID did not commit; reconcile that uncertainty first. If no earlier attempt committed, submit the corrected mutation with this operationID. If it did commit, retry its exact original arguments."
             case "retryReceiptUnavailable":
-                advice = "This operationID already names a committed revision, but its original request cannot be verified. Inspect the item or its history. Reserve fresh operation IDs for new edits."
+                advice =
+                    "This operationID already names a committed revision, but its original request cannot be verified. Inspect the item or its history. Reserve fresh operation IDs for new edits."
             default:
-                advice = "If the outcome is uncertain, retry identical arguments with this operationID. Do not replace the ID merely to retry."
+                advice =
+                    "If the outcome is uncertain, retry identical arguments with this operationID. Do not replace the ID merely to retry."
             }
             result["retryAdvice"] = .string(advice)
         }

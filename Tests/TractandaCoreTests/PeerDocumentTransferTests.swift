@@ -151,10 +151,12 @@ final class PeerDocumentTransferTests: XCTestCase {
     func testAuthenticatedUnknownProvenanceIntakePreservesManifestBytes() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
-        var fields = try XCTUnwrap(JSONSerialization.jsonObject(with: JSON.encode(DocumentConverterIdentity())) as? [String: String])
+        var fields = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSON.encode(DocumentConverterIdentity())) as? [String: String])
         fields["converter"] = "another-supported-data-producer"
         fields["runtimeRevision"] = String(repeating: "d", count: 40)
-        let identity = try JSON.decode(DocumentConverterIdentity.self, JSONSerialization.data(withJSONObject: fields))
+        let identity = try JSON.decode(
+            DocumentConverterIdentity.self, JSONSerialization.data(withJSONObject: fields))
         let package = try id()
         let tree = try tree(preservedWhitespace: true, identity: identity)
         try proofs(tree, package: package, transfer: f.transfer)
@@ -165,7 +167,9 @@ final class PeerDocumentTransferTests: XCTestCase {
         try f.contents.publishExact(stage: binding.stage, reference: tree.reference, manifestBytes: tree.raw)
         let saved = try f.contents.manifest(tree.reference)
         XCTAssertEqual(saved.identity, identity)
-        let directory = try f.contents.directory(tree.reference.contentID).reduce(f.root) { $0.appendingPathComponent($1) }
+        let directory = try f.contents.directory(tree.reference.contentID).reduce(f.root) {
+            $0.appendingPathComponent($1)
+        }
         XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent("manifest.json")), tree.raw)
         try f.contents.rebuildPlacement()
         XCTAssertEqual(try f.contents.readPage(tree.reference, pageNumber: 2).status, "timeout")

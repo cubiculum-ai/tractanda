@@ -110,7 +110,9 @@ final class DocumentWorkerProtocolTests: XCTestCase {
         let retained = try JSONDecoder().decode(NativeDocumentBinding.self, from: data)
         XCTAssertNoThrow(try retained.identity.validate())
         XCTAssertThrowsError(try retained.identity.validateCurrent())
-        XCTAssertThrowsError(try NativeWorkerProtocol.binding(data), "Readable provenance must never authorize launching a worker")
+        XCTAssertThrowsError(
+            try NativeWorkerProtocol.binding(data),
+            "Readable provenance must never authorize launching a worker")
     }
 
     func testKnownHistoricalIdentityCannotBindActiveNativeWorker() throws {

@@ -49,31 +49,45 @@ final class LinuxDocumentProfileTests: XCTestCase {
         let roundTrip = try JSONDecoder().decode(DocumentConverterIdentity.self, from: encoded)
         XCTAssertEqual(roundTrip, value, "Provenance values are not normalized or rewritten")
         let wire = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: String])
-        XCTAssertEqual(Set(wire.keys), ["converter", "model", "modelRevision", "runtimeRevision", "preprocessing", "parser"])
+        XCTAssertEqual(
+            Set(wire.keys),
+            ["converter", "model", "modelRevision", "runtimeRevision", "preprocessing", "parser"])
     }
     func testUnsupportedStoredSemanticsAreStillRejected() throws {
         XCTAssertThrowsError(try identity(["parser": "unapproved-parser"]).validate())
         XCTAssertThrowsError(try identity(["preprocessing": "unapproved-preprocessing"]).validate())
-        let historical = try identity(["converter": "different-build", "preprocessing": "opaque-rgb2048-17tiles-v1"])
+        let historical = try identity([
+            "converter": "different-build", "preprocessing": "opaque-rgb2048-17tiles-v1",
+        ])
         XCTAssertEqual(try historical.storedSemanticProfile(), .legacyCanvasV1)
-        XCTAssertNotEqual(try historical.storedSemanticProfile(), try DocumentConverterIdentity().storedSemanticProfile())
+        XCTAssertNotEqual(
+            try historical.storedSemanticProfile(), try DocumentConverterIdentity().storedSemanticProfile())
     }
     func testMalformedAndUnboundedProvenanceIsRejected() throws {
         for field in ["converter", "model"] {
             for value in ["", "bad identity", "../bad", "bad\0identity", String(repeating: "a", count: 257)] {
-                XCTAssertThrowsError(try identity([field: value]).validate(), field + ": " + value.debugDescription)
+                XCTAssertThrowsError(
+                    try identity([field: value]).validate(), field + ": " + value.debugDescription)
             }
         }
         for field in ["modelRevision", "runtimeRevision"] {
-            for value in ["", "not-a-revision", String(repeating: "a", count: 39), String(repeating: "g", count: 40), String(repeating: "a", count: 65)] {
-                XCTAssertThrowsError(try identity([field: value]).validate(), field + ": " + value.debugDescription)
+            for value in [
+                "", "not-a-revision", String(repeating: "a", count: 39), String(repeating: "g", count: 40),
+                String(repeating: "a", count: 65),
+            ] {
+                XCTAssertThrowsError(
+                    try identity([field: value]).validate(), field + ": " + value.debugDescription)
             }
         }
     }
     func testCurrentPackageProfileConstructionRemainsFiniteAndStrict() throws {
         let digest = String(repeating: "a", count: 64)
-        XCTAssertEqual(LinuxDocumentConverterProfiles.converterName(digest: digest), LinuxDocumentConverterProfiles.macConverter + "+linux-raster." + digest)
-        for invalid in [nil, "", String(repeating: "g", count: 64), String(repeating: "a", count: 63)] as [String?] {
+        XCTAssertEqual(
+            LinuxDocumentConverterProfiles.converterName(digest: digest),
+            LinuxDocumentConverterProfiles.macConverter + "+linux-raster." + digest)
+        for invalid in [nil, "", String(repeating: "g", count: 64), String(repeating: "a", count: 63)]
+            as [String?]
+        {
             XCTAssertNil(LinuxDocumentConverterProfiles.converterName(digest: invalid))
         }
         let historical = try identity(["converter": "a-different-runtime-build"])

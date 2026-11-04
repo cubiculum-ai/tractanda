@@ -79,7 +79,8 @@ struct PooledCanonicalRecord: Sendable {
         guard let identities = CanonicalRecordPath.identities(path) else {
             throw PooledCanonicalRecordError.invalidPath
         }
-        let itemID = identities.itemID, revisionID = identities.revisionID
+        let itemID = identities.itemID
+        let revisionID = identities.revisionID
         let before = try metadata(for: descriptor)
         guard before.type == .regular, before.uid == ownerUID, before.mode & 0o077 == 0 else {
             throw PooledCanonicalRecordError.unsafePermissions

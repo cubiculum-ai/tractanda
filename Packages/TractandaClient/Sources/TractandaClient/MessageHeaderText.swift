@@ -31,7 +31,9 @@ enum MessageHeaderText {
         var result = ""
         while let scalar = input.next() {
             guard scalar == "\\" else {
-                guard scalar == "\t" || !requiresEscape(scalar) else { throw invalid("Unescaped header control character.") }
+                guard scalar == "\t" || !requiresEscape(scalar) else {
+                    throw invalid("Unescaped header control character.")
+                }
                 result.unicodeScalars.append(scalar)
                 continue
             }
@@ -48,11 +50,14 @@ enum MessageHeaderText {
                 var hex = ""
                 var digit = input.next()
                 while let scalar = digit, scalar != "}" {
-                    guard hex.utf8.count < 6, isHex(scalar) else { throw invalid("Malformed header scalar escape.") }
+                    guard hex.utf8.count < 6, isHex(scalar) else {
+                        throw invalid("Malformed header scalar escape.")
+                    }
                     hex.unicodeScalars.append(scalar)
                     digit = input.next()
                 }
-                guard digit == "}", let number = UInt32(hex, radix: 16), let escaped = UnicodeScalar(number) else {
+                guard digit == "}", let number = UInt32(hex, radix: 16), let escaped = UnicodeScalar(number)
+                else {
                     throw invalid("Invalid escaped Unicode scalar.")
                 }
                 result.unicodeScalars.append(escaped)
@@ -106,7 +111,9 @@ struct MessageHeaderTokens {
 
     mutating func takeQuoted() throws -> String {
         skipWhitespace()
-        guard !isAtEnd, bytes[index] == 34 else { throw MessageHeaderText.invalid("Expected a quoted header value.") }
+        guard !isAtEnd, bytes[index] == 34 else {
+            throw MessageHeaderText.invalid("Expected a quoted header value.")
+        }
         index += 1
         let start = index
         while index < bytes.count {
@@ -137,7 +144,8 @@ struct MessageHeaderTokens {
         if afterValue, !isAtEnd { try takeDelimiter(59) }
         while !isAtEnd {
             let name = try takeWord(until: 61).lowercased()
-            guard name.utf8.allSatisfy({ (97...122).contains($0) || (48...57).contains($0) || $0 == 45 }) else {
+            guard name.utf8.allSatisfy({ (97...122).contains($0) || (48...57).contains($0) || $0 == 45 })
+            else {
                 throw MessageHeaderText.invalid("Invalid view header parameter name.")
             }
             try takeDelimiter(61)

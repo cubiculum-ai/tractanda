@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+
 @testable import TractandaClient
 
 final class MessageRecordCodecTests: XCTestCase {
@@ -16,9 +17,14 @@ final class MessageRecordCodecTests: XCTestCase {
         ]
         fields.merge(extras) { _, new in new }
         if authored {
-            let managed: Set<String> = ["itemID", "revisionID", "createdAt", "modifiedAt", "actor", "operationID", "requestIdentity"]
-            fields["revisionAncestry"] = try RevisionProvenance(kind: .authored, originReplicaID: c, parents: [],
-                writtenFields: fields.keys.filter { !managed.contains($0) }.sorted(), unsetFields: [], frontier: []).itemValue
+            let managed: Set<String> = [
+                "itemID", "revisionID", "createdAt", "modifiedAt", "actor", "operationID", "requestIdentity",
+            ]
+            fields["revisionAncestry"] = try RevisionProvenance(
+                kind: .authored, originReplicaID: c, parents: [],
+                writtenFields: fields.keys.filter { !managed.contains($0) }.sorted(), unsetFields: [],
+                frontier: []
+            ).itemValue
         }
         return try Revision(fields: fields, formatVersion: authored ? 2 : 1)
     }
@@ -27,11 +33,14 @@ final class MessageRecordCodecTests: XCTestCase {
         let body = "\u{feff}<p>e\u{301} 🔍</p>\r\n\nlast line without a terminator"
         let fields: [String: ItemValue] = [
             "subject": .text("  control\t\r\n  "), "body": .text(body), "bodyMediaType": .text("text/html"),
-            "isDeleted": .boolean(false), "custom": .object([
-                "quoted \" / \\ e\u{301}": .list([.text("line\n\u{0}\\u{a}"), .integer(.min),
+            "isDeleted": .boolean(false),
+            "custom": .object([
+                "quoted \" / \\ e\u{301}": .list([
+                    .text("line\n\u{0}\\u{a}"), .integer(.min),
                     .integer(.max), .real(-0.0), .real(Double.leastNonzeroMagnitude), .boolean(true),
                     .date("2026-11-03T10:00:00.123Z"), .reference(ItemReference(a, revisionID: c)),
-                    .bytes(Data([0, 1, 255])), .bytes(Data()), .list([]), .object([:])]),
+                    .bytes(Data([0, 1, 255])), .bytes(Data()), .list([]), .object([:]),
+                ]),
                 "Ω": .text("  "), "A": .text("ASCII"),
             ]),
         ]
@@ -91,9 +100,11 @@ final class MessageRecordCodecTests: XCTestCase {
     }
 
     func testBodyPresenceAndUnrecognizedMediaTypeRoundTrip() throws {
-        for fields: [String: ItemValue] in [[:], ["body": .text("")], ["bodyMediaType": .text("unknown/example")],
+        for fields: [String: ItemValue] in [
+            [:], ["body": .text("")], ["bodyMediaType": .text("unknown/example")],
             ["body": .text("# Markdown\n"), "bodyMediaType": .text("text/markdown")],
-            ["body": .text("\r\n"), "bodyMediaType": .integer(7)]] {
+            ["body": .text("\r\n"), "bodyMediaType": .integer(7)],
+        ] {
             let original = try revision(fields)
             XCTAssertEqual(try MessageRecordCodec.decode(MessageRecordCodec.encode(original)), original)
         }
@@ -101,26 +112,36 @@ final class MessageRecordCodecTests: XCTestCase {
 
     func testViewProjectionPreservesDefaultsCollapseOrderAndExtensions() throws {
         let view: ItemValue = .object([
-            "language": .text("tractanda.spotlight.v1"), "expression": .text("subject == 'literal'"), "text": .text(""),
+            "language": .text("tractanda.spotlight.v1"), "expression": .text("subject == 'literal'"),
+            "text": .text(""),
             "categoryPath": .list([.reference(ItemReference(a))]), "excludedCategoryIDs": .list([]),
             "referenceLabels": .object([a: .text("Tractanda"), b: .text("Axis")]),
-            "sort": .list([.object(["property": .text("modifiedAt")]),
-                .object(["categoryRootID": .reference(ItemReference(b)), "isAscending": .boolean(false)])]),
+            "sort": .list([
+                .object(["property": .text("modifiedAt")]),
+                .object(["categoryRootID": .reference(ItemReference(b)), "isAscending": .boolean(false)]),
+            ]),
             "presentation": .object([
                 "profile": .text("tractanda.table.v0"),
-                "columns": .list([.object(["property": .text("subject"), "title": .text("Süß \"Title\""), "width": .integer(40)])]),
+                "columns": .list([
+                    .object([
+                        "property": .text("subject"), "title": .text("Süß \"Title\""), "width": .integer(40),
+                    ])
+                ]),
                 "sections": .list([a, b, c].map { .reference(ItemReference($0)) }),
                 "collapsedSections": .list([b, a].map { .reference(ItemReference($0)) }),
                 "custom": .bytes(Data([23])),
             ]), "extension": .object(["nested": .list([])]),
         ])
-        let original = try revision(["viewDefinition": view, "referenceLabels": .object([a: .text("Display only")])])
+        let original = try revision([
+            "viewDefinition": view, "referenceLabels": .object([a: .text("Display only")]),
+        ])
         let encoded = try MessageRecordCodec.encode(original)
         let text = String(decoding: encoded, as: UTF8.self)
         XCTAssertTrue(text.contains("X-View-Include: \(a); label=\"Tractanda\"\r\n"))
         XCTAssertTrue(text.contains("X-View-Sort: property=modifiedAt\r\n"))
         XCTAssertTrue(text.contains("X-View-Sort: category=\(b); direction=descending; label=\"Axis\"\r\n"))
-        XCTAssertTrue(text.contains("X-View-Column: property=subject; title=\"Süß \\\"Title\\\"\"; width=40\r\n"))
+        XCTAssertTrue(
+            text.contains("X-View-Column: property=subject; title=\"Süß \\\"Title\\\"\"; width=40\r\n"))
         XCTAssertTrue(text.contains("X-View-Section: \(a); collapsed=yes; collapsed-order=1\r\n"))
         XCTAssertTrue(text.contains("X-View-Section: \(b); collapsed=yes; collapsed-order=0\r\n"))
         XCTAssertTrue(text.contains("X-View-Section: \(c); collapsed=no\r\n"))
@@ -132,12 +153,16 @@ final class MessageRecordCodecTests: XCTestCase {
     }
 
     func testReadablePermissionsCategoryAndAttachmentProjection() throws {
-        let attachment = try AttachmentDescriptor(attachmentID: c, filename: "report \"é\".txt", mediaType: "text/plain",
+        let attachment = try AttachmentDescriptor(
+            attachmentID: c, filename: "report \"é\".txt", mediaType: "text/plain",
             byteCount: 7, sha256: String(repeating: "a", count: 64))
         let original = try revision([
-            "permissions": .object(["profile": .text("tractanda.permissions.posix.v1"), "owner": .text("alice"),
-                "group": .text("staff"), "mode": .integer(0o640), "acl": .object(["users": .object([:])])]),
-            "categoryParents": .list([.reference(ItemReference(a))]), "categoryOverrides": .object([b: .text("exclude")]),
+            "permissions": .object([
+                "profile": .text("tractanda.permissions.posix.v1"), "owner": .text("alice"),
+                "group": .text("staff"), "mode": .integer(0o640), "acl": .object(["users": .object([:])]),
+            ]),
+            "categoryParents": .list([.reference(ItemReference(a))]),
+            "categoryOverrides": .object([b: .text("exclude")]),
             "attachments": .list([attachment.itemValue]),
         ])
         let encoded = try MessageRecordCodec.encode(original)
@@ -156,10 +181,13 @@ final class MessageRecordCodecTests: XCTestCase {
         XCTAssertEqual(decoded.fields["x-color"], .list([.text("red"), .text(" blue ")]))
         XCTAssertEqual(decoded.fields["x-note"], .text("literal"))
         let canonical = try MessageRecordCodec.encode(decoded)
-        XCTAssertTrue(String(decoding: canonical, as: UTF8.self).contains("x-color: red\r\nx-color:  blue \r\n"))
+        XCTAssertTrue(
+            String(decoding: canonical, as: UTF8.self).contains("x-color: red\r\nx-color:  blue \r\n"))
         XCTAssertEqual(try MessageRecordCodec.decode(canonical), decoded)
-        let exactKeys = try revision(["X-Color": .text("Case-sensitive API key"),
-            "x-color": .list([.text("singleton list")])])
+        let exactKeys = try revision([
+            "X-Color": .text("Case-sensitive API key"),
+            "x-color": .list([.text("singleton list")]),
+        ])
         XCTAssertEqual(try MessageRecordCodec.decode(MessageRecordCodec.encode(exactKeys)), exactKeys)
         let typed = try MessageRecordCodec.encode(revision(["x-color": .integer(7)]))
         XCTAssertThrowsError(try MessageRecordCodec.decode(Data("X-Color: red\r\n".utf8) + typed))
@@ -173,34 +201,45 @@ final class MessageRecordCodecTests: XCTestCase {
         let refB = ItemValue.reference(ItemReference(b))
         let table: ItemValue = .object([
             "profile": .text("tractanda.table.v0"),
-            "columns": .list([.object(["categoryRootID": refA, "title": .text("§ e\u{301}"), "width": .integer(18)])]),
+            "columns": .list([
+                .object(["categoryRootID": refA, "title": .text("§ e\u{301}"), "width": .integer(18)])
+            ]),
             "sections": .list([refA, refB]), "collapsedSections": .list([refB, refA]),
         ])
         let full: [String: ItemValue] = [
-            "subject": .text("Über \\ e\u{301}\n  " ),
+            "subject": .text("Über \\ e\u{301}\n  "),
             "body": .text("\u{feff}<p>猫 🧪</p>\r\n\nno final newline"), "bodyMediaType": .text("text/html"),
-            "permissions": .object(["profile": .text("tractanda.permissions.posix.v1"), "owner": .text("alice"),
-                "group": .text("staff"), "mode": .integer(0o640), "acl": .object([
+            "permissions": .object([
+                "profile": .text("tractanda.permissions.posix.v1"), "owner": .text("alice"),
+                "group": .text("staff"), "mode": .integer(0o640),
+                "acl": .object([
                     "users": .object(["bob": .integer(4)]), "groups": .object([:]),
                     "mask": .integer(4), "owningGroup": .integer(4),
-                ])]),
+                ]),
+            ]),
             "viewDefinition": .object([
-                "language": .text("tractanda.spotlight.v1"), "expression": .text("subject == '猫'"), "text": .text(""),
+                "language": .text("tractanda.spotlight.v1"), "expression": .text("subject == '猫'"),
+                "text": .text(""),
                 "categoryPath": .list([refA]), "excludedCategoryIDs": .list([refB]),
                 "referenceLabels": .object([a: .text("Tractanda"), b: .text("Nested e\u{301}; \"display\"")]),
-                "sort": .list([.object(["property": .text("subject")]),
-                    .object(["categoryRootID": refB, "isAscending": .boolean(false)])]), "presentation": table,
+                "sort": .list([
+                    .object(["property": .text("subject")]),
+                    .object(["categoryRootID": refB, "isAscending": .boolean(false)]),
+                ]), "presentation": table,
             ]),
             "referenceLabels": .object([a: .text("Display only")]),
             "nested": .object([
-                "é": .text("prefixed e\u{301}"), "Z": .integer(.min), "a": .list([
+                "é": .text("prefixed e\u{301}"), "Z": .integer(.min),
+                "a": .list([
                     .real(-0.0), .real(Double.leastNonzeroMagnitude), .real(Double.greatestFiniteMagnitude),
                     .date("2026-11-03T10:00:00+01:00"), .list([]), .object([:]), .bytes(Data([0, 255])),
                     .reference(ItemReference(a, revisionID: c)), .boolean(false),
                 ]),
             ]),
             "x-custom": .list([.text("first"), .text("  δεύτερο  ")]),
-            "requestIdentity": .text(Data(#"{"operationID":"fixture","changes":{"body":"Original request"}}"#.utf8).base64EncodedString()),
+            "requestIdentity": .text(
+                Data(#"{"operationID":"fixture","changes":{"body":"Original request"}}"#.utf8)
+                    .base64EncodedString()),
         ]
         let authored = try revision(full, authored: true)
         var withoutReceipt = authored.fields
@@ -208,17 +247,23 @@ final class MessageRecordCodecTests: XCTestCase {
         let fixtures: [(String, Revision)] = try [
             ("legacy-absent", revision()),
             ("legacy-empty", revision(["body": .text("")])),
-            ("markdown", revision(["body": .text("# Heading\n\r\n"), "bodyMediaType": .text("text/markdown")])),
+            (
+                "markdown",
+                revision(["body": .text("# Heading\n\r\n"), "bodyMediaType": .text("text/markdown")])
+            ),
             ("unknown-media", revision(["body": .text("legacy"), "bodyMediaType": .text("legacy/type")])),
             ("authored-html-and-metadata", authored),
             ("authored-without-receipt", Revision(fields: withoutReceipt, formatVersion: 2)),
         ]
-        let destination = ProcessInfo.processInfo.environment["TRACTANDA_MESSAGE_GOLDENS"].map { URL(fileURLWithPath: $0) }
+        let destination = ProcessInfo.processInfo.environment["TRACTANDA_MESSAGE_GOLDENS"].map {
+            URL(fileURLWithPath: $0)
+        }
         for (name, revision) in fixtures {
             let encoded = try MessageRecordCodec.encode(revision)
             XCTAssertEqual(try MessageRecordCodec.decode(encoded), revision)
             if let destination {
-                try encoded.write(to: destination.appendingPathComponent(name + ".tractanda"), options: .withoutOverwriting)
+                try encoded.write(
+                    to: destination.appendingPathComponent(name + ".tractanda"), options: .withoutOverwriting)
             }
         }
     }
@@ -226,7 +271,8 @@ final class MessageRecordCodecTests: XCTestCase {
     func testFoldedHeadersAndLiteralBackslashes() throws {
         let baseline = try MessageRecordCodec.encode(revision(["body": .text("body\r\n\tunchanged")]))
         let text = String(decoding: baseline, as: UTF8.self).replacingOccurrences(
-            of: "Content-Type: text/plain; charset=utf-8", with: "Content-Type:\ttext/plain;\r\n\tcharset = \"UTF-8\"")
+            of: "Content-Type: text/plain; charset=utf-8",
+            with: "Content-Type:\ttext/plain;\r\n\tcharset = \"UTF-8\"")
         let headers = [
             "Subject:\tFix C:\\temp \"quoted\"",
             "\tand more",
@@ -250,7 +296,9 @@ final class MessageRecordCodecTests: XCTestCase {
         XCTAssertEqual(view["presentation"]?.map?["columns"]?.array?.first?.map?["title"], .text("A\tB"))
         XCTAssertEqual(view["sort"]?.array?.first?.map?["isAscending"], .boolean(false))
         let canonical = try MessageRecordCodec.encode(decoded)
-        XCTAssertTrue(String(decoding: canonical, as: UTF8.self).contains("Subject: Fix C:\\temp \"quoted\"\tand more\r\n"))
+        XCTAssertTrue(
+            String(decoding: canonical, as: UTF8.self).contains(
+                "Subject: Fix C:\\temp \"quoted\"\tand more\r\n"))
         XCTAssertEqual(try MessageRecordCodec.decode(canonical), decoded)
     }
 
@@ -283,7 +331,8 @@ final class MessageRecordCodecTests: XCTestCase {
 
     func testOptionalExactReceiptCanBeRemovedWithoutChangingOtherFields() throws {
         let receipt = Data(#"{"operationID":"fixture"}"#.utf8).base64EncodedString()
-        let original = try revision(["body": .text("body\r\n"), "requestIdentity": .text(receipt)], authored: true)
+        let original = try revision(
+            ["body": .text("body\r\n"), "requestIdentity": .text(receipt)], authored: true)
         let encoded = try MessageRecordCodec.encode(original)
         let header = "X-Request-Identity: " + receipt + "\r\n"
         let text = String(decoding: encoded, as: UTF8.self)
@@ -318,8 +367,10 @@ final class MessageRecordCodecTests: XCTestCase {
     func testMalformedAndOldMessageEnvelopesFailClosed() throws {
         let original = try revision(["subject": .text("ok")])
         let bytes = try MessageRecordCodec.encode(original)
-        for extra in ["sUBJECT: duplicate\r\n", " X-Field-Text: folded\r\n", "X-Field-End: \r\n",
-            "X-Field-Object: \"unclosed\"\r\n", "X-Field-Text: \"bad\" \\u{61\r\n"] {
+        for extra in [
+            "sUBJECT: duplicate\r\n", " X-Field-Text: folded\r\n", "X-Field-End: \r\n",
+            "X-Field-Object: \"unclosed\"\r\n", "X-Field-Text: \"bad\" \\u{61\r\n",
+        ] {
             XCTAssertThrowsError(try MessageRecordCodec.decode(Data(extra.utf8) + bytes))
         }
         XCTAssertThrowsError(try MessageRecordCodec.decode(bytes + Data([0xff])))
@@ -328,7 +379,10 @@ final class MessageRecordCodecTests: XCTestCase {
         XCTAssertThrowsError(try MessageRecordCodec.decode(Data(invalidTransfer.utf8)))
         let withBody = try MessageRecordCodec.encode(revision(["body": .text("")]))
         XCTAssertThrowsError(try MessageRecordCodec.decode(withBody + Data([0xff])))
-        let old = Data("MIME-Version: 1.0\r\nContent-Type: application/vnd.tractanda.item+json; charset=utf-8\r\n\r\n".utf8)
+        let old =
+            Data(
+                "MIME-Version: 1.0\r\nContent-Type: application/vnd.tractanda.item+json; charset=utf-8\r\n\r\n"
+                    .utf8)
             + (try JSON.encode(original))
         XCTAssertThrowsError(try MessageRecordCodec.decode(old))
     }

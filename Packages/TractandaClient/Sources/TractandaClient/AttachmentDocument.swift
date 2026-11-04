@@ -68,7 +68,8 @@ public struct DocumentConverterIdentity: Codable, Equatable, Sendable {
     }
 
     private static func unsupportedStoredIdentity() -> TractandaError {
-        TractandaError("unsupportedDocumentConverter", "Malformed provenance or unsupported stored document semantics.")
+        TractandaError(
+            "unsupportedDocumentConverter", "Malformed provenance or unsupported stored document semantics.")
     }
 
     /// Saved provenance remains readable. New subprocess results must

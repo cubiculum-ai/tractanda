@@ -28,7 +28,8 @@ enum CanonicalPhysicalLayout {
         do {
             _ = try FileMetadata.read(at: root.appendingPathComponent(pendingFileName))
         } catch FileMetadataError.posix(let code) where code == ENOENT { return }
-        throw TractandaError("canonicalLayoutMigrationRequired",
+        throw TractandaError(
+            "canonicalLayoutMigrationRequired",
             "The installer must finish the pending physical-layout transition before opening this store.")
     }
 
@@ -56,13 +57,16 @@ enum CanonicalPhysicalLayout {
     }
 
     static func migrationRequired() -> TractandaError {
-        TractandaError("canonicalLayoutMigrationRequired",
-            "This nonempty store lacks the current physical layout. Use the .17 installer migration; never initialize it as an empty store.")
+        TractandaError(
+            "canonicalLayoutMigrationRequired",
+            "This nonempty store lacks the current physical layout. Use the .17 installer migration; never initialize it as an empty store."
+        )
     }
 
     private static func load(_ root: URL, ownerUID: UInt32) throws -> Bool {
-        guard let bytes = try CanonicalReaderRequirement.localConfigurationBytes(
-            root: root, name: fileName, ownerUID: ownerUID, maximumBytes: 4096)
+        guard
+            let bytes = try CanonicalReaderRequirement.localConfigurationBytes(
+                root: root, name: fileName, ownerUID: ownerUID, maximumBytes: 4096)
         else { return false }
         guard let object = try JSONSerialization.jsonObject(with: bytes) as? [String: Any],
             Set(object.keys) == ["profile", "layout", "recordEncoding"],
@@ -122,7 +126,8 @@ enum CanonicalPhysicalLayout {
                 offset += count
             }
         }
-        var named = stat(), after = stat()
+        var named = stat()
+        var after = stat()
         guard expected.prefix(bytes.count) == bytes,
             !committed || bytes == expected,
             fstat(descriptor, &after) == 0,
@@ -162,7 +167,8 @@ enum CanonicalPhysicalLayout {
         guard directory >= 0 else { throw FileMetadataError.posix(errno) }
         defer { close(directory) }
         let temporary = ".physical-layout-" + Identifier.make() + ".stage"
-        let descriptor = openat(directory, temporary,
+        let descriptor = openat(
+            directory, temporary,
             O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
         guard descriptor >= 0 else { throw FileMetadataError.posix(errno) }
         defer {

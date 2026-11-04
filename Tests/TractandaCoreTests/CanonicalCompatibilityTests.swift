@@ -40,7 +40,9 @@ final class CanonicalCompatibilityTests: XCTestCase {
     func testPhysicalFloorIsRetainedAndPublicationExtendsRecordFormatsMonotonically() throws {
         let root = try root()
         defer { try? FileManager.default.removeItem(at: root) }
-        XCTAssertEqual(try CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid())?.minimumReaderLevel, 20)
+        XCTAssertEqual(
+            try CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid())?.minimumReaderLevel, 20
+        )
         let initial = try CanonicalReaderRequirement.withWriterLock(root: root, ownerUID: tractanda_uid()) {
             try CanonicalReaderRequirement.admitQuiescent(root: root, ownerUID: tractanda_uid())
         }
@@ -70,12 +72,15 @@ final class CanonicalCompatibilityTests: XCTestCase {
         let request = CommitRequest(
             classID: "Item", changes: ["subject": .text("content")], operationID: "first2")
         XCTAssertThrowsError(try store.commit(request))
-        XCTAssertEqual(try CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid())?.minimumReaderLevel, 20)
+        XCTAssertEqual(
+            try CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid())?.minimumReaderLevel, 20
+        )
         XCTAssertEqual(try store.exportCatalogueForVerification().count, 0)
         store.beforeCanonicalReaderRequirementForTesting = nil
         let revision = try store.commit(request).revision
         XCTAssertEqual(
-            try CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid())?.minimumReaderLevel, 20)
+            try CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid())?.minimumReaderLevel, 20
+        )
         let rows = try store.exportCatalogueForVerification()
         let path = root.appendingPathComponent(try XCTUnwrap(rows.first).path)
         let original = try Data(contentsOf: path)
@@ -151,6 +156,8 @@ final class CanonicalCompatibilityTests: XCTestCase {
                     root: root, ownerUID: tractanda_uid(), maximumRecords: 1)
             }
         ) { XCTAssertEqual(($0 as? TractandaError)?.code, "resourceLimit") }
-        XCTAssertEqual(try CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid())?.minimumReaderLevel, 20)
+        XCTAssertEqual(
+            try CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid())?.minimumReaderLevel, 20
+        )
     }
 }

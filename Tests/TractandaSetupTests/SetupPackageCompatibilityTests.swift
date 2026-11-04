@@ -136,13 +136,14 @@ final class SetupPackageCompatibilityTests: XCTestCase {
 
         let changedParser = try JSONDecoder().decode(
             DocumentExtractionPayload.self,
-            from: encodedObject({
-                var value = try jsonObject(JSONEncoder().encode(oldDocument))
-                var identity = try XCTUnwrap(value["identity"] as? [String: Any])
-                identity["parser"] = "unsupported-parser-v9"
-                value["identity"] = identity
-                return value
-            }()))
+            from: encodedObject(
+                {
+                    var value = try jsonObject(JSONEncoder().encode(oldDocument))
+                    var identity = try XCTUnwrap(value["identity"] as? [String: Any])
+                    identity["parser"] = "unsupported-parser-v9"
+                    value["identity"] = identity
+                    return value
+                }()))
         XCTAssertThrowsError(try declaration(document: changedParser).requireRollingUpgrade(from: old))
         XCTAssertThrowsError(try declaration(document: nil).requireRollingUpgrade(from: old))
     }
@@ -158,10 +159,12 @@ final class SetupPackageCompatibilityTests: XCTestCase {
         }
         let old = try withConverter("8edce98a4bc2d2c3e359f79010d17c67ee08f84409ef83149f3522b0629d3cae")
         let new = try withConverter("610fdf77f4d8f037ec0d6510d50023e9e8d02f79a36236e044e446150ffca013")
-        XCTAssertNoThrow(try declaration(document: new).requireRollingUpgrade(from: declaration(document: old)))
+        XCTAssertNoThrow(
+            try declaration(document: new).requireRollingUpgrade(from: declaration(document: old)))
         // This does not authorize the old executable as the new package payload.
         let incoming = declaration(document: new)
-        let mismatched = BundleManifest(version: incoming.version, platform: "linux", arch: incoming.arch,
+        let mismatched = BundleManifest(
+            version: incoming.version, platform: "linux", arch: incoming.arch,
             files: [], embedding: incoming.embedding, documentExtraction: old,
             canonicalFormats: incoming.canonicalFormats)
         XCTAssertThrowsError(try incoming.requirePayload(mismatched, digest: incoming.manifestSHA256))

@@ -39,7 +39,8 @@ final class RevisionProvenanceIntegrationTests: XCTestCase {
             let folder = root.appendingPathComponent("items/2020/01/02/03/\(minute)")
             try FileManager.default.createDirectory(
                 at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            let path = folder.appendingPathComponent(revision.itemID + "." + revision.revisionID + ".tractanda")
+            let path = folder.appendingPathComponent(
+                revision.itemID + "." + revision.revisionID + ".tractanda")
             let bytes = try RecordCodec.encode(revision)
             try bytes.write(to: path)
             try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: path.path)

@@ -58,27 +58,41 @@ final class DocumentContractsTests: XCTestCase {
 
     func testStoredDocumentUnknownProvenanceRetainsSchemaAndGeometryChecks() throws {
         let block = try DoclingBlock(kind: .text, text: "saved", textByteStart: 0, textByteEnd: 5)
-        let parsed = try DoclingParsedPage(rawDocTags: "<doctag><text>saved</text></doctag>", blocks: [block], text: "saved")
-        let source = try AttachmentDocumentSource(itemID: id, revisionID: id, attachmentID: id, sha256: sourceDigest, byteCount: 100, mediaType: "image/png")
-        let page = try AttachmentDocumentPage(pageNumber: 1, geometry: geometry(), rasterSHA256: sourceDigest, parsed: parsed, generatedTokens: 10, stopReason: "stop")
-        let original = try AttachmentDocumentRepresentation(representationID: id, attachmentID: id, source: source, extractedAt: "2026-10-07T12:00:00Z", identity: .init(), pages: [page])
+        let parsed = try DoclingParsedPage(
+            rawDocTags: "<doctag><text>saved</text></doctag>", blocks: [block], text: "saved")
+        let source = try AttachmentDocumentSource(
+            itemID: id, revisionID: id, attachmentID: id, sha256: sourceDigest, byteCount: 100,
+            mediaType: "image/png")
+        let page = try AttachmentDocumentPage(
+            pageNumber: 1, geometry: geometry(), rasterSHA256: sourceDigest, parsed: parsed,
+            generatedTokens: 10, stopReason: "stop")
+        let original = try AttachmentDocumentRepresentation(
+            representationID: id, attachmentID: id, source: source, extractedAt: "2026-10-07T12:00:00Z",
+            identity: .init(), pages: [page])
         var wire = try XCTUnwrap(JSONSerialization.jsonObject(with: JSON.encode(original)) as? [String: Any])
         var provenance = try XCTUnwrap(wire["identity"] as? [String: String])
         provenance["converter"] = "future-build-" + String(repeating: "f", count: 64)
         provenance["modelRevision"] = String(repeating: "c", count: 40)
         provenance["runtimeRevision"] = String(repeating: "d", count: 40)
         wire["identity"] = provenance
-        let value = try JSON.decode(AttachmentDocumentRepresentation.self, JSONSerialization.data(withJSONObject: wire))
+        let value = try JSON.decode(
+            AttachmentDocumentRepresentation.self, JSONSerialization.data(withJSONObject: wire))
         XCTAssertNoThrow(try value.validate())
         XCTAssertEqual(try AttachmentDocumentRepresentation(value.itemValue), value)
         XCTAssertEqual(value.identity.converter, provenance["converter"])
         XCTAssertThrowsError(try value.identity.validateCurrent())
         wire["schema"] = "tractanda.attachment-document.v999"
-        XCTAssertThrowsError(try JSON.decode(AttachmentDocumentRepresentation.self, JSONSerialization.data(withJSONObject: wire)).validate())
+        XCTAssertThrowsError(
+            try JSON.decode(
+                AttachmentDocumentRepresentation.self, JSONSerialization.data(withJSONObject: wire)
+            ).validate())
         wire["schema"] = original.schema
         provenance["preprocessing"] = "opaque-rgb2048-17tiles-v1"
         wire["identity"] = provenance
-        XCTAssertThrowsError(try JSON.decode(AttachmentDocumentRepresentation.self, JSONSerialization.data(withJSONObject: wire)).validate(), "Legacy semantics cannot admit crop-v2 geometry")
+        XCTAssertThrowsError(
+            try JSON.decode(
+                AttachmentDocumentRepresentation.self, JSONSerialization.data(withJSONObject: wire)
+            ).validate(), "Legacy semantics cannot admit crop-v2 geometry")
     }
 
     func testCanonicalDocumentRoundTripAndImmutableCopyProvenance() throws {
@@ -128,7 +142,9 @@ final class DocumentContractsTests: XCTestCase {
         unknown["converter"] = "tractanda.docling-native.v2-unknown-patch"
         let unknownIdentity = try JSON.decode(
             DocumentConverterIdentity.self, JSONSerialization.data(withJSONObject: unknown))
-        XCTAssertNoThrow(try unknownIdentity.validate(), "Supported saved semantics do not depend on the producer build label")
+        XCTAssertNoThrow(
+            try unknownIdentity.validate(),
+            "Supported saved semantics do not depend on the producer build label")
         XCTAssertThrowsError(try unknownIdentity.validateCurrent())
         var forged = try XCTUnwrap(value.map)
         forged["unrecognized"] = .text("hidden")

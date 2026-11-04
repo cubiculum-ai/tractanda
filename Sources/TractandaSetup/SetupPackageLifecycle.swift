@@ -27,7 +27,8 @@ extension SetupEngine {
             }
             try preflightCandidatePayload(incoming, bundle: candidate)
             try preflightPackageUpgrade(incoming, bundle: candidate)
-            return "Incoming package payload and format preflight passed; no services or package state changed."
+            return
+                "Incoming package payload and format preflight passed; no services or package state changed."
         }
         if arguments.action == .preinst {
             guard let incoming else { throw SetupError("Missing incoming package declaration.") }
@@ -177,7 +178,8 @@ extension SetupEngine {
     /// compatibility. This never runs a candidate converter or mutates live state.
     func preflightCandidatePayload(_ incoming: SetupPackageCompatibility, bundle: URL) throws {
         guard bundle.path.hasPrefix("/"), bundle.standardizedFileURL.path == bundle.path,
-            bundle.path != "/" else {
+            bundle.path != "/"
+        else {
             throw SetupError("Candidate bundle must be an absolute normalized protected path.")
         }
         if trustedOwnership {
@@ -188,7 +190,9 @@ extension SetupEngine {
             var count = 0
             for case let path as URL in scan {
                 count += 1
-                guard count <= 40_000 else { throw SetupError("Candidate bundle inventory exceeds its bound.") }
+                guard count <= 40_000 else {
+                    throw SetupError("Candidate bundle inventory exceeds its bound.")
+                }
                 let attributes = try FileManager.default.attributesOfItem(atPath: path.path)
                 guard !isLink(path), let type = attributes[.type] as? FileAttributeType,
                     type == .typeDirectory || type == .typeRegular
@@ -246,8 +250,10 @@ extension SetupEngine {
             // A historical preinst can only retain stop intent. A failed older attempt may
             // leave its rejected incoming descriptor in the journal; it is not a commitment
             // to this unpack. Configure has verified the real incoming manifest and payload.
-            let verifiedLegacyUnpack = prior.phase == .quiesced && incoming == installed
-                && prior.original != nil && receipts.allSatisfy {
+            let verifiedLegacyUnpack =
+                prior.phase == .quiesced && incoming == installed
+                && prior.original != nil
+                && receipts.allSatisfy {
                     $0.manifestSHA256 == prior.original?.manifestSHA256
                 }
             guard commitments.contains(installed.manifestSHA256) || verifiedLegacyUnpack else {
@@ -410,10 +416,12 @@ extension SetupEngine {
         }
         if let existing, existing.phase == .committed, existing.incoming == incoming {
             try verifyPackageDefinitionFiles(receipts)
-            guard receipts.allSatisfy({
-                incoming.version == "0.1.0-poc.17" && $0.state == .removed
-                    || $0.manifestSHA256 == incoming.manifestSHA256
-            }) else {
+            guard
+                receipts.allSatisfy({
+                    incoming.version == "0.1.0-poc.17" && $0.state == .removed
+                        || $0.manifestSHA256 == incoming.manifestSHA256
+                })
+            else {
                 throw SetupError("Committed package receipts differ from the actual active payload.")
             }
             return "Package configuration already committed; service intent is unchanged."
@@ -439,8 +447,10 @@ extension SetupEngine {
                     )
                 }
                 if incoming.version == "0.1.0-poc.17", let original = state.original,
-                    original.version == "0.1.0-poc.16.2" {
-                    _ = try migrateLayout17Store(receipt, bundle: packagePayload, incoming: incoming, original: original)
+                    original.version == "0.1.0-poc.16.2"
+                {
+                    _ = try migrateLayout17Store(
+                        receipt, bundle: packagePayload, incoming: incoming, original: original)
                 }
                 try incoming.canonicalFormats.require(quiescentCanonicalRequirement(receipt))
                 var allowStart = try intent.wasRunning && readLayout17Intent(intent.name) == nil
@@ -471,7 +481,8 @@ extension SetupEngine {
             // owner dies halfway, stale permits deny subsequent boot/restart, even if a link exists.
             for intent in state.instances where intent.wasEnabled {
                 guard let receipt = try readReceipt(intent.name), receipt.state == .active,
-                    try readLayout17Intent(intent.name) == nil else { continue }
+                    try readLayout17Intent(intent.name) == nil
+                else { continue }
                 for role in [SetupServiceRole.authentication, .embeddings, .server]
                 where packageDefinitionHash(receipt, role: role) != nil {
                     try serviceBackend.enable(intent.name, role: role)

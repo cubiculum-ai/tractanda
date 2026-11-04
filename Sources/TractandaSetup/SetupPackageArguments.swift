@@ -45,7 +45,8 @@ struct SetupPackageArguments: Equatable, Sendable {
                 let descriptor = normalizedDescriptorURL(arguments[3]), arguments[4] == "--bundle",
                 let bundle = normalizedDescriptorURL(arguments[5])
             else {
-                throw SetupError("Use --package-lifecycle preflight --descriptor ABSOLUTE_PATH --bundle ABSOLUTE_PATH.")
+                throw SetupError(
+                    "Use --package-lifecycle preflight --descriptor ABSOLUTE_PATH --bundle ABSOLUTE_PATH.")
             }
             return Self(action: action, descriptor: descriptor, instance: nil, candidateBundle: bundle)
         case .preinst, .configure:

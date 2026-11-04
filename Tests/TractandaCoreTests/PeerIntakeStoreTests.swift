@@ -363,7 +363,9 @@ final class PeerIntakeStoreTests: XCTestCase {
             root: existing, ownerUID: tractanda_uid(), minimumFreeBytes: 10 * 1024 * 1024 * 1024)
         try files.writeImmutable(
             bytes,
-            path: ["items", "2001", "01", "01", "00", "00", old.itemID + "." + old.revisionID + ".tractanda"],
+            path: [
+                "items", "2001", "01", "01", "00", "00", old.itemID + "." + old.revisionID + ".tractanda",
+            ],
             maximumBytes: 8 * 1024 * 1024)
         f.receiver = try Fixture.open(existing, f.receiverAccounts)
         code("authorityBootstrapRequired") {

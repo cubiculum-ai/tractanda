@@ -955,46 +955,49 @@ final class DocumentJobCoordinatorTests: XCTestCase {
     func testPartialIndexImportRestartReusesSavedPagesWithoutConverterReplay() async throws {
         var observedStage = "fixture"
         do {
-        // Three outcomes + all store/index/spool copies are estimated below2MiB under16MiB.
-        let fixture = try fixture(pages: 3)
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        observedStage = "first coordinator open"
-        let first = try await ServiceCoordinator(
-            opening: fixture.store, embeddingProviderForTesting: nil, requireInitializedStore: true,
-            documentRuntimeVerifierForTesting: { _ in }, documentConverter: fixture.configuration)
-        await first.setDocumentJobIndexHookForTesting { batch in
-            if batch.phase == .afterCommit {
-                throw TractandaError("indexProjectionPending", "Stopped after durable partial import")
+            // Three outcomes + all store/index/spool copies are estimated below2MiB under16MiB.
+            let fixture = try fixture(pages: 3)
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            observedStage = "first coordinator open"
+            let first = try await ServiceCoordinator(
+                opening: fixture.store, embeddingProviderForTesting: nil, requireInitializedStore: true,
+                documentRuntimeVerifierForTesting: { _ in }, documentConverter: fixture.configuration)
+            await first.setDocumentJobIndexHookForTesting { batch in
+                if batch.phase == .afterCommit {
+                    throw TractandaError("indexProjectionPending", "Stopped after durable partial import")
+                }
             }
-        }
-        observedStage = "start current-identity job"
-        let admitted = try await client(first).startDocumentJob(fixture.request)
-        observedStage = "wait for intentional partial-index pause"
-        let paused = try await wait(client(first), id: admitted.jobID, root: fixture.root) {
-            $0.state == "paused"
-        }
-        XCTAssertEqual(paused.acceptedPages, 3)
-        observedStage = "close first coordinator"
-        await first.close()
-        observedStage = "read original page call count"
-        let calls = try String(contentsOf: fixture.root.appendingPathComponent("page-calls"), encoding: .utf8)
-        observedStage = "reopen retained job"
-        let second = try await ServiceCoordinator(
-            opening: fixture.store, embeddingProviderForTesting: nil, requireInitializedStore: true,
-            documentRuntimeVerifierForTesting: { _ in }, documentConverter: fixture.configuration)
-        observedStage = "resume retained job"
-        let completed = try await wait(client(second), id: admitted.jobID, root: fixture.root) {
-            $0.state == "completed"
-        }
-        XCTAssertTrue(completed.committed?.isIndexReady == true)
-        XCTAssertEqual(
-            try String(contentsOf: fixture.root.appendingPathComponent("page-calls"), encoding: .utf8), calls)
-        observedStage = "close second coordinator"
-        await second.close()
-        observedStage = "final fixture capacity"
-        try capacity(fixture.root)
+            observedStage = "start current-identity job"
+            let admitted = try await client(first).startDocumentJob(fixture.request)
+            observedStage = "wait for intentional partial-index pause"
+            let paused = try await wait(client(first), id: admitted.jobID, root: fixture.root) {
+                $0.state == "paused"
+            }
+            XCTAssertEqual(paused.acceptedPages, 3)
+            observedStage = "close first coordinator"
+            await first.close()
+            observedStage = "read original page call count"
+            let calls = try String(
+                contentsOf: fixture.root.appendingPathComponent("page-calls"), encoding: .utf8)
+            observedStage = "reopen retained job"
+            let second = try await ServiceCoordinator(
+                opening: fixture.store, embeddingProviderForTesting: nil, requireInitializedStore: true,
+                documentRuntimeVerifierForTesting: { _ in }, documentConverter: fixture.configuration)
+            observedStage = "resume retained job"
+            let completed = try await wait(client(second), id: admitted.jobID, root: fixture.root) {
+                $0.state == "completed"
+            }
+            XCTAssertTrue(completed.committed?.isIndexReady == true)
+            XCTAssertEqual(
+                try String(contentsOf: fixture.root.appendingPathComponent("page-calls"), encoding: .utf8),
+                calls)
+            observedStage = "close second coordinator"
+            await second.close()
+            observedStage = "final fixture capacity"
+            try capacity(fixture.root)
         } catch {
-            FileHandle.standardError.write(Data("DocumentJobCoordinator diagnostic stage=\(observedStage) error=\(error)\n".utf8))
+            FileHandle.standardError.write(
+                Data("DocumentJobCoordinator diagnostic stage=\(observedStage) error=\(error)\n".utf8))
             throw error
         }
     }

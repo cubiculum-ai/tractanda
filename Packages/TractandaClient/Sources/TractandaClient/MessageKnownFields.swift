@@ -25,8 +25,12 @@ enum MessageKnownFields {
             try emit("X-Ancestry-Kind", ancestry.kind.rawValue)
             try emit("X-Ancestry-Origin", ancestry.originReplicaID)
             for parent in ancestry.parents { try emit("X-Ancestry-Parent", parent) }
-            for key in ancestry.writtenFields { try emit("X-Ancestry-Written-Field", MessageHeaderText.escaped(key)) }
-            for key in ancestry.unsetFields { try emit("X-Ancestry-Unset-Field", MessageHeaderText.escaped(key)) }
+            for key in ancestry.writtenFields {
+                try emit("X-Ancestry-Written-Field", MessageHeaderText.escaped(key))
+            }
+            for key in ancestry.unsetFields {
+                try emit("X-Ancestry-Unset-Field", MessageHeaderText.escaped(key))
+            }
             for id in ancestry.frontier { try emit("X-Ancestry-Frontier", id) }
             if let profile = ancestry.mergeProfile { try emit("X-Ancestry-Merge-Profile", profile) }
             if let witness = ancestry.authorityWitness {
@@ -48,8 +52,10 @@ enum MessageKnownFields {
         }
         if let attachments = try? AttachmentDescriptor.descriptors(in: fields), !attachments.isEmpty {
             for attachment in attachments {
-                let parts = [attachment.attachmentID, MessageHeaderText.escaped(attachment.filename, quoted: true),
-                    attachment.mediaType, String(attachment.byteCount), attachment.sha256]
+                let parts = [
+                    attachment.attachmentID, MessageHeaderText.escaped(attachment.filename, quoted: true),
+                    attachment.mediaType, String(attachment.byteCount), attachment.sha256,
+                ]
                 try emit("X-Attachment", parts.joined(separator: " "))
             }
             fields["attachments"] = nil
@@ -65,10 +71,11 @@ enum MessageKnownFields {
             let owner = try MessageHeaderText.literal(headers.required("x-permissions-owner"))
             let group = try MessageHeaderText.literal(headers.required("x-permissions-group"))
             let acl = try headers.typed(prefix: "x-acl-")
-            try MessageRecordCodec.insert(.object([
-                "profile": .text(profile), "owner": .text(owner), "group": .text(group),
-                "mode": .integer(mode), "acl": .object(acl),
-            ]), key: "permissions", into: &fields)
+            try MessageRecordCodec.insert(
+                .object([
+                    "profile": .text(profile), "owner": .text(owner), "group": .text(group),
+                    "mode": .integer(mode), "acl": .object(acl),
+                ]), key: "permissions", into: &fields)
         }
         if let kind = try headers.single("x-ancestry-kind") {
             guard let parsedKind = RevisionProvenance.Kind(rawValue: try MessageHeaderText.word(kind)) else {
@@ -82,9 +89,12 @@ enum MessageKnownFields {
                 let sha = try tokens.takeWord()
                 try tokens.requireEnd()
                 witness = try AuthorityBinding(recordID: id, sha256: sha)
-            } else { witness = nil }
+            } else {
+                witness = nil
+            }
             let provenance = try RevisionProvenance(
-                kind: parsedKind, originReplicaID: MessageHeaderText.word(headers.required("x-ancestry-origin")),
+                kind: parsedKind,
+                originReplicaID: MessageHeaderText.word(headers.required("x-ancestry-origin")),
                 parents: headers.many("x-ancestry-parent").map(MessageHeaderText.word),
                 writtenFields: headers.many("x-ancestry-written-field").map(MessageHeaderText.unescaped),
                 unsetFields: headers.many("x-ancestry-unset-field").map(MessageHeaderText.unescaped),
@@ -129,8 +139,10 @@ enum MessageKnownFields {
                 try tokens.takeSpace()
                 let sha = try tokens.takeWord()
                 try tokens.requireEnd()
-                return try AttachmentDescriptor(attachmentID: id, filename: filename,
-                    mediaType: mediaType, byteCount: byteCount, sha256: sha).itemValue
+                return try AttachmentDescriptor(
+                    attachmentID: id, filename: filename,
+                    mediaType: mediaType, byteCount: byteCount, sha256: sha
+                ).itemValue
             }
             try MessageRecordCodec.insert(.list(values), key: "attachments", into: &fields)
         }
@@ -139,7 +151,9 @@ enum MessageKnownFields {
     static func currentReferences(_ field: ItemValue?) -> [ItemReference]? {
         guard let values = field?.array, !values.isEmpty else { return nil }
         let references = values.compactMap(\.link)
-        guard references.count == values.count, references.allSatisfy({ $0.revisionID == nil }) else { return nil }
+        guard references.count == values.count, references.allSatisfy({ $0.revisionID == nil }) else {
+            return nil
+        }
         return references
     }
 }

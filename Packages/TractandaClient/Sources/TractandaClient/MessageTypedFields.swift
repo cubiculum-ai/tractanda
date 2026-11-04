@@ -59,7 +59,9 @@ enum MessageTypedFields {
 
     static func reference(_ text: String) throws -> ItemReference {
         let parts = text.split(separator: "/", omittingEmptySubsequences: false)
-        guard parts.count == 1 || parts.count == 2 else { throw MessageHeaderText.invalid("Invalid item reference.") }
+        guard parts.count == 1 || parts.count == 2 else {
+            throw MessageHeaderText.invalid("Invalid item reference.")
+        }
         let id = String(parts[0])
         let revision = parts.count == 2 ? String(parts[1]) : nil
         try Identifier.validate(id)
@@ -78,10 +80,14 @@ enum MessageTypedFields {
             while index < headers.count {
                 let row = headers[index]
                 index += 1
-                guard row.name.hasPrefix(prefix) else { throw MessageHeaderText.invalid("Invalid field header family.") }
+                guard row.name.hasPrefix(prefix) else {
+                    throw MessageHeaderText.invalid("Invalid field header family.")
+                }
                 let type = row.name.dropFirst(prefix.count)
                 if type == "end" {
-                    guard depth >= 0, row.value.utf8.allSatisfy(MessageHeaderText.isWhitespace) else { throw MessageHeaderText.invalid("Unexpected field container end.") }
+                    guard depth >= 0, row.value.utf8.allSatisfy(MessageHeaderText.isWhitespace) else {
+                        throw MessageHeaderText.invalid("Unexpected field container end.")
+                    }
                     return object ? .object(fields) : .list(values)
                 }
                 guard depth + 1 < 32 else { throw TractandaError("limit", "Values are nested too deeply.") }
@@ -99,7 +105,9 @@ enum MessageTypedFields {
                     guard fields.updateValue(child, forKey: key) == nil else {
                         throw MessageHeaderText.invalid("Duplicate object field.")
                     }
-                } else { values.append(child) }
+                } else {
+                    values.append(child)
+                }
             }
             guard depth == -1 else { throw MessageHeaderText.invalid("Unclosed field container.") }
             return .object(fields)
@@ -118,7 +126,9 @@ enum MessageTypedFields {
                 if text == "false" { return .boolean(false) }
             case "reference": return .reference(try reference(text))
             case "bytes":
-                if let bytes = Data(base64Encoded: text), bytes.base64EncodedString() == text { return .bytes(bytes) }
+                if let bytes = Data(base64Encoded: text), bytes.base64EncodedString() == text {
+                    return .bytes(bytes)
+                }
             default: break
             }
             throw MessageHeaderText.invalid("Unknown or malformed typed field.")

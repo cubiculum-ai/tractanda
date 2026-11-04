@@ -49,16 +49,25 @@ let package = Package(
             ]),
         .executableTarget(name: "TractandaAuthHelper", dependencies: ["CTractandaPlatform"]),
         // Finite .17 installer tooling is deliberately absent from Core and the daemon.
-        .target(name: "CTractandaLayout17", path: "Tools/Layout17Bridge", sources: ["moves.c"],
-            publicHeadersPath: ".", cSettings: [
+        .target(
+            name: "CTractandaLayout17", path: "Tools/Layout17Bridge", sources: ["moves.c"],
+            publicHeadersPath: ".",
+            cSettings: [
                 .define("_DARWIN_C_SOURCE", .when(platforms: [.macOS])),
                 .define("_GNU_SOURCE", .when(platforms: [.linux])),
             ]),
-        .executableTarget(name: "TractandaLayout17", dependencies: [
-            "CTractandaLayout17", "CSQLite", "TractandaCore", .product(name: "Crypto", package: "swift-crypto"),
-            .product(name: "TractandaClient", package: "TractandaClient"),
-        ], path: "Tools/Layout17Bridge", exclude: ["moves.c", "moves.h", "test_fixture.py", "test_moves.py"],
-            sources: ["main.swift", "LegacyRecordCodec.swift", "PersonalRevisionMetadata.swift", "TransientDescriptorMap.swift"]),
+        .executableTarget(
+            name: "TractandaLayout17",
+            dependencies: [
+                "CTractandaLayout17", "CSQLite", "TractandaCore",
+                .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "TractandaClient", package: "TractandaClient"),
+            ], path: "Tools/Layout17Bridge",
+            exclude: ["moves.c", "moves.h", "test_fixture.py", "test_moves.py"],
+            sources: [
+                "main.swift", "LegacyRecordCodec.swift", "PersonalRevisionMetadata.swift",
+                "TransientDescriptorMap.swift",
+            ]),
         .target(name: "CTractandaSetupMetadata", dependencies: ["CTractandaPlatform"]),
         .executableTarget(
             name: "TractandaSetup",
@@ -147,10 +156,13 @@ let package = Package(
             name: "FirstSourceConversionTests", dependencies: ["TractandaCore"],
             path: "scripts/development/first-source-conversion", exclude: ["README.md", "run.py"]),
         .testTarget(name: "TractandaSetupTests", dependencies: ["TractandaSetup", "TractandaCLI"]),
-        .testTarget(name: "TractandaLayout17Tests", dependencies: [
-            "TractandaLayout17", "TractandaCore", .product(name: "TractandaClient", package: "TractandaClient"),
-            .product(name: "Crypto", package: "swift-crypto"),
-        ]),
+        .testTarget(
+            name: "TractandaLayout17Tests",
+            dependencies: [
+                "TractandaLayout17", "TractandaCore",
+                .product(name: "TractandaClient", package: "TractandaClient"),
+                .product(name: "Crypto", package: "swift-crypto"),
+            ]),
         .testTarget(
             name: "TractandaVectorsTests", dependencies: ["TractandaVectors", "CSQLite", "CTractandaVec1"]),
         .testTarget(name: "TractandaMCPTests", dependencies: ["TractandaMCP", "TractandaCore"]),

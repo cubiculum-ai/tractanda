@@ -18,18 +18,22 @@ extension SetupEngine {
         // A failed configure can have receipts already updated to a verified incoming or
         // observed payload while dpkg restores original bytes. Admit only these three
         // exact protected transaction commitments, with each receipt's own full recipe.
-        let receiptCommitments = state.pending
+        let receiptCommitments =
+            state.pending
             ? [state.original, state.incoming, state.observed].compactMap { $0 }
             : [committed]
-        guard (!receipts.isEmpty || state.instances.isEmpty),
-            (!state.pending || Set(receipts.map(\.instance)) == Set(state.instances.map(\.name))),
+        guard !receipts.isEmpty || state.instances.isEmpty,
+            !state.pending || Set(receipts.map(\.instance)) == Set(state.instances.map(\.name)),
             receipts.allSatisfy({ receipt in
-                receipt.state == .removed || receipt.release == packagePayload.path && receiptCommitments.contains(where: {
-                    receipt.manifestSHA256 == $0.manifestSHA256 && receipt.embedding == $0.embedding
-                        && receipt.documentExtraction == $0.documentExtraction
-                })
+                receipt.state == .removed
+                    || receipt.release == packagePayload.path
+                        && receiptCommitments.contains(where: {
+                            receipt.manifestSHA256 == $0.manifestSHA256 && receipt.embedding == $0.embedding
+                                && receipt.documentExtraction == $0.documentExtraction
+                        })
             }),
-            try sha256(packagePayload.appendingPathComponent("bundle-manifest.json")) == committed.manifestSHA256
+            try sha256(packagePayload.appendingPathComponent("bundle-manifest.json"))
+                == committed.manifestSHA256
         else { throw SetupError("Historical installed manifest differs from protected receipts.") }
         try requirePackageRelease(packagePayload.path)
         if trustedOwnership { try requireTrustedAncestry(of: packagePayload) }
@@ -46,7 +50,8 @@ extension SetupEngine {
         guard roots.platform == .macos, try readReceipt(receipt.instance) == receipt,
             receipt.releases[release.path] == expectedDigest,
             release.path.hasPrefix(roots.software.appendingPathComponent("releases").path + "/"),
-            try sha256(release.appendingPathComponent("bundle-manifest.json")) == expectedDigest else {
+            try sha256(release.appendingPathComponent("bundle-manifest.json")) == expectedDigest
+        else {
             throw SetupError("The .17 historical source lacks its exact protected owned-release commitment.")
         }
         try requirePackageRelease(release.path)
@@ -57,7 +62,9 @@ extension SetupEngine {
         return try verifyBundleContents(at: release, validation: .layout17Original)
     }
 
-    private func verifyBundleContents(at suppliedBundle: URL, validation: BundleValidation) throws -> BundleManifest {
+    private func verifyBundleContents(at suppliedBundle: URL, validation: BundleValidation) throws
+        -> BundleManifest
+    {
         let bundle = suppliedBundle.resolvingSymlinksInPath()
         let manifestURL = bundle.appendingPathComponent("bundle-manifest.json")
         let attributes = try FileManager.default.attributesOfItem(atPath: manifestURL.path)

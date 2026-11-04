@@ -2,13 +2,14 @@ import CTractandaPlatform
 import Crypto
 import TractandaClient
 import XCTest
+
+@testable import TractandaCore
+
 #if canImport(Darwin)
     import Darwin
 #else
     import Glibc
 #endif
-
-@testable import TractandaCore
 
 final class PersonalSyncTests: XCTestCase {
     private final class Accounts: AccountDirectory {
@@ -79,7 +80,8 @@ final class PersonalSyncTests: XCTestCase {
     ) throws -> [String: Any] {
         let request = try nativeFixtureEnvelope(calls: [[method, arguments, callID]], accountID: accountID)
         let response = try XCTUnwrap(
-            JSONSerialization.jsonObject(with: service.handle(request, peerUID: tractanda_uid())) as? [String: Any],
+            JSONSerialization.jsonObject(with: service.handle(request, peerUID: tractanda_uid()))
+                as? [String: Any],
             file: file, line: line)
         let replies = try XCTUnwrap(response["methodResponses"] as? [[Any]], file: file, line: line)
         let first = try XCTUnwrap(replies.first, file: file, line: line)
@@ -224,7 +226,8 @@ final class PersonalSyncTests: XCTestCase {
         let fileManager = FileManager.default
         let itemRoot = store.appendingPathComponent("items", isDirectory: true)
         let canonicalFiles: [URL] = try {
-            let enumerator = try XCTUnwrap(fileManager.enumerator(at: itemRoot, includingPropertiesForKeys: nil))
+            let enumerator = try XCTUnwrap(
+                fileManager.enumerator(at: itemRoot, includingPropertiesForKeys: nil))
             return enumerator.compactMap { $0 as? URL }.filter { $0.pathExtension == "tractanda" }
         }()
         var canonicalDescriptors: [String: PersonalObjectDescriptor] = [:]
@@ -256,8 +259,10 @@ final class PersonalSyncTests: XCTestCase {
         let currentPayloadStageRoot = store.appendingPathComponent("attachments/staging", isDirectory: true)
         let legacyPayloadStageRoot = store.appendingPathComponent("attachments/.staging", isDirectory: true)
         try PrivateConfiguration.makeDirectory(legacyPayloadStageRoot)
-        let stageMetadataFiles = try fileManager.contentsOfDirectory(at: stageRoot, includingPropertiesForKeys: nil)
-            .filter { $0.pathExtension == "json" }
+        let stageMetadataFiles = try fileManager.contentsOfDirectory(
+            at: stageRoot, includingPropertiesForKeys: nil
+        )
+        .filter { $0.pathExtension == "json" }
         var stageDescriptors: [String: PersonalObjectDescriptor] = [:]
         var rewrittenStages: [(source: URL, destination: URL, bytes: Data)] = []
         for metadataURL in stageMetadataFiles {
@@ -288,7 +293,8 @@ final class PersonalSyncTests: XCTestCase {
             let remaining = try fileManager.contentsOfDirectory(
                 at: currentPayloadStageRoot, includingPropertiesForKeys: nil)
             guard remaining.isEmpty else {
-                throw TractandaError("layout17FixtureUnexpectedStage", "Unconverted visible staging entries remain.")
+                throw TractandaError(
+                    "layout17FixtureUnexpectedStage", "Unconverted visible staging entries remain.")
             }
             try fileManager.removeItem(at: currentPayloadStageRoot)
         }
@@ -299,8 +305,10 @@ final class PersonalSyncTests: XCTestCase {
         let hasCurrentPlacements = fileManager.fileExists(atPath: currentPlacements.path)
         let hasLegacyPlacements = fileManager.fileExists(atPath: legacyPlacements.path)
         if hasCurrentPlacements && hasLegacyPlacements {
-            let currentEntries = try fileManager.contentsOfDirectory(at: currentPlacements, includingPropertiesForKeys: nil)
-            let legacyEntries = try fileManager.contentsOfDirectory(at: legacyPlacements, includingPropertiesForKeys: nil)
+            let currentEntries = try fileManager.contentsOfDirectory(
+                at: currentPlacements, includingPropertiesForKeys: nil)
+            let legacyEntries = try fileManager.contentsOfDirectory(
+                at: legacyPlacements, includingPropertiesForKeys: nil)
             guard currentEntries.isEmpty || legacyEntries.isEmpty else {
                 throw TractandaError(
                     "layout17FixturePlacementCollision",
@@ -341,7 +349,9 @@ final class PersonalSyncTests: XCTestCase {
         var requirement = try XCTUnwrap(JSONSerialization.jsonObject(with: readerData) as? [String: Any])
         requirement["minimumReaderLevel"] = 18
         var capabilities = try XCTUnwrap(requirement["capabilities"] as? [String])
-        capabilities.removeAll { $0 == CanonicalPhysicalLayout.capability || $0 == MessageRecordCodec.capability }
+        capabilities.removeAll {
+            $0 == CanonicalPhysicalLayout.capability || $0 == MessageRecordCodec.capability
+        }
         requirement["capabilities"] = capabilities.sorted()
         let downgradedReader = try JSONSerialization.data(withJSONObject: requirement, options: [.sortedKeys])
         try writeFixtureFile(downgradedReader, to: readerURL, mode: 0o600)
@@ -362,13 +372,16 @@ final class PersonalSyncTests: XCTestCase {
         ]
         let intentURL = store.deletingLastPathComponent().appendingPathComponent("layout17-intent.json")
         try writeFixtureFile(
-            JSONSerialization.data(withJSONObject: intent, options: [.sortedKeys]), to: intentURL, mode: 0o600)
-        let journal = store.deletingLastPathComponent().appendingPathComponent("layout17-journal", isDirectory: true)
+            JSONSerialization.data(withJSONObject: intent, options: [.sortedKeys]), to: intentURL, mode: 0o600
+        )
+        let journal = store.deletingLastPathComponent().appendingPathComponent(
+            "layout17-journal", isDirectory: true)
         try PrivateConfiguration.makeDirectory(journal)
         let journalPath = try physicalFixturePath(journal.path)
         let intentPath = try physicalFixturePath(intentURL.path)
         let oldLayoutFiles: [URL] = try {
-            let enumerator = try XCTUnwrap(fileManager.enumerator(at: itemRoot, includingPropertiesForKeys: nil))
+            let enumerator = try XCTUnwrap(
+                fileManager.enumerator(at: itemRoot, includingPropertiesForKeys: nil))
             return enumerator.compactMap { $0 as? URL }.filter { $0.pathExtension == "tractanda" }
         }()
         XCTAssertFalse(oldLayoutFiles.isEmpty)
@@ -381,12 +394,21 @@ final class PersonalSyncTests: XCTestCase {
                 XCTAssertTrue(String(components[6]).hasSuffix(".tractanda"))
             }
         }
-        XCTAssertTrue(fileManager.fileExists(atPath: store.appendingPathComponent("attachments/.staging").path))
-        let oldPlacements = fileManager.fileExists(atPath: store.appendingPathComponent("attachments/.placements").path)
-        XCTAssertTrue(oldPlacements || !fileManager.fileExists(atPath: store.appendingPathComponent("attachments/placements").path))
-        XCTAssertFalse(fileManager.fileExists(atPath: store.appendingPathComponent("attachments/staging").path))
-        XCTAssertFalse(fileManager.fileExists(atPath: store.appendingPathComponent("attachments/placements").path))
-        XCTAssertFalse(fileManager.fileExists(atPath: store.appendingPathComponent("canonical-layout.json").path))
+        XCTAssertTrue(
+            fileManager.fileExists(atPath: store.appendingPathComponent("attachments/.staging").path))
+        let oldPlacements = fileManager.fileExists(
+            atPath: store.appendingPathComponent("attachments/.placements").path)
+        XCTAssertTrue(
+            oldPlacements
+                || !fileManager.fileExists(
+                    atPath: store.appendingPathComponent("attachments/placements").path)
+        )
+        XCTAssertFalse(
+            fileManager.fileExists(atPath: store.appendingPathComponent("attachments/staging").path))
+        XCTAssertFalse(
+            fileManager.fileExists(atPath: store.appendingPathComponent("attachments/placements").path))
+        XCTAssertFalse(
+            fileManager.fileExists(atPath: store.appendingPathComponent("canonical-layout.json").path))
         XCTAssertEqual(requirement["minimumReaderLevel"] as? Int, 18)
         XCTAssertFalse(capabilities.contains(CanonicalPhysicalLayout.capability))
         XCTAssertFalse(capabilities.contains(MessageRecordCodec.capability))
@@ -1250,32 +1272,40 @@ final class PersonalSyncTests: XCTestCase {
 
     func testNativeReviewListRejectAcceptAndExactRetry() throws {
         try fixture { pair, accounts in
-            let base = try create(pair.a, accounts: accounts, subject: "review base", operation: "review-base")
+            let base = try create(
+                pair.a, accounts: accounts, subject: "review base", operation: "review-base")
             XCTAssertEqual(
-                try send(base, from: pair.a, to: pair.b,
-                    sourceBinding: pair.bindingA, targetBinding: pair.bindingB).status,
+                try send(
+                    base, from: pair.a, to: pair.b,
+                    sourceBinding: pair.bindingA, targetBinding: pair.bindingB
+                ).status,
                 .accepted)
             let offline = try pair.b.withAccess(forUID: accounts.bob) {
-                try pair.b.commit(.init(
-                    action: .revise, itemID: base.itemID, expectedRevisionID: base.revisionID,
-                    changes: ["body": .text("offline parent")], operationID: "review-offline-parent"
-                )).revision
+                try pair.b.commit(
+                    .init(
+                        action: .revise, itemID: base.itemID, expectedRevisionID: base.revisionID,
+                        changes: ["body": .text("offline parent")], operationID: "review-offline-parent"
+                    )
+                ).revision
             }
             _ = try pair.a.withAccess(forUID: accounts.alice) {
-                try pair.a.commit(.init(
-                    action: .revise, itemID: base.itemID, expectedRevisionID: base.revisionID,
-                    changes: ["permissions": permissions(0o600)], operationID: "review-restrict"
-                ))
+                try pair.a.commit(
+                    .init(
+                        action: .revise, itemID: base.itemID, expectedRevisionID: base.revisionID,
+                        changes: ["permissions": permissions(0o600)], operationID: "review-restrict"
+                    ))
             }
             let parentProposal = try send(
                 offline, from: pair.b, to: pair.a,
                 sourceBinding: pair.bindingB, targetBinding: pair.bindingA)
             XCTAssertEqual(parentProposal.status, .reviewRequired)
             let child = try pair.b.withAccess(forUID: accounts.bob) {
-                try pair.b.commit(.init(
-                    action: .revise, itemID: base.itemID, expectedRevisionID: offline.revisionID,
-                    changes: ["subject": .text("offline child")], operationID: "review-offline-child"
-                )).revision
+                try pair.b.commit(
+                    .init(
+                        action: .revise, itemID: base.itemID, expectedRevisionID: offline.revisionID,
+                        changes: ["subject": .text("offline child")], operationID: "review-offline-child"
+                    )
+                ).revision
             }
             let childProposal = try send(
                 child, from: pair.b, to: pair.a,
@@ -1308,7 +1338,8 @@ final class PersonalSyncTests: XCTestCase {
                 arguments: ["reviewID": childReviewID], callID: "reject-child", accountID: accountID)
             XCTAssertEqual(rejected["rejected"] as? Bool, true)
             let afterReject = try reviewRows()
-            XCTAssertEqual(afterReject.first(where: { reviewID($0) == childReviewID })?["disposition"] as? String,
+            XCTAssertEqual(
+                afterReject.first(where: { reviewID($0) == childReviewID })?["disposition"] as? String,
                 "rejected")
             XCTAssertEqual(try pair.a.history(base.itemID).count, 2)
             let rejectReplay = try nativePayload(
@@ -1330,13 +1361,16 @@ final class PersonalSyncTests: XCTestCase {
                     method: "TractandaSync/acceptReview", callID: "accept-parent"))
             XCTAssertFalse(accepted.wasReplayed)
             XCTAssertEqual(accepted.operationID, "personal-review:" + parentReviewID)
-            XCTAssertEqual(try pair.a.history(base.itemID).filter {
-                $0.fields["operationID"]?.string == accepted.operationID
-            }.count, 1)
+            XCTAssertEqual(
+                try pair.a.history(base.itemID).filter {
+                    $0.fields["operationID"]?.string == accepted.operationID
+                }.count, 1)
             let acceptedRows = try reviewRows()
-            XCTAssertEqual(acceptedRows.first(where: { reviewID($0) == parentReviewID })?["disposition"] as? String,
+            XCTAssertEqual(
+                acceptedRows.first(where: { reviewID($0) == parentReviewID })?["disposition"] as? String,
                 "accepted")
-            XCTAssertEqual(acceptedRows.first(where: { reviewID($0) == childReviewID })?["disposition"] as? String,
+            XCTAssertEqual(
+                acceptedRows.first(where: { reviewID($0) == childReviewID })?["disposition"] as? String,
                 "rejected")
 
             let replay = try JSON.decode(
@@ -1346,9 +1380,10 @@ final class PersonalSyncTests: XCTestCase {
                     method: "TractandaSync/acceptReview", callID: "accept-parent"))
             XCTAssertTrue(replay.wasReplayed)
             XCTAssertEqual(replay.revisionID, accepted.revisionID)
-            XCTAssertEqual(try pair.a.history(base.itemID).filter {
-                $0.fields["operationID"]?.string == accepted.operationID
-            }.count, 1)
+            XCTAssertEqual(
+                try pair.a.history(base.itemID).filter {
+                    $0.fields["operationID"]?.string == accepted.operationID
+                }.count, 1)
             let finalHistory = try pair.a.history(base.itemID)
             XCTAssertEqual(finalHistory.count, 4)
             XCTAssertTrue(finalHistory.contains { $0.revisionID == offline.revisionID })
@@ -1361,37 +1396,52 @@ final class PersonalSyncTests: XCTestCase {
 
     func testConvertedLegacyReviewStagesRemainExplicitlyReviewableInNativeCore() throws {
         guard let helperPath = ProcessInfo.processInfo.environment["TRACTANDA_LAYOUT17_FIXTURE_HELPER"] else {
-            throw XCTSkip("Set TRACTANDA_LAYOUT17_FIXTURE_HELPER to the instrumented private bridge to run this integration fixture.")
+            throw XCTSkip(
+                "Set TRACTANDA_LAYOUT17_FIXTURE_HELPER to the instrumented private bridge to run this integration fixture."
+            )
         }
         let helper = URL(fileURLWithPath: helperPath)
         try fixture { pair, accounts in
-            let acceptedBase = try create(pair.a, accounts: accounts, subject: "accepted review base", operation: "accepted-base")
-            _ = try send(acceptedBase, from: pair.a, to: pair.b,
+            let acceptedBase = try create(
+                pair.a, accounts: accounts, subject: "accepted review base", operation: "accepted-base")
+            _ = try send(
+                acceptedBase, from: pair.a, to: pair.b,
                 sourceBinding: pair.bindingA, targetBinding: pair.bindingB)
             let acceptedOffline = try pair.b.withAccess(forUID: accounts.bob) {
-                try pair.b.commit(.init(
-                    action: .revise, itemID: acceptedBase.itemID, expectedRevisionID: acceptedBase.revisionID,
-                    changes: ["body": .text("explicitly accepted branch")], operationID: "accepted-offline"
-                )).revision
+                try pair.b.commit(
+                    .init(
+                        action: .revise, itemID: acceptedBase.itemID,
+                        expectedRevisionID: acceptedBase.revisionID,
+                        changes: ["body": .text("explicitly accepted branch")],
+                        operationID: "accepted-offline"
+                    )
+                ).revision
             }
             _ = try pair.a.withAccess(forUID: accounts.alice) {
-                try pair.a.commit(.init(
-                    action: .revise, itemID: acceptedBase.itemID, expectedRevisionID: acceptedBase.revisionID,
-                    changes: ["permissions": permissions(0o600)], operationID: "accepted-restrict"
-                )).revision
+                try pair.a.commit(
+                    .init(
+                        action: .revise, itemID: acceptedBase.itemID,
+                        expectedRevisionID: acceptedBase.revisionID,
+                        changes: ["permissions": permissions(0o600)], operationID: "accepted-restrict"
+                    )
+                ).revision
             }
-            let acceptedProposal = try send(acceptedOffline, from: pair.b, to: pair.a,
+            let acceptedProposal = try send(
+                acceptedOffline, from: pair.b, to: pair.a,
                 sourceBinding: pair.bindingB, targetBinding: pair.bindingA)
             XCTAssertEqual(acceptedProposal.status, .reviewRequired)
             var service: ItemService? = ItemService(store: pair.a)
             let accountID = try pair.a.nativeProtocolSessionBasis.identity
             let acceptedReviewID = try XCTUnwrap(acceptedProposal.reviewItemID)
             let acceptedToken = try pair.a.itemState(acceptedBase.itemID).stateToken
-            let acceptRequest = try nativeFixtureEnvelope(calls: [[
-                "TractandaSync/acceptReview",
-                ["reviewID": acceptedReviewID, "expectedStateToken": acceptedToken],
-                "accept-initial-review",
-            ]], accountID: accountID)
+            let acceptRequest = try nativeFixtureEnvelope(
+                calls: [
+                    [
+                        "TractandaSync/acceptReview",
+                        ["reviewID": acceptedReviewID, "expectedStateToken": acceptedToken],
+                        "accept-initial-review",
+                    ]
+                ], accountID: accountID)
             let initialAcceptance = try JSON.decode(
                 MutationReceipt.self,
                 NativeMethodResult.unwrap(
@@ -1400,29 +1450,41 @@ final class PersonalSyncTests: XCTestCase {
             XCTAssertFalse(initialAcceptance.wasReplayed)
 
             func pendingReview(subject: String, operation: String) throws -> (Revision, String) {
-                let base = try create(pair.a, accounts: accounts, subject: subject, operation: operation + "-base")
-                XCTAssertEqual(try send(base, from: pair.a, to: pair.b,
-                    sourceBinding: pair.bindingA, targetBinding: pair.bindingB).status, .accepted)
+                let base = try create(
+                    pair.a, accounts: accounts, subject: subject, operation: operation + "-base")
+                XCTAssertEqual(
+                    try send(
+                        base, from: pair.a, to: pair.b,
+                        sourceBinding: pair.bindingA, targetBinding: pair.bindingB
+                    ).status, .accepted)
                 let offline = try pair.b.withAccess(forUID: accounts.bob) {
-                    try pair.b.commit(.init(
-                        action: .revise, itemID: base.itemID, expectedRevisionID: base.revisionID,
-                        changes: ["body": .text(operation + " staged body")], operationID: operation + "-offline"
-                    )).revision
+                    try pair.b.commit(
+                        .init(
+                            action: .revise, itemID: base.itemID, expectedRevisionID: base.revisionID,
+                            changes: ["body": .text(operation + " staged body")],
+                            operationID: operation + "-offline"
+                        )
+                    ).revision
                 }
                 _ = try pair.a.withAccess(forUID: accounts.alice) {
-                    try pair.a.commit(.init(
-                        action: .revise, itemID: base.itemID, expectedRevisionID: base.revisionID,
-                        changes: ["permissions": permissions(0o600)], operationID: operation + "-restrict"
-                    ))
+                    try pair.a.commit(
+                        .init(
+                            action: .revise, itemID: base.itemID, expectedRevisionID: base.revisionID,
+                            changes: ["permissions": permissions(0o600)], operationID: operation + "-restrict"
+                        ))
                 }
-                let proposal = try send(offline, from: pair.b, to: pair.a,
+                let proposal = try send(
+                    offline, from: pair.b, to: pair.a,
                     sourceBinding: pair.bindingB, targetBinding: pair.bindingA)
                 XCTAssertEqual(proposal.status, .reviewRequired)
-                XCTAssertFalse(try pair.a.history(base.itemID).contains { $0.revisionID == offline.revisionID })
+                XCTAssertFalse(
+                    try pair.a.history(base.itemID).contains { $0.revisionID == offline.revisionID })
                 return (offline, try XCTUnwrap(proposal.reviewItemID))
             }
-            let (toAccept, acceptID) = try pendingReview(subject: "pending accept", operation: "pending-accept")
-            let (toReject, rejectID) = try pendingReview(subject: "pending reject", operation: "pending-reject")
+            let (toAccept, acceptID) = try pendingReview(
+                subject: "pending accept", operation: "pending-accept")
+            let (toReject, rejectID) = try pendingReview(
+                subject: "pending reject", operation: "pending-reject")
             let identity = try pair.a.personalSyncIdentity()
             XCTAssertNotNil(identity.membership)
             service = nil
@@ -1431,20 +1493,29 @@ final class PersonalSyncTests: XCTestCase {
             print(
                 "LAYOUT17_REVIEW_FD after-closing-source-stores="
                     + "\(openDescriptorCount()) limit=\(openDescriptorLimit())")
-            let privateRoot = URL(fileURLWithPath: "/private/tmp/layout17-review-" + UUID().uuidString.lowercased())
+            let privateRoot = URL(
+                fileURLWithPath: "/private/tmp/layout17-review-" + UUID().uuidString.lowercased())
             try PrivateConfiguration.makeDirectory(privateRoot)
             defer { try? FileManager.default.removeItem(at: privateRoot) }
             let migratedRoot = privateRoot.appendingPathComponent("store", isDirectory: true)
             try FileManager.default.copyItem(at: pair.first.root, to: migratedRoot)
             try reverseEncodeLegacyStoreAndMigrate(root: migratedRoot, identity: identity, helper: helper)
             let convertedAttachments = migratedRoot.appendingPathComponent("attachments", isDirectory: true)
-            XCTAssertTrue(FileManager.default.fileExists(atPath: convertedAttachments.appendingPathComponent("staging").path))
-            XCTAssertFalse(FileManager.default.fileExists(atPath: convertedAttachments.appendingPathComponent(".staging").path))
-            XCTAssertFalse(FileManager.default.fileExists(atPath: convertedAttachments.appendingPathComponent(".placements").path))
-            let markerData = try Data(contentsOf: migratedRoot.appendingPathComponent("canonical-layout.json"))
+            XCTAssertTrue(
+                FileManager.default.fileExists(
+                    atPath: convertedAttachments.appendingPathComponent("staging").path))
+            XCTAssertFalse(
+                FileManager.default.fileExists(
+                    atPath: convertedAttachments.appendingPathComponent(".staging").path))
+            XCTAssertFalse(
+                FileManager.default.fileExists(
+                    atPath: convertedAttachments.appendingPathComponent(".placements").path))
+            let markerData = try Data(
+                contentsOf: migratedRoot.appendingPathComponent("canonical-layout.json"))
             let marker = try XCTUnwrap(JSONSerialization.jsonObject(with: markerData) as? [String: Any])
             XCTAssertEqual(marker["recordEncoding"] as? String, MessageRecordCodec.encoding)
-            let readerData = try Data(contentsOf: migratedRoot.appendingPathComponent("canonical-reader.json"))
+            let readerData = try Data(
+                contentsOf: migratedRoot.appendingPathComponent("canonical-reader.json"))
             let reader = try XCTUnwrap(JSONSerialization.jsonObject(with: readerData) as? [String: Any])
             XCTAssertEqual(reader["minimumReaderLevel"] as? Int, 20)
             let capabilities = try XCTUnwrap(reader["capabilities"] as? [String])
@@ -1502,42 +1573,58 @@ final class PersonalSyncTests: XCTestCase {
             }
             var reviewRows = try rows()
             XCTAssertEqual(Set(reviewRows.compactMap(reviewID)), Set([acceptedReviewID, acceptID, rejectID]))
-            XCTAssertEqual(reviewRows.first(where: { reviewID($0) == acceptedReviewID })?["disposition"] as? String,
+            XCTAssertEqual(
+                reviewRows.first(where: { reviewID($0) == acceptedReviewID })?["disposition"] as? String,
                 "accepted")
-            XCTAssertEqual(reviewRows.first(where: { reviewID($0) == acceptID })?["disposition"] as? String,
+            XCTAssertEqual(
+                reviewRows.first(where: { reviewID($0) == acceptID })?["disposition"] as? String,
                 "pending")
-            XCTAssertEqual(reviewRows.first(where: { reviewID($0) == rejectID })?["disposition"] as? String,
+            XCTAssertEqual(
+                reviewRows.first(where: { reviewID($0) == rejectID })?["disposition"] as? String,
                 "pending")
             XCTAssertTrue(try core.history(toAccept.itemID).contains { $0.revisionID != toAccept.revisionID })
-            XCTAssertFalse(try core.history(toAccept.itemID).contains { $0.revisionID == toAccept.revisionID },
+            XCTAssertFalse(
+                try core.history(toAccept.itemID).contains { $0.revisionID == toAccept.revisionID },
                 "Bridge/open must not auto-promote an unaccepted staged revision")
-            XCTAssertFalse(try core.history(toReject.itemID).contains { $0.revisionID == toReject.revisionID },
+            XCTAssertFalse(
+                try core.history(toReject.itemID).contains { $0.revisionID == toReject.revisionID },
                 "Bridge/open must not auto-promote a pending revision")
-            XCTAssertTrue(try core.history(acceptedBase.itemID).contains {
-                $0.revisionID == initialAcceptance.revisionID
-            })
-            XCTAssertTrue(try core.personalIncomingReviews().contains {
-                $0.reviewID == acceptedReviewID && $0.disposition == "accepted"
-            })
+            XCTAssertTrue(
+                try core.history(acceptedBase.itemID).contains {
+                    $0.revisionID == initialAcceptance.revisionID
+                })
+            XCTAssertTrue(
+                try core.personalIncomingReviews().contains {
+                    $0.reviewID == acceptedReviewID && $0.disposition == "accepted"
+                })
 
-            let rejectRequest = try nativeFixtureEnvelope(calls: [[
-                "TractandaSync/rejectReview", ["reviewID": rejectID], "reject-converted-review",
-            ]], accountID: accountID)
-            let rejected = try JSONSerialization.jsonObject(
-                with: ItemService(store: core).handle(rejectRequest, peerUID: tractanda_uid())) as? [String: Any]
+            let rejectRequest = try nativeFixtureEnvelope(
+                calls: [
+                    [
+                        "TractandaSync/rejectReview", ["reviewID": rejectID], "reject-converted-review",
+                    ]
+                ], accountID: accountID)
+            let rejected =
+                try JSONSerialization.jsonObject(
+                    with: ItemService(store: core).handle(rejectRequest, peerUID: tractanda_uid()))
+                as? [String: Any]
             let rejectedRows = try XCTUnwrap(rejected?["methodResponses"] as? [[Any]])
             let rejectedPayload = try XCTUnwrap(rejectedRows.first?[1] as? [String: Any])
             XCTAssertEqual(rejectedPayload["rejected"] as? Bool, true)
             reviewRows = try rows()
-            XCTAssertEqual(reviewRows.first(where: { reviewID($0) == rejectID })?["disposition"] as? String,
+            XCTAssertEqual(
+                reviewRows.first(where: { reviewID($0) == rejectID })?["disposition"] as? String,
                 "rejected")
             XCTAssertEqual(try core.history(toReject.itemID).count, 2)
 
             let stateToken = try core.itemState(toAccept.itemID).stateToken
             let acceptArguments: [String: Any] = ["reviewID": acceptID, "expectedStateToken": stateToken]
-            let convertedAcceptRequest = try nativeFixtureEnvelope(calls: [[
-                "TractandaSync/acceptReview", acceptArguments, "accept-converted-review",
-            ]], accountID: accountID)
+            let convertedAcceptRequest = try nativeFixtureEnvelope(
+                calls: [
+                    [
+                        "TractandaSync/acceptReview", acceptArguments, "accept-converted-review",
+                    ]
+                ], accountID: accountID)
             let accepted = try JSON.decode(
                 MutationReceipt.self,
                 NativeMethodResult.unwrap(
@@ -1552,13 +1639,16 @@ final class PersonalSyncTests: XCTestCase {
                     method: "TractandaSync/acceptReview", callID: "accept-converted-review"))
             XCTAssertTrue(replay.wasReplayed)
             XCTAssertEqual(replay.revisionID, accepted.revisionID)
-            XCTAssertEqual(try core.history(toAccept.itemID).filter {
-                $0.fields["operationID"]?.string == accepted.operationID
-            }.count, 1)
+            XCTAssertEqual(
+                try core.history(toAccept.itemID).filter {
+                    $0.fields["operationID"]?.string == accepted.operationID
+                }.count, 1)
             reviewRows = try rows()
-            XCTAssertEqual(reviewRows.first(where: { reviewID($0) == acceptID })?["disposition"] as? String,
+            XCTAssertEqual(
+                reviewRows.first(where: { reviewID($0) == acceptID })?["disposition"] as? String,
                 "accepted")
-            XCTAssertEqual(reviewRows.first(where: { reviewID($0) == rejectID })?["disposition"] as? String,
+            XCTAssertEqual(
+                reviewRows.first(where: { reviewID($0) == rejectID })?["disposition"] as? String,
                 "rejected")
             XCTAssertTrue(reviewRows.contains { reviewID($0) == acceptedReviewID })
         }

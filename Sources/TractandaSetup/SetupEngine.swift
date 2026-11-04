@@ -243,11 +243,14 @@ public final class SetupEngine {
                 throw SetupError("This instance already has another release. Use upgrade.")
             }
             let layout17Original = try layout17MacOriginal(previous, manifest: manifest, digest: digest)
-            let layout17WasRunning = try layout17Original != nil && previous != nil
+            let layout17WasRunning =
+                try layout17Original != nil && previous != nil
                 && serviceBackend.isRunning(options.name)
             if let layout17Original, let previous {
-                let incoming = try layout17Declaration(manifest, digest: digest, upgrade: .coordinatedMaintenance)
-                try layout17MacPreflight(previous, bundle: options.bundle, incoming: incoming, original: layout17Original)
+                let incoming = try layout17Declaration(
+                    manifest, digest: digest, upgrade: .coordinatedMaintenance)
+                try layout17MacPreflight(
+                    previous, bundle: options.bundle, incoming: incoming, original: layout17Original)
             }
             let owner = try previous?.owner ?? resolvedOwner(options)
             if let requested = options.owner, requested != owner {
@@ -402,8 +405,10 @@ public final class SetupEngine {
                 if let layout17Original {
                     try unloadEmbedding(receipt)
                     try unloadAuthentication(receipt)
-                    let incoming = try layout17Declaration(manifest, digest: digest, upgrade: .coordinatedMaintenance)
-                    let clustered = try migrateLayout17Store(receipt, bundle: release, incoming: incoming, original: layout17Original)
+                    let incoming = try layout17Declaration(
+                        manifest, digest: digest, upgrade: .coordinatedMaintenance)
+                    let clustered = try migrateLayout17Store(
+                        receipt, bundle: release, incoming: incoming, original: layout17Original)
                     if clustered || !layout17WasRunning {
                         try layout17HoldInstalledMac(&receipt, clustered: clustered)
                         return

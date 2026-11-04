@@ -1549,14 +1549,20 @@ extension SetupTests {
         try installer.install(f.options)
         let receipt = try XCTUnwrap(installer.readReceipt("preview"))
         let root = URL(fileURLWithPath: receipt.store)
-        let profile = try JSONSerialization.jsonObject(with: Data(contentsOf:
-            root.appendingPathComponent(".tractanda-personal-profile.json"))) as! [String: Any]
-        let intent = SetupLayout17Intent(profile: "tractanda.layout17-prepare.v1", mode: "administrator-coordinated",
+        let profile =
+            try JSONSerialization.jsonObject(
+                with: Data(
+                    contentsOf:
+                        root.appendingPathComponent(".tractanda-personal-profile.json"))) as! [String: Any]
+        let intent = SetupLayout17Intent(
+            profile: "tractanda.layout17-prepare.v1", mode: "administrator-coordinated",
             instance: receipt.instance, storePath: receipt.store, storeID: profile["storeID"] as! String,
             replicaID: profile["replicaID"] as! String, oldManifestSHA256: receipt.manifestSHA256,
             newManifestSHA256: receipt.manifestSHA256, membershipDigest: String(repeating: "a", count: 64),
-            readerRequirementSHA256: String(repeating: "b", count: 64), acknowledgedAllMembersUpgradedBeforeStart: true)
-        try installer.writeProtected(JSON.encode(intent), to: installer.layout17IntentURL(receipt.instance), mode: 0o600)
+            readerRequirementSHA256: String(repeating: "b", count: 64),
+            acknowledgedAllMembersUpgradedBeforeStart: true)
+        try installer.writeProtected(
+            JSON.encode(intent), to: installer.layout17IntentURL(receipt.instance), mode: 0o600)
         let boundary = runner.calls.count
         try installer.layout17StopAndDisable(receipt)
         let label = installer.serviceBackend.label(receipt.instance)
@@ -1571,7 +1577,10 @@ extension SetupTests {
         try installer.start(f.options)
         let calls = Array(runner.calls.dropFirst(released))
         let enable = try XCTUnwrap(calls.firstIndex { $0.1 == ["enable", label] })
-        let bootstrap = try XCTUnwrap(calls.firstIndex { $0.1.first == "bootstrap" && $0.1.last == installer.definitionURL(receipt.instance).path })
+        let bootstrap = try XCTUnwrap(
+            calls.firstIndex {
+                $0.1.first == "bootstrap" && $0.1.last == installer.definitionURL(receipt.instance).path
+            })
         XCTAssertLessThan(enable, bootstrap)
         XCTAssertTrue(runner.jobs.contains(label))
     }

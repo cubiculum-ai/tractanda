@@ -6,7 +6,9 @@ enum MessageViewFields {
     private static let scalars = [
         ("language", "X-View-Language"), ("expression", "X-View-Expression"), ("text", "X-View-Text"),
     ]
-    private static let references = [("categoryPath", "X-View-Include"), ("excludedCategoryIDs", "X-View-Exclude")]
+    private static let references = [
+        ("categoryPath", "X-View-Include"), ("excludedCategoryIDs", "X-View-Exclude"),
+    ]
 
     static func write(_ value: ItemValue, emit: MessageHeaderEmitter) throws -> ItemValue? {
         guard var view = value.map else { return value }
@@ -60,10 +62,11 @@ enum MessageViewFields {
             if let sections = MessageKnownFields.currentReferences(table["sections"]) {
                 let order = collapseOrder(table["collapsedSections"], sections: sections)
                 for section in sections {
-                    let state = order.map { ranks in
-                        ranks[section.itemID].map { "; collapsed=yes; collapsed-order=" + String($0) }
-                            ?? "; collapsed=no"
-                    } ?? ""
+                    let state =
+                        order.map { ranks in
+                            ranks[section.itemID].map { "; collapsed=yes; collapsed-order=" + String($0) }
+                                ?? "; collapsed=no"
+                        } ?? ""
                     try output("X-View-Section", section.itemID + state, referenceID: section.itemID)
                 }
                 table["sections"] = nil
@@ -88,13 +91,14 @@ enum MessageViewFields {
         for (field, header) in references {
             let rows = headers.many(header.lowercased())
             if !rows.isEmpty {
-                selected[field] = .list(try rows.map { row in
-                    let (id, parameters) = try referenceParameters(row)
-                    var rest = parameters
-                    try readLabel(&rest, id: id, labels: &labels)
-                    try requireNoParameters(rest)
-                    return .reference(ItemReference(id))
-                })
+                selected[field] = .list(
+                    try rows.map { row in
+                        let (id, parameters) = try referenceParameters(row)
+                        var rest = parameters
+                        try readLabel(&rest, id: id, labels: &labels)
+                        try requireNoParameters(rest)
+                        return .reference(ItemReference(id))
+                    })
             }
         }
         let sort = headers.many("x-view-sort")
@@ -103,7 +107,9 @@ enum MessageViewFields {
             table["profile"] = .text(try MessageHeaderText.literal(profile))
         }
         let columns = headers.many("x-view-column")
-        if !columns.isEmpty { table["columns"] = .list(try columns.map { try readColumn($0, labels: &labels) }) }
+        if !columns.isEmpty {
+            table["columns"] = .list(try columns.map { try readColumn($0, labels: &labels) })
+        }
         let sections = headers.many("x-view-section")
         if !sections.isEmpty {
             let values = try sections.map { try readSection($0, labels: &labels) }
@@ -143,7 +149,9 @@ enum MessageViewFields {
 
     private static func remainderMap(_ value: ItemValue?) throws -> [String: ItemValue] {
         guard let value else { return [:] }
-        guard let fields = value.map else { throw MessageHeaderText.invalid("View headers conflict with a typed field.") }
+        guard let fields = value.map else {
+            throw MessageHeaderText.invalid("View headers conflict with a typed field.")
+        }
         return fields
     }
 
@@ -174,7 +182,10 @@ enum MessageViewFields {
 
     private static func parameterText(_ text: String) -> String {
         if !text.isEmpty, MessageHeaderText.isLiteral(text),
-            !text.utf8.contains(where: { MessageHeaderText.isWhitespace($0) || [34, 59, 61, 92].contains($0) }) {
+            !text.utf8.contains(where: {
+                MessageHeaderText.isWhitespace($0) || [34, 59, 61, 92].contains($0)
+            })
+        {
             return text
         }
         return MessageHeaderText.escaped(text, quoted: true)
@@ -190,8 +201,10 @@ enum MessageViewFields {
         return nil
     }
 
-    private static func readSelector(_ parameters: inout [String: String], labels: inout [String: ItemValue]) throws
-        -> [String: ItemValue] {
+    private static func readSelector(_ parameters: inout [String: String], labels: inout [String: ItemValue])
+        throws
+        -> [String: ItemValue]
+    {
         let property = parameters.removeValue(forKey: "property")
         let category = parameters.removeValue(forKey: "category")
         try readLabel(&parameters, id: category, labels: &labels)
@@ -200,7 +213,8 @@ enum MessageViewFields {
         case (nil, let id?):
             try Identifier.validate(id)
             return ["categoryRootID": .reference(ItemReference(id))]
-        default: throw MessageHeaderText.invalid("View header requires exactly one property or category selector.")
+        default:
+            throw MessageHeaderText.invalid("View header requires exactly one property or category selector.")
         }
     }
 
@@ -232,7 +246,10 @@ enum MessageViewFields {
         guard let map = value.map, map.count == 3, let target = selector(map),
             let title = map["title"]?.string, let width = map["width"]?.integerValue
         else { return nil }
-        return (target.text + "; title=" + MessageHeaderText.escaped(title, quoted: true) + "; width=" + String(width), target.id)
+        return (
+            target.text + "; title=" + MessageHeaderText.escaped(title, quoted: true) + "; width="
+                + String(width), target.id
+        )
     }
 
     private static func readColumn(_ row: String, labels: inout [String: ItemValue]) throws -> ItemValue {
@@ -255,13 +272,15 @@ enum MessageViewFields {
         var ranks: [String: Int] = [:]
         for (index, item) in values.enumerated() {
             guard let link = item.link, link.revisionID == nil, ids.contains(link.itemID),
-                ranks.updateValue(index, forKey: link.itemID) == nil else { return nil }
+                ranks.updateValue(index, forKey: link.itemID) == nil
+            else { return nil }
         }
         return ranks
     }
 
     private static func readSection(_ row: String, labels: inout [String: ItemValue]) throws
-        -> (reference: ItemValue, collapsed: Bool?, rank: Int?) {
+        -> (reference: ItemValue, collapsed: Bool?, rank: Int?)
+    {
         let (id, parameters) = try referenceParameters(row)
         var rest = parameters
         try readLabel(&rest, id: id, labels: &labels)
@@ -278,7 +297,9 @@ enum MessageViewFields {
                 throw MessageHeaderText.invalid("Invalid collapsed section ordinal.")
             }
             rank = index
-        } else { rank = nil }
+        } else {
+            rank = nil
+        }
         try requireNoParameters(rest)
         return (.reference(ItemReference(id)), collapsed, rank)
     }

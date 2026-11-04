@@ -41,7 +41,8 @@ final class Version1UUIDTests: XCTestCase {
             try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: parent.path)
             parent.deleteLastPathComponent()
         }
-        let file = directory.appendingPathComponent(revision.itemID + "." + revision.revisionID + ".tractanda")
+        let file = directory.appendingPathComponent(
+            revision.itemID + "." + revision.revisionID + ".tractanda")
         let bytes = try RecordCodec.encode(revision)
         try bytes.write(to: file)
         try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: file.path)

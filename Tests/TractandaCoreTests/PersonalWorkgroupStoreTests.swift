@@ -345,16 +345,19 @@ final class PersonalWorkgroupStoreTests: XCTestCase {
 
     func testDiscardedRetryReceiptAllowsRebuildAndNewEditButNeverReexecutesOldOperation() throws {
         try fixture { root, accounts in
-            let request = CommitRequest(classID: "Item",
+            let request = CommitRequest(
+                classID: "Item",
                 changes: ["subject": .text("receiptless needle"), "permissions": permissions()],
                 operationID: "discarded-retry")
             var store: ItemStore? = try open(root, accounts, .fresh(policy()))
             let first = try store!.withAccess(forUID: accounts.alice) { try store!.commit(request).revision }
-            let edit = CommitRequest(action: .revise, itemID: first.itemID, expectedRevisionID: first.revisionID,
+            let edit = CommitRequest(
+                action: .revise, itemID: first.itemID, expectedRevisionID: first.revisionID,
                 changes: ["body": .text("Raw body\r\n")], operationID: "second-receipt")
             let second = try store!.withAccess(forUID: accounts.alice) { try store!.commit(edit).revision }
             let originalBytes = Data("private attachment fixture".utf8)
-            let uploadRequest = AttachmentUploadRequest(itemID: first.itemID,
+            let uploadRequest = AttachmentUploadRequest(
+                itemID: first.itemID,
                 expectedRevisionID: second.revisionID, operationID: "discarded-attachment-retry",
                 filename: "fixture.txt", mediaType: "text/plain", byteCount: Int64(originalBytes.count),
                 sha256: SHA256.hash(data: originalBytes).map { String(format: "%02x", $0) }.joined())
@@ -372,8 +375,11 @@ final class PersonalWorkgroupStoreTests: XCTestCase {
                 let url = root.appendingPathComponent(row.path)
                 var bytes = try Data(contentsOf: url)
                 let boundary = try XCTUnwrap(bytes.range(of: Data("\r\n\r\n".utf8)))
-                let prefix = try XCTUnwrap(bytes.range(of: Data("X-Request-Identity: ".utf8), in: bytes.startIndex..<boundary.lowerBound))
-                let end = try XCTUnwrap(bytes.range(of: Data("\r\n".utf8), in: prefix.upperBound..<bytes.endIndex))
+                let prefix = try XCTUnwrap(
+                    bytes.range(
+                        of: Data("X-Request-Identity: ".utf8), in: bytes.startIndex..<boundary.lowerBound))
+                let end = try XCTUnwrap(
+                    bytes.range(of: Data("\r\n".utf8), in: prefix.upperBound..<bytes.endIndex))
                 bytes.removeSubrange(prefix.lowerBound..<end.upperBound)
                 try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
                 try bytes.write(to: url)
@@ -385,10 +391,16 @@ final class PersonalWorkgroupStoreTests: XCTestCase {
                 XCTAssertEqual(head.revisionID, attached.revisionID)
                 XCTAssertEqual(head.fields["body"], .text("Raw body\r\n"))
                 XCTAssertNil(head.fields["requestIdentity"])
-                XCTAssertEqual(try store!.history(first.itemID).map(\.revisionID), [attached.revisionID, second.revisionID, first.revisionID])
-                XCTAssertEqual(try Categories.query(store: store!, text: "needle").map(\.itemID), [first.itemID])
-                let fresh = try store!.commit(.init(action: .revise, itemID: first.itemID,
-                    expectedRevisionID: attached.revisionID, changes: ["body": .text("New edit")], operationID: "fresh-after-rebuild"))
+                XCTAssertEqual(
+                    try store!.history(first.itemID).map(\.revisionID),
+                    [attached.revisionID, second.revisionID, first.revisionID])
+                XCTAssertEqual(
+                    try Categories.query(store: store!, text: "needle").map(\.itemID), [first.itemID])
+                let fresh = try store!.commit(
+                    .init(
+                        action: .revise, itemID: first.itemID,
+                        expectedRevisionID: attached.revisionID, changes: ["body": .text("New edit")],
+                        operationID: "fresh-after-rebuild"))
                 XCTAssertNotNil(fresh.revision.fields["requestIdentity"])
                 assertCode("retryReceiptUnavailable") { _ = try store!.commit(request) }
                 assertCode("retryReceiptUnavailable") { _ = try store!.commit(edit) }
@@ -399,17 +411,21 @@ final class PersonalWorkgroupStoreTests: XCTestCase {
             let stage = root.appendingPathComponent("attachments/staging")
             let stagingBefore = (try? FileManager.default.contentsOfDirectory(atPath: stage.path))?.sorted()
             let service = ItemService(store: store!)
-            let arguments = try XCTUnwrap(JSONSerialization.jsonObject(with: JSON.encode(uploadRequest)) as? [String: Any])
+            let arguments = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: JSON.encode(uploadRequest)) as? [String: Any])
             let call = try nativeFixtureEnvelope(
                 calls: [["TractandaAttachment/begin", arguments, "retry"]],
                 accountID: store!.nativeProtocolSessionBasis.identity)
-            let response = try XCTUnwrap(JSONSerialization.jsonObject(with: service.handle(call, peerUID: accounts.alice)) as? [String: Any])
+            let response = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: service.handle(call, peerUID: accounts.alice))
+                    as? [String: Any])
             let tuples = try XCTUnwrap(response["methodResponses"] as? [[Any]])
             XCTAssertEqual(tuples.first?.first as? String, "error")
             let error = try XCTUnwrap(tuples.first?[1] as? [String: Any])
             XCTAssertEqual(error["type"] as? String, "retryReceiptUnavailable")
             XCTAssertEqual(try fingerprint(root), before)
-            XCTAssertEqual((try? FileManager.default.contentsOfDirectory(atPath: stage.path))?.sorted(), stagingBefore)
+            XCTAssertEqual(
+                (try? FileManager.default.contentsOfDirectory(atPath: stage.path))?.sorted(), stagingBefore)
             store = nil
         }
     }
@@ -422,7 +438,8 @@ final class PersonalWorkgroupStoreTests: XCTestCase {
                 let before = try fingerprint(root)
                 let expected = try JSON.encode([
                     "profile": "tractanda.physical-layout.v1", "layout": "flat-items-visible-attachments.v1",
-            "recordEncoding": "message-v1"])
+                    "recordEncoding": "message-v1",
+                ])
                 let stage = root.appendingPathComponent(".physical-layout-" + Identifier.make() + ".stage")
                 try Data(expected.prefix(length)).write(to: stage)
                 try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: stage.path)
@@ -432,7 +449,9 @@ final class PersonalWorkgroupStoreTests: XCTestCase {
                 }
                 XCTAssertEqual(try fingerprint(root), before)
                 XCTAssertFalse(FileManager.default.fileExists(atPath: stage.path))
-                XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(CanonicalPhysicalLayout.fileName)), expected)
+                XCTAssertEqual(
+                    try Data(contentsOf: root.appendingPathComponent(CanonicalPhysicalLayout.fileName)),
+                    expected)
             }
         }
     }
@@ -441,16 +460,20 @@ final class PersonalWorkgroupStoreTests: XCTestCase {
         try fixture { root, accounts in
             let revision = try raw()
             try save(revision, root: root)
-            let flat = root.appendingPathComponent("items/2026/10/24/11/01/" + revision.itemID + "." + revision.revisionID + ".tractanda")
+            let flat = root.appendingPathComponent(
+                "items/2026/10/24/11/01/" + revision.itemID + "." + revision.revisionID + ".tractanda")
             let legacy = flat.deletingLastPathComponent().appendingPathComponent(revision.itemID)
                 .appendingPathComponent(revision.revisionID + ".tractanda")
-            try FileManager.default.createDirectory(at: legacy.deletingLastPathComponent(),
+            try FileManager.default.createDirectory(
+                at: legacy.deletingLastPathComponent(),
                 withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             try FileManager.default.moveItem(at: flat, to: legacy)
             let bytes = try Data(contentsOf: legacy)
             XCTAssertThrowsError(try open(root, accounts, .selectedContent(policy())))
-            for name in [CanonicalPhysicalLayout.fileName, CanonicalReaderRequirement.fileName,
-                ".tractanda-store-identity.json", PersonalWorkgroupProfile.pendingName] {
+            for name in [
+                CanonicalPhysicalLayout.fileName, CanonicalReaderRequirement.fileName,
+                ".tractanda-store-identity.json", PersonalWorkgroupProfile.pendingName,
+            ] {
                 XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(name).path))
             }
             XCTAssertEqual(try Data(contentsOf: legacy), bytes)

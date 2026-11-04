@@ -47,7 +47,8 @@ public enum MessageRecordCodec {
         }
         for (field, header) in dateHeaders {
             if let value = fields[field]?.dateString, MessageHeaderText.isLiteral(value),
-                !value.utf8.contains(where: MessageHeaderText.isWhitespace) {
+                !value.utf8.contains(where: MessageHeaderText.isWhitespace)
+            {
                 try emit(header, value)
                 fields[field] = nil
             }
@@ -57,7 +58,9 @@ public enum MessageRecordCodec {
             try emit("X-Is-Deleted", String(deleted))
         }
         try MessageKnownFields.write(&fields, emit: emit)
-        if let view = fields["viewDefinition"] { fields["viewDefinition"] = try MessageViewFields.write(view, emit: emit) }
+        if let view = fields["viewDefinition"] {
+            fields["viewDefinition"] = try MessageViewFields.write(view, emit: emit)
+        }
         for key in MessageTypedFields.sortedKeys(fields)
         where key.hasPrefix("x-") && key == key.lowercased() && MessageHeaderReader.isExtensionName(key) {
             guard let value = fields[key] else { continue }
@@ -79,12 +82,15 @@ public enum MessageRecordCodec {
     }
 
     public static func decode(_ data: Data) throws -> Revision {
-        guard data.count <= maximumRecordBytes else { throw MessageHeaderText.invalid("Oversized message record.") }
+        guard data.count <= maximumRecordBytes else {
+            throw MessageHeaderText.invalid("Oversized message record.")
+        }
         let envelope = try splitEnvelope(data)
         var headers = try MessageHeaderReader(envelope.lines)
         guard try MessageHeaderText.word(headers.required("x-tractanda-encoding")) == encoding,
             try MessageHeaderText.word(headers.required("mime-version")) == "1.0",
-            try MessageHeaderText.word(headers.required("content-transfer-encoding")).lowercased() == "binary",
+            try MessageHeaderText.word(headers.required("content-transfer-encoding")).lowercased()
+                == "binary",
             let version = try Int(MessageHeaderText.word(headers.required("x-tractanda-format-version")))
         else { throw MessageHeaderText.invalid("Unsupported message record header values.") }
         let mediaType = try readContentType(headers.required("content-type"))
@@ -94,8 +100,11 @@ public enum MessageRecordCodec {
             throw MessageHeaderText.invalid("Absent body media type must use the plain-text default.")
         }
         var fields = try headers.typed()
-        let reserved = Set(textHeaders.map(\.0) + dateHeaders.map(\.0) + ["schemaVersion", "isDeleted", "body"])
-        guard fields["body"] == nil else { throw MessageHeaderText.invalid("Body belongs in the raw message bytes.") }
+        let reserved = Set(
+            textHeaders.map(\.0) + dateHeaders.map(\.0) + ["schemaVersion", "isDeleted", "body"])
+        guard fields["body"] == nil else {
+            throw MessageHeaderText.invalid("Body belongs in the raw message bytes.")
+        }
         if let value = try headers.single("x-schema-version") {
             guard let schema = try Int64(MessageHeaderText.word(value)) else {
                 throw MessageHeaderText.invalid("Invalid schema version header.")
@@ -154,7 +163,9 @@ public enum MessageRecordCodec {
     private static func readContentType(_ value: String) throws -> String {
         let whitespace = CharacterSet(charactersIn: " \t")
         let parts = value.split(separator: ";", omittingEmptySubsequences: false)
-        guard parts.count == 2 else { throw MessageHeaderText.invalid("Unsupported message body content type.") }
+        guard parts.count == 2 else {
+            throw MessageHeaderText.invalid("Unsupported message body content type.")
+        }
         let media = parts[0].trimmingCharacters(in: whitespace).lowercased()
         let charset = parts[1].split(separator: "=", omittingEmptySubsequences: false)
         guard bodyMediaTypes.contains(media), charset.count == 2,
@@ -199,7 +210,9 @@ struct MessageHeaderReader {
         var value = ""
         for line in physicalLines {
             if let first = line.utf8.first, MessageHeaderText.isWhitespace(first) {
-                guard name != nil else { throw MessageHeaderText.invalid("Header continuation has no field.") }
+                guard name != nil else {
+                    throw MessageHeaderText.invalid("Header continuation has no field.")
+                }
                 // Remove the CRLF, retaining the continuation's leading whitespace.
                 value.append(contentsOf: line)
                 continue
@@ -227,7 +240,9 @@ struct MessageHeaderReader {
     }
 
     mutating func required(_ name: String) throws -> String {
-        guard let value = try single(name) else { throw MessageHeaderText.invalid("Required message header is missing.") }
+        guard let value = try single(name) else {
+            throw MessageHeaderText.invalid("Required message header is missing.")
+        }
         return value
     }
 
@@ -240,12 +255,16 @@ struct MessageHeaderReader {
     }
 
     static func isExtensionName(_ name: String) -> Bool {
-        let reserved = ["x-tractanda-", "x-field-", "x-view-", "x-ancestry-", "x-permissions-", "x-acl-",
-            "x-category-", "x-body-", "x-request-", "content-", "mime-"]
+        let reserved = [
+            "x-tractanda-", "x-field-", "x-view-", "x-ancestry-", "x-permissions-", "x-acl-",
+            "x-category-", "x-body-", "x-request-", "content-", "mime-",
+        ]
         return !name.isEmpty && name.utf8.allSatisfy(isNameByte)
             && !reserved.contains(where: { name.hasPrefix($0) })
-            && !["x-item-id", "x-revision-id", "x-isa", "x-supersedes", "x-actor", "x-operation-id",
-                "x-created-at", "x-modified-at", "x-schema-version", "x-is-deleted", "x-attachment"].contains(name)
+            && ![
+                "x-item-id", "x-revision-id", "x-isa", "x-supersedes", "x-actor", "x-operation-id",
+                "x-created-at", "x-modified-at", "x-schema-version", "x-is-deleted", "x-attachment",
+            ].contains(name)
     }
 
     func readExtensions(into fields: inout [String: ItemValue], reservedFields: Set<String>) throws {
