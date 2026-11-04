@@ -105,6 +105,7 @@ sys.exit(int(os.environ.get("MOCK_PYTHON_EXIT", "0")))
         source = source.replace("@TRACTANDA_PACKAGE_DESCRIPTOR_JSON@", DESCRIPTOR)
         source = source.replace("@TRACTANDA_LAYOUT17_INSPECTOR_SHA256@", "b" * 64)
         source = source.replace("@TRACTANDA_LAYOUT17_DEBIAN_VERSION@", "0.1.0~poc.17-1")
+        source = source.replace("@TRACTANDA_LAYOUT17_MANIFEST_SHA256@", "c" * 64)
         replacements = {
             "/opt/tractanda/current/bin/tractanda-setup": str(self.helper),
             "/run/tractanda-package-descriptor.": str(self.root / "descriptor-"),
@@ -299,6 +300,19 @@ class PackageHookTests(unittest.TestCase):
                 self.assertEqual(records[0]["args"], ["-I", "-", "postrm-remove" if args[0] in ("remove", "purge") else "postrm"])
                 self.assertEqual(records[1], {"program": "systemctl", "args": ["daemon-reload"]})
 
+    def test_postrm_same_17_abort_binds_the_incoming_manifest(self):
+        version = "0.1.0~poc.17-1"
+        for arguments, expected in (
+            (("abort-upgrade", version, version), ["layout17-reinstall-abort", "c" * 64]),
+            (("abort-upgrade", "0.1.0~poc.16.2-1", version), ["layout17-abort-upgrade"]),
+            (("abort-upgrade", version, "0.1.0~poc.17-2"), ["postrm"]),
+            (("failed-upgrade", version, version), ["postrm"]),
+        ):
+            self.harness.clear()
+            result = self.harness.run("tractanda.postrm", *arguments, helper=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.harness.records()[0]["args"], ["-I", "-", *expected])
+
     def test_postrm_skips_nonessential_cleanup_if_python_or_systemctl_is_absent(self):
         for missing in (("/usr/bin/python3",), ("/usr/bin/systemctl",)):
             self.harness.clear()
@@ -425,6 +439,32 @@ class Layout17ControlInspectorTests(unittest.TestCase):
             verify.reset_mock()
             with self.assertRaises(SystemExit): m.fallback(['layout17-abort-upgrade'])
             verify.assert_not_called()
+
+    def test_exact_17_reinstall_abort_keeps_committed_services_running(self):
+        m = module_from_template()
+        raw = b'{"version":"0.1.0-poc.17"}'
+        digest = hashlib.sha256(raw).hexdigest()
+        state = {"profile": "tractanda.package-transaction.v1", "operationID": "fixture",
+                 "phase": "committed", "instances": [], "startupPermitted": [],
+                 "incoming": {"version": "0.1.0-poc.17", "manifestSHA256": digest}}
+        def read(path, *args, **kwargs):
+            return json.dumps(state).encode() if path == m.STATE else raw
+        with mock.patch.object(m.os, "geteuid", return_value=0), \
+                mock.patch.object(m.os, "lstat"), \
+                mock.patch.object(m, "read_private_regular", side_effect=read), \
+                mock.patch.object(m, "verify_helper", return_value=0) as verify, \
+                mock.patch.object(m, "safe_state", side_effect=SystemExit("writer lock is held")) as stop_check:
+            self.assertEqual(m.fallback(["layout17-reinstall-abort", digest]), 0)
+            verify.assert_called_once_with(["verify-helper", m.ACTIVE + "/bin/tractanda-setup"])
+            stop_check.assert_not_called()
+            for argument, change in (("a" * 64, {}), (digest, {"phase": "awaitingUnpack"}),
+                                     (digest, {"startupPermitted": ["fixture"]}),
+                                     (digest, {"owner": {"pid": 10}})):
+                verify.reset_mock()
+                with self.subTest(argument=argument, change=change), mock.patch.dict(state, change):
+                    with self.assertRaisesRegex(SystemExit, "writer lock is held"):
+                        m.fallback(["layout17-reinstall-abort", argument])
+                    verify.assert_not_called()
 
     def test_loader_closure_checks_sqlite_and_rejects_shadowing(self):
         m = module_from_template(); stage = '/verified/stage'

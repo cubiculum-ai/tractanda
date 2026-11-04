@@ -211,6 +211,7 @@ def stage_package(bundle, stage, snapshot, arch, maintainer, copyright_bytes, re
             'TRACTANDA_PACKAGE_HOOK_FALLBACK_PY': fallback,
             'TRACTANDA_LAYOUT17_INSPECTOR_SHA256': control_hash,
             'TRACTANDA_LAYOUT17_DEBIAN_VERSION': version if inspector is not None else '-',
+            'TRACTANDA_LAYOUT17_MANIFEST_SHA256': snapshot.sha256 if inspector is not None else '-',
         })
         write(stage / 'DEBIAN' / name, data, 0o755)
     files = B.inventory(stage)

@@ -1218,8 +1218,10 @@ def fallback(arguments):
         if len(arguments) != 1:
             refuse("invalid uuidd-remove arguments")
         return uuidd_remove()
-    if action == "layout17-abort-upgrade":
-        if len(arguments) != 1:
+    if action in ("layout17-abort-upgrade", "layout17-reinstall-abort"):
+        reinstall = action == "layout17-reinstall-abort"
+        if (len(arguments) != (2 if reinstall else 1)
+                or reinstall and not valid_digest(arguments[1])):
             refuse("invalid layout17 abort arguments")
         try:
             state = decode_object(read_private_regular(STATE), STATE_REQUIRED, STATE_ALLOWED)
@@ -1227,17 +1229,22 @@ def fallback(arguments):
             return fallback(["postrm"])
         if state.get("phase") != "committed":
             return fallback(["postrm"])
-        # A rejected preflight may have left the original running, or the genuine old
-        # configure may have restored it. Check that old commitment without requiring
-        # its active units to be quiescent. The old postinst abort sees committed state.
+        # A pre-stop refusal may leave the committed services running. Only
+        # the genuine old payload or an exact reinstall can prove that case.
         raw = read_private_regular(os.path.join(ACTIVE, "bundle-manifest.json"),
                                    16 * 1024 * 1024, private=False)
         old = decode_object(raw)
         incoming = state.get("incoming")
-        if (old.get("version") != "0.1.0-poc.16.2" or type(incoming) is not dict
-                or incoming.get("version") != old["version"]
-                or incoming.get("manifestSHA256") != hashlib.sha256(raw).hexdigest()
-                or state.get("owner") is not None or state.get("startupPermitted") != []):
+        actual_digest = hashlib.sha256(raw).hexdigest()
+        expected_version = "0.1.0-poc.17" if reinstall else "0.1.0-poc.16.2"
+        if (state.get("profile") != "tractanda.package-transaction.v1"
+                or old.get("version") != expected_version or type(incoming) is not dict
+                or incoming.get("version") != expected_version
+                or incoming.get("manifestSHA256") != actual_digest
+                or state.get("owner") is not None or state.get("startupPermitted") != []
+                or reinstall and arguments[1] != actual_digest):
+            if reinstall:
+                return fallback(["postrm"])
             refuse("layout17 abort lacks the authentic committed old payload")
         return verify_helper(["verify-helper", os.path.join(ACTIVE, "bin/tractanda-setup")])
     if action == "postrm-remove":

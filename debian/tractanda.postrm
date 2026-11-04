@@ -10,6 +10,9 @@ case "${1-}" in
   if [ "$1" = abort-upgrade ] && [ "$2" = '0.1.0~poc.16.2-1' ] \
      && [ "$3" = '@TRACTANDA_LAYOUT17_DEBIAN_VERSION@' ] && [ "$3" != '-' ]; then
    action=layout17-abort-upgrade
+  elif [ "$1" = abort-upgrade ] && [ "$2" = '@TRACTANDA_LAYOUT17_DEBIAN_VERSION@' ] \
+     && [ "$3" = "$2" ] && [ "$3" != '-' ]; then
+   action=layout17-reinstall-abort
   fi ;;
  abort-install)
   { [ "$#" -eq 1 ] || [ "$#" -eq 3 ]; } || { echo "tractanda postrm: invalid abort-install arguments" >&2; exit 2; }
@@ -32,7 +35,11 @@ if ! [ -x /usr/bin/python3 ] || ! [ -x /usr/bin/systemctl ]; then
  fi
  exit 0
 fi
-/usr/bin/python3 -I - "$action" <<'TRACTANDA_PACKAGE_HOOK_FALLBACK_EOF'
+set -- "$action"
+if [ "$action" = layout17-reinstall-abort ]; then
+ set -- "$action" '@TRACTANDA_LAYOUT17_MANIFEST_SHA256@'
+fi
+/usr/bin/python3 -I - "$@" <<'TRACTANDA_PACKAGE_HOOK_FALLBACK_EOF'
 @TRACTANDA_PACKAGE_HOOK_FALLBACK_PY@
 TRACTANDA_PACKAGE_HOOK_FALLBACK_EOF
 if [ "$reload" -eq 1 ]; then /usr/bin/systemctl daemon-reload; fi
