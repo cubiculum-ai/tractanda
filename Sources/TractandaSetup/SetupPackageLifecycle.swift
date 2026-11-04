@@ -302,7 +302,8 @@ extension SetupEngine {
             if let incoming, let original = state.original {
                 try requirePackageUpgrade(incoming, from: original)
             }
-            for receipt in receipts where incoming?.version != "0.1.0-poc.17" || receipt.state != .removed {
+            let bridgePackage = incoming.flatMap { SetupLayout17Release.upgrade(for: $0.version) } != nil
+            for receipt in receipts where !bridgePackage || receipt.state != .removed {
                 let requirement = try quiescentCanonicalRequirement(receipt)
                 if let incoming { try incoming.canonicalFormats.require(requirement) }
             }
@@ -400,6 +401,7 @@ extension SetupEngine {
         _ = try installedPackageCompatibility()  // Includes complete production component boundary.
         let existing = try readPackageState()
         let receipts = try installationReceipts()
+        let bridgePackage = SetupLayout17Release.upgrade(for: incoming.version) != nil
         if existing == nil {
             guard receipts.isEmpty else {
                 throw SetupError(
@@ -418,7 +420,7 @@ extension SetupEngine {
             try verifyPackageDefinitionFiles(receipts)
             guard
                 receipts.allSatisfy({
-                    incoming.version == "0.1.0-poc.17" && $0.state == .removed
+                    bridgePackage && $0.state == .removed
                         || $0.manifestSHA256 == incoming.manifestSHA256
                 })
             else {
@@ -440,14 +442,14 @@ extension SetupEngine {
                 guard var receipt = try readReceipt(intent.name) else {
                     throw SetupError("A retained package instance receipt is missing.")
                 }
-                if incoming.version == "0.1.0-poc.17", receipt.state == .removed { continue }
+                if bridgePackage, receipt.state == .removed { continue }
                 guard receipt.initialized, !receipt.sample || receipt.sampled else {
                     throw SetupError(
                         "Package configure cannot initialize or seed a store; finish the explicit setup operation."
                     )
                 }
-                if incoming.version == "0.1.0-poc.17", let original = state.original,
-                    original.version == "0.1.0-poc.16.2"
+                if bridgePackage, let original = state.original,
+                    original.version == SetupLayout17Release.source
                 {
                     _ = try migrateLayout17Store(
                         receipt, bundle: packagePayload, incoming: incoming, original: original)

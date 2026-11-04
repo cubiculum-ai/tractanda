@@ -38,6 +38,16 @@ class LinuxDebTests(unittest.TestCase):
         manifest['canonicalFormats']['writeCapabilities'].remove('tractanda.message-items.v1')
         with self.assertRaises(ValueError): D.package_descriptor(manifest, 'a' * 64, 'coordinated-maintenance')
 
+    def test_layout171_compatible_only_with_same_layout_and_message_floor(self):
+        manifest = {'version': '0.1.0-poc.17.1', 'arch': 'x86_64', 'embedding': None, 'documentExtraction': None,
+                    'canonicalFormats': {'readerLevel': 20, 'writerLevel': 20,
+                        'capabilities': ['tractanda.physical-layout.flat-items.v1', 'tractanda.message-items.v1'],
+                        'writeCapabilities': ['tractanda.physical-layout.flat-items.v1', 'tractanda.message-items.v1']}}
+        self.assertEqual(json.loads(D.package_descriptor(manifest, 'a' * 64, 'compatible'))['upgrade'], 'compatible')
+        with self.assertRaises(ValueError): D.package_descriptor(manifest, 'a' * 64, 'coordinated-maintenance')
+        manifest['canonicalFormats']['capabilities'].remove('tractanda.message-items.v1')
+        with self.assertRaises(ValueError): D.package_descriptor(manifest, 'a' * 64, 'compatible')
+
     def test_layout17_control_contains_only_exact_reachable_payload_bytes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); payload = root / 'payload'; payload.mkdir()

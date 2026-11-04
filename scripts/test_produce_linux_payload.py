@@ -74,6 +74,8 @@ class ProducerTests(unittest.TestCase):
 
     def test_layout17_helper_and_sources_are_versioned_sealed_inputs(self):
         self.assertIn('tractanda-layout17', P.core_products('0.1.0-poc.17'))
+        self.assertIn('tractanda-layout17', P.core_products('0.1.0-poc.17.1'))
+        self.assertNotIn('tractanda-layout17', P.core_products('0.1.0-poc.17.2'))
         self.assertNotIn('tractanda-layout17', P.core_products('0.1.0-poc.18'))
         self.assertIn('Tools', P.SOURCE_ROOTS)
         self.put(self.root / 'Tools/Layout17Bridge/main.swift', b'first')

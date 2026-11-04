@@ -118,7 +118,7 @@ def inspect_asset(entry, version, context):
         require(all(actual.get(k) == row.get(k) for k in ('sha256', 'size', 'mode')), 'D3 file commitment differs from actual bundle manifest')
     core = ('tractanda', 'tractanda-tui', 'tractanda-mcp', 'tractanda-setup', 'tractanda-auth-helper', 'tractanda-embeddings', 'tractanda-document-converter')
     require(all('bin/' + n in files for n in core), 'Complete Linux executable inventory required')
-    if manifest.get('version') == '0.1.0-poc.17':
+    if manifest.get('version') in ('0.1.0-poc.17', '0.1.0-poc.17.1'):
         require('bin/tractanda-layout17' in files, 'The .17 one-time migration bridge is required')
     if manifest.get('modelProvisioningManifestPath') == 'models/manifest.json':
         require(files.get('models/manifest.json', {}).get('sha256') == manifest.get('modelProvisioningManifestSHA256')

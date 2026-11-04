@@ -43,7 +43,7 @@ SOURCE_FILES = ('Package.swift', 'Package.resolved', 'VERSION', 'scripts/produce
 
 
 def core_products(version):
-    return PRODUCTS + (('tractanda-layout17',) if version == '0.1.0-poc.17' else ())
+    return PRODUCTS + (('tractanda-layout17',) if version in ('0.1.0-poc.17', '0.1.0-poc.17.1') else ())
 
 
 def sha(value):

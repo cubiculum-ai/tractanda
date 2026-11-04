@@ -1,7 +1,22 @@
 import Foundation
 import TractandaCore
 
-/// Finite package check for the .16.2 to .17 physical-layout bridge only.
+/// The two releases that carry the finite physical-layout bridge.
+enum SetupLayout17Release {
+    static let source = "0.1.0-poc.16.2"
+    static let first = "0.1.0-poc.17"
+    static let corrected = "0.1.0-poc.17.1"
+
+    static func upgrade(for version: String) -> SetupPackageCompatibility.Upgrade? {
+        switch version {
+        case first: .coordinatedMaintenance
+        case corrected: .compatible
+        default: nil
+        }
+    }
+}
+
+/// Finite package check for the .16.2 to .17-family physical-layout bridge.
 /// It does not authenticate either payload, establish administrator intent, or
 /// prove quiescence. Callers must independently establish those conditions.
 extension SetupPackageCompatibility {
@@ -13,8 +28,9 @@ extension SetupPackageCompatibility {
         ]
         let before = old.canonicalFormats
         let after = canonicalFormats
-        guard old.version == "0.1.0-poc.16.2", version == "0.1.0-poc.17",
-            old.upgrade == .compatible, upgrade == .coordinatedMaintenance,
+        guard let policy = SetupLayout17Release.upgrade(for: version),
+            old.version == SetupLayout17Release.source,
+            old.upgrade == .compatible, upgrade == policy,
             old.arch == arch, old.semanticProfile == semanticProfile,
             semanticProfile == PeerCompatibilityDeclaration.semanticProfile,
             old.embedding == embedding,
@@ -30,5 +46,14 @@ extension SetupPackageCompatibility {
         else {
             throw SetupError("The package is not the exact .16.2 to .17 physical-layout transition.")
         }
+    }
+
+    func requireLayout17CompatibleUpdate(from old: Self) throws {
+        guard old.version == SetupLayout17Release.first,
+            old.upgrade == .coordinatedMaintenance, version == SetupLayout17Release.corrected,
+            canonicalFormats == old.canonicalFormats,
+            canonicalFormats.readerLevel == 20, canonicalFormats.writerLevel == 20
+        else { throw SetupError("The installed .17 update must retain its exact current canonical formats.") }
+        try requireRollingUpgrade(from: old)
     }
 }

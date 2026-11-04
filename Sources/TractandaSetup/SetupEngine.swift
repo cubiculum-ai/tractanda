@@ -246,9 +246,12 @@ public final class SetupEngine {
             let layout17WasRunning =
                 try layout17Original != nil && previous != nil
                 && serviceBackend.isRunning(options.name)
+            let layout17KeepStopped =
+                try roots.platform == .macos && manifest.version == SetupLayout17Release.corrected
+                && layout17Original == nil && previous != nil
+                && !serviceBackend.isRunning(options.name)
             if let layout17Original, let previous {
-                let incoming = try layout17Declaration(
-                    manifest, digest: digest, upgrade: .coordinatedMaintenance)
+                let incoming = try layout17Declaration(manifest, digest: digest)
                 try layout17MacPreflight(
                     previous, bundle: options.bundle, incoming: incoming, original: layout17Original)
             }
@@ -405,8 +408,7 @@ public final class SetupEngine {
                 if let layout17Original {
                     try unloadEmbedding(receipt)
                     try unloadAuthentication(receipt)
-                    let incoming = try layout17Declaration(
-                        manifest, digest: digest, upgrade: .coordinatedMaintenance)
+                    let incoming = try layout17Declaration(manifest, digest: digest)
                     let clustered = try migrateLayout17Store(
                         receipt, bundle: release, incoming: incoming, original: layout17Original)
                     if clustered || !layout17WasRunning {
@@ -415,6 +417,10 @@ public final class SetupEngine {
                     }
                 }
                 try requireCanonicalReader(receipt, quiescent: true)
+                if layout17KeepStopped {
+                    try layout17HoldInstalledMac(&receipt, clustered: false)
+                    return
+                }
                 if receipt.peerRuntimeConfiguration != nil {
                     try publishPeerBytes(
                         peerTransition.bytes, replacing: peerTransition.currentBytes,

@@ -29,6 +29,9 @@ LAYOUT_ALIASES = (
     ("/opt/tractanda/run/tractanda", "/run/tractanda"),
 )
 ACTIVE = "/opt/tractanda/current"
+LAYOUT17_FIRST = "0.1.0-poc.17"
+LAYOUT17_CORRECTED = "0.1.0-poc.17.1"
+LAYOUT17_POLICIES = {LAYOUT17_FIRST: "coordinated-maintenance", LAYOUT17_CORRECTED: "compatible"}
 UNIT_DIR = "/etc/systemd/system"
 ROLES = ("server", "embeddings", "authentication")
 MAX_BYTES = 1_048_576
@@ -461,7 +464,7 @@ def receipt_instance_paths(receipt, name, daemon_uid):
         private_directory(path, daemon_uid)
     return paths
 
-def read_receipts(instances):
+def read_receipts(instances, quiescent=True):
     root_directory_chain(os.path.dirname(RECEIPTS))
     try:
         directory = os.lstat(RECEIPTS)
@@ -488,7 +491,11 @@ def read_receipts(instances):
         if ("packageDefinitions" in receipt
                 and receipt["packageDefinitions"] not in (None, {})):
             refuse("owned service-definition publication is pending native recovery")
-        receipt_instance_paths(receipt, name, daemon_uid)
+        if quiescent or receipt["state"] != "removed":
+            receipt_instance_paths(receipt, name, daemon_uid)
+        if not quiescent:
+            receipts[name] = receipt
+            continue
         lock_path = os.path.join(receipt["store"], ".writer.lock")
         lock_info = os.lstat(lock_path)
         if (not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid != daemon_uid
@@ -839,12 +846,24 @@ def layout17_control_inspector(path, expected_sha, incoming):
             yield os.path.join(stage, _LAYOUT17_INSPECTOR)
 
 
+def layout17_journal_path(store_id, replica_id):
+    try:
+        ids = (uuid.UUID(store_id), uuid.UUID(replica_id))
+    except (AttributeError, ValueError, TypeError):
+        refuse("layout17 journal identity is invalid")
+    if (tuple(map(str, ids)) != (store_id, replica_id) or ids[0] == ids[1]
+            or any(value.version != 1 for value in ids)):
+        refuse("layout17 journal identity is invalid")
+    return os.path.join(INSTALLATION, "layout17-journals", f"layout17-{store_id}-{replica_id}.json")
+
+
 def layout17_pre_stop(previous, previous_digest, incoming):
     """The finite16.2 boundary is checked BEFORE asking its authentic helper to stop."""
     capabilities = ["tractanda.physical-layout.flat-items.v1", "tractanda.message-items.v1"]
     before, after = previous.get("canonicalFormats"), incoming.get("canonicalFormats")
-    if (previous.get("version") != "0.1.0-poc.16.2" or incoming.get("version") != "0.1.0-poc.17"
-            or incoming.get("upgrade") != "coordinated-maintenance"
+    policy = LAYOUT17_POLICIES.get(incoming.get("version"))
+    if (previous.get("version") != "0.1.0-poc.16.2" or policy is None
+            or incoming.get("upgrade") != policy
             or previous.get("arch") != incoming.get("arch")
             or previous.get("embedding") != incoming.get("embedding")
             or layout17_document_semantics(previous.get("documentExtraction"))
@@ -888,7 +907,8 @@ def layout17_pre_stop(previous, previous_digest, incoming):
         store = receipt["store"]
         for pending in (".tractanda-first-source.json", ".tractanda-first-source-complete.json",
                         ".personal-membership.pending.json", ".personal-baseline.json",
-                        ".tractanda-personal-profile.pending.json", "canonical-layout.pending.json"):
+                        ".tractanda-personal-profile.pending.json", "canonical-layout.pending.json",
+                        "canonical-layout.json"):
             if os.path.lexists(os.path.join(store, pending)):
                 refuse("finish unsupported pending or historical16.2 operation before layout17")
         profile = decode_object(layout17_store_file(store, ".tractanda-personal-profile.json", daemon_uid))
@@ -900,6 +920,10 @@ def layout17_pre_stop(previous, previous_digest, incoming):
             refuse("layout17 supports established personal/workgroup16.2 stores only")
         target = {"store": store, "storeID": profile.get("storeID"), "replicaID": profile.get("replicaID"),
                   "readerRequirementSHA256": hashlib.sha256(fence_raw).hexdigest(), "clustered": False}
+        if incoming["version"] == LAYOUT17_CORRECTED:
+            journal = layout17_journal_path(target["storeID"], target["replicaID"])
+            if os.path.lexists(journal):
+                refuse("finish the retained .17 operation using its exact original package")
         targets[name] = target
         membership_path = os.path.join(store, ".personal-membership.json")
         if not os.path.lexists(membership_path):
@@ -954,6 +978,89 @@ def layout17_inspect_targets(inspector, targets, quiescent=False):
             refuse("layout17 inspection identity, membership or reader requirement changed")
 
 
+def layout17_compatible_update(original, incoming):
+    formats = incoming["canonicalFormats"]
+    if (original.get("version") != LAYOUT17_FIRST or incoming.get("version") != LAYOUT17_CORRECTED
+            or original.get("upgrade") != LAYOUT17_POLICIES[LAYOUT17_FIRST]
+            or incoming.get("upgrade") != LAYOUT17_POLICIES[LAYOUT17_CORRECTED]
+            or original.get("canonicalFormats") != formats
+            or formats.get("readerLevel") != 20 or formats.get("writerLevel") != 20
+            or original.get("arch") != incoming.get("arch")
+            or original.get("semanticProfile") != incoming.get("semanticProfile")
+            or original.get("embedding") != incoming.get("embedding")
+            or layout17_document_semantics(original.get("documentExtraction"))
+                != layout17_document_semantics(incoming.get("documentExtraction"))):
+        refuse("the .17.1 compatible update differs from the committed .17 formats or semantics")
+
+
+def layout17_released_receipts(receipts, old_digest, incoming):
+    daemon_uid = pwd.getpwnam("daemon").pw_uid
+    required = {"tractanda.physical-layout.flat-items.v1", "tractanda.message-items.v1"}
+    for name, receipt in receipts.items():
+        if receipt["state"] == "removed":
+            continue
+        store = receipt["store"]
+        if (receipt["state"] != "active" or not receipt["initialized"]
+                or receipt["manifestSHA256"] != old_digest
+                or os.path.lexists(os.path.join(INSTALLATION, "layout17-intents", name + ".json"))
+                or os.path.lexists(os.path.join(store, "canonical-layout.pending.json"))):
+            refuse("complete the retained .17 package and administrator hold before updating")
+        marker = decode_object(layout17_store_file(store, "canonical-layout.json", daemon_uid))
+        fence = decode_object(layout17_store_file(store, "canonical-reader.json", daemon_uid))
+        profile = decode_object(layout17_store_file(store, ".tractanda-personal-profile.json", daemon_uid))
+        capabilities = fence.get("capabilities")
+        if (marker != {"profile": "tractanda.physical-layout.v1", "layout": "flat-items-visible-attachments.v1",
+                       "recordEncoding": "message-v1"}
+                or fence.get("profile") != "tractanda.canonical-reader.v1"
+                or profile.get("profile") != "tractanda.personal-workgroup.v1"
+                or fence.get("storeID") != profile.get("storeID")
+                or fence.get("minimumReaderLevel") != 20 or type(capabilities) is not list
+                or not all(type(capability) is str for capability in capabilities)
+                or not required <= set(capabilities) <= set(incoming["canonicalFormats"].get("capabilities", []))):
+            refuse("the installed .17 store is not a completed compatible format-20 store")
+        journal = layout17_journal_path(profile.get("storeID"), profile.get("replicaID"))
+        if os.path.lexists(journal):
+            root_directory_chain(os.path.dirname(journal))
+            record = decode_object(read_private_regular(journal, 512 * 1024))
+            if (record.get("phase") != "complete" or record.get("profile") != "tractanda.layout17-journal.v1"
+                    or record.get("storeID") != profile["storeID"] or record.get("replicaID") != profile["replicaID"]
+                    or not valid_digest(record.get("originalRequirementSHA256"))):
+                refuse("finish the retained .17 migration journal before updating")
+
+
+def layout17_replacement_pre_stop(incoming):
+    """Check the immutable old .17 helper's inputs before it sees a compatible update."""
+    raw = read_private_regular(os.path.join(ACTIVE, "bundle-manifest.json"),
+                               16 * 1024 * 1024, private=False)
+    manifest = decode_object(raw)
+    if manifest.get("version") != LAYOUT17_FIRST:
+        return
+    state = decode_object(read_private_regular(STATE), STATE_REQUIRED, STATE_ALLOWED)
+    if state.get("owner") is not None or state.get("startupPermitted") != []:
+        refuse("a retained package transaction still owns the .17 installation")
+    if state["phase"] == "committed":
+        original = state.get("incoming")
+    elif state["phase"] in ("quiesced", "awaitingUnpack", "failed") and state.get("incoming") == incoming:
+        original = state.get("original")
+    else:
+        refuse("complete the exact retained .17 package transaction before updating")
+    digest = hashlib.sha256(raw).hexdigest()
+    if (type(original) is not dict or original.get("manifestSHA256") != digest
+            or any(original.get(key) != manifest.get(key) for key in
+                   ("version", "canonicalFormats", "arch", "embedding", "documentExtraction"))):
+        refuse("the installed .17 manifest differs from its protected package commitment")
+    layout17_compatible_update(original, incoming)
+    if os.path.lexists(RECEIPTS):
+        root_directory_chain(RECEIPTS)
+        names = os.listdir(RECEIPTS)
+        if len(names) > 1024 or any(not name.endswith(".json") or not valid_instance(name[:-5]) for name in names):
+            refuse("invalid layout17 receipt inventory")
+        instances = {name[:-5] for name in names}
+    else:
+        instances = set()
+    layout17_released_receipts(read_receipts(instances, quiescent=False), digest, incoming)
+
+
 def layout17_restore_original(helper, original, targets):
     """Reconfigure the real old payload only before any layout barrier or unpack."""
     daemon_uid = pwd.getpwnam("daemon").pw_uid
@@ -987,7 +1094,7 @@ def legacy_preinst_helper(arguments):
     helper, path, version = arguments[1:4]
     verify_helper(["verify-helper", helper])
     incoming = validate_descriptor(path)
-    if incoming.get("version") == "0.1.0-poc.17" and version != "0.1.0~poc.16.2-1":
+    if incoming.get("version") in LAYOUT17_POLICIES and version != "0.1.0~poc.16.2-1":
         refuse("install the authentic16.2 bridge source before upgrading to17")
     raw = read_private_regular(os.path.join(ACTIVE, "bundle-manifest.json"),
                                16 * 1024 * 1024, private=False)
@@ -1218,10 +1325,11 @@ def fallback(arguments):
         if len(arguments) != 1:
             refuse("invalid uuidd-remove arguments")
         return uuidd_remove()
-    if action in ("layout17-abort-upgrade", "layout17-reinstall-abort"):
+    if action in ("layout17-abort-upgrade", "layout17-reinstall-abort", "layout17-compatible-abort"):
         reinstall = action == "layout17-reinstall-abort"
-        if (len(arguments) != (2 if reinstall else 1)
-                or reinstall and not valid_digest(arguments[1])):
+        compatible = action == "layout17-compatible-abort"
+        if (len(arguments) != (2 if reinstall or compatible else 1)
+                or (reinstall or compatible) and not valid_digest(arguments[1])):
             refuse("invalid layout17 abort arguments")
         try:
             state = decode_object(read_private_regular(STATE), STATE_REQUIRED, STATE_ALLOWED)
@@ -1236,14 +1344,16 @@ def fallback(arguments):
         old = decode_object(raw)
         incoming = state.get("incoming")
         actual_digest = hashlib.sha256(raw).hexdigest()
-        expected_version = "0.1.0-poc.17" if reinstall else "0.1.0-poc.16.2"
+        expected_versions = (LAYOUT17_POLICIES if reinstall else
+                             (LAYOUT17_FIRST,) if compatible else ("0.1.0-poc.16.2",))
         if (state.get("profile") != "tractanda.package-transaction.v1"
-                or old.get("version") != expected_version or type(incoming) is not dict
-                or incoming.get("version") != expected_version
+                or old.get("version") not in expected_versions or type(incoming) is not dict
+                or incoming.get("version") != old.get("version")
                 or incoming.get("manifestSHA256") != actual_digest
                 or state.get("owner") is not None or state.get("startupPermitted") != []
-                or reinstall and arguments[1] != actual_digest):
-            if reinstall:
+                or reinstall and arguments[1] != actual_digest
+                or compatible and arguments[1] == actual_digest):
+            if reinstall or compatible:
                 return fallback(["postrm"])
             refuse("layout17 abort lacks the authentic committed old payload")
         return verify_helper(["verify-helper", os.path.join(ACTIVE, "bin/tractanda-setup")])
@@ -1258,7 +1368,9 @@ def fallback(arguments):
         if len(arguments) != 3:
             refuse("invalid preinst helper arguments")
         verify_helper(["verify-helper", arguments[1]])
-        validate_descriptor(arguments[2])
+        incoming = validate_descriptor(arguments[2])
+        if incoming["version"] == LAYOUT17_CORRECTED:
+            layout17_replacement_pre_stop(incoming)
         return 0
     if action == "legacy-preinst-helper":
         return legacy_preinst_helper(arguments)
@@ -1284,10 +1396,17 @@ def fallback(arguments):
         if state["phase"] not in ("quiesced", "awaitingUnpack", "failed", "removed"):
             refuse("retained state is not eligible for missing-helper unpack")
         original = state.get("original") or {}
-        if descriptor["version"] == "0.1.0-poc.17":
-            if original.get("version") == "0.1.0-poc.17":
-                if descriptor != original or descriptor.get("upgrade") != "coordinated-maintenance":
+        if descriptor["version"] in LAYOUT17_POLICIES:
+            if original.get("version") == descriptor["version"]:
+                if descriptor != original or descriptor.get("upgrade") != LAYOUT17_POLICIES[descriptor["version"]]:
                     refuse("layout17 missing-helper reinstall differs from the committed .17 artifact")
+            elif original.get("version") == LAYOUT17_FIRST and descriptor["version"] == LAYOUT17_CORRECTED:
+                if state["phase"] != "awaitingUnpack" or state.get("incoming") != descriptor:
+                    refuse("layout17 missing-helper update lacks the exact retained .17.1 commitment")
+                layout17_compatible_update(original, descriptor)
+                receipts = read_receipts({entry["name"] for entry in state["instances"]})
+                layout17_released_receipts(receipts, original["manifestSHA256"], descriptor)
+                return 0
             else:
                 if (original.get("version") != "0.1.0-poc.16.2" or state["phase"] != "awaitingUnpack"
                         or state.get("incoming") != descriptor

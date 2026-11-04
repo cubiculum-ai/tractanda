@@ -1480,7 +1480,8 @@ private func withStagedCandidate(bundle: String, stageParent: String, action: (S
 #else
     let architecture = "x86_64"
 #endif
-    try check(manifest.profile == "tractanda.bundle.v1" && manifest.version == "0.1.0-poc.17" &&
+    try check(manifest.profile == "tractanda.bundle.v1" &&
+              ["0.1.0-poc.17", "0.1.0-poc.17.1"].contains(manifest.version) &&
               manifest.platform == platform && manifest.arch == architecture &&
               !manifest.files.isEmpty && manifest.files.count <= 20000,
               "Candidate is not the selected .17 platform bundle")
@@ -1548,7 +1549,8 @@ private func complete(instance: String) throws {
           manifestMeta.st_mode & 0o022 == 0 else { throw Failure("Installed manifest has unsafe custody") }
     let manifest = try JSONDecoder().decode(CandidateManifest.self,
         from: candidateBytes(bundle, name: "bundle-manifest.json", maximum: 4 * 1024 * 1024))
-    guard manifest.profile == "tractanda.bundle.v1", manifest.version == "0.1.0-poc.17",
+    guard manifest.profile == "tractanda.bundle.v1",
+          ["0.1.0-poc.17", "0.1.0-poc.17.1"].contains(manifest.version),
           let entry = manifest.files.first(where: { $0.path == "bin/tractanda-setup" }),
           manifest.files.filter({ $0.path == "bin/tractanda-setup" }).count == 1 else {
         throw Failure("Installed bundle is not the .17 bridge")

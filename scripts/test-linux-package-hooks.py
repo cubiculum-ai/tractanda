@@ -97,14 +97,14 @@ sys.exit(int(os.environ.get("MOCK_PYTHON_EXIT", "0")))
         path.chmod(0o700)
         return path
 
-    def render(self, hook, *, helper=True, missing=()):
+    def render(self, hook, *, helper=True, missing=(), layout17_version="0.1.0~poc.17-1"):
         source = ((ROOT / "Tests/TractandaSetupTests/Fixtures/LegacyDebian/tractanda.prerm")
                   if hook == "legacy.prerm" else (DEBIAN / hook)).read_text()
         fallback = FALLBACK.read_text()
         source = source.replace("@TRACTANDA_PACKAGE_HOOK_FALLBACK_PY@", fallback)
         source = source.replace("@TRACTANDA_PACKAGE_DESCRIPTOR_JSON@", DESCRIPTOR)
         source = source.replace("@TRACTANDA_LAYOUT17_INSPECTOR_SHA256@", "b" * 64)
-        source = source.replace("@TRACTANDA_LAYOUT17_DEBIAN_VERSION@", "0.1.0~poc.17-1")
+        source = source.replace("@TRACTANDA_LAYOUT17_DEBIAN_VERSION@", layout17_version)
         source = source.replace("@TRACTANDA_LAYOUT17_MANIFEST_SHA256@", "c" * 64)
         replacements = {
             "/opt/tractanda/current/bin/tractanda-setup": str(self.helper),
@@ -136,8 +136,8 @@ sys.exit(int(os.environ.get("MOCK_HELPER_EXIT", "0")))
         path.chmod(0o700)
         return path
 
-    def run(self, hook, *arguments, helper=True, missing=()):
-        path = self.render(hook, helper=helper, missing=missing)
+    def run(self, hook, *arguments, helper=True, missing=(), layout17_version="0.1.0~poc.17-1"):
+        path = self.render(hook, helper=helper, missing=missing, layout17_version=layout17_version)
         return subprocess.run(["/bin/sh", str(path), *arguments], capture_output=True,
                               text=True, timeout=10, env=self.env, cwd=self.root)
 
@@ -310,6 +310,20 @@ class PackageHookTests(unittest.TestCase):
         ):
             self.harness.clear()
             result = self.harness.run("tractanda.postrm", *arguments, helper=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.harness.records()[0]["args"], ["-I", "-", *expected])
+
+    def test_postrm_corrected_patch_abort_routes_only_exact_dpkg_pairs(self):
+        corrected = "0.1.0~poc.17.1-1"
+        for old, new, expected in (
+            ("0.1.0~poc.17-1", corrected, ["layout17-compatible-abort", "c" * 64]),
+            ("0.1.0~poc.16.2-1", corrected, ["layout17-abort-upgrade"]),
+            (corrected, corrected, ["layout17-reinstall-abort", "c" * 64]),
+            ("0.1.0~poc.17-1", "0.1.0~poc.17.2-1", ["postrm"]),
+        ):
+            self.harness.clear()
+            result = self.harness.run("tractanda.postrm", "abort-upgrade", old, new,
+                                      helper=False, layout17_version=corrected)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(self.harness.records()[0]["args"], ["-I", "-", *expected])
 
@@ -496,7 +510,7 @@ class Layout17ControlInspectorTests(unittest.TestCase):
                     m.layout17_check_loader(stage, inventory)
 
 class Layout17PreStopTests(unittest.TestCase):
-    def check(self, defect=None):
+    def check(self, defect=None, corrected=False):
         m = module_from_template()
         capabilities = ["tractanda.physical-layout.flat-items.v1", "tractanda.message-items.v1"]
         before = {"profile": "tractanda.canonical-formats.v1", "readerLevel": 18, "writerLevel": 18,
@@ -508,6 +522,8 @@ class Layout17PreStopTests(unittest.TestCase):
         previous = {"version": "0.1.0-poc.16.2", "arch": "x86_64", "canonicalFormats": before}
         incoming = dict(previous, version="0.1.0-poc.17", canonicalFormats=after,
                         manifestSHA256="b" * 64, upgrade="coordinated-maintenance")
+        if corrected:
+            incoming.update(version="0.1.0-poc.17.1", upgrade="compatible")
         if defect in ("provenance", "changedStoredSemantics", "malformedProvenance"):
             document = json.loads((DEBIAN / "components/amd64/documents.json").read_text())["documentExtraction"]
             previous["documentExtraction"] = document
@@ -517,16 +533,18 @@ class Layout17PreStopTests(unittest.TestCase):
             if defect == "changedStoredSemantics": changed["identity"]["preprocessing"] = "opaque-rgb2048-17tiles-v1"
             if defect == "malformedProvenance": changed["identity"]["converter"] = "bad\nprovenance"
             incoming["documentExtraction"] = changed
-        profile = {"profile": "tractanda.personal-workgroup.v1", "storeID": "store", "replicaID": "replica"}
-        fence = {"storeID": "store", "minimumReaderLevel": 18}
-        membership = {"profile": "tractanda.personal-membership.v1", "storeID": "store", "members": [{}, {}]}
+        store_id = "00000000-0000-1000-8000-000000000001"
+        replica_id = "00000000-0000-1000-8000-000000000002"
+        profile = {"profile": "tractanda.personal-workgroup.v1", "storeID": store_id, "replicaID": replica_id}
+        fence = {"storeID": store_id, "minimumReaderLevel": 18}
+        membership = {"profile": "tractanda.personal-membership.v1", "storeID": store_id, "members": [{}, {}]}
         encode = lambda value: json.dumps(value, sort_keys=True).encode()
         raw_fence, raw_membership = encode(fence), encode(membership)
         digest = lambda raw: __import__("hashlib").sha256(raw).hexdigest()
         receipt = {"version": 1, "instance": "a", "release": m.ACTIVE, "manifestSHA256": "a" * 64,
                    "initialized": True, "state": "active", "store": "/store/a"}
         intent = {"profile": "tractanda.layout17-prepare.v1", "mode": "administrator-coordinated",
-                  "instance": "a", "storePath": "/store/a", "storeID": "store", "replicaID": "replica",
+                  "instance": "a", "storePath": "/store/a", "storeID": store_id, "replicaID": replica_id,
                   "oldManifestSHA256": "a" * 64, "newManifestSHA256": "b" * 64,
                   "membershipDigest": digest(raw_membership), "readerRequirementSHA256": digest(raw_fence),
                   "acknowledgedAllMembersUpgradedBeforeStart": True}
@@ -545,6 +563,7 @@ class Layout17PreStopTests(unittest.TestCase):
         def exists(path):
             if path == m.RECEIPTS: return True
             if "layout17-intents" in path: return defect != "missingIntent"
+            if "layout17-journals" in path: return defect == "oldJournal"
             if path.endswith(".personal-membership.json"): return defect != "standalone"
             return defect == "pending" and path.endswith(".personal-membership.pending.json")
         with mock.patch.object(m, "root_directory_chain"), mock.patch.object(m.os, "listdir", return_value=["a.json"]), \
@@ -585,6 +604,88 @@ class Layout17PreStopTests(unittest.TestCase):
     def test_unprepared_changed_or_pending_cluster_refuses_before_any_stop(self):
         for defect in ("missingIntent", "wrongCandidate", "changedMembership", "changedFence", "pending", "extraSemantics", "changedStoredSemantics", "malformedProvenance"):
             with self.subTest(defect=defect), self.assertRaises(SystemExit): self.check(defect)
+
+    def test_corrected_bridge_refuses_old_intent_or_journal_before_any_stop(self):
+        self.check(corrected=True)
+        for defect in ("wrongCandidate", "oldJournal"):
+            with self.subTest(defect=defect), self.assertRaises(SystemExit):
+                self.check(defect, corrected=True)
+
+
+class Layout17CompatiblePatchTests(unittest.TestCase):
+    def test_only_released_current_format_or_exact_update_retry_reaches_old_helper(self):
+        m = module_from_template()
+        caps = ["tractanda.message-items.v1", "tractanda.physical-layout.flat-items.v1"]
+        formats = {"readerLevel": 20, "writerLevel": 20, "capabilities": caps}
+        manifest = {"version": m.LAYOUT17_FIRST, "arch": "x86_64", "canonicalFormats": formats}
+        raw = json.dumps(manifest).encode()
+        digest = hashlib.sha256(raw).hexdigest()
+        original = dict(manifest, manifestSHA256=digest, upgrade="coordinated-maintenance")
+        incoming = dict(original, version=m.LAYOUT17_CORRECTED, manifestSHA256="c" * 64, upgrade="compatible")
+        state = {"profile": "tractanda.package-transaction.v1", "operationID": "fixture",
+                 "phase": "committed", "instances": [], "startupPermitted": [], "incoming": original}
+        marker = {"profile": "tractanda.physical-layout.v1", "layout": "flat-items-visible-attachments.v1",
+                  "recordEncoding": "message-v1"}
+        store_id = "00000000-0000-1000-8000-000000000001"
+        replica_id = "00000000-0000-1000-8000-000000000002"
+        fence = {"profile": "tractanda.canonical-reader.v1", "minimumReaderLevel": 20, "capabilities": caps,
+                 "storeID": store_id}
+        profile = {"profile": "tractanda.personal-workgroup.v1", "storeID": store_id, "replicaID": replica_id}
+        journal = {"phase": "moving", "profile": "tractanda.layout17-journal.v1", "storeID": store_id,
+                   "replicaID": replica_id, "originalRequirementSHA256": "d" * 64}
+        receipts = {"a": {"state": "active", "initialized": True, "store": "/store/a", "manifestSHA256": digest}}
+
+        def read(path, *args, **kwargs):
+            if "layout17-journals" in path:
+                return json.dumps(journal).encode()
+            return json.dumps(state).encode() if path == m.STATE else raw
+
+        def file(_store, name, _uid):
+            return json.dumps({"canonical-layout.json": marker, "canonical-reader.json": fence,
+                               ".tractanda-personal-profile.json": profile}[name]).encode()
+
+        with mock.patch.object(m, "read_private_regular", side_effect=read), \
+                mock.patch.object(m, "read_receipts", return_value=receipts) as custody, \
+                mock.patch.object(m, "layout17_store_file", side_effect=file), \
+                mock.patch.object(m.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=123)), \
+                mock.patch.object(m.os.path, "lexists", return_value=False), \
+                mock.patch.object(m.subprocess, "run") as process:
+            m.layout17_replacement_pre_stop(incoming)
+            custody.assert_called_once_with(set(), quiescent=False)
+            for changes in ({"phase": "awaitingUnpack"}, {"owner": {"pid": 10}}):
+                with mock.patch.dict(state, changes), self.assertRaises(SystemExit):
+                    m.layout17_replacement_pre_stop(incoming)
+            with mock.patch.dict(state, phase="awaitingUnpack", original=original, incoming=incoming):
+                m.layout17_replacement_pre_stop(incoming)
+            for name in ("layout17-intents/a.json", "canonical-layout.pending.json"):
+                with mock.patch.object(m.os.path, "lexists", side_effect=lambda path: path.endswith(name)), \
+                        self.assertRaises(SystemExit):
+                    m.layout17_replacement_pre_stop(incoming)
+            with mock.patch.dict(fence, minimumReaderLevel=19), self.assertRaises(SystemExit):
+                m.layout17_replacement_pre_stop(incoming)
+            with (mock.patch.object(m.os.path, "lexists", side_effect=lambda path: "layout17-journals" in path),
+                  mock.patch.object(m, "root_directory_chain")):
+                with self.assertRaisesRegex(SystemExit, "retained .17 migration journal"):
+                    m.layout17_replacement_pre_stop(incoming)
+                with mock.patch.dict(journal, phase="complete"):
+                    m.layout17_replacement_pre_stop(incoming)
+            process.assert_not_called()
+
+    def test_corrected_abort_preserves_the_authenticated_running_old_artifact(self):
+        m = module_from_template()
+        raw = b'{"version":"0.1.0-poc.17"}'
+        digest = hashlib.sha256(raw).hexdigest()
+        state = {"profile": "tractanda.package-transaction.v1", "operationID": "fixture",
+                 "phase": "committed", "instances": [], "startupPermitted": [],
+                 "incoming": {"version": m.LAYOUT17_FIRST, "manifestSHA256": digest}}
+        with mock.patch.object(m.os, "geteuid", return_value=0), \
+                mock.patch.object(m, "read_private_regular", side_effect=lambda path, *a, **k:
+                                  json.dumps(state).encode() if path == m.STATE else raw), \
+                mock.patch.object(m, "verify_helper", return_value=0) as verify, \
+                mock.patch.object(m, "safe_state", side_effect=SystemExit("writer lock is held")) as quiescent:
+            self.assertEqual(m.fallback(["layout17-compatible-abort", "c" * 64]), 0)
+            verify.assert_called_once_with(["verify-helper", m.ACTIVE + "/bin/tractanda-setup"])
+            quiescent.assert_not_called()
 
 
 class LegacyBootstrapTests(unittest.TestCase):
@@ -636,17 +737,17 @@ class LegacyBootstrapTests(unittest.TestCase):
             if (quiescent and late_inspection_failure) or (not quiescent and early_inspection_failure):
                 raise SystemExit("deep inspector refused")
         patches = (
-            mock.patch.object(m.os, "geteuid", return_value=0),
-            mock.patch.object(m, "verify_helper", side_effect=verified),
-            mock.patch.object(m, "validate_descriptor", side_effect=descriptor),
-            mock.patch.object(m, "read_private_regular", return_value=raw),
-            mock.patch.object(m.subprocess, "run", side_effect=process),
-            mock.patch.object(m, "safe_state", side_effect=quiescent),
-            mock.patch.object(m, "read_receipts", return_value={"one": {"manifestSHA256": receipt_digest or digest}}),
-            mock.patch.object(m, "write_state", side_effect=write),
-            mock.patch.object(m, "layout17_pre_stop", side_effect=lambda *args: calls.append("layout17-prestop") or {}),
-            mock.patch.object(m, "layout17_control_inspector", return_value=__import__("contextlib").nullcontext("/verified/inspector")),
-            mock.patch.object(m, "layout17_inspect_targets", side_effect=inspect),
+            mock.patch.object(m.os, "geteuid", return_value=0), \
+            mock.patch.object(m, "verify_helper", side_effect=verified), \
+            mock.patch.object(m, "validate_descriptor", side_effect=descriptor), \
+            mock.patch.object(m, "read_private_regular", return_value=raw), \
+            mock.patch.object(m.subprocess, "run", side_effect=process), \
+            mock.patch.object(m, "safe_state", side_effect=quiescent), \
+            mock.patch.object(m, "read_receipts", return_value={"one": {"manifestSHA256": receipt_digest or digest}}), \
+            mock.patch.object(m, "write_state", side_effect=write), \
+            mock.patch.object(m, "layout17_pre_stop", side_effect=lambda *args: calls.append("layout17-prestop") or {}), \
+            mock.patch.object(m, "layout17_control_inspector", return_value=__import__("contextlib").nullcontext("/verified/inspector")), \
+            mock.patch.object(m, "layout17_inspect_targets", side_effect=inspect), \
             mock.patch.object(m, "layout17_restore_original", side_effect=lambda *args: calls.append("restore-authentic-old")),
         )
         from contextlib import ExitStack

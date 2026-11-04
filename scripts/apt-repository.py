@@ -177,8 +177,8 @@ def package(path):
     require(fields.get('Package') == 'tractanda' and fields.get('Architecture') in ARCHES,
             'Only Tractanda amd64/arm64 packages are admitted')
     require(re.fullmatch(r'[0-9][A-Za-z0-9.+~:-]*', fields.get('Version', '')), 'Invalid Debian version')
-    require(not inspector or re.fullmatch(r"0\.1\.0~poc\.17-[1-9][0-9A-Za-z.+]*", fields["Version"]),
-            "The large layout inspector belongs only to the poc.17 bridge")
+    require(not inspector or re.fullmatch(r"0\.1\.0~poc\.17(?:\.1)?-[1-9][0-9A-Za-z.+]*", fields["Version"]),
+            "The large layout inspector belongs only to the poc.17 bridge family")
     name = f"tractanda_{fields['Version'].replace(':', '%3a')}_{fields['Architecture']}.deb"
     require('%' not in name, 'Epoch versions require an explicit repository naming policy')
     return path, fields, 'pool/main/t/tractanda/' + name

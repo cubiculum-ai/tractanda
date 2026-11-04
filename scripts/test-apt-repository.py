@@ -50,6 +50,19 @@ class ControlArchiveTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'ordinary Debian control metadata'):
                 A.package(refused)
 
+    def test_layout_inspector_is_limited_to_exact_bridge_family(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            for version in ('0.1.0~poc.17-1', '0.1.0~poc.17.1-1'):
+                with self.subTest(version=version):
+                    path = deb(directory / (version + '.deb'), 'amd64', version,
+                               [('layout17-inspector.tar', b'inspector')])
+                    self.assertEqual(A.package(path)[1]['Version'], version)
+            for version in ('0.1.0~poc.17.2-1', '0.1.0~poc.170-1', '0.1.0~poc.18-1'):
+                with self.subTest(version=version), self.assertRaisesRegex(ValueError, 'poc.17 bridge'):
+                    A.package(deb(directory / (version + '.deb'), 'amd64', version,
+                                  [('layout17-inspector.tar', b'inspector')]))
+
     def test_expanded_budget_and_inspector_version_are_checked(self):
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp)

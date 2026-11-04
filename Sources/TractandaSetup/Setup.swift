@@ -80,11 +80,14 @@ public struct BundleManifest: Codable, Equatable, Sendable {
         try validateManifest(as: .historicalInstalled)
     }
 
-    /// Finite .17 bridge source only; the caller must separately prove an immutable Mac
+    /// Finite .17-family upgrade sources; the caller must separately prove an immutable Mac
     /// release's exact protected installation receipt and complete inventory.
     func validateHistoricalLayout17Original() throws {
-        guard platform == "macos", version == "0.1.0-poc.16.2" else {
-            throw SetupError("Historical .17 source must be the exact owned macOS16.2 release.")
+        guard platform == "macos",
+            version == SetupLayout17Release.source || version == SetupLayout17Release.first
+        else {
+            throw SetupError(
+                "Historical .17-family source must be the exact owned macOS .16.2 or .17 release.")
         }
         try validateManifest(as: .historicalInstalled)
     }
@@ -117,7 +120,7 @@ public struct BundleManifest: Codable, Equatable, Sendable {
         let required = ["bin/tractanda", "bin/tractanda-tui", "bin/tractanda-mcp", "bin/tractanda-setup"]
         guard required.allSatisfy({ name in files.contains { $0.path == name && $0.mode & 0o111 != 0 } })
         else { throw SetupError("Bundle is missing a required executable.") }
-        if version == "0.1.0-poc.17",
+        if SetupLayout17Release.upgrade(for: version) != nil,
             !files.contains(where: {
                 $0.path == "bin/tractanda-layout17" && $0.mode & 0o111 != 0
             })

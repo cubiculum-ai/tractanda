@@ -17,6 +17,7 @@ struct SetupLayout17Inspection: Decodable {
     let replicaID: String
     let readerRequirementSHA256: String
     let minimumReaderLevel: Int
+    let phase: String
     let clustered: Bool
     let membershipDigest: String?
     let memberCount: Int?
@@ -45,14 +46,15 @@ extension SetupEngine {
     }
     func layout17Declaration(
         _ manifest: BundleManifest, digest: String,
-        upgrade: SetupPackageCompatibility.Upgrade
+        upgrade: SetupPackageCompatibility.Upgrade? = nil
     ) throws -> SetupPackageCompatibility {
         guard let formats = manifest.canonicalFormats else {
             throw SetupError("The .17 bridge requires explicit canonical format declarations.")
         }
         return SetupPackageCompatibility(
             manifestSHA256: digest, version: manifest.version,
-            arch: manifest.arch, canonicalFormats: formats, upgrade: upgrade,
+            arch: manifest.arch, canonicalFormats: formats,
+            upgrade: upgrade ?? SetupLayout17Release.upgrade(for: manifest.version) ?? .compatible,
             embedding: manifest.embedding, documentExtraction: manifest.documentExtraction)
     }
     func layout17Inspect(
@@ -64,7 +66,7 @@ extension SetupEngine {
             try requireOwned(bundle, uid: 0, directory: true)
         }
         let manifest = try verifyBundle(at: bundle)
-        guard manifest.version == "0.1.0-poc.17",
+        guard SetupLayout17Release.upgrade(for: manifest.version) != nil,
             manifest.files.contains(where: { $0.path == "bin/tractanda-layout17" && $0.mode & 0o111 != 0 })
         else { throw SetupError("The verified .17 payload must include its one-time layout helper.") }
         let store = URL(fileURLWithPath: receipt.store)
@@ -85,6 +87,7 @@ extension SetupEngine {
         }
         let value = try JSONDecoder().decode(SetupLayout17Inspection.self, from: bytes)
         guard value.profile == "tractanda.layout17-inspection.v1",
+            ["unmigrated", "prepared", "moving", "complete"].contains(value.phase),
             SetupPackageCompatibility.isDigest(value.readerRequirementSHA256),
             (16...20).contains(value.minimumReaderLevel),
             UUID(uuidString: value.storeID)?.version1Components != nil,
@@ -137,6 +140,28 @@ extension SetupEngine {
             )
         }
     }
+    func requireLayout17ResumeCommitment(
+        _ receipt: InstallationReceipt, incoming: SetupPackageCompatibility,
+        inspection: SetupLayout17Inspection
+    ) throws {
+        guard incoming.version == SetupLayout17Release.corrected else { return }
+        let journal = layout17JournalDirectory.appendingPathComponent(
+            "layout17-" + inspection.storeID + "-" + inspection.replicaID + ".json")
+        guard inspection.phase != "unmigrated" || exists(journal) else { return }
+        let matches: Bool
+        if roots.platform == .macos {
+            matches = receipt.manifestSHA256 == incoming.manifestSHA256
+        } else {
+            let transaction = try readPackageState()
+            matches =
+                transaction?.pending == true && transaction?.incoming == incoming
+                && transaction?.original?.version == SetupLayout17Release.source
+        }
+        guard matches else {
+            throw SetupError(
+                "Finish the retained .17 migration using its exact original installer before updating.")
+        }
+    }
     func preflightLayout17Stores(
         _ incoming: SetupPackageCompatibility,
         original: SetupPackageCompatibility, bundle: URL? = nil
@@ -154,6 +179,7 @@ extension SetupEngine {
                 || exists(URL(fileURLWithPath: receipt.store).appendingPathComponent("canonical-layout.json"))
             let inspection = try layout17Inspect(
                 receipt, bundle: bundle ?? packagePayload, resuming: resuming)
+            try requireLayout17ResumeCommitment(receipt, incoming: incoming, inspection: inspection)
             try requireLayout17Intent(receipt, incoming: incoming, original: original, inspection: inspection)
         }
     }
@@ -162,19 +188,41 @@ extension SetupEngine {
         _ incoming: SetupPackageCompatibility,
         from original: SetupPackageCompatibility, bundle: URL? = nil
     ) throws {
-        if incoming.version == "0.1.0-poc.17", original.version == "0.1.0-poc.17" {
+        if let policy = SetupLayout17Release.upgrade(for: incoming.version),
+            incoming.version == original.version
+        {
             // The installed commitment was verified against the actual payload. Exact
             // reinstall does not change format or authorize releasing a held instance.
-            guard incoming.upgrade == .coordinatedMaintenance, incoming == original else {
+            guard incoming.upgrade == policy, incoming == original else {
                 throw SetupError("The .17 reinstall differs from the verified installed package.")
             }
             return
         }
-        if incoming.version == "0.1.0-poc.17", original.version == "0.1.0-poc.16.2" {
+        if SetupLayout17Release.upgrade(for: incoming.version) != nil,
+            original.version == SetupLayout17Release.source
+        {
             try preflightLayout17Stores(incoming, original: original, bundle: bundle)
+        } else if incoming.version == SetupLayout17Release.corrected,
+            original.version == SetupLayout17Release.first
+        {
+            try incoming.requireLayout17CompatibleUpdate(from: original)
+            for receipt in try installationReceipts() where receipt.state != .removed {
+                try requireLayout17ReleasedStore(receipt, support: incoming.canonicalFormats)
+            }
         } else {
             try incoming.requireRollingUpgrade(from: original)
         }
+    }
+    func requireLayout17ReleasedStore(_ receipt: InstallationReceipt, support: CanonicalFormatSupport) throws
+    {
+        let store = URL(fileURLWithPath: receipt.store)
+        guard receipt.initialized, try readLayout17Intent(receipt.instance) == nil,
+            !exists(store.appendingPathComponent("canonical-layout.pending.json"))
+        else {
+            throw SetupError("Complete the retained .17 package and administrator hold before updating.")
+        }
+        _ = try layout17CompletedInspection(receipt, requireCompletedJournal: true)
+        try support.require(layout17CurrentRequirement(receipt))
     }
     func migrateLayout17Store(
         _ receipt: InstallationReceipt, bundle: URL,
@@ -190,6 +238,12 @@ extension SetupEngine {
             }
         }
         let store = URL(fileURLWithPath: receipt.store)
+        let resuming =
+            exists(store.appendingPathComponent("canonical-layout.pending.json"))
+            || exists(store.appendingPathComponent("canonical-layout.json"))
+        let inspection = try layout17Inspect(receipt, bundle: bundle, resuming: resuming)
+        try requireLayout17ResumeCommitment(receipt, incoming: incoming, inspection: inspection)
+        try requireLayout17Intent(receipt, incoming: incoming, original: original, inspection: inspection)
         if exists(store.appendingPathComponent("canonical-layout.json")),
             !exists(store.appendingPathComponent("canonical-layout.pending.json"))
         {
@@ -215,9 +269,6 @@ extension SetupEngine {
             try incoming.canonicalFormats.require(requirement)
             return try readLayout17Intent(receipt.instance) != nil
         }
-        let resuming = exists(store.appendingPathComponent("canonical-layout.pending.json"))
-        let inspection = try layout17Inspect(receipt, bundle: bundle, resuming: resuming)
-        try requireLayout17Intent(receipt, incoming: incoming, original: original, inspection: inspection)
         if trustedOwnership { try requireTrustedAncestry(of: layout17JournalDirectory) }
         try ensureServiceDirectory(layout17JournalDirectory, uid: 0, mode: 0o700)
         try layout17SyncDirectory(roots.installation)
@@ -238,7 +289,7 @@ extension SetupEngine {
         try SetupOptions(name: instance, bundle: bundle).validate()
         let manifest = try verifyBundle(at: bundle)
         let digest = try sha256(bundle.appendingPathComponent("bundle-manifest.json"))
-        let incoming = try layout17Declaration(manifest, digest: digest, upgrade: .coordinatedMaintenance)
+        let incoming = try layout17Declaration(manifest, digest: digest)
         return try withInstallerLockResult {
             guard let receipt = try readReceipt(instance), receipt.initialized, receipt.state == .active
             else {
@@ -261,6 +312,7 @@ extension SetupEngine {
             let original = try layout17Declaration(old, digest: receipt.manifestSHA256, upgrade: .compatible)
             try incoming.requireLayout17Transition(from: original)
             let inspection = try layout17Inspect(receipt, bundle: bundle)
+            try requireLayout17ResumeCommitment(receipt, incoming: incoming, inspection: inspection)
             guard inspection.clustered, let membership = inspection.membershipDigest else {
                 throw SetupError("Standalone .17 migration is automatic and needs no cluster prepare intent.")
             }
@@ -307,23 +359,51 @@ extension SetupEngine {
         _ previous: InstallationReceipt?, manifest: BundleManifest,
         digest: String
     ) throws -> SetupPackageCompatibility? {
-        guard roots.platform == .macos, manifest.version == "0.1.0-poc.17", let previous else { return nil }
+        guard roots.platform == .macos, SetupLayout17Release.upgrade(for: manifest.version) != nil,
+            let previous
+        else { return nil }
         let root = URL(fileURLWithPath: previous.store)
         if previous.state == .active, previous.manifestSHA256 == digest,
             try readLayout17Intent(previous.instance) == nil,
             exists(root.appendingPathComponent("canonical-layout.json")),
             !exists(root.appendingPathComponent("canonical-layout.pending.json"))
         {
+            if manifest.version == SetupLayout17Release.corrected {
+                let incoming = try layout17Declaration(manifest, digest: digest)
+                try requireLayout17ReleasedStore(previous, support: incoming.canonicalFormats)
+            }
             return nil
         }
-        let incoming = try layout17Declaration(manifest, digest: digest, upgrade: .coordinatedMaintenance)
+        let incoming = try layout17Declaration(manifest, digest: digest)
+        if manifest.version == SetupLayout17Release.corrected, previous.manifestSHA256 != digest {
+            let active = URL(fileURLWithPath: previous.release)
+            let path = active.appendingPathComponent("bundle-manifest.json")
+            guard try fileSize(path) <= 4 * 1024 * 1024,
+                try sha256(path) == previous.manifestSHA256
+            else { throw SetupError("The active macOS release differs from its protected receipt.") }
+            let header = try JSONDecoder().decode(BundleManifest.self, from: Data(contentsOf: path))
+            if header.version == SetupLayout17Release.first {
+                guard previous.state == .active else {
+                    throw SetupError("Complete the retained .17 installation before updating.")
+                }
+                let old = try verifyLayout17OwnedMacOriginal(
+                    previous, release: active, expectedDigest: previous.manifestSHA256)
+                try incoming.requireLayout17CompatibleUpdate(
+                    from: layout17Declaration(old, digest: previous.manifestSHA256))
+                try requireLayout17ReleasedStore(previous, support: incoming.canonicalFormats)
+                return nil
+            }
+            guard header.version == SetupLayout17Release.source else {
+                throw SetupError("The corrected .17 bridge cannot replace a different pending artifact.")
+            }
+        }
         var originals: [SetupPackageCompatibility] = []
         for (release, commitment) in previous.releases {
             let bundle = URL(fileURLWithPath: release)
             let metadata = bundle.appendingPathComponent("bundle-manifest.json")
             guard exists(metadata), try fileSize(metadata) <= 4 * 1024 * 1024 else { continue }
             let header = try JSONDecoder().decode(BundleManifest.self, from: Data(contentsOf: metadata))
-            if header.version == "0.1.0-poc.16.2" {
+            if header.version == SetupLayout17Release.source {
                 guard try sha256(metadata) == commitment else {
                     throw SetupError("Owned original release bytes changed during .17 recovery.")
                 }
@@ -351,6 +431,7 @@ extension SetupEngine {
             receipt, bundle: bundle,
             resuming: exists(root.appendingPathComponent("canonical-layout.pending.json"))
                 || exists(root.appendingPathComponent("canonical-layout.json")))
+        try requireLayout17ResumeCommitment(receipt, incoming: incoming, inspection: inspection)
         try requireLayout17Intent(receipt, incoming: incoming, original: original, inspection: inspection)
     }
     func layout17MayStartDuringInstallation(_ instance: String) throws -> Bool {
@@ -388,7 +469,7 @@ extension SetupEngine {
             try verifyRegistration(receipt)
             let bundle = URL(fileURLWithPath: receipt.release)
             let manifest = try verifyBundle(at: bundle)
-            guard manifest.version == "0.1.0-poc.17",
+            guard SetupLayout17Release.upgrade(for: manifest.version) != nil,
                 try sha256(bundle.appendingPathComponent("bundle-manifest.json")) == receipt.manifestSHA256,
                 intent == nil
                     || receipt.manifestSHA256 == intent?.newManifestSHA256
@@ -433,9 +514,7 @@ extension SetupEngine {
                         "Finish pending private configuration recovery before completing .17 startup.")
                 }
                 if roots.platform == .linux {
-                    let incoming = try layout17Declaration(
-                        manifest, digest: receipt.manifestSHA256,
-                        upgrade: .coordinatedMaintenance)
+                    let incoming = try layout17Declaration(manifest, digest: receipt.manifestSHA256)
                     try configureStoppedPackageInstance(&receipt, manifest: manifest, incoming: incoming)
                 } else {
                     try layout17HoldInstalledMac(&receipt, clustered: true)
@@ -484,8 +563,9 @@ extension SetupEngine {
             }
         }
     }
-    private func layout17CompletedInspection(_ receipt: InstallationReceipt) throws -> SetupLayout17Inspection
-    {
+    private func layout17CompletedInspection(
+        _ receipt: InstallationReceipt, requireCompletedJournal: Bool = false
+    ) throws -> SetupLayout17Inspection {
         let root = URL(fileURLWithPath: receipt.store)
         let owner = try layout17StoreOwner(root)
         let requirement = try layout17CurrentRequirement(receipt)
@@ -506,7 +586,9 @@ extension SetupEngine {
                 with:
                     layout17PrivateStoreFile(root, name: ".tractanda-personal-profile.json", owner: owner))
             as? [String: Any]
-        guard let replica = profile?["replicaID"] as? String,
+        guard let replica = profile?["replicaID"] as? String, let uuid = UUID(uuidString: replica),
+            uuid.version1Components != nil, uuid.uuidString.lowercased() == replica,
+            replica != requirement.storeID,
             profile?["storeID"] as? String == requirement.storeID
         else {
             throw SetupError("Completed .17 store identities are inconsistent.")
@@ -536,6 +618,7 @@ extension SetupEngine {
                 value["profile"] as? String == "tractanda.layout17-journal.v1",
                 value["storeID"] as? String == requirement.storeID,
                 value["replicaID"] as? String == replica,
+                !requireCompletedJournal || value["phase"] as? String == "complete",
                 let digest = value["originalRequirementSHA256"] as? String,
                 SetupPackageCompatibility.isDigest(digest)
             else {
@@ -547,7 +630,8 @@ extension SetupEngine {
         return SetupLayout17Inspection(
             profile: "tractanda.layout17-inspection.v1",
             storeID: requirement.storeID, replicaID: replica, readerRequirementSHA256: original ?? current,
-            minimumReaderLevel: requirement.minimumReaderLevel, clustered: (memberCount ?? 0) > 1,
+            minimumReaderLevel: requirement.minimumReaderLevel, phase: "complete",
+            clustered: (memberCount ?? 0) > 1,
             membershipDigest: membershipDigest, memberCount: memberCount,
             originalReaderRequirementSHA256: original, currentReaderRequirementSHA256: current)
     }

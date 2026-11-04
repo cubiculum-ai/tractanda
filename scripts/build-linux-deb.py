@@ -53,14 +53,15 @@ def render(source, values):
 def package_descriptor(manifest, digest, upgrade):
     if upgrade not in ('compatible', 'coordinated-maintenance'):
         raise ValueError('Explicit reviewed upgrade classification is required.')
-    if manifest.get('version') == '0.1.0-poc.17':
+    if manifest.get('version') in ('0.1.0-poc.17', '0.1.0-poc.17.1'):
         formats = manifest.get('canonicalFormats', {})
         capabilities = {'tractanda.physical-layout.flat-items.v1', 'tractanda.message-items.v1'}
-        if (upgrade != 'coordinated-maintenance' or formats.get('readerLevel') != 20
+        expected_upgrade = 'coordinated-maintenance' if manifest['version'] == '0.1.0-poc.17' else 'compatible'
+        if (upgrade != expected_upgrade or formats.get('readerLevel') != 20
                 or formats.get('writerLevel') != 20
                 or not capabilities.issubset(formats.get('capabilities', []))
                 or not capabilities.issubset(formats.get('writeCapabilities', []))):
-            raise ValueError('The .17 layout/message bridge requires truthful floor20 coordinated-maintenance metadata.')
+            raise ValueError('The .17 bridge family requires truthful floor20 metadata and its reviewed upgrade classification.')
     result = dict(profile='tractanda.linux-package.v1', manifestSHA256=digest,
                   version=manifest['version'], arch=manifest['arch'],
                   canonicalFormats=manifest['canonicalFormats'], semanticProfile=B.SEMANTIC_PROFILE,
@@ -180,7 +181,7 @@ def stage_package(bundle, stage, snapshot, arch, maintainer, copyright_bytes, re
     if any('\n' in value or ',' in value for value in depends):
         raise ValueError('Unsafe derived Debian dependency field.')
     inspector = None
-    if manifest['version'] == '0.1.0-poc.17':
+    if manifest['version'] in ('0.1.0-poc.17', '0.1.0-poc.17.1'):
         inspector = layout17_control_inventory(manifest, closure, arch, snapshot.sha256)
         B.capacity(stage.parent, sum(v['size'] for v in manifest['files'])
                    + sum(v['size'] for v in inspector['files']) + 1024**2, maximum)
@@ -190,7 +191,7 @@ def stage_package(bundle, stage, snapshot, arch, maintainer, copyright_bytes, re
         source, target = bundle / row['path'], payload / row['path']
         B.copy_verified(source, target, row, maximum)
     write(payload / 'bundle-manifest.json', snapshot.raw)
-    selected_commands = COMMANDS + (('tractanda-layout17',) if manifest['version'] == '0.1.0-poc.17' else ())
+    selected_commands = COMMANDS + (('tractanda-layout17',) if manifest['version'] in ('0.1.0-poc.17', '0.1.0-poc.17.1') else ())
     for command in selected_commands:
         write(stage / 'usr/bin' / command,
               ('#!/bin/sh\nexec /opt/tractanda/current/bin/' + command + ' "$@"\n').encode(), 0o755)

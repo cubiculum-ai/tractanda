@@ -32,7 +32,21 @@ final class SetupLayout17CompatibilityTests: XCTestCase {
         }
         let old = declaration("0.1.0-poc.16.2", oldSupport, .compatible)
         let bridge = declaration("0.1.0-poc.17", support(), .coordinatedMaintenance)
+        let corrected = declaration("0.1.0-poc.17.1", support(), .compatible)
         XCTAssertNoThrow(try bridge.requireLayout17Transition(from: old))
+        XCTAssertNoThrow(try corrected.requireLayout17Transition(from: old))
+        XCTAssertNoThrow(try corrected.requireLayout17CompatibleUpdate(from: bridge))
+        XCTAssertThrowsError(try corrected.requireRollingUpgrade(from: old))
+        XCTAssertThrowsError(try corrected.requireLayout17CompatibleUpdate(from: old))
+        XCTAssertThrowsError(
+            try declaration("0.1.0-poc.17.1", support(), .coordinatedMaintenance)
+                .requireLayout17Transition(from: old))
+        XCTAssertThrowsError(
+            try declaration("0.1.0-poc.17.2", support(), .compatible)
+                .requireLayout17Transition(from: old))
+        XCTAssertThrowsError(
+            try declaration("0.1.0-poc.17.1", support([capability, message, "extra"]), .compatible)
+                .requireLayout17CompatibleUpdate(from: bridge))
         XCTAssertThrowsError(try bridge.requireRollingUpgrade(from: old))
         XCTAssertThrowsError(
             try declaration("0.1.0-poc.18", support(), .coordinatedMaintenance)

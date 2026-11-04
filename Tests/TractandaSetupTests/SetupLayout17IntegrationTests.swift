@@ -23,7 +23,7 @@ final class SetupLayout17IntegrationTests: XCTestCase {
         let clustered: Bool
         var failure: String?
         var migrations = 0
-        init(clustered: Bool) throws {
+        init(clustered: Bool, incomingVersion: String = "0.1.0-poc.17") throws {
             self.clustered = clustered
             root = try GuardedFixtureDirectory.create(
                 prefix: "layout17-setup-", source: #filePath, test: #function)
@@ -99,7 +99,7 @@ final class SetupLayout17IntegrationTests: XCTestCase {
                 [.posixPermissions: 0o755],
                 ofItemAtPath: candidate.appendingPathComponent("bin/tractanda-layout17").path)
             let manifest = BundleManifest(
-                version: "0.1.0-poc.17", platform: "linux", arch: prior.arch,
+                version: incomingVersion, platform: "linux", arch: prior.arch,
                 files: prior.files + [
                     .init(
                         path: "bin/tractanda-layout17", sha256: Self.digest(helper),
@@ -110,7 +110,8 @@ final class SetupLayout17IntegrationTests: XCTestCase {
             try bytes.write(to: candidate.appendingPathComponent("bundle-manifest.json"))
             incoming = .init(
                 manifestSHA256: Self.digest(bytes), version: manifest.version, arch: manifest.arch,
-                canonicalFormats: .current, upgrade: .coordinatedMaintenance)
+                canonicalFormats: .current,
+                upgrade: try XCTUnwrap(SetupLayout17Release.upgrade(for: incomingVersion)))
             base.runner.layout17Call = { [unowned self] args in
                 if args.first == "inspect" { return try self.inspect() }
                 let journal = self.base.engine.layout17JournalDirectory
@@ -128,6 +129,7 @@ final class SetupLayout17IntegrationTests: XCTestCase {
                         "profile": "tractanda.physical-layout.v1",
                         "layout": "flat-items-visible-attachments.v1", "recordEncoding": "message-v1",
                     ]), self.store.appendingPathComponent("canonical-layout.json"))
+                try self.writeJournal(phase: "complete")
                 try FileManager.default.removeItem(
                     at: self.store.appendingPathComponent("canonical-layout.pending.json"))
                 return .init(status: 0)
@@ -147,6 +149,9 @@ final class SetupLayout17IntegrationTests: XCTestCase {
                 "replicaID": replicaID, "readerRequirementSHA256": originalHash,
                 "minimumReaderLevel": try CanonicalReaderRequirement.load(
                     root: store, ownerUID: tractanda_uid())!.minimumReaderLevel,
+                "phase": FileManager.default.fileExists(
+                    atPath: store.appendingPathComponent("canonical-layout.pending.json").path)
+                    ? "moving" : "unmigrated",
                 "clustered": clustered,
             ]
             if clustered {
@@ -168,10 +173,13 @@ final class SetupLayout17IntegrationTests: XCTestCase {
             try Self.privateWrite(JSON.encode(raised), store.appendingPathComponent("canonical-reader.json"))
             try Self.privateWrite(
                 Data("{}".utf8), store.appendingPathComponent("canonical-layout.pending.json"))
+            try writeJournal(phase: "moving")
+        }
+        func writeJournal(phase: String) throws {
             try base.engine.writeProtected(
                 JSON.encode([
                     "profile": "tractanda.layout17-journal.v1", "storeID": storeID,
-                    "replicaID": replicaID, "originalRequirementSHA256": originalHash,
+                    "replicaID": replicaID, "originalRequirementSHA256": originalHash, "phase": phase,
                 ]),
                 to: base.engine.layout17JournalDirectory.appendingPathComponent(
                     "layout17-" + storeID + "-" + replicaID + ".json"), mode: 0o600)
@@ -194,6 +202,82 @@ final class SetupLayout17IntegrationTests: XCTestCase {
             try FileManager.default.copyItem(at: candidate, to: base.engine.packagePayload)
         }
         func configure() throws { _ = try base.hook(.configure, incoming) }
+    }
+
+    func testCorrectedBridgeKeepsClusterHeldAndResumesOnlyItsOwnUnpackedPayload() throws {
+        let f = try Fixture(clustered: true, incomingVersion: "0.1.0-poc.17.1")
+        XCTAssertThrowsError(try f.preflight())
+        XCTAssertFalse(f.base.runner.running.isEmpty)
+        try f.prepare()
+        try f.preflight()
+        try f.unpack()
+        f.failure = "afterFence"
+        XCTAssertThrowsError(try f.configure())
+        XCTAssertEqual(try f.base.engine.readPackageState()?.incoming, f.incoming)
+        XCTAssertTrue(f.base.runner.running.isEmpty)
+        let substituted = SetupPackageCompatibility(
+            manifestSHA256: String(repeating: "9", count: 64), version: f.incoming.version,
+            arch: f.incoming.arch, canonicalFormats: f.incoming.canonicalFormats)
+        XCTAssertThrowsError(try f.base.hook(.configure, substituted))
+        XCTAssertEqual(f.migrations, 1)
+        f.failure = nil
+        try f.configure()
+        XCTAssertEqual(f.migrations, 2)
+        XCTAssertTrue(f.base.runner.running.isEmpty)
+        _ = try f.base.engine.completeLayout17(instance: "a")
+        XCTAssertFalse(f.base.runner.running.isEmpty)
+    }
+
+    func testCompleted17CompatibleUpdateRefusesHeldStoreAndNeverReappliesBridge() throws {
+        let f = try Fixture(clustered: true)
+        try f.prepare()
+        try f.unpack()
+        try f.configure()
+        let old = try JSON.decode(BundleManifest.self, Data(contentsOf: f.base.manifestURL))
+        let manifest = BundleManifest(
+            version: "0.1.0-poc.17.1", platform: old.platform, arch: old.arch,
+            files: old.files, canonicalFormats: old.canonicalFormats)
+        let bytes = try JSON.encode(manifest)
+        try bytes.write(to: f.candidate.appendingPathComponent("bundle-manifest.json"))
+        let incoming = SetupPackageCompatibility(
+            manifestSHA256: Fixture.digest(bytes), version: manifest.version,
+            arch: manifest.arch, canonicalFormats: .current)
+        let hold = try f.base.engine.readLayout17Intent("a")
+        let before = try f.base.engine.readPackageState()
+        XCTAssertThrowsError(try f.base.hook(.preinst, incoming))
+        XCTAssertEqual(try f.base.engine.readPackageState(), before)
+        XCTAssertEqual(try f.base.engine.readLayout17Intent("a"), hold)
+        XCTAssertTrue(f.base.runner.running.isEmpty)
+
+        _ = try f.base.engine.completeLayout17(instance: "a")
+        let marker = f.store.appendingPathComponent("canonical-layout.json")
+        let markerBytes = try Data(contentsOf: marker)
+        let running = f.base.runner.running
+        try f.writeJournal(phase: "moving")
+        XCTAssertThrowsError(try f.base.hook(.preinst, incoming))
+        XCTAssertEqual(f.base.runner.running, running)
+        try f.writeJournal(phase: "complete")
+        _ = try f.base.hook(.preinst, incoming)
+        try FileManager.default.removeItem(at: f.base.engine.packagePayload)
+        try FileManager.default.copyItem(at: f.candidate, to: f.base.engine.packagePayload)
+        _ = try f.base.hook(.configure, incoming)
+        XCTAssertEqual(try f.base.engine.readPackageState()?.phase, .committed)
+        XCTAssertEqual(try Data(contentsOf: marker), markerBytes)
+        XCTAssertEqual(f.migrations, 1)
+        XCTAssertFalse(f.base.runner.running.isEmpty)
+    }
+
+    func testCorrectedBridgeRefusesStandaloneOldJournalBeforeAnyStop() throws {
+        let f = try Fixture(clustered: false, incomingVersion: "0.1.0-poc.17.1")
+        let journal = f.base.engine.layout17JournalDirectory.appendingPathComponent(
+            "layout17-" + f.storeID + "-" + f.replicaID + ".json")
+        try f.base.engine.writeProtected(Data("{}".utf8), to: journal, mode: 0o600)
+        let before = try f.base.engine.readPackageState()
+        let running = f.base.runner.running
+        XCTAssertThrowsError(try f.preflight())
+        XCTAssertEqual(try f.base.engine.readPackageState(), before)
+        XCTAssertEqual(f.base.runner.running, running)
+        XCTAssertEqual(f.migrations, 0)
     }
 
     func testUnpreparedClusterRefusesBeforeAnyServiceStopOrPackageMutation() throws {

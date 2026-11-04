@@ -6,6 +6,14 @@ From **0.1.0-poc.6**, generic content uses the concrete `Item` class. Shipped te
 
 From **0.1.0-poc.10**, extracted-text diagnostics distinguish canonical text, FTS inputs, semantic source/chunk parameters and actual index freshness. Use the served query reference and the declared `tractanda.extracted-text.v1` feature.
 
+## 0.1.0-poc.17.1 — retain reviews backed by canonical history
+
+Pending and rejected reviews can refer to an exact revision already present in canonical history after peer synchronization has retired its private stage. The installer preserves the review ID, disposition and context. An explicit administrator resolution can use the verified canonical bytes while preserving the original revision. The review still requires the existing current-state and permissions checks. A missing or contradictory revision is refused.
+
+For a new migration from 16.2, use the 17.1 package and matching 17.1 bridge helper. Standalone installations migrate automatically. For a cluster, use the coordinated sequence below with the matching 17.1 artifacts, prepare every retained member before installation, and complete each node only after every member has been upgraded. Reader floor 20, message-v1 and the physical layout are unchanged from 17.
+
+A completed and released 17 installation can update to 17.1 through the normal package path without converting its canonical history again. An interrupted 17 operation or a completed 17 store still held by its administrator intent must be resolved with the exact original 17 package and intent before updating. A genuine interrupted 17.1 operation resumes only with the exact 17.1 package.
+
 ## 0.1.0-poc.17 — mandatory layout and record-format bridge
 
 This version changes canonical directory names and the physical encoding of item revision files. Attachment staging and placement directories become `attachments/staging` and `attachments/placements`. Item revision files move from `items/YYYY/MM/DD/HH/mm/<itemID>/<revisionID>.tractanda` to `items/YYYY/MM/DD/HH/mm/<itemID>.<revisionID>.tractanda`. The bridge preserves logical IDs, schemas, fields, revision ancestry and history, body bytes, and attachment payload filenames and bytes; item record files are rewritten from the earlier MIME/typed-JSON envelope to `message-v1`. The new message form uses readable/scoped headers and a raw UTF-8 body, with no JSON item body or hidden duplicate. Logical revision formats 1 and 2 remain unchanged. New readers require reader floor 20 and both capabilities, `tractanda.physical-layout.flat-items.v1` and `tractanda.message-items.v1`. Completion is recorded in the visible root marker `canonical-layout.json`, including `recordEncoding: message-v1`; a missing or incompatible marker is a preflight refusal, not a signal to search old paths or convert during ordinary reads. See [the item-file format reference](item-file-format.md) for the wire form and recovery behavior.
