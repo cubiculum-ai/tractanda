@@ -4,9 +4,9 @@
     /// digest literals are normalized to avoid self-reference.
     enum ApprovedLinuxDocumentClosure {
         #if arch(x86_64)
-            static let sha256: String? = "70c4dccbc9ba294a0b4effea7e2f47005fea85f4155f8587adc8987c6806b726"
+            static let sha256: String? = "4d5b73350265f8c8d00fd14c84bb52865a218113ecf4407d500c021e55cc5f44"
         #elseif arch(arm64)
-            static let sha256: String? = "3656ce0831bd76ade008db31dded22b78058a4c60c0f7342bb0de3faab797ff7"
+            static let sha256: String? = "fc12ebc137327bb8a9cecabde2a8334cbadc8ab132f2af59eaad53e73a6ed814"
         #else
             static let sha256: String? = nil
         #endif
