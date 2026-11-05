@@ -4,6 +4,7 @@ import importlib.util
 import contextlib
 import io
 import os
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -73,11 +74,12 @@ class BinaryDirectoryTests(unittest.TestCase):
 class BuildArgumentTests(unittest.TestCase):
     def test_public_parser_help_enters_without_removed_producer_map(self):
         output = io.StringIO()
-        with patch.object(C.sys, 'argv', ['build-linux-ml-component.py', '--help']), contextlib.redirect_stdout(output):
+        with patch.object(sys, 'argv', ['build-linux-ml-component.py', '--help']), contextlib.redirect_stdout(output):
             with self.assertRaises(SystemExit) as stopped:
                 C.main()
         self.assertEqual(stopped.exception.code, 0)
         self.assertIn('--arch {amd64,arm64}', output.getvalue())
+        self.assertIn('--build-os {kali-rolling,debian13}', output.getvalue())
         self.assertIn('--build-timeout-seconds', output.getvalue())
 
     def test_native_release_thread_and_isa_arguments(self):

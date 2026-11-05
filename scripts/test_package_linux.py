@@ -23,7 +23,8 @@ def elf_bytes(machine=62):
 
 
 def input_spec():
-    return dict(profile='tractanda.linux-bundle-input.v1', version='0.1.0-poc.14', arch='amd64',
+    return dict(profile='tractanda.linux-bundle-input.v2', version='0.1.0-poc.14', arch='amd64',
+                buildOS=B.PRIMARY_BUILD_OS,
                 minimumCPU='x86-64', sourceInputsSHA256='a' * 64, buildFlags=['-march=x86-64'],
                 semanticProfile=B.SEMANTIC_PROFILE, documentExtraction={}, dynamicLoads=[],
                 runtimeNotices=['licenses/runtime/NOTICE'])
@@ -44,7 +45,7 @@ def payload(root):
 
 
 class LinuxBundleTests(unittest.TestCase):
-    def query_system_library(self, search_output):
+    def query_system_library(self, search_output, status='install ok installed'):
         target = '/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1'
 
         class FakePath:
@@ -61,7 +62,7 @@ class LinuxBundleTests(unittest.TestCase):
             return SimpleNamespace(returncode=0, stdout=search_output, stderr='')
 
         with patch.object(B, 'Path', FakePath), patch.object(B.subprocess, 'run', side_effect=dpkg_search), \
-                patch.object(B, 'run', return_value='libc6:arm64\t2.41-12\tarm64'), \
+                patch.object(B, 'run', return_value='libc6:arm64\t2.41-12\tarm64\t' + status), \
                 patch.object(B, 'digest', return_value='a' * 64):
             return B.system_library('ld-linux-aarch64.so.1', 'arm64')
 
@@ -82,6 +83,32 @@ class LinuxBundleTests(unittest.TestCase):
         for output in cases:
             with self.subTest(output=output), self.assertRaisesRegex(ValueError, 'unique owning'):
                 self.query_system_library(output)
+        with self.assertRaisesRegex(ValueError, 'runtime package'):
+            self.query_system_library(f'libc6:arm64: {path}\n', 'install ok unpacked')
+
+    def test_native_baseline_binds_distribution_dpkg_arch_and_glibc(self):
+        def tools(arguments):
+            return {'--print-architecture': 'amd64', 'GNU_LIBC_VERSION': 'glibc 2.43',
+                    '--version': 'fixture tool'}[arguments[-1]]
+
+        release = {'ID': 'kali', 'VERSION_CODENAME': 'kali-rolling', 'VERSION_ID': '2026.3'}
+        with patch.object(B.platform, 'system', return_value='Linux'), \
+                patch.object(B.platform, 'machine', return_value='x86_64'), \
+                patch.object(B.platform, 'freedesktop_os_release', return_value=release), \
+                patch.object(B, 'run', side_effect=tools):
+            actual = B.native_baseline('amd64')
+            self.assertEqual((actual['os'], actual['osReleaseVersion'], actual['glibcVersion']),
+                             ('kali-rolling', '2026.3', '2.43'))
+            with self.assertRaisesRegex(ValueError, 'distribution'):
+                B.native_baseline('amd64', B.DEBIAN_BUILD_OS)
+            release.update(ID='debian', VERSION_ID='13.7', VERSION_CODENAME='trixie')
+            with self.assertRaisesRegex(ValueError, 'distribution'):
+                B.native_baseline('amd64')
+            with self.assertRaisesRegex(ValueError, 'glibc'):
+                B.native_baseline('amd64', B.DEBIAN_BUILD_OS)
+            with patch.object(B, 'run', return_value='arm64'):
+                with self.assertRaisesRegex(ValueError, 'architecture'):
+                    B.native_baseline('amd64')
 
     def test_real_elf_header_rejects_wrong_machine_macho_and_newer_glibc(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -102,6 +129,11 @@ class LinuxBundleTests(unittest.TestCase):
             with patch.object(B, 'run', side_effect=['', '', '', 'Name: GLIBC_2.43']):
                 with self.assertRaisesRegex(ValueError, 'glibc'):
                     B.elf(file, 'amd64')
+            with patch.object(B, 'run', side_effect=['', '', '', 'Name: GLIBC_2.43']):
+                self.assertEqual(B.elf(file, 'amd64', B.PRIMARY_BUILD_OS)['needed'], [])
+            with patch.object(B, 'run', side_effect=['', '', '', 'Name: GLIBC_2.44']):
+                with self.assertRaisesRegex(ValueError, 'glibc'):
+                    B.elf(file, 'amd64', B.PRIMARY_BUILD_OS)
             with patch.object(B, 'run', side_effect=['', '', 'x86-64-v3', '']):
                 with self.assertRaisesRegex(ValueError, 'ISA'):
                     B.elf(file, 'amd64')
@@ -200,7 +232,7 @@ class LinuxBundleTests(unittest.TestCase):
             root = Path(temporary); payload(root)
             library = root / 'lib/libprivate.so'; library.write_bytes(elf_bytes()); library.chmod(0o644)
             rows = B.inventory(root)
-            def inspect(path, arch):
+            def inspect(path, arch, build_os):
                 name = path.name
                 if name == 'libprivate.so': return dict(soname=name, needed=['libc.so.6'], searchPaths=[], interpreter=None)
                 if name == 'libc.so.6': return dict(soname=name, needed=[], searchPaths=[], interpreter=None)
@@ -208,13 +240,13 @@ class LinuxBundleTests(unittest.TestCase):
             system = dict(soname='libc.so.6', path='/usr/lib/x86_64-linux-gnu/libc.so.6', sha256='b'*64,
                           package='libc6', version='2.41-12')
             with patch.object(B, 'elf', side_effect=inspect), patch.object(B, 'system_library', return_value=(Path(system['path']), system)):
-                closure = B.runtime_closure(root, rows, 'amd64', ['lib/libprivate.so'])
+                closure = B.runtime_closure(root, rows, 'amd64', ['lib/libprivate.so'], B.PRIMARY_BUILD_OS)
             self.assertEqual(closure['depends'], ['libc6 (>= 2.41-12)'])
             self.assertIn('lib/libprivate.so', closure['privateELF'])
             self.assertEqual(closure['edges']['lib/libprivate.so'][0]['system'], system['path'])
             with patch.object(B, 'elf', return_value=dict(soname=None, needed=[], searchPaths=['/home/build/lib'], interpreter=None)):
                 with self.assertRaisesRegex(ValueError, 'search'):
-                    B.runtime_closure(root, rows, 'amd64', [])
+                    B.runtime_closure(root, rows, 'amd64', [], B.PRIMARY_BUILD_OS)
 
     def test_complete_assembly_always_calls_actual_setup_admission_and_inventory_is_closed(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -226,7 +258,7 @@ class LinuxBundleTests(unittest.TestCase):
                 calls.append(list(map(str, args)))
                 return json.dumps(formats) if '--canonical-format-support' in args else '{}'
             closure = dict(depends=['libc6 (>= 2.41-12)'], dynamicLoads=[])
-            with patch.object(B, 'native_baseline', return_value=dict(os='debian13', arch='amd64')), \
+            with patch.object(B, 'native_baseline', return_value=dict(os=B.PRIMARY_BUILD_OS, arch='amd64')), \
                  patch.object(B, 'public_assets'), patch.object(B, 'full_components', return_value=({'model':'fixture-granite'},{'identity':'fixture-docling'})), \
                  patch.object(B, 'runtime_closure', return_value=closure), patch.object(B, 'run', side_effect=helper):
                 result = B.assemble(source, spec, root / 'bundle', 'amd64', 32*1024**2)

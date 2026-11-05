@@ -2,10 +2,11 @@
 
 `scripts/produce-linux-payload.py` is the tracked bridge from a frozen source tree and reviewed native ML components to the complete `package-linux.py` bundle. It builds the five core executables, stages resources and both local ML components, and invokes the full assembler. The default output is slim: pinned model metadata and worker binaries are included, while weights are omitted. Add `--include-model-weights` and supply both complete local model roots for an offline package. It never installs a package, creates a store/account, starts a service or publishes anything. `VERSION` is unchanged.
 
-The checked-in `debian/linux-runtime-inputs.json` starts with **null embeddings and documents entries for both architectures**. `plan` reports those missing inputs. `produce` refuses them before discovering tools, hashing/copying models, creating work directories or launching a compiler. The slim mode changes only whether model files are included; it is not a core-only mode or runtime-admission bypass. This source unit is not a native producer execution result.
+The input registry keeps separate approvals for Kali rolling and Debian 13. Kali rolling is the default. Its embeddings and documents entries are currently empty on both architectures, so `produce` stops before tool discovery, model work or compilation. Existing Debian 13 approvals retain their original identities and require explicit selection.
 
 ```
 python3 -B scripts/produce-linux-payload.py plan --arch amd64
+python3 -B scripts/produce-linux-payload.py plan --arch amd64 --build-os debian13
 ```
 
 The registry is packaging input provenance, separate from the finite runtime identity table and actual Setup admission. A reviewed component's stable normalized manifest SHA-256 may later replace its null entry through a source change. A diagnostic receipt containing timestamps, PIDs and temporary paths is not that manifest. Rebuilding identical approved artifacts does not require pinning a new diagnostic run receipt.
@@ -20,7 +21,7 @@ The manifest has exactly these fields; JSON object ordering/whitespace is immate
 | --- | --- |
 | `profile` | `tractanda.linux-component-artifacts.v1` |
 | `component`, `arch` | Fixed role; `amd64` or `arm64` |
-| `baseline` | Exactly `{buildOS: "debian13", minimumCPU: "x86-64" or "armv8-a", swiftABI: "6.4"}` |
+| `baseline` | Exactly `{buildOS: "kali-rolling" or "debian13", minimumCPU: "x86-64" or "armv8-a", swiftABI: "6.4"}`. The OS must match the selected registry and native producer. |
 | `modelRevision` | Embeddings `44399559930365213510b1ee2eb15ded83374f0e`; documents `a8b999991fe8c521a0cec749973414eaaf823731` |
 | `runtimeRevision` | `61a4b20d4ad01b10466e8fc94c50402a9f994430` |
 | `sourceInputsSHA256` | Stable normalized source/dependency/actual patch and recipe/ISA/ABI commitments, excluding diagnostic run fields and generated expected-digest/identity-table source |
@@ -40,7 +41,7 @@ Native dependencies must be rebuilt or supplied using their reviewed **tracked**
 
 ## Native invocation after admission
 
-Run natively on Debian13, once for each architecture; Kali/cross-build evidence is supplementary. The actual Swift toolchain entry point is explicit. `--mirrors` is a JSON object mapping **exactly** every root `Package.resolved` identity to an absolute real offline bare Git mirror directory. Full strict Git object validation must pass; each locked commit must exist and its version tag (`VERSION` or `vVERSION`) must match. Mirrors can be acquired separately under the existing acquisition/resource gates; this script never fetches them from the network.
+Run on native Kali rolling once per architecture after its component admission. The producer and component compiler accept `--build-os debian13` for secondary Debian 13 work. Assembly and packaging enforce the native baseline bound in the input and receipt. Use a concrete Swift toolchain path. `--mirrors` maps every root `Package.resolved` identity to an absolute, real offline bare Git mirror. Each locked commit and version tag must match. The producer operates offline.
 
 ```
 python3 -B scripts/produce-linux-payload.py produce --arch amd64 \
@@ -57,7 +58,7 @@ The fixed recipe builds `tractanda`, `tractanda-tui`, `tractanda-mcp`, `tractand
 
 Native SwiftPM release output uses `scratch/x86_64-unknown-linux-gnu/release` or `scratch/aarch64-unknown-linux-gnu/release`. Debian's library tuples (`x86_64-linux-gnu` and `aarch64-linux-gnu`) are used only for OS library resolution. The fixed output mapping is checked with both-architecture tiny fixtures, and the staged executable still undergoes actual ELF architecture validation.
 
-Only the five newly built core binaries have RUNPATH set to `$ORIGIN/../lib` using Debian `patchelf`; before/after hashes and patcher bytes are retained. No supplied component is patched. SwiftPM resource directories are copied, exact approved component files merge, when requested, complete model roots are validated against the checked-in fixed-revision artifact catalog and the existing Granite helper/source Docling validators, and reviewed public assets use the same macOS projection. Any duplicate must remain byte/mode identical. The final D3 input is the existing exact `tractanda.linux-bundle-input.v1`; it binds stable source/component/tool/ISA/build-environment commitments. Actual recursive ELF/provider closure, licenses/model hashes, canonical capability declaration and the shipped Setup `plan --bundle` remain mandatory. No registry or descriptor assertion substitutes for them.
+The producer sets RUNPATH on its own freshly built executables and retains before/after hashes and patcher bytes. Supplied components keep their approved bytes. SwiftPM resources, approved component files, optional verified model weights and reviewed public assets follow the existing inventory checks. The `tractanda.linux-bundle-input.v2` commitment binds the native distribution/release, architecture, glibc and tools alongside the source, component, ISA and build environment. Recursive ELF/provider inspection and actual Setup bundle admission remain mandatory.
 
 ## Capacity, failure and acceptance
 
@@ -67,6 +68,6 @@ The estimate reserves source, the selected payload copies, compiler allowance, b
 
 Both actual embedding `--describe` calls (input validation and the final reused D3 assembler probe) use that same owned-child path after capacity checks and private work creation: controlled environment, 60-second timeout, separate stdout capped at 64 KiB, bounded stderr log, durable command/PID checkpoints and process-group termination/wait. The temporary capture is removed after success or failure; an existing capture path is refused and retained. The existing exact pinned worker descriptor validation is unchanged. Standard slim builds validate the worker asset inventory against the checked-in fixed-revision catalog without copying weights; full/offline builds also verify every staged file size and hash. The shared descriptor helper and standalone assembler accept an optional runner solely for this call path; their default invocation behavior remains unchanged. No Docling describe API is introduced.
 
-`result.json`, `source-inputs.json`, `bundle-input.json` and the complete admitted bundle feed `build-linux-deb.py`. Maintainer email remains an explicit operator input there; none is fabricated here. Actual native producer executions, Debian13 amd64/arm64 raster/inference/semantic parity, final finite runtime identity admission, complete `.deb` assembly, disposable dpkg/systemd lifecycle tests and package-size measurement remain required. Apt hosting and release/publication remain deferred.
+`result.json`, `source-inputs.json`, `bundle-input.json` and the admitted bundle feed `build-linux-deb.py`. Before releasing Kali packages, qualify the native components and producer on amd64 and arm64, run the required runtime/model checks, and verify actual package lifecycle in an isolated guest. The published poc.17.1 Debian 13 packages retain their original build receipts.
 
-Toolchain discovery has its own finite operator budget: `--toolchain-probe-timeout-seconds` defaults to 1800 seconds and applies to both pre-build and post-build Swift version/hash capture. The selected budget is recorded in source/final operation receipts. This accommodates slow machines without changing compiler identities, Debian13 baseline, closure validation, build deadline, locale or loader sanitization. Short packaging metadata commands retain their existing 60-second default.
+The `--toolchain-probe-timeout-seconds` budget defaults to 1800 seconds and applies to the pre-build and post-build Swift version/hash capture. The producer records the selected budget. Short packaging metadata commands retain their 60-second default.

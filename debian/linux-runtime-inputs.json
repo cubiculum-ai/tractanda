@@ -1,14 +1,26 @@
 {
-  "profile": "tractanda.linux-runtime-inputs.v1",
+  "profile": "tractanda.linux-runtime-inputs.v2",
   "runtimeRevision": "61a4b20d4ad01b10466e8fc94c50402a9f994430",
-  "architectures": {
-    "amd64": {
-      "embeddings": "7ce60199a57851c97651e45c2e31d05636c6b3bc40cb304cb64c52ae588356da",
-      "documents": "d366255fb8a59789e679bb480c3421f583548c248b20139fd9cffa3969e9ae23"
+  "baselines": {
+    "kali-rolling": {
+      "amd64": {
+        "embeddings": null,
+        "documents": null
+      },
+      "arm64": {
+        "embeddings": null,
+        "documents": null
+      }
     },
-    "arm64": {
-      "embeddings": "8703e7221b89757c5e62ceeff2cb9f647718822aa443afdb838a7ce6c94a19cf",
-      "documents": "8aa1731336b0a2ded85fa64a97a6405684697a67f863a37b8309c9a620db6297"
+    "debian13": {
+      "amd64": {
+        "embeddings": "7ce60199a57851c97651e45c2e31d05636c6b3bc40cb304cb64c52ae588356da",
+        "documents": "d366255fb8a59789e679bb480c3421f583548c248b20139fd9cffa3969e9ae23"
+      },
+      "arm64": {
+        "embeddings": "8703e7221b89757c5e62ceeff2cb9f647718822aa443afdb838a7ce6c94a19cf",
+        "documents": "8aa1731336b0a2ded85fa64a97a6405684697a67f863a37b8309c9a620db6297"
+      }
     }
   }
 }

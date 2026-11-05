@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Validate and assemble one complete native Debian13 Linux bundle; never build or install.
+"""Validate and assemble one complete native Linux bundle; never build or install.
 
 Input is the closed payload produced by the separately reviewed native build recipe, plus
-tractanda.linux-bundle-input.v1 JSON. There is no core-only or skip-admission mode.
+tractanda.linux-bundle-input.v2 JSON. There is no core-only or skip-admission mode.
 """
 import argparse
 import hashlib
@@ -27,6 +27,9 @@ MAX_DIRECTORIES = 20_000
 MAX_FILE = 8 * 1024**3
 ARCH = {'amd64': ('x86_64', 62, 'x86-64', 'x86_64-linux-gnu', '/lib64/ld-linux-x86-64.so.2'),
         'arm64': ('arm64', 183, 'armv8-a', 'aarch64-linux-gnu', '/lib/ld-linux-aarch64.so.1')}
+PRIMARY_BUILD_OS = 'kali-rolling'
+DEBIAN_BUILD_OS = 'debian13'
+GLIBC_LIMITS = {PRIMARY_BUILD_OS: (2, 43), DEBIAN_BUILD_OS: (2, 41)}
 CORE = ('tractanda', 'tractanda-tui', 'tractanda-mcp', 'tractanda-setup',
         'tractanda-auth-helper', 'tractanda-embeddings', 'tractanda-document-converter')
 SEMANTIC_PROFILE = 'tractanda.peer-exchange.v2'
@@ -221,25 +224,38 @@ def copy_verified(source, target, row, maximum):
         os.close(fd)
 
 
-def native_baseline(arch):
-    if arch not in ARCH or platform.system() != 'Linux':
-        raise ValueError('Package assembly requires native Linux Debian13.')
+def native_os(arch, build_os):
+    if arch not in ARCH or build_os not in GLIBC_LIMITS or platform.system() != 'Linux':
+        raise ValueError('A supported native Linux baseline and architecture are required.')
     actual = platform.machine()
-    if actual not in (('x86_64', 'amd64') if arch == 'amd64' else ('arm64', 'aarch64')):
+    if (actual not in (('x86_64', 'amd64') if arch == 'amd64' else ('arm64', 'aarch64'))
+            or run(['/usr/bin/dpkg', '--print-architecture']).strip() != arch):
         raise ValueError('Native builder architecture differs from the requested package.')
-    values = {}
-    for line in Path('/etc/os-release').read_text().splitlines():
-        if '=' in line:
-            key, value = line.split('=', 1)
-            values[key] = value.strip('"')
-    if values.get('ID') != 'debian' or values.get('VERSION_ID', '').split('.')[0] != '13':
-        raise ValueError('Finished packages require the Debian13 baseline; Kali source evidence is supplementary.')
-    return dict(os='debian13', arch=arch, minimumCPU=ARCH[arch][2],
+    release = platform.freedesktop_os_release()
+    version = release.get('VERSION_ID', '')
+    if build_os == PRIMARY_BUILD_OS:
+        matches = release.get('ID') == 'kali' and release.get('VERSION_CODENAME') == 'kali-rolling'
+    else:
+        matches = release.get('ID') == 'debian' and version.split('.')[0] == '13'
+    if not matches or not re.fullmatch(r'[0-9]+(?:\.[0-9]+)*', version):
+        raise ValueError('Actual Linux distribution differs from the requested ' + build_os + ' baseline.')
+    return version
+
+
+def native_baseline(arch, build_os=PRIMARY_BUILD_OS):
+    version = native_os(arch, build_os)
+    glibc = run(['/usr/bin/getconf', 'GNU_LIBC_VERSION']).strip()
+    match = re.fullmatch(r'glibc ([0-9]+)\.([0-9]+)', glibc)
+    if not match or tuple(map(int, match.groups())) > GLIBC_LIMITS[build_os]:
+        raise ValueError('Native glibc exceeds the reviewed ' + build_os + ' ABI baseline.')
+    return dict(os=build_os, osReleaseVersion=version, arch=arch, minimumCPU=ARCH[arch][2],
+                glibcVersion=match[1] + '.' + match[2],
                 dpkgVersion=run(['dpkg-deb', '--version']).splitlines()[0],
                 readelfVersion=run(['readelf', '--version']).splitlines()[0])
 
 
-def elf(path, arch):
+# The older Docling rebinding recipes intentionally retain their Debian13 ELF checks.
+def elf(path, arch, build_os=DEBIAN_BUILD_OS):
     with path.open('rb') as stream:
         header = stream.read(64)
     if (len(header) != 64 or header[:7] != b'\x7fELF\x02\x01\x01'
@@ -263,8 +279,8 @@ def elf(path, arch):
     if any(marker in notes for marker in ('x86-64-v2', 'x86-64-v3', 'x86-64-v4')):
         raise ValueError('ELF requires an ISA above the declared x86-64 baseline.')
     glibc = [tuple(map(int, v.split('.'))) for v in re.findall(r'\bGLIBC_([0-9]+\.[0-9]+)\b', versions)]
-    if glibc and max(glibc) > (2, 41):
-        raise ValueError('ELF requires glibc newer than the Debian13 baseline.')
+    if glibc and max(glibc) > GLIBC_LIMITS[build_os]:
+        raise ValueError('ELF requires glibc newer than the ' + build_os + ' baseline.')
     return dict(needed=needed, soname=sonames[0] if sonames else None,
                 searchPaths=[p for value in rpaths for p in value.split(':')],
                 interpreter=interpreters[0] if interpreters else None)
@@ -303,21 +319,23 @@ def system_library(soname, arch):
     if len(packages) != 1:
         raise ValueError('OS library has no unique owning Debian package.')
     package = packages.pop()
-    fields = run(['dpkg-query', '--show', '--showformat=${binary:Package}\t${Version}\t${Architecture}\n', package]).strip().split('\t')
-    if (len(fields) != 3 or fields[2] != arch or not re.fullmatch(r'[a-z0-9][a-z0-9+.-]+(?::(?:amd64|arm64))?', fields[0])
+    fields = run(['dpkg-query', '--show', '--showformat=${binary:Package}\t${Version}\t${Architecture}\t${Status}\n',
+                  package]).strip().split('\t')
+    if (len(fields) != 4 or fields[2:] != [arch, 'install ok installed']
+            or not re.fullmatch(r'[a-z0-9][a-z0-9+.-]+(?::(?:amd64|arm64))?', fields[0])
             or not re.fullmatch(r'[0-9][A-Za-z0-9.+:~\-]*', fields[1]) or fields[0].split(':')[0].endswith('-dev')):
         raise ValueError('OS dependency is not an architecture-bound runtime package.')
     return path, dict(soname=soname, path=str(path), sha256=digest(path), package=fields[0].split(':')[0], version=fields[1])
 
 
-def runtime_closure(root, rows, arch, dynamic_loads):
+def runtime_closure(root, rows, arch, dynamic_loads, build_os):
     private = {}
     for row in rows:
         path = root / row['path']
         with path.open('rb') as stream:
             magic = stream.read(4)
         if magic == b'\x7fELF':
-            private[row['path']] = elf(path, arch)
+            private[row['path']] = elf(path, arch, build_os)
     if any('bin/' + name not in private for name in CORE):
         raise ValueError('Every required first-party/helper executable must be an actual matching ELF.')
     if not isinstance(dynamic_loads, list) or len(set(dynamic_loads)) != len(dynamic_loads) or any(v not in private for v in dynamic_loads):
@@ -356,7 +374,7 @@ def runtime_closure(root, rows, arch, dynamic_loads):
             else:
                 if needed not in external:
                     path, provider = system_library(needed, arch)
-                    provider['elf'] = elf(path, arch)
+                    provider['elf'] = elf(path, arch, build_os)
                     external[needed] = provider
                     queue.append(needed)
                 targets.append(dict(soname=needed, system=external[needed]['path']))
@@ -426,9 +444,10 @@ def global_isa_flags(flags, arch):
 
 
 def validate_spec(value, arch):
-    required = {'profile', 'version', 'arch', 'minimumCPU', 'sourceInputsSHA256', 'buildFlags',
+    required = {'profile', 'version', 'arch', 'buildOS', 'minimumCPU', 'sourceInputsSHA256', 'buildFlags',
                 'semanticProfile', 'documentExtraction', 'dynamicLoads', 'runtimeNotices'}
-    if (not isinstance(value, dict) or set(value) != required or value['profile'] != 'tractanda.linux-bundle-input.v1'
+    if (not isinstance(value, dict) or set(value) != required or value['profile'] != 'tractanda.linux-bundle-input.v2'
+            or value['buildOS'] not in GLIBC_LIMITS
             or value['arch'] != arch or value['minimumCPU'] != ARCH[arch][2]
             or not re.fullmatch(r'[0-9][A-Za-z0-9._+\-]{0,79}', value['version'])
             or not re.fullmatch(r'[0-9a-f]{64}', value['sourceInputsSHA256'])
@@ -542,8 +561,9 @@ def verify_bundle(root, arch, snapshot=None):
 
 
 def assemble(payload, spec_path, output, arch, maximum, embedding_runner=None, include_model_weights=False):
-    baseline = native_baseline(arch)
     spec = validate_spec(read_json(spec_path), arch)
+    build_os = spec['buildOS']
+    baseline = native_baseline(arch, build_os)
     if payload.is_symlink():
         raise ValueError('Prepared payload root cannot be a symlink.')
     payload = payload.resolve(strict=True)
@@ -565,8 +585,8 @@ def assemble(payload, spec_path, output, arch, maximum, embedding_runner=None, i
         bridge = next((row for row in rows if row['path'] == 'bin/tractanda-layout17'), None)
         if bridge is None or not bridge['mode'] & 0o111:
             raise ValueError('The .17 one-time migration executable is required.')
-        elf(payload / bridge['path'], arch)
-    closure = runtime_closure(payload, rows, arch, spec['dynamicLoads'])
+        elf(payload / bridge['path'], arch, build_os)
+    closure = runtime_closure(payload, rows, arch, spec['dynamicLoads'], build_os)
     embedding, document = full_components(payload, spec, rows, embedding_runner=embedding_runner)
     formats = json.loads(run([payload / 'bin/tractanda-setup', '--canonical-format-support']), object_pairs_hook=unique)
     if not isinstance(formats, dict) or set(formats) != {'profile', 'readerLevel', 'writerLevel', 'read', 'write', 'capabilities', 'writeCapabilities'}:

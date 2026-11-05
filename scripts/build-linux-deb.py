@@ -155,6 +155,20 @@ def stage_layout17_control(payload, control, inventory, epoch):
     return B.digest(control)
 
 
+def verified_build_receipt(bundle, snapshot, arch):
+    relative = 'lib/tractanda/linux-bundle-build.json'
+    raw = B.captured_bytes(bundle / relative, 16 * 1024**2)
+    row = next((entry for entry in snapshot.manifest()['files'] if entry['path'] == relative), None)
+    if row is None or row['size'] != len(raw) or row['sha256'] != hashlib.sha256(raw).hexdigest():
+        raise ValueError('Build receipt bytes differ from the bound bundle manifest.')
+    receipt = json.loads(raw, object_pairs_hook=B.unique)
+    spec = B.validate_spec(receipt['input'], arch)
+    if (receipt.get('profile') != 'tractanda.linux-bundle-build.v1'
+            or receipt['baseline'] != B.native_baseline(arch, spec['buildOS'])):
+        raise ValueError('Bundle assembly receipt differs from the actual native packaging baseline.')
+    return receipt
+
+
 def stage_package(bundle, stage, snapshot, arch, maintainer, copyright_bytes, revision, upgrade, epoch, maximum):
     if not isinstance(snapshot, B.ManifestSnapshot):
         raise ValueError('An immutable admitted manifest snapshot is required.')
@@ -169,12 +183,11 @@ def stage_package(bundle, stage, snapshot, arch, maintainer, copyright_bytes, re
         raise ValueError('Explicit source epoch and bounded copyright notice are required.')
     copyright_bytes.decode('utf-8')
     B.capacity(stage.parent, sum(v['size'] for v in manifest['files']) + 1024**2, maximum)
-    receipt = B.read_json(bundle / 'lib/tractanda/linux-bundle-build.json', 16 * 1024**2)
-    if receipt.get('profile') != 'tractanda.linux-bundle-build.v1' or receipt['baseline']['os'] != 'debian13' or receipt['baseline']['arch'] != arch:
-        raise ValueError('Bundle lacks its architecture-bound Debian13 assembly receipt.')
+    receipt = verified_build_receipt(bundle, snapshot, arch)
+    spec = receipt['input']
     # Reinspect before a potentially large copy; receipt assertions alone do not admit libraries.
     rows = B.inventory(bundle, exclude=('bundle-manifest.json',))
-    closure = B.runtime_closure(bundle, rows, arch, receipt['input']['dynamicLoads'])
+    closure = B.runtime_closure(bundle, rows, arch, spec['dynamicLoads'], spec['buildOS'])
     if closure != receipt['runtimeClosure']:
         raise ValueError('Actual runtime closure differs from its admitted bundle receipt.')
     depends = sorted(set(closure['depends']) | {'ca-certificates', 'curl', 'lsof', 'sudo', 'uuid-runtime', 'init-system-helpers'})
@@ -294,16 +307,14 @@ def build(bundle, output, arch, maintainer, copyright_file, revision, upgrade, e
           build_timeout_seconds=DEFAULT_BUILD_TIMEOUT_SECONDS):
     if not 1 <= build_timeout_seconds <= MAX_TIMEOUT_SECONDS:
         raise ValueError('Configured package build timeout is invalid.')
-    B.native_baseline(arch)
     bundle = bundle.resolve(strict=True)
     output = output.parent.resolve(strict=True) / output.name
     receipt = output.with_name(output.name + '.inventory.json')
     if output.exists() or output.is_symlink() or receipt.exists() or output.is_relative_to(bundle):
         raise ValueError('Package output must be new with an existing parent.')
     snapshot = B.capture_manifest(bundle)
+    spec = verified_build_receipt(bundle, snapshot, arch)['input']
     manifest = B.verify_bundle(bundle, arch, snapshot)  # No incomplete-package bypass.
-    build_receipt = B.read_json(bundle / 'lib/tractanda/linux-bundle-build.json', 16 * 1024**2)
-    spec = B.validate_spec(build_receipt['input'], arch)
     B.public_assets(bundle)
     embedding, document = B.full_components(bundle, spec, manifest['files'])
     if (embedding, document) != (manifest['embedding'], manifest['documentExtraction']):

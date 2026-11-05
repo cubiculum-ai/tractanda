@@ -48,29 +48,30 @@ class ProducerTests(unittest.TestCase):
             return P.component(path, tree, 'embeddings', 'amd64', P.sha(P.B.canonical(value)))
 
     def test_unadmitted_stops_before_heavy_or_environment_work(self):
-        registry = self.root / 'registry.json'
-        registry.write_bytes(P.B.canonical({'profile': 'tractanda.linux-runtime-inputs.v1',
-            'runtimeRevision': P.RUNTIME,
-            'architectures': {arch: {'embeddings': None, 'documents': None} for arch in P.B.ARCH}}))
-        with mock.patch.object(P, 'REGISTRY', registry), mock.patch.object(P.B, 'native_baseline') as native, \
+        with mock.patch.object(P.B, 'native_baseline') as native, \
                 mock.patch.object(P, 'source_rows') as source, mock.patch.object(P, 'build_environment') as env:
-            with self.assertRaisesRegex(ValueError, 'Unadmitted amd64 components: embeddings, documents'):
-                P.produce(argparse.Namespace(arch='amd64'))
+            with self.assertRaisesRegex(ValueError, 'Unadmitted kali-rolling amd64 components: embeddings, documents'):
+                P.produce(argparse.Namespace(arch='amd64', build_os=P.B.PRIMARY_BUILD_OS))
             native.assert_not_called()
             source.assert_not_called()
             env.assert_not_called()
-        self.assertEqual(list(self.root.iterdir()), [registry])
+        self.assertEqual(list(self.root.iterdir()), [])
+        self.assertTrue(all(P.registry('amd64', P.B.DEBIAN_BUILD_OS).values()))
 
     def test_registry_rejects_unknown_component_or_nonhash(self):
-        value = {'profile': 'tractanda.linux-runtime-inputs.v1', 'runtimeRevision': P.RUNTIME,
-                 'architectures': {arch: {'embeddings': None, 'documents': None} for arch in P.B.ARCH}}
+        value = P.B.read_json(P.REGISTRY)
         path = self.put(self.root / 'registry.json', json.dumps(value).encode())
         with mock.patch.object(P, 'REGISTRY', path):
             self.assertEqual(P.registry('arm64'), {'embeddings': None, 'documents': None})
-            value['architectures']['arm64']['documents'] = 'approved'
+            value['baselines'][P.B.PRIMARY_BUILD_OS]['arm64']['documents'] = 'approved'
             path.write_text(json.dumps(value))
             with self.assertRaisesRegex(ValueError, 'reviewed normalized'):
                 P.registry('arm64')
+
+    def test_component_commitment_cannot_cross_build_baselines(self):
+        path, tree, value = self.fixture()
+        with self.assertRaisesRegex(ValueError, 'mismatched'):
+            P.component(path, tree, 'embeddings', 'amd64', P.sha(P.B.canonical(value)), P.B.PRIMARY_BUILD_OS)
 
     def test_layout17_helper_and_sources_are_versioned_sealed_inputs(self):
         self.assertIn('tractanda-layout17', P.core_products('0.1.0-poc.17'))

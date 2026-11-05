@@ -129,13 +129,17 @@ def inspect_asset(entry, version, context):
                     ('granite-embedding-311m-multilingual-r2', 'granite-docling-258m-mlx')), 'Complete legacy Linux model inventory required')
     require(files['lib/tractanda/linux-bundle-build.json']['sha256'] == bp['sha256'], 'Bundle-build receipt is not in the committed manifest')
     spec = build['input']
-    require(build.get('profile') == 'tractanda.linux-bundle-build.v1' and build['baseline']['arch'] == arch
-            and build['baseline']['os'] == 'debian13' and spec['version'] == version and spec['arch'] == arch,
+    baseline = build['baseline']
+    require(build.get('profile') == 'tractanda.linux-bundle-build.v1'
+            and spec['profile'] == 'tractanda.linux-bundle-input.v2'
+            and baseline['arch'] == arch and baseline['os'] == spec['buildOS'] == context['buildOS']
+            and baseline == source['baseline'] == result['baseline']
+            and spec['version'] == version and spec['arch'] == arch,
             'Linux producer/bundle build identity differs')
     require(source['files'] == context['files'] and source['componentManifests'] == context['components'][arch]
             and spec['buildFlags'] == context['flags'][arch], 'Linux core source/recipe/approved components differ from the sealed candidate')
     normalized = {'files': source['files'], 'components': source['componentManifests'], 'toolchain': source['toolchain'],
-                  'buildFlags': spec['buildFlags'], 'buildEnvironment': source['buildEnvironment']}
+                  'buildFlags': spec['buildFlags'], 'buildEnvironment': source['buildEnvironment'], 'baseline': baseline}
     commitment = digest(canonical(normalized))
     require(spec['sourceInputsSHA256'] == commitment == result['sourceInputsSHA256']
             and result['bundle']['manifestSHA256'] == mp['sha256'] and result['components'] == normalized['components']
@@ -212,9 +216,13 @@ def verify_linux(state, context):
         require(inventory['packageSHA256'] == record['sha256'] and inventory['bundleManifestSHA256'] == record['bundleManifestSHA256'], 'Staged D3 inventory differs')
         source, _, _ = json_input(entry['producerSourceInputs'])
         build, _, _ = json_input(entry['bundleBuildReceipt'])
+        baseline = build['baseline']
         normalized = {'files': source['files'], 'components': source['componentManifests'], 'toolchain': source['toolchain'],
-                      'buildFlags': build['input']['buildFlags'], 'buildEnvironment': source['buildEnvironment']}
+                      'buildFlags': build['input']['buildFlags'], 'buildEnvironment': source['buildEnvironment'],
+                      'baseline': baseline}
         require(source['files'] == context['files'] and source['componentManifests'] == context['components'][record['arch']]
+                and baseline == source['baseline'] and baseline['arch'] == record['arch']
+                and baseline['os'] == build['input']['buildOS'] == context['buildOS']
                 and normalized['buildFlags'] == context['flags'][record['arch']]
                 and digest(canonical(normalized)) == record['sourceInputsSHA256'], 'Staged Linux sealed-source commitment changed')
     return {r['name']: r['sha256'] for r in rows}

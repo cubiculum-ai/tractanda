@@ -25,6 +25,12 @@ F = module('linux_bundle_fixtures', 'test_package_linux.py')
 
 
 class LinuxDebTests(unittest.TestCase):
+    def setUp(self):
+        self.baseline = dict(os=D.B.PRIMARY_BUILD_OS, arch='amd64')
+        baseline = patch.object(D.B, 'native_baseline', return_value=self.baseline)
+        self.native = baseline.start()
+        self.addCleanup(baseline.stop)
+
     def test_layout17_descriptor_cannot_claim_rolling_or_hide_physical_floor(self):
         manifest = {'version': '0.1.0-poc.17', 'arch': 'x86_64', 'embedding': None, 'documentExtraction': None,
                     'canonicalFormats': {'readerLevel': 20, 'writerLevel': 20,
@@ -90,8 +96,8 @@ class LinuxDebTests(unittest.TestCase):
         catalog.write_bytes((D.B.ROOT / D.B.MAC.MODEL_ARTIFACT_MANIFEST).read_bytes())
         catalog.chmod(0o644)
         closure = dict(profile='fixture-runtime-closure', depends=['libc6 (>= 2.41-12)'])
-        receipt = dict(profile='tractanda.linux-bundle-build.v1', baseline=dict(os='debian13', arch='amd64'),
-                       input=dict(dynamicLoads=[]), runtimeClosure=closure)
+        receipt = dict(profile='tractanda.linux-bundle-build.v1', baseline=self.baseline,
+                       input=F.input_spec(), runtimeClosure=closure)
         D.write(bundle / 'lib/tractanda/linux-bundle-build.json', D.B.canonical(receipt))
         formats = dict(profile='fixture-only', readerLevel=1, writerLevel=1, read=[1], write=[1],
                        capabilities=[], writeCapabilities=[])
@@ -192,12 +198,20 @@ class LinuxDebTests(unittest.TestCase):
                     D.stage_package(bundle,root/'stage',D.B.capture_manifest(bundle),'amd64','Fixture <test@example.invalid>',b'notice',
                                     '1','compatible',1,64*1024**2)
 
+    def test_bundle_baseline_must_match_actual_packaging_environment(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle, _, _ = self.fixture(root)
+            self.native.return_value = dict(self.baseline, os='debian13')
+            with self.assertRaisesRegex(ValueError, 'actual native packaging baseline'):
+                D.verified_build_receipt(bundle, D.B.capture_manifest(bundle), 'amd64')
+
     def test_core_only_bundle_rejects_before_package_tool_or_output(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);bundle,manifest,_=self.fixture(root)
             del manifest['documentExtraction'];D.write(bundle/'bundle-manifest.json',D.B.canonical(manifest))
             copyright=root/'copyright';copyright.write_text('fixture notice')
-            with patch.object(D.B,'native_baseline'),patch.object(D.subprocess,'Popen') as popen:
+            with patch.object(D.subprocess,'Popen') as popen:
                 with self.assertRaisesRegex(ValueError,'incomplete'):
                     D.build(bundle,root/'output.deb','amd64','Fixture <test@example.invalid>',copyright,
                             '1','compatible',1,128*1024**2)
@@ -274,8 +288,8 @@ class LinuxDebTests(unittest.TestCase):
                 def __init__(self,args,**kwargs):
                     calls.append((args,kwargs));Path(args[-1]).write_bytes(b'synthetic-deb-tool-output')
                 def poll(self):return 0
-            with patch.object(D.B,'native_baseline'),patch.object(D.B,'verify_bundle',return_value=manifest), \
-                 patch.object(D.B,'validate_spec',return_value=dict(dynamicLoads=[])),patch.object(D.B,'public_assets'), \
+            with patch.object(D.B,'verify_bundle',return_value=manifest), \
+                 patch.object(D.B,'public_assets'), \
                  patch.object(D.B,'full_components',return_value=(manifest['embedding'],manifest['documentExtraction'])), \
                  patch.object(D.B,'runtime_closure',return_value=closure),patch.object(D.subprocess,'Popen',Process), \
                  patch.object(D,'verify_archive') as verify:
@@ -324,8 +338,8 @@ class LinuxDebTests(unittest.TestCase):
                     Path(args[-1]).write_bytes(b'synthetic package')
                     D.write(bundle/'bundle-manifest.json',D.B.canonical(dict(manifest,version='0.1.0-poc.15')))
                 def poll(self):return 0
-            with patch.object(D.B,'native_baseline'),patch.object(D.B,'run',return_value='{}'), \
-                 patch.object(D.B,'validate_spec',return_value=dict(dynamicLoads=[])),patch.object(D.B,'public_assets'), \
+            with patch.object(D.B,'run',return_value='{}'), \
+                 patch.object(D.B,'public_assets'), \
                  patch.object(D.B,'full_components',return_value=(manifest['embedding'],manifest['documentExtraction'])), \
                  patch.object(D.B,'runtime_closure',return_value=closure),patch.object(D.subprocess,'Popen',Process), \
                  patch.object(D,'verify_archive'):
@@ -355,8 +369,8 @@ class LinuxDebTests(unittest.TestCase):
                     if failure=='reserve' and artifact is not None:
                         return SimpleNamespace(f_frsize=1,f_bavail=D.B.RESERVE-1)
                     return statvfs(path)
-                with patch.object(D.B,'native_baseline'),patch.object(D.B,'verify_bundle',return_value=manifest), \
-                     patch.object(D.B,'validate_spec',return_value=dict(dynamicLoads=[])),patch.object(D.B,'public_assets'), \
+                with patch.object(D.B,'verify_bundle',return_value=manifest), \
+                     patch.object(D.B,'public_assets'), \
                      patch.object(D.B,'full_components',return_value=(manifest['embedding'],manifest['documentExtraction'])), \
                      patch.object(D.B,'runtime_closure',return_value=closure),patch.object(D.subprocess,'Popen',Process), \
                      patch.object(Path,'lstat',allocated),patch.object(D.B.os,'statvfs',side_effect=available), \

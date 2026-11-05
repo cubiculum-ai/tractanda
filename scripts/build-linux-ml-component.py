@@ -5,14 +5,12 @@ Both components use the same Swift/MLX source pins and toolchain. The D4
 registry and document runtime expected identity are intentionally untouched.
 """
 import argparse
-import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
 import signal
 import stat
-import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('linux_producer', ROOT / 'scripts/produce-linux-payload.py')
@@ -80,6 +78,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--component', choices=ROLES, required=True)
     parser.add_argument('--arch', choices=B.ARCH, required=True)
+    parser.add_argument('--build-os', choices=B.GLIBC_LIMITS, default=B.PRIMARY_BUILD_OS)
     parser.add_argument('--build-timeout-seconds', type=P.timeout_seconds, default=P.DEFAULT_BUILD_TIMEOUT_SECONDS)
     parser.add_argument('--swift', type=Path, required=True)
     parser.add_argument('--expected-toolchain', type=Path, required=True)
@@ -90,13 +89,9 @@ def main():
     parser.add_argument('--work', type=Path, required=True)
     parser.add_argument('--max-work-bytes', type=int, required=True)
     args = parser.parse_args()
-    if sys.platform != 'linux' or os.uname().machine != {'amd64': 'x86_64', 'arm64': 'aarch64'}[args.arch]:
-        raise ValueError('Run natively on the selected Linux architecture.')
-    release = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text().splitlines() if '=' in line)
-    if release.get('ID', '').strip('"') != 'debian' or release.get('VERSION_ID', '').strip('"') != '13':
-        raise ValueError('Use the pinned Debian13 native build environment.')
+    baseline = B.native_baseline(args.arch, args.build_os)
     swift, tools = P.toolchain(args.swift)
-    if tools != B.read_json(args.expected_toolchain) or not tools['version'].startswith('Swift version 6.4.1 '):
+    if tools != B.read_json(args.expected_toolchain) or not P.SWIFT_6_4.match(tools['version']):
         raise ValueError('Concrete Swift toolchain differs from the frozen build input.')
     work = args.work.absolute()
     if work.exists() or work.is_symlink() or work.is_relative_to(ROOT) or args.max_work_bytes > 8 * 1024**3:
@@ -107,7 +102,7 @@ def main():
     for name in ('source', 'home', 'tmp', 'modules', 'cache', 'config', 'security'):
         (work / name).mkdir(mode=0o700)
     P.write_json(work / 'source-inputs.json', {'status': 'COMPILE_ONLY_UNADMITTED', 'files': original,
-                 'component': args.component, 'arch': args.arch, 'toolchain': tools,
+                 'component': args.component, 'arch': args.arch, 'toolchain': tools, 'baseline': baseline,
                  'buildTimeoutSeconds': args.build_timeout_seconds})
     P.merge_files(ROOT, work / 'source', original, args.max_work_bytes)
     package_name, product = ROLES[args.component]
@@ -155,12 +150,14 @@ def main():
     bin_path = compile_child([*command, '--show-bin-path'], work, environment,
                              args.max_work_bytes, timeout=args.build_timeout_seconds, capture=True)
     artifact = compiled_artifact(bin_path, work, product, args.arch)
-    if P.toolchain(args.swift)[1] != tools or P.rows(ROOT, roots=SOURCE_ROOTS, skip=P.SKIP) != original:
-        raise ValueError('Compiler or original source changed during compilation.')
+    B.elf(artifact, args.arch, args.build_os)
+    if (P.toolchain(args.swift)[1] != tools or P.rows(ROOT, roots=SOURCE_ROOTS, skip=P.SKIP) != original
+            or B.native_baseline(args.arch, args.build_os) != baseline):
+        raise ValueError('Compiler, native baseline or original source changed during compilation.')
     if B.read_json(package / 'Package.resolved')['pins'] != expected_pins:
         raise ValueError('Selected dependency graph changed during compilation.')
     P.write_json(work / 'result.json', {'status': 'NATIVE_HELPER_COMPILED_NOT_RUNTIME_ADMITTED_NOT_MODEL_EXECUTED',
-                 'component': args.component, 'arch': args.arch, 'toolchain': tools,
+                 'component': args.component, 'arch': args.arch, 'toolchain': tools, 'baseline': baseline,
                  'artifact': {'path': str(artifact), 'sha256': B.digest(artifact), 'size': artifact.stat().st_size},
                  'runtimePatch': patch_receipt, 'registryUpdated': False, 'documentIdentityAdmitted': False})
     print(json.dumps({'component': args.component, 'result': str(work / 'result.json'), 'runtimeAdmitted': False}))

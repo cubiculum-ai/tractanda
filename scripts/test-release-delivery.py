@@ -8,7 +8,7 @@ import tempfile
 import unittest
 import uuid
 from types import SimpleNamespace
-from unittest.mock import patch, Mock
+from unittest.mock import call, patch, Mock
 
 spec = importlib.util.spec_from_file_location('delivery_release', Path(__file__).with_name('release-macos.py'))
 R = importlib.util.module_from_spec(spec); spec.loader.exec_module(R)
@@ -22,6 +22,7 @@ class DeliveryTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.context = {'files': [{'path': 'Sources/Core.swift', 'size': 1, 'mode': 0o644, 'sha256': 'a' * 64}],
+                        'buildOS': 'kali-rolling',
                         'components': {a: {'embeddings': 'e' * 64, 'documents': 'd' * 64} for a in D.ARCHES},
                         'flags': {a: ['-march=' + ('x86-64' if a == 'amd64' else 'armv8-a'), '-target-cpu', 'generic',
                                       '--build-system', 'native', '-num-threads', '4'] for a in D.ARCHES}}
@@ -40,17 +41,20 @@ class DeliveryTests(unittest.TestCase):
     def asset(self, arch, defect=None):
         p = self.root / ('input-' + arch)
         p.mkdir()
+        baseline = {'os': self.context['buildOS'], 'arch': arch, 'glibcVersion': '2.43'}
         source = {'profile': 'tractanda.linux-producer-source.v1', 'files': copy.deepcopy(self.context['files']),
                   'componentManifests': copy.deepcopy(self.context['components'][arch]),
-                  'toolchain': {'version': 'fixed synthetic tool'}, 'buildEnvironment': {'os': 'debian13'}}
+                  'toolchain': {'version': 'fixed synthetic tool'}, 'buildEnvironment': {'fixture': True},
+                  'baseline': baseline}
         if defect == 'source': source['files'][0]['sha256'] = 'f' * 64
         if defect == 'components': source['componentManifests']['documents'] = 'f' * 64
         flags = self.context['flags'][arch]
         normalized = {'files': source['files'], 'components': source['componentManifests'], 'toolchain': source['toolchain'],
-                      'buildFlags': flags, 'buildEnvironment': source['buildEnvironment']}
+                      'buildFlags': flags, 'buildEnvironment': source['buildEnvironment'], 'baseline': baseline}
         h = D.digest(D.canonical(normalized))
-        build = {'profile': 'tractanda.linux-bundle-build.v1', 'baseline': {'os': 'debian13', 'arch': arch},
-                 'input': {'version': V, 'arch': arch, 'buildFlags': flags, 'sourceInputsSHA256': h}}
+        build = {'profile': 'tractanda.linux-bundle-build.v1', 'baseline': baseline,
+                 'input': {'profile': 'tractanda.linux-bundle-input.v2', 'buildOS': baseline['os'],
+                           'version': V, 'arch': arch, 'buildFlags': flags, 'sourceInputsSHA256': h}}
         build_path = self.write(p / 'bundle-build.json', build)
         names = ['bin/' + n for n in ('tractanda', 'tractanda-tui', 'tractanda-mcp', 'tractanda-setup',
                                     'tractanda-auth-helper', 'tractanda-embeddings', 'tractanda-document-converter')]
@@ -71,7 +75,8 @@ class DeliveryTests(unittest.TestCase):
         self.write(Path(str(package) + '.inventory.json'), receipt)
         result = {'profile': 'tractanda.linux-payload-result.v1', 'sourceInputsSHA256': h,
                   'bundle': {'manifestSHA256': R.sha(manifest_path)}, 'components': normalized['components'],
-                  'toolchain': source['toolchain'], 'buildEnvironment': source['buildEnvironment']}
+                  'toolchain': source['toolchain'], 'buildEnvironment': source['buildEnvironment'],
+                  'baseline': dict(baseline, os='debian13') if defect == 'baseline' else baseline}
         if defect == 'commitment': result['sourceInputsSHA256'] = 'f' * 64
         return {'arch': arch, 'package': str(package), 'bundleManifest': str(manifest_path),
                 'bundleBuildReceipt': str(build_path), 'producerSourceInputs': str(self.write(p / 'source-inputs.json', source)),
@@ -148,7 +153,7 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(len(D.verify_linux(self.state, self.context)), 2)
 
     def test_internally_bound_but_different_core_source_or_components_are_rejected(self):
-        for defect in ('source', 'components', 'commitment'):
+        for defect in ('source', 'components', 'commitment', 'baseline'):
             with self.subTest(defect=defect), tempfile.TemporaryDirectory() as d:
                 old = self.root; self.root = Path(d)
                 try:
@@ -202,12 +207,15 @@ class DeliveryTests(unittest.TestCase):
     def test_linux_context_uses_candidate_algorithm_only_after_exact_git_seal_check(self):
         p = self.pipeline()
         producer = SimpleNamespace(source_rows=lambda: self.context['files'],
-                                   require_admitted=lambda a: self.context['components'][a],
+                                   B=SimpleNamespace(PRIMARY_BUILD_OS=self.context['buildOS']),
+                                   require_admitted=Mock(side_effect=lambda a, _: self.context['components'][a]),
                                    core_build_flags=lambda a: self.context['flags'][a])
         with patch.object(R, 'git', side_effect=[self.state['commit'], self.state['tree'], '']), \
              patch.object(R.importlib.util, 'spec_from_file_location', return_value=Mock()), \
              patch.object(R.importlib.util, 'module_from_spec', return_value=producer):
             self.assertEqual(R.Pipeline.linux_context(p), self.context)
+        self.assertEqual(producer.require_admitted.call_args_list,
+                         [call(arch, self.context['buildOS']) for arch in D.ARCHES])
         for values in (['c' * 40], [self.state['commit'], 'c' * 40], [self.state['commit'], self.state['tree'], 'dirty']):
             with patch.object(R, 'git', side_effect=values), patch.object(R.importlib.util, 'spec_from_file_location') as load, self.assertRaises(RuntimeError):
                 R.Pipeline.linux_context(p)
@@ -365,21 +373,30 @@ class DeliveryTests(unittest.TestCase):
         canonical = {**self.state['steps']['artifacts']['result'], 'SHA256SUMS': R.sha(p.directory / 'SHA256SUMS')}
         expected = self.expected_remote_hashes(canonical)
         uploaded = []
+        temporary_directory = tempfile.TemporaryDirectory
+
+        def upload_directory(*, prefix, dir):
+            self.assertEqual((prefix, dir), ('tractanda-upload-', '/private/tmp'))
+            return temporary_directory(prefix=prefix, dir=self.root)
+
         def run(name, arguments, *unused):
             if name.startswith('upload-'):
-                staged = Path(arguments[4]); self.assertTrue(str(staged).startswith('/private/tmp/tractanda-upload-'))
+                staged = Path(arguments[4])
+                self.assertEqual(staged.parent.parent, self.root)
+                self.assertTrue(staged.parent.name.startswith('tractanda-upload-'))
                 self.assertEqual(R.sha(staged), expected[staged.name]); uploaded.append(staged.name)
         remote = {'target_commitish': self.state['commit'], 'assets': [], 'draft': True}
         final = {'assets': [{'name': n, 'digest': 'sha256:' + h} for n, h in expected.items()],
                  'draft': False, 'html_url': 'https://github.com/owner/repo/releases/tag/v' + V}
-        with patch.object(p, 'verify_notarization'), patch.object(p, 'run_command', side_effect=run), \
-             patch.object(R.subprocess, 'run', return_value=Mock(returncode=0)), patch.object(R, 'release_info', side_effect=[remote, final]):
-            result = p.publish()
-        self.assertEqual(set(uploaded), set(expected)); self.assertEqual(result['sha256'], expected)
-        remote['assets'] = final['assets']; uploaded.clear()
-        with patch.object(p, 'verify_notarization'), patch.object(p, 'run_command', side_effect=run), \
-             patch.object(R.subprocess, 'run', return_value=Mock(returncode=0)), patch.object(R, 'release_info', side_effect=[remote, final]):
-            p.publish()
+        with patch.object(R.tempfile, 'TemporaryDirectory', side_effect=upload_directory):
+            with patch.object(p, 'verify_notarization'), patch.object(p, 'run_command', side_effect=run), \
+                 patch.object(R.subprocess, 'run', return_value=Mock(returncode=0)), patch.object(R, 'release_info', side_effect=[remote, final]):
+                result = p.publish()
+            self.assertEqual(set(uploaded), set(expected)); self.assertEqual(result['sha256'], expected)
+            remote['assets'] = final['assets']; uploaded.clear()
+            with patch.object(p, 'verify_notarization'), patch.object(p, 'run_command', side_effect=run), \
+                 patch.object(R.subprocess, 'run', return_value=Mock(returncode=0)), patch.object(R, 'release_info', side_effect=[remote, final]):
+                p.publish()
         self.assertEqual(uploaded, [])
 
     def test_duplicate_or_changed_remote_assets_never_overwrite(self):

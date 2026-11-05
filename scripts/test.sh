@@ -24,6 +24,11 @@ python3 scripts/test-release-status.py
 python3 scripts/test-docling-packaging.py
 python3 scripts/test-docling-model-validator.py
 python3 scripts/test-linux-docling-provenance.py
+python3 scripts/test_package_linux.py
+python3 scripts/test_produce_linux_payload.py
+python3 scripts/test_build_linux_ml_component.py
+python3 scripts/test_build_linux_deb.py
+python3 scripts/test-release-delivery.py
 python3 scripts/test-swift-test-wrapper.py
 run_tests() (
     log=$1; scratch=$2; shift 2

@@ -18,23 +18,50 @@ jobs:
     # The source suite contains slow native Swift tests on shared CI hardware.
     # This remains finite and may still be limited by the CI provider.
     timeout-minutes: 360
-    # Official Swift 6.4.0 Debian 13 (Trixie) multiarch image; supports amd64 and arm64/v8.
+    # Official Kali rolling multiarch image. Review the digest and ABI before refreshing.
     container:
-      image: docker.io/library/swift@sha256:c90a484cbd45ff768e05bfdb2a73c4cc8978de0d940d8eb2cf68fcede6bad8f8
+      image: docker.io/kalilinux/kali-rolling@sha256:7997e0581c4f5c185cfe6773d5cae8fcc7c6b79798726ccaabf843af4bcd2013
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
       - name: Install platform and test dependencies
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends libsqlite3-dev libpam0g-dev uuid-dev python3 acl gnupg curl
+          apt-get install -y --no-install-recommends ca-certificates curl gnupg git \
+            build-essential binutils libcurl4-openssl-dev libedit-dev libicu-dev libncurses-dev \
+            libsqlite3-dev libxml2-dev libpam0g-dev uuid-dev pkgconf python3 acl tzdata zlib1g-dev
+      - name: Install signed Swift 6.4.2 toolchain
+        run: |
+          set -eu
+          case "$(dpkg --print-architecture)" in
+            amd64) suffix= ;;
+            arm64) suffix=-aarch64 ;;
+            *) exit 1 ;;
+          esac
+          stage=$(mktemp -d)
+          trap 'rm -rf "$stage"' EXIT
+          export GNUPGHOME="$stage/gnupg"
+          mkdir -m 0700 "$GNUPGHOME"
+          archive="swift-6.4.2-RELEASE-ubuntu26.04$suffix.tar.gz"
+          source="https://download.swift.org/swift-6.4.2-release/ubuntu2604$suffix/swift-6.4.2-RELEASE/$archive"
+          curl --compressed -fsSL https://www.swift.org/keys/all-keys.asc -o "$stage/swift-keys.asc"
+          gpg --batch --import "$stage/swift-keys.asc"
+          gpg --batch --export 52BB7E3DE28A71BE22EC05FFEF80A866B47A981F > "$stage/swift-release.gpg"
+          test -s "$stage/swift-release.gpg"
+          curl -fsSL "$source.sig" -o "$stage/$archive.sig"
+          curl -fsSL "$source" -o "$stage/$archive"
+          gpgv --keyring "$stage/swift-release.gpg" "$stage/$archive.sig" "$stage/$archive"
+          mkdir -m 0755 /opt/swift
+          tar -xzf "$stage/$archive" --strip-components=1 -C /opt/swift
+          echo /opt/swift/usr/bin >> "$GITHUB_PATH"
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
       - name: Verify the published source tree
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           python3 scripts/audit-release.py --staged
+          python3 -c 'import json, runpy, sys; print(json.dumps(runpy.run_path("scripts/package-linux.py")["native_baseline"](sys.argv[1])))' "$(dpkg --print-architecture)"
           swift --version
           useradd --uid 2000 --user-group --create-home --shell /bin/sh tractanda-ci
           chown -R tractanda-ci:tractanda-ci "$GITHUB_WORKSPACE"
-          runuser -u tractanda-ci -- env TRACTANDA_UUID_NODE=00:00:00:00:00:01 \
+          runuser -u tractanda-ci -- env PATH="$PATH" TRACTANDA_UUID_NODE=00:00:00:00:00:01 \
             sh -c 'cd "$1" && sh scripts/test.sh' sh "$GITHUB_WORKSPACE"

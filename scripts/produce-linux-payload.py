@@ -3,7 +3,7 @@
 
 No network downloads, installation, model inference or release. Model weights are
 omitted by default; --include-model-weights admits only complete pinned local snapshots.
-The tracked input registry deliberately starts unadmitted. See linux-payload-producer.md.
+Only the selected baseline's reviewed registry entries can be used. See linux-payload-producer.md.
 """
 import argparse
 import math
@@ -29,6 +29,7 @@ COMPONENTS = ('embeddings', 'documents')
 PRODUCTS = ('tractanda', 'tractanda-tui', 'tractanda-mcp', 'tractanda-auth-helper', 'tractanda-setup')
 PROBE_BYTES = 64 * 1024
 COMPILER_THREADS = 4
+SWIFT_6_4 = re.compile(r'Swift version 6\.4(?:\.[0-9]+)?(?:\s|$)')
 RUNTIME = '61a4b20d4ad01b10466e8fc94c50402a9f994430'
 MODELS = {'embeddings': '44399559930365213510b1ee2eb15ded83374f0e',
           'documents': 'a8b999991fe8c521a0cec749973414eaaf823731'}
@@ -112,11 +113,14 @@ def rows(root, roots=None, maximum=SOURCE_LIMIT, skip=()):
             raise ValueError('Input paths collide under bundle normalization.')
         folded_names[folded] = relative
         entries += 1
+        directory = stat.S_ISDIR(info.st_mode)
+        if not (directory or stat.S_ISREG(info.st_mode)):
+            raise ValueError('Input links/special files are forbidden: ' + relative)
         if entries > 40_000 or info.st_mode & 0o7022:
             raise ValueError('Input count or protected mode bound exceeded.')
-        if stat.S_ISDIR(info.st_mode):
+        if directory:
             pending.extend(sorted((v for v in path.iterdir() if v.name not in skip), reverse=True))
-        elif stat.S_ISREG(info.st_mode):
+        else:
             B.safe_path(relative)
             if relative in seen:
                 continue
@@ -133,8 +137,6 @@ def rows(root, roots=None, maximum=SOURCE_LIMIT, skip=()):
             if identity(info) != identity(before) or identity(before) != identity(after):
                 raise ValueError('Input changed while hashing: ' + relative)
             result.append(dict(path=relative, sha256=checksum, size=info.st_size, mode=info.st_mode & 0o777))
-        else:
-            raise ValueError('Input links/special files are forbidden: ' + relative)
     return sorted(result, key=lambda v: v['path'])
 
 
@@ -145,23 +147,29 @@ def source_rows(root=ROOT):
     return rows(root, (*SOURCE_ROOTS, *SOURCE_FILES, *extra), skip=SKIP)
 
 
-def registry(arch):
+def registry(arch, build_os=B.PRIMARY_BUILD_OS):
     value = B.read_json(REGISTRY)
-    if (set(value) != {'profile', 'runtimeRevision', 'architectures'}
-            or value['profile'] != 'tractanda.linux-runtime-inputs.v1' or value['runtimeRevision'] != RUNTIME
-            or set(value['architectures']) != set(B.ARCH)):
+    if (not isinstance(value, dict) or set(value) != {'profile', 'runtimeRevision', 'baselines'}
+            or value['profile'] != 'tractanda.linux-runtime-inputs.v2' or value['runtimeRevision'] != RUNTIME
+            or not isinstance(value['baselines'], dict) or set(value['baselines']) != set(B.GLIBC_LIMITS)):
         raise ValueError('Tracked packaging input registry is invalid.')
-    for entries in value['architectures'].values():
-        if set(entries) != set(COMPONENTS) or any(v is not None and not hash_string(v) for v in entries.values()):
-            raise ValueError('Registry entries must be reviewed normalized manifest hashes or null.')
-    return value['architectures'][arch]
+    for architectures in value['baselines'].values():
+        if not isinstance(architectures, dict) or set(architectures) != set(B.ARCH):
+            raise ValueError('Each build baseline must declare every supported architecture.')
+        for entries in architectures.values():
+            if (not isinstance(entries, dict) or set(entries) != set(COMPONENTS)
+                    or any(v is not None and not hash_string(v) for v in entries.values())):
+                raise ValueError('Registry entries must be reviewed normalized manifest hashes or null.')
+    return value['baselines'][build_os][arch]
 
 
-def require_admitted(arch):
-    entries = registry(arch)
+# Keep the implicit argument of the byte-bound historical Debian13 component
+# recipes. Producer and release entry points always pass their baseline.
+def require_admitted(arch, build_os=B.DEBIAN_BUILD_OS):
+    entries = registry(arch, build_os)
     missing = [v for v in COMPONENTS if entries[v] is None]
     if missing:
-        raise ValueError('Unadmitted ' + arch + ' components: ' + ', '.join(missing)
+        raise ValueError('Unadmitted ' + build_os + ' ' + arch + ' components: ' + ', '.join(missing)
                          + '. Review stable component artifacts/recipes and runtime identity first; no build/model copy started.')
     return entries
 
@@ -175,7 +183,7 @@ def file_entry(value):
     return value
 
 
-def component(path, root, role, arch, expected):
+def component(path, root, role, arch, expected, build_os=B.DEBIAN_BUILD_OS):
     value = B.read_json(path, 16 * 1024**2)
     keys = {'profile', 'component', 'arch', 'baseline', 'modelRevision', 'runtimeRevision', 'sourceInputsSHA256',
             'recipe', 'patches', 'toolchain', 'files', 'dynamicLoads', 'runtimeNotices', 'documentExtraction'}
@@ -183,11 +191,11 @@ def component(path, root, role, arch, expected):
             or value['profile'] != 'tractanda.linux-component-artifacts.v1' or value['component'] != role
             or value['arch'] != arch or value['runtimeRevision'] != RUNTIME or value['modelRevision'] != MODELS[role]
             or not hash_string(value['sourceInputsSHA256'])
-            or value['baseline'] != {'buildOS': 'debian13', 'minimumCPU': B.ARCH[arch][2], 'swiftABI': '6.4'}):
+            or value['baseline'] != {'buildOS': build_os, 'minimumCPU': B.ARCH[arch][2], 'swiftABI': '6.4'}):
         raise ValueError('Unapproved or mismatched normalized component manifest: ' + role)
     tool = value['toolchain']
     if (not isinstance(tool, dict) or set(tool) != {'version', 'swiftSHA256', 'swiftFrontendSHA256', 'clangSHA256'}
-            or not isinstance(tool['version'], str) or not tool['version'].startswith('Swift version 6.4')
+            or not isinstance(tool['version'], str) or not SWIFT_6_4.match(tool['version'])
             or any(not hash_string(tool[k]) for k in tool if k != 'version')):
         raise ValueError('Component Swift toolchain/ABI must be bound explicitly.')
     commitments = [value['recipe'], *value['patches']]
@@ -508,14 +516,15 @@ def mirrored_pins(source, mirrors):
 
 def produce(args):
     # Crucial ordering: a missing reviewed runtime stops before source/model hashing, tools or work creation.
-    admitted = require_admitted(args.arch)
+    build_os = args.build_os
+    admitted = require_admitted(args.arch, build_os)
     registry_snapshot = B.captured_bytes(REGISTRY, 1024**2)
-    if require_admitted(args.arch) != admitted:
+    if require_admitted(args.arch, build_os) != admitted:
         raise ValueError('Runtime packaging approvals changed during capture.')
-    baseline = B.native_baseline(args.arch)
+    baseline = B.native_baseline(args.arch, build_os)
     build_inputs = build_environment()
     components = {role: component(getattr(args, role + '_manifest'), getattr(args, role + '_root'),
-                                  role, args.arch, admitted[role]) for role in COMPONENTS}
+                                  role, args.arch, admitted[role], build_os) for role in COMPONENTS}
     probe_budget = getattr(args, 'toolchain_probe_timeout_seconds', DEFAULT_TOOLCHAIN_PROBE_TIMEOUT_SECONDS)
     swift, tools = toolchain(args.swift, probe_timeout_seconds=probe_budget)
     if any(value['toolchain'] != tools for value in components.values()):
@@ -578,8 +587,8 @@ def produce(args):
             raise ValueError('Swift reported inconsistent product directories within the frozen scratch root.')
         release = reported
     if (toolchain(args.swift, probe_timeout_seconds=probe_budget)[1] != tools
-            or build_environment() != build_inputs):
-        raise ValueError('The compiler or Debian build environment changed during the build.')
+            or build_environment() != build_inputs or B.native_baseline(args.arch, build_os) != baseline):
+        raise ValueError('The compiler or native build environment changed during the build.')
     if B.read_json(work / 'source/Package.resolved') != B.read_json(ROOT / 'Package.resolved'):
         raise ValueError('SwiftPM changed the locked dependency graph.')
     # Known native SwiftPM release layout, no arbitrary output command or discovered alternate binary.
@@ -587,7 +596,7 @@ def produce(args):
     core_changes = []
     for product in selected_products:
         binary = release / product
-        B.elf(binary, args.arch)
+        B.elf(binary, args.arch, build_os)
         entry = rows(release, [product])[0]
         entry['path'] = 'bin/' + product
         B.copy_verified(binary, payload / entry['path'], entry, work_limit)
@@ -626,9 +635,10 @@ def produce(args):
         raise ValueError('Source drifted during the build; no bundle will be admitted.')
     # Bind stable source/recipe/ABI commitments, not operation PIDs/timestamps/temp paths.
     normalized = {'files': original, 'components': admitted, 'toolchain': tools, 'buildFlags': flags,
-                  'buildEnvironment': build_inputs}
-    spec = dict(profile='tractanda.linux-bundle-input.v1', version=(work / 'source/VERSION').read_text().strip(),
-                arch=args.arch, minimumCPU=B.ARCH[args.arch][2], sourceInputsSHA256=sha(B.canonical(normalized)),
+                  'buildEnvironment': build_inputs, 'baseline': baseline}
+    spec = dict(profile='tractanda.linux-bundle-input.v2', version=(work / 'source/VERSION').read_text().strip(),
+                arch=args.arch, buildOS=build_os, minimumCPU=B.ARCH[args.arch][2],
+                sourceInputsSHA256=sha(B.canonical(normalized)),
                 buildFlags=flags, semanticProfile=B.SEMANTIC_PROFILE,
                 documentExtraction=components['documents']['documentExtraction'],
                 dynamicLoads=sorted(set(p for v in components.values() for p in v['dynamicLoads'])),
@@ -655,6 +665,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('plan', 'produce'))
     parser.add_argument('--arch', choices=B.ARCH, required=True)
+    parser.add_argument('--build-os', choices=B.GLIBC_LIMITS, default=B.PRIMARY_BUILD_OS)
     parser.add_argument('--build-timeout-seconds', type=timeout_seconds, default=DEFAULT_BUILD_TIMEOUT_SECONDS)
     parser.add_argument('--toolchain-probe-timeout-seconds', type=timeout_seconds,
                         default=DEFAULT_TOOLCHAIN_PROBE_TIMEOUT_SECONDS)
@@ -671,9 +682,9 @@ def main():
     parser.add_argument('--build-allowance-bytes', type=int)
     args = parser.parse_args()
     if args.action == 'plan':
-        admitted = registry(args.arch)
+        admitted = registry(args.arch, args.build_os)
         print(json.dumps(dict(profile='tractanda.linux-producer-plan.v1', arch=args.arch, products=core_products((ROOT / "VERSION").read_text().strip()),
-              baseline={'buildOS': 'debian13', 'minimumCPU': B.ARCH[args.arch][2], 'swiftABI': '6.4'},
+              baseline={'buildOS': args.build_os, 'minimumCPU': B.ARCH[args.arch][2], 'swiftABI': '6.4'},
               admittedComponents=admitted, missingComponents=[v for v in COMPONENTS if admitted[v] is None],
               buildStarted=False, reserveBytes=B.RESERVE,
               toolchainProbeTimeoutSeconds=args.toolchain_probe_timeout_seconds), indent=2))
