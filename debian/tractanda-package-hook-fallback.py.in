@@ -745,21 +745,21 @@ def layout17_elf_dependencies(path, arch):
             refuse("layout17 ELF dynamic table is unterminated")
         addresses = [value for tag, value in tags if tag == 5]
         sizes = [value for tag, value in tags if tag == 10]
-        if len(addresses) != 1 or len(sizes) != 1 or not 1 <= sizes[0] <= 1024**2:
+        if len(addresses) != 1 or len(sizes) != 1 or not 1 <= sizes[0] <= before.st_size:
             refuse("layout17 ELF string table is invalid")
         mapped = [row[2] + addresses[0] - row[3] for row in segments
                   if row[0] == 1 and row[3] <= addresses[0]
                   and addresses[0] + sizes[0] <= row[3] + row[5]]
         if len(mapped) != 1:
             refuse("layout17 ELF string table is unmapped or ambiguous")
-        strings = read(mapped[0], sizes[0])
         def name(index):
-            if index >= len(strings):
+            if index >= sizes[0]:
                 refuse("layout17 ELF name exceeds its string table")
-            end = strings.find(b"\0", index, min(len(strings), index + 257))
-            if end == -1 or re.fullmatch(rb"[A-Za-z0-9][A-Za-z0-9+_.-]{0,255}", strings[index:end]) is None:
+            text = read(mapped[0] + index, min(257, sizes[0] - index))
+            end = text.find(b"\0")
+            if end == -1 or re.fullmatch(rb"[A-Za-z0-9][A-Za-z0-9+_.-]{0,255}", text[:end]) is None:
                 refuse("layout17 ELF dependency name is invalid")
-            return strings[index:end].decode("ascii")
+            return text[:end].decode("ascii")
         needed = [name(value) for tag, value in tags if tag == 1]
         sonames = [name(value) for tag, value in tags if tag == 14]
         if len(needed) > 256 or len(set(needed)) != len(needed) or len(sonames) > 1:
@@ -806,7 +806,7 @@ def layout17_declared_dependency(source, target, arch, records):
         if match is None:
             refuse("unsupported layout17 Debian Provides metadata")
         provided[match[1]] = match[2]
-    pending, seen = [source], set()
+    pending, seen, scheduled, edges = [source], set(), {source}, set()
     while pending:
         package = pending.pop()
         if package in seen:
@@ -823,6 +823,12 @@ def layout17_declared_dependency(source, target, arch, records):
             if match is None:
                 refuse("unsupported layout17 Debian dependency metadata")
             name, qualifier, relation, minimum = match.groups()
+            edge = (package, name, qualifier, relation, minimum)
+            if edge in edges:
+                continue
+            edges.add(edge)
+            if len(edges) > 4096:
+                refuse("layout17 Debian dependency edge bound exceeded")
             if qualifier not in (None, "any", "native", arch):
                 continue
             if name in provided:
@@ -837,7 +843,11 @@ def layout17_declared_dependency(source, target, arch, records):
                 continue
             if name in provided:
                 return True
-            pending.append(name)
+            if name not in scheduled:
+                if len(scheduled) >= 256:
+                    refuse("layout17 Debian dependency worklist bound exceeded")
+                scheduled.add(name)
+                pending.append(name)
     return False
 
 

@@ -23,7 +23,7 @@ def module():
     return value
 
 
-def elf(needed=(), soname=None, machine=62):
+def elf(needed=(), soname=None, machine=62, string_padding=0):
     strings = bytearray(b'\0')
     tags = []
     for name in needed:
@@ -32,6 +32,7 @@ def elf(needed=(), soname=None, machine=62):
     if soname:
         tags.append((14, len(strings)))
         strings.extend(soname.encode() + b'\0')
+    strings.extend(bytes(string_padding))
     string_offset = 176 + (len(tags) + 3) * 16
     tags += [(5, 4096 + string_offset), (10, len(strings)), (0, 0)]
     dynamic = b''.join(struct.pack('<qQ', *tag) for tag in tags)
@@ -62,6 +63,10 @@ class ELFTests(unittest.TestCase):
         for arch, machine in (('amd64', 62), ('arm64', 183)):
             self.assertEqual(self.parse(elf(['libc.so.6'], 'libfixture.so.1', machine), arch),
                              (['libc.so.6'], 'libfixture.so.1'))
+
+    def test_large_dynamic_string_table_needs_only_bounded_names(self):
+        self.assertEqual(self.parse(elf(['libc.so.6'], string_padding=2 * 1024**2)),
+                         (['libc.so.6'], None))
 
     def test_wrong_arch_truncation_bounds_and_unsafe_needed_name(self):
         malformed = [elf(machine=183), elf()[:100], elf(['../libbad.so'])]
@@ -182,6 +187,9 @@ class DebianRelationshipTests(unittest.TestCase):
         records = {'fixture-a': record('fixture-b'), 'fixture-b': record('fixture-a'),
                    'fixture-target': record('')}
         with mock.patch.object(m, 'layout17_native_command') as command:
+            self.assertFalse(m.layout17_declared_dependency('fixture-a', 'fixture-target', 'amd64', records))
+            command.assert_not_called()
+            records['fixture-a'] = record(', '.join(['fixture-b'] * 2000))
             self.assertFalse(m.layout17_declared_dependency('fixture-a', 'fixture-target', 'amd64', records))
             command.assert_not_called()
             records['fixture-a'] = record('fixture-target [unrecognized]')
