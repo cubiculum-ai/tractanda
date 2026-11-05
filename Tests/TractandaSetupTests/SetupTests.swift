@@ -1096,7 +1096,7 @@ final class SetupTests: XCTestCase {
             documentExtraction: original.documentExtraction, canonicalFormats: support)
         try JSONEncoder().encode(updated).write(to: path)
     }
-    private func publishFormat2Fixture(_ receipt: InstallationReceipt) throws -> (URL, Data) {
+    private func publishCanonicalFixture(_ receipt: InstallationReceipt) throws -> (URL, Data) {
         let store = try ItemStore.openInitialized(
             root: URL(fileURLWithPath: receipt.store),
             indexDirectory: URL(fileURLWithPath: receipt.indexDirectory))
@@ -1109,9 +1109,10 @@ final class SetupTests: XCTestCase {
             FileManager.default.enumerator(
                 at: URL(fileURLWithPath: receipt.store).appendingPathComponent("items"),
                 includingPropertiesForKeys: nil))
+        let leaf = "\(revision.itemID).\(revision.revisionID).tractanda"
         let path = try XCTUnwrap(
             enumerator.allObjects.compactMap { $0 as? URL }.first(where: {
-                $0.lastPathComponent == revision.revisionID + ".tractanda"
+                $0.lastPathComponent == leaf
             }))
         return (path, try Data(contentsOf: path))
     }
@@ -1132,7 +1133,9 @@ final class SetupTests: XCTestCase {
         let fresh = try XCTUnwrap(initial.readReceipt("preview"))
         let root = URL(fileURLWithPath: fresh.store).resolvingSymlinksInPath()
         let before = try XCTUnwrap(CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid()))
-        XCTAssertEqual(before.minimumReaderLevel, PersonalWorkgroupProfile.readerLevel)
+        XCTAssertEqual(before.minimumReaderLevel, CanonicalFormatSupport.current.readerLevel)
+        XCTAssertTrue(before.capabilities.contains(CanonicalPhysicalLayout.capability))
+        XCTAssertTrue(before.capabilities.contains("tractanda.message-items.v1"))
         XCTAssertFalse(
             before.capabilities.contains(PersonalSyncValidation.capability),
             "The captured personal baseline has not published current personal sync semantics")
@@ -1141,7 +1144,7 @@ final class SetupTests: XCTestCase {
         try rewriteCanonicalSupport(f, support: previousSupport)
         try initial.install(f.options, upgrade: true)
         let previous = try XCTUnwrap(initial.readReceipt("preview"))
-        let canonical = try publishFormat2Fixture(previous)
+        let canonical = try publishCanonicalFixture(previous)
         try rewriteCanonicalSupport(f, support: .current)
         var raised: CanonicalReaderRequirement?
         let candidate = SetupEngine(
@@ -1166,7 +1169,7 @@ final class SetupTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: canonical.0), canonical.1)
         let persisted = try XCTUnwrap(CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid()))
         XCTAssertEqual(persisted, raised)
-        XCTAssertEqual(persisted.minimumReaderLevel, max(before.minimumReaderLevel, 18))
+        XCTAssertEqual(persisted.minimumReaderLevel, before.minimumReaderLevel)
         XCTAssertTrue(Set(before.capabilities).isSubset(of: Set(persisted.capabilities)))
         XCTAssertTrue(persisted.capabilities.contains(PersonalSyncValidation.capability))
         XCTAssertNotEqual(
@@ -1193,7 +1196,7 @@ final class SetupTests: XCTestCase {
             try rewriteCanonicalSupport(f, support: previousSupport)
             try initial.install(f.options, upgrade: true)
             let previous = try XCTUnwrap(initial.readReceipt("preview"))
-            let canonical = extraContent ? try publishFormat2Fixture(previous) : nil
+            let canonical = extraContent ? try publishCanonicalFixture(previous) : nil
             let admitted = try XCTUnwrap(
                 CanonicalReaderRequirement.load(root: root, ownerUID: tractanda_uid()))
             XCTAssertNoThrow(try previousSupport.require(admitted))
@@ -1455,7 +1458,9 @@ extension SetupTests {
         let first = try XCTUnwrap(initial.readReceipt("preview"))
         let store = URL(fileURLWithPath: first.store).resolvingSymlinksInPath()
         let before = try XCTUnwrap(CanonicalReaderRequirement.load(root: store, ownerUID: tractanda_uid()))
-        XCTAssertEqual(before.minimumReaderLevel, PersonalWorkgroupProfile.readerLevel)
+        XCTAssertEqual(before.minimumReaderLevel, CanonicalFormatSupport.current.readerLevel)
+        XCTAssertTrue(before.capabilities.contains(CanonicalPhysicalLayout.capability))
+        XCTAssertTrue(before.capabilities.contains("tractanda.message-items.v1"))
         XCTAssertFalse(
             before.capabilities.contains(PersonalSyncValidation.capability),
             "The captured personal baseline has not published current personal sync semantics")
@@ -1478,7 +1483,7 @@ extension SetupTests {
                     root: store, ownerUID: tractanda_uid())
             }
             raised = try CanonicalReaderRequirement.load(root: store, ownerUID: tractanda_uid())
-            throw SetupError("fixture candidate health failed after actual publication-intent floor advance")
+            throw SetupError("fixture candidate health failed after personal-sync capability activation")
         }
         XCTAssertThrowsError(try candidate.install(peerOptions(f, .replace(input)), upgrade: true)) {
             XCTAssertTrue($0.localizedDescription.contains("canonical compatibility blocks rollback"))
@@ -1494,7 +1499,7 @@ extension SetupTests {
                     PersonalSyncValidation.capability
                 ]
             ).sorted())
-        XCTAssertEqual(persisted.minimumReaderLevel, max(before.minimumReaderLevel, 18))
+        XCTAssertEqual(persisted.minimumReaderLevel, before.minimumReaderLevel)
         XCTAssertTrue(Set(before.capabilities).isSubset(of: Set(persisted.capabilities)))
         XCTAssertTrue(persisted.capabilities.contains(PersonalSyncValidation.capability))
         XCTAssertNotEqual(
@@ -1583,6 +1588,58 @@ extension SetupTests {
             })
         XCTAssertLessThan(enable, bootstrap)
         XCTAssertTrue(runner.jobs.contains(label))
+    }
+
+    func testHeldMacFinalizesPeerTransitionsWithoutStarting() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        try rewriteCanonicalSupport(f, support: .current)
+        let runner = Runner()
+        let installer = peerInstaller(f, runner: runner, loaded: LoadedPeerStatus())
+        let input = try peerInput(f)
+        try installer.install(peerOptions(f, .replace(input)))
+        let uid = try SystemAccountDirectory().user(named: f.roots.platform.serviceUser).uid
+        for action: SetupOptions.PeerRuntimeAction in [
+            .preserve, .replace(try peerInput(f, listen: true)), .disable,
+        ] {
+            var receipt = try XCTUnwrap(installer.readReceipt("preview"))
+            let captured: Data?
+            if case .replace(let path) = action {
+                captured = try Data(contentsOf: path)
+            } else {
+                captured = nil
+            }
+            var transition = try installer.preparePeerTransition(
+                previous: receipt, options: peerOptions(f, action), captured: captured, uid: uid)
+            receipt.peerRuntimeConfiguration = transition.desired
+            receipt.peerRuntimePrevious = transition.previous
+            receipt.state = .preparing
+            try installer.writeReceipt(receipt)
+            XCTAssertThrowsError(try installer.layout17HoldInstalledMac(&receipt, clustered: true))
+            XCTAssertNotNil(try installer.readReceipt("preview")?.peerRuntimePrevious)
+            var mismatched = receipt
+            mismatched.peerRuntimePrevious = nil
+            XCTAssertThrowsError(
+                try installer.layout17HoldInstalledMac(
+                    &mismatched, clustered: true, peerTransition: transition))
+            XCTAssertNotNil(try installer.readReceipt("preview")?.peerRuntimePrevious)
+            if case .replace = action {
+                try installer.publishPeerBytes(
+                    transition.bytes, replacing: transition.currentBytes, instance: "preview", uid: uid)
+                transition = try installer.preparePeerTransition(
+                    previous: installer.readReceipt("preview"), options: peerOptions(f, action),
+                    captured: captured, uid: uid)
+            }
+            try installer.layout17HoldInstalledMac(&receipt, clustered: true, peerTransition: transition)
+            let saved = try XCTUnwrap(installer.readReceipt("preview"))
+            XCTAssertEqual(saved.state, .active)
+            XCTAssertNil(saved.peerRuntimePrevious)
+            XCTAssertEqual(saved.peerRuntimeConfiguration, transition.desired)
+            XCTAssertEqual(
+                try installer.ownedPeerBytes(saved.peerRuntimeConfiguration, instance: "preview", uid: uid),
+                transition.bytes)
+            XCTAssertFalse(runner.jobs.contains(installer.serviceBackend.label("preview", role: .server)))
+        }
     }
 
 }

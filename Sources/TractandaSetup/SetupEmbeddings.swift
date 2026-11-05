@@ -47,9 +47,9 @@ extension SetupEngine {
             receipt.instance, role: .embeddings,
             enableAtBoot: !(try packageStartupIsConfiguring(receipt.instance)))
     }
-    func replaceEmbeddingRegistration(_ receipt: inout InstallationReceipt) throws {
+    func embeddingArguments(_ receipt: InstallationReceipt) throws -> [String]? {
         try requirePackageRelease(receipt.release)
-        guard let payload = receipt.embedding else { return }
+        guard let payload = receipt.embedding else { return nil }
         guard receipt.port < 65535 else {
             throw SetupError("A bundled embedding service needs a port after the HTTP port.")
         }
@@ -72,6 +72,10 @@ extension SetupEngine {
                 ?? release.appendingPathComponent(payload.modelDirectory).path,
             "--port", String(receipt.port + 1),
         ]
+        return arguments
+    }
+    func replaceEmbeddingRegistration(_ receipt: inout InstallationReceipt) throws {
+        guard let arguments = try embeddingArguments(receipt) else { return }
         let dictionary: [String: Any] = [
             "Label": "ai.tractanda.embeddings." + receipt.instance, "ProgramArguments": arguments,
             "UserName": roots.platform.serviceUser, "RunAtLoad": true,

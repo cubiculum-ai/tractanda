@@ -437,10 +437,29 @@ extension SetupEngine {
     func layout17MayStartDuringInstallation(_ instance: String) throws -> Bool {
         try !layout17StoppedInstallation.contains(instance) && readLayout17Intent(instance) == nil
     }
-    func layout17HoldInstalledMac(_ receipt: inout InstallationReceipt, clustered: Bool) throws {
+    func layout17HoldInstalledMac(
+        _ receipt: inout InstallationReceipt, clustered: Bool,
+        peerTransition: ManagedPeerTransition? = nil
+    ) throws {
         let instance = receipt.instance
+        guard peerTransition != nil || receipt.peerRuntimePrevious == nil else {
+            throw SetupError(
+                "Finish pending peer configuration recovery before completing the held installation.")
+        }
+        if let peerTransition {
+            guard receipt.peerRuntimeConfiguration == peerTransition.desired,
+                receipt.peerRuntimePrevious == peerTransition.previous
+            else {
+                throw SetupError("The held installation peer transition differs from its recovery receipt.")
+            }
+        }
         layout17StoppedInstallation.insert(instance)
         defer { layout17StoppedInstallation.remove(instance) }
+        let uid = try SystemAccountDirectory().user(named: roots.platform.serviceUser).uid
+        if let peerTransition, receipt.peerRuntimeConfiguration != nil {
+            try publishPeerBytes(
+                peerTransition.bytes, replacing: peerTransition.currentBytes, instance: instance, uid: uid)
+        }
         try replaceAuthenticationRegistration(&receipt)
         try replaceEmbeddingRegistration(&receipt)
         try replaceRegistration(&receipt)
@@ -448,6 +467,11 @@ extension SetupEngine {
         try writeGlobalProfile(receipt)
         try publishClientLink(receipt)
         try publishTUICommand()
+        if let peerTransition, receipt.peerRuntimeConfiguration == nil {
+            try publishPeerBytes(nil, replacing: peerTransition.currentBytes, instance: instance, uid: uid)
+        }
+        _ = try ownedPeerBytes(receipt.peerRuntimeConfiguration, instance: instance, uid: uid)
+        receipt.peerRuntimePrevious = nil
         receipt.state = .active
         receipt.recoveryReason =
             clustered

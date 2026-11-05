@@ -571,12 +571,7 @@ extension SetupEngine {
         receipt.authenticationDefinitionSHA256 = SHA256.hash(data: authentication).map {
             String(format: "%02x", $0)
         }.joined()
-        if let payload = receipt.embedding {
-            let argv = [
-                packagePayload.appendingPathComponent("bin/tractanda-embeddings").path,
-                "--model", packagePayload.appendingPathComponent(payload.modelDirectory).path,
-                "--port", String(receipt.port + 1),
-            ]
+        if let argv = try embeddingArguments(receipt) {
             let bytes = try serviceBackend.systemdDefinition(
                 instance: receipt.instance, role: .embeddings, arguments: argv)
             try publishPackageDefinition(bytes, role: .embeddings, receipt: &receipt)

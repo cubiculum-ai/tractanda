@@ -861,6 +861,48 @@ final class SetupPackageLifecycleTests: XCTestCase {
         XCTAssertEqual(try f.canonicalBytes(), before)
     }
 
+    func testStoppedPackageUsesSharedProvisionedEmbeddingCommand() throws {
+        let f = try fixture()
+        try f.configureFresh()
+        try f.install()
+        _ = try f.hook(.prermUpgrade)
+        var receipt = try XCTUnwrap(f.engine.readReceipt("a"))
+        receipt.embedding = .granite
+        let old = try f.engine.serviceBackend.systemdDefinition(
+            instance: "a", role: .embeddings, arguments: ["/old/embedding"])
+        try f.engine.writeProtected(old, to: f.engine.embeddingDefinitionURL("a"), mode: 0o644)
+        receipt.embeddingDefinitionSHA256 = Fixture.digest(old)
+        try f.engine.writeReceipt(receipt)
+        let artifact = ModelArtifactManifest(
+            identifier: "granite-embedding-311m-multilingual-r2", repository: "example/model",
+            revision: String(repeating: "a", count: 40),
+            files: [.init(path: "config.json", size: 1, sha256: String(repeating: "b", count: 64))])
+        let catalog = try JSONEncoder().encode(ModelProvisioningCatalog(artifacts: [artifact]))
+        let catalogURL = f.engine.packagePayload.appendingPathComponent("models/manifest.json")
+        try FileManager.default.createDirectory(
+            at: catalogURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try catalog.write(to: catalogURL)
+        let prior = try JSONDecoder().decode(BundleManifest.self, from: Data(contentsOf: f.manifestURL))
+        let manifest = BundleManifest(
+            version: prior.version, platform: prior.platform, arch: prior.arch, files: prior.files,
+            embedding: .granite, canonicalFormats: prior.canonicalFormats,
+            modelProvisioningManifestPath: "models/manifest.json",
+            modelProvisioningManifestSHA256: Fixture.digest(catalog))
+        try JSONEncoder().encode(manifest).write(to: f.manifestURL)
+        let incoming = SetupPackageCompatibility(
+            manifestSHA256: Fixture.digest(try Data(contentsOf: f.manifestURL)), version: manifest.version,
+            arch: manifest.arch, canonicalFormats: try XCTUnwrap(manifest.canonicalFormats))
+        try f.engine.configureStoppedPackageInstance(&receipt, manifest: manifest, incoming: incoming)
+        let text = String(decoding: try Data(contentsOf: f.engine.embeddingDefinitionURL("a")), as: UTF8.self)
+        XCTAssertTrue(text.contains("models"))
+        XCTAssertTrue(text.contains("granite-embedding-311m-multilingual-r2"))
+        XCTAssertTrue(text.contains(artifact.directory(in: f.engine.roots.models).path))
+        XCTAssertFalse(
+            text.contains(
+                f.engine.packagePayload.appendingPathComponent(EmbeddingPayload.granite.modelDirectory).path))
+        XCTAssertTrue(f.runner.running.isEmpty)
+    }
+
     func testStoppedDocumentRemovalOrUnknownSemanticsPreservesReceiptAndCanonicalData() throws {
         for unknownSemantics in [false, true] {
             let f = try fixture()

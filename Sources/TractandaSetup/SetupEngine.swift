@@ -412,13 +412,14 @@ public final class SetupEngine {
                     let clustered = try migrateLayout17Store(
                         receipt, bundle: release, incoming: incoming, original: layout17Original)
                     if clustered || !layout17WasRunning {
-                        try layout17HoldInstalledMac(&receipt, clustered: clustered)
+                        try layout17HoldInstalledMac(
+                            &receipt, clustered: clustered, peerTransition: peerTransition)
                         return
                     }
                 }
                 try requireCanonicalReader(receipt, quiescent: true)
                 if layout17KeepStopped {
-                    try layout17HoldInstalledMac(&receipt, clustered: false)
+                    try layout17HoldInstalledMac(&receipt, clustered: false, peerTransition: peerTransition)
                     return
                 }
                 if receipt.peerRuntimeConfiguration != nil {
