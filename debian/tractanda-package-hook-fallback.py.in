@@ -10,6 +10,7 @@ import pwd
 import platform
 import re
 import stat
+import struct
 import subprocess
 import sys
 import tarfile
@@ -704,6 +705,142 @@ def layout17_native_command(arguments):
                           stderr=subprocess.PIPE, env=_CONTROL_ENV, text=True, check=False)
 
 
+def layout17_elf_dependencies(path, arch):
+    """Read only bounded ELF64 program/dynamic metadata, without an end-user binutils dependency."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_mode & 0o022
+                or not 64 <= before.st_size <= 256 * 1024**2):
+            refuse("unsafe layout17 ELF dependency")
+        def read(offset, size):
+            if offset < 0 or size < 0 or offset + size > before.st_size:
+                refuse("layout17 ELF metadata is out of bounds")
+            data = os.pread(fd, size, offset)
+            if len(data) != size:
+                refuse("layout17 ELF metadata is truncated")
+            return data
+        header = read(0, 64)
+        if (header[:7] != b"\x7fELF\x02\x01\x01"
+                or struct.unpack_from("<H", header, 16)[0] not in (2, 3)
+                or struct.unpack_from("<H", header, 18)[0] != {"amd64": 62, "arm64": 183}[arch]):
+            refuse("layout17 dependency has an unsupported ELF architecture")
+        offset = struct.unpack_from("<Q", header, 32)[0]
+        width, count = struct.unpack_from("<HH", header, 54)
+        if width != 56 or not 1 <= count <= 256:
+            refuse("layout17 ELF program header bound exceeded")
+        segments = [struct.unpack("<IIQQQQQQ", read(offset + index * width, width))
+                    for index in range(count)]
+        dynamic = [row for row in segments if row[0] == 2]
+        if len(dynamic) != 1 or not 16 <= dynamic[0][5] <= 131072 or dynamic[0][5] % 16:
+            refuse("layout17 ELF dynamic table is invalid")
+        table = read(dynamic[0][2], dynamic[0][5])
+        tags = []
+        for index in range(0, len(table), 16):
+            tag, value = struct.unpack_from("<qQ", table, index)
+            if tag == 0:
+                break
+            tags.append((tag, value))
+        else:
+            refuse("layout17 ELF dynamic table is unterminated")
+        addresses = [value for tag, value in tags if tag == 5]
+        sizes = [value for tag, value in tags if tag == 10]
+        if len(addresses) != 1 or len(sizes) != 1 or not 1 <= sizes[0] <= 1024**2:
+            refuse("layout17 ELF string table is invalid")
+        mapped = [row[2] + addresses[0] - row[3] for row in segments
+                  if row[0] == 1 and row[3] <= addresses[0]
+                  and addresses[0] + sizes[0] <= row[3] + row[5]]
+        if len(mapped) != 1:
+            refuse("layout17 ELF string table is unmapped or ambiguous")
+        strings = read(mapped[0], sizes[0])
+        def name(index):
+            if index >= len(strings):
+                refuse("layout17 ELF name exceeds its string table")
+            end = strings.find(b"\0", index, min(len(strings), index + 257))
+            if end == -1 or re.fullmatch(rb"[A-Za-z0-9][A-Za-z0-9+_.-]{0,255}", strings[index:end]) is None:
+                refuse("layout17 ELF dependency name is invalid")
+            return strings[index:end].decode("ascii")
+        needed = [name(value) for tag, value in tags if tag == 1]
+        sonames = [name(value) for tag, value in tags if tag == 14]
+        if len(needed) > 256 or len(set(needed)) != len(needed) or len(sonames) > 1:
+            refuse("layout17 ELF dependency count or identity is invalid")
+        after = os.fstat(fd)
+        named = os.stat(path, follow_symlinks=False)
+        stamp = lambda row: (row.st_dev, row.st_ino, row.st_mode, row.st_uid, row.st_size,
+                             row.st_mtime_ns, row.st_ctime_ns)
+        if stamp(before) != stamp(after) or stamp(after) != stamp(named):
+            refuse("layout17 ELF dependency changed during inspection")
+        return needed, sonames[0] if sonames else None
+    finally:
+        os.close(fd)
+
+
+def layout17_package_record(package, arch, records):
+    if package not in records:
+        if len(records) >= 256 or re.fullmatch(r"[a-z0-9][a-z0-9+.-]{0,127}", package) is None:
+            refuse("layout17 Debian dependency graph exceeds its bound")
+        result = layout17_native_command(["/usr/bin/dpkg-query", "-W",
+            "-f=${Status}\t${Version}\t${Architecture}\t${Depends}\t${Pre-Depends}\t${Provides}\n", package])
+        if len(result.stdout.encode()) > 65536:
+            refuse("layout17 Debian dependency metadata exceeds its bound")
+        fields = result.stdout.rstrip("\n").split("\t")
+        if result.returncode == 1 or (not result.returncode and len(fields) == 6
+                                     and fields[0] != "install ok installed"):
+            records[package] = None
+        elif (result.returncode or result.stderr or len(fields) != 6
+                or fields[0] != "install ok installed" or fields[2] not in (arch, "all")):
+            refuse("layout17 Debian dependency is not configured for this architecture")
+        else:
+            records[package] = fields
+    return records[package]
+
+
+def layout17_declared_dependency(source, target, arch, records):
+    """An ELF edge must also be backed by current configured Debian dependency metadata."""
+    target_record = layout17_package_record(target, arch, records)
+    if target_record is None:
+        return False
+    provided = {target: target_record[1]}
+    for value in target_record[5].split(",") if target_record[5] else []:
+        match = re.fullmatch(r"\s*([a-z0-9][a-z0-9+.-]*)(?:\s*\(=\s*([^ ()]+)\))?\s*", value)
+        if match is None:
+            refuse("unsupported layout17 Debian Provides metadata")
+        provided[match[1]] = match[2]
+    pending, seen = [source], set()
+    while pending:
+        package = pending.pop()
+        if package in seen:
+            continue
+        seen.add(package)
+        record = layout17_package_record(package, arch, records)
+        if record is None:
+            continue
+        for alternative in re.split(r"[,|]", ",".join(record[3:5])):
+            if not alternative.strip():
+                continue
+            match = re.fullmatch(r"\s*([a-z0-9][a-z0-9+.-]*)(?::(any|native|amd64|arm64))?"
+                                 r"(?:\s*\((<<|<=|=|>=|>>)\s*([^ ()]+)\))?\s*", alternative)
+            if match is None:
+                refuse("unsupported layout17 Debian dependency metadata")
+            name, qualifier, relation, minimum = match.groups()
+            if qualifier not in (None, "any", "native", arch):
+                continue
+            if name in provided:
+                version = provided[name]
+            else:
+                candidate = layout17_package_record(name, arch, records)
+                if candidate is None:
+                    continue
+                version = candidate[1]
+            if relation and (version is None or layout17_native_command(
+                    ["/usr/bin/dpkg", "--compare-versions", version, relation, minimum]).returncode):
+                continue
+            if name in provided:
+                return True
+            pending.append(name)
+    return False
+
+
 def layout17_check_loader(stage, inventory):
     arch = inventory["arch"]
     loader = _LAYOUT17_LOADER[arch]
@@ -716,8 +853,7 @@ def layout17_check_loader(stage, inventory):
     result = layout17_native_command([loader, "--list", os.path.join(stage, _LAYOUT17_INSPECTOR)])
     if result.returncode or result.stderr or len(result.stdout.encode()) > 65536:
         refuse("layout17 inspector runtime closure could not load")
-    observed = set()
-    checked_packages = set()
+    observed, paths, providers, records = set(), {}, {}, {}
     for line in result.stdout.splitlines():
         line = line.strip()
         if re.fullmatch(r"linux-vdso\.so\.1 \(0x[0-9a-f]+\)", line):
@@ -730,10 +866,13 @@ def layout17_check_loader(stage, inventory):
             if direct is None or os.path.realpath(direct[1]) != os.path.realpath(loader):
                 refuse("layout17 inspector loader reported an unknown dependency")
             name, path = loader_name, direct[1]
-        if name not in expected:
-            refuse("layout17 inspector loaded a dependency outside its closure")
+        if len(observed) >= 512:
+            refuse("layout17 loader dependency graph exceeds its bound")
+        if name in observed:
+            refuse("layout17 inspector loader reported a duplicate dependency")
         observed.add(name)
         physical = os.path.realpath(path)
+        paths[name] = physical
         if name in private:
             if physical != os.path.join(stage, private[name]):
                 refuse("layout17 private runtime dependency resolved outside its verified copy")
@@ -744,8 +883,9 @@ def layout17_check_loader(stage, inventory):
         metadata = os.lstat(physical)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0 or metadata.st_mode & 0o022:
             refuse("layout17 system dependency has unsafe custody")
-        provider = system[name]
         ownership = layout17_native_command(["/usr/bin/dpkg-query", "--search", path, physical])
+        if len(ownership.stdout.encode()) > 65536:
+            refuse("layout17 Debian ownership metadata exceeds its bound")
         owners = set()
         for row in ownership.stdout.splitlines():
             for candidate in (path, physical):
@@ -754,21 +894,43 @@ def layout17_check_loader(stage, inventory):
                     owner = row[:-len(suffix)]
                     if re.fullmatch(r"[a-z0-9][a-z0-9+.-]+(?::(?:amd64|arm64))?", owner):
                         owners.add(owner.split(":", 1)[0])
-        if ownership.returncode not in (0, 1) or owners != {provider["package"]}:
+        if ownership.returncode not in (0, 1) or len(owners) != 1:
             refuse("layout17 system dependency has an unexpected Debian provider")
-        binding = (provider["package"], provider["version"])
-        if binding not in checked_packages:
-            package, minimum = binding
-            installed = layout17_native_command(["/usr/bin/dpkg-query", "-W",
-                "-f=${Status}\t${Version}\t${Architecture}\n", package])
-            fields = installed.stdout.strip().split("\t")
-            if (installed.returncode or installed.stderr or len(fields) != 3
-                    or fields[0] != "install ok installed" or fields[2] != arch
-                    or layout17_native_command(["/usr/bin/dpkg", "--compare-versions", fields[1], "ge", minimum]).returncode):
-                refuse("layout17 system dependency is not configured at the required version")
-            checked_packages.add(binding)
-    if observed != expected:
-        refuse("layout17 inspector's actual loader closure differs from its commitment")
+        package = next(iter(owners))
+        fields = layout17_package_record(package, arch, records)
+        if fields is None or fields[2] != arch:
+            refuse("layout17 system dependency is not configured for this architecture")
+        providers[name] = package
+        if name in system and (package != system[name]["package"] or layout17_native_command(
+                ["/usr/bin/dpkg", "--compare-versions", fields[1], "ge", system[name]["version"]]).returncode):
+            refuse("layout17 system dependency is not configured at the required version")
+    if not set(private) <= observed or loader_name not in observed:
+        refuse("layout17 inspector's private runtime or loader is incomplete")
+    graph = {}
+    for name, path in {"@inspector": os.path.join(stage, _LAYOUT17_INSPECTOR), **paths}.items():
+        needed, soname = layout17_elf_dependencies(path, arch)
+        if (name != "@inspector" and soname is not None and soname != name) or not set(needed) <= observed:
+            refuse("layout17 ELF dependency identity or loader graph differs")
+        if name == "@inspector" or name in private:
+            if not set(needed) <= expected:
+                refuse("layout17 private runtime introduced an uncommitted dependency")
+        elif set(needed) & set(private):
+            refuse("layout17 system dependency shadows the private runtime")
+        graph[name] = needed
+    reached, pending = set(), ["@inspector", loader_name]
+    while pending:
+        name = pending.pop()
+        if name in reached:
+            continue
+        reached.add(name)
+        for dependency in graph[name]:
+            if (dependency not in expected and name in providers
+                    and providers[name] != providers[dependency]
+                    and not layout17_declared_dependency(providers[name], providers[dependency], arch, records)):
+                refuse("layout17 extra system dependency lacks a declared Debian dependency")
+            pending.append(dependency)
+    if reached != observed | {"@inspector"}:
+        refuse("layout17 loader reported a dependency outside the actual ELF graph")
 
 
 @contextlib.contextmanager

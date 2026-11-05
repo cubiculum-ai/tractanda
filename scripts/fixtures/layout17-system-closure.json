@@ -1,0 +1,1327 @@
+{
+  "inventory": {
+    "arch": "amd64",
+    "privateSONAMEs": {
+      "libBlocksRuntime.so": "lib/libBlocksRuntime.so",
+      "libFoundation.so": "lib/libFoundation.so",
+      "libFoundationEssentials.so": "lib/libFoundationEssentials.so",
+      "libFoundationInternationalization.so": "lib/libFoundationInternationalization.so",
+      "libFoundationNetworking.so": "lib/libFoundationNetworking.so",
+      "lib_FoundationICU.so": "lib/lib_FoundationICU.so",
+      "libdispatch.so": "lib/libdispatch.so",
+      "libswiftCore.so": "lib/libswiftCore.so",
+      "libswiftDispatch.so": "lib/libswiftDispatch.so",
+      "libswiftGlibc.so": "lib/libswiftGlibc.so",
+      "libswiftObservation.so": "lib/libswiftObservation.so",
+      "libswiftSynchronization.so": "lib/libswiftSynchronization.so",
+      "libswift_Builtin_float.so": "lib/libswift_Builtin_float.so",
+      "libswift_Concurrency.so": "lib/libswift_Concurrency.so",
+      "libswift_RegexParser.so": "lib/libswift_RegexParser.so",
+      "libswift_StringProcessing.so": "lib/libswift_StringProcessing.so"
+    },
+    "systemLibraries": {
+      "ld-linux-x86-64.so.2": {
+        "package": "libc6",
+        "version": "2.41-12+deb13u4"
+      },
+      "libaudit.so.1": {
+        "package": "libaudit1",
+        "version": "1:4.0.2-2+deb13u1"
+      },
+      "libbrotlicommon.so.1": {
+        "package": "libbrotli1",
+        "version": "1.1.0-2+b7"
+      },
+      "libbrotlidec.so.1": {
+        "package": "libbrotli1",
+        "version": "1.1.0-2+b7"
+      },
+      "libc.so.6": {
+        "package": "libc6",
+        "version": "2.41-12+deb13u4"
+      },
+      "libcap-ng.so.0": {
+        "package": "libcap-ng0",
+        "version": "0.8.5-4+b1"
+      },
+      "libcom_err.so.2": {
+        "package": "libcom-err2",
+        "version": "1.47.2-3+b12"
+      },
+      "libcrypto.so.3": {
+        "package": "libssl3t64",
+        "version": "3.5.7-1~deb13u3"
+      },
+      "libcurl.so.4": {
+        "package": "libcurl4t64",
+        "version": "8.14.1-2+deb13u5"
+      },
+      "libffi.so.8": {
+        "package": "libffi8",
+        "version": "3.4.8-2"
+      },
+      "libgcc_s.so.1": {
+        "package": "libgcc-s1",
+        "version": "14.2.0-19"
+      },
+      "libgmp.so.10": {
+        "package": "libgmp10",
+        "version": "2:6.3.0+dfsg-3"
+      },
+      "libgnutls.so.30": {
+        "package": "libgnutls30t64",
+        "version": "3.8.9-3+deb13u4"
+      },
+      "libgssapi_krb5.so.2": {
+        "package": "libgssapi-krb5-2",
+        "version": "1.21.3-5+deb13u1"
+      },
+      "libhogweed.so.6": {
+        "package": "libhogweed6t64",
+        "version": "3.10.1-1"
+      },
+      "libidn2.so.0": {
+        "package": "libidn2-0",
+        "version": "2.3.8-2"
+      },
+      "libk5crypto.so.3": {
+        "package": "libk5crypto3",
+        "version": "1.21.3-5+deb13u1"
+      },
+      "libkeyutils.so.1": {
+        "package": "libkeyutils1",
+        "version": "1.6.3-6"
+      },
+      "libkrb5.so.3": {
+        "package": "libkrb5-3",
+        "version": "1.21.3-5+deb13u1"
+      },
+      "libkrb5support.so.0": {
+        "package": "libkrb5support0",
+        "version": "1.21.3-5+deb13u1"
+      },
+      "liblber.so.2": {
+        "package": "libldap2",
+        "version": "2.6.10+dfsg-1"
+      },
+      "libldap.so.2": {
+        "package": "libldap2",
+        "version": "2.6.10+dfsg-1"
+      },
+      "libm.so.6": {
+        "package": "libc6",
+        "version": "2.41-12+deb13u4"
+      },
+      "libnettle.so.8": {
+        "package": "libnettle8t64",
+        "version": "3.10.1-1"
+      },
+      "libnghttp2.so.14": {
+        "package": "libnghttp2-14",
+        "version": "1.64.0-1.1+deb13u1"
+      },
+      "libnghttp3.so.9": {
+        "package": "libnghttp3-9",
+        "version": "1.8.0-1"
+      },
+      "libp11-kit.so.0": {
+        "package": "libp11-kit0",
+        "version": "0.25.5-3"
+      },
+      "libpam.so.0": {
+        "package": "libpam0g",
+        "version": "1.7.0-5"
+      },
+      "libpsl.so.5": {
+        "package": "libpsl5t64",
+        "version": "0.21.2-1.1+b1"
+      },
+      "libresolv.so.2": {
+        "package": "libc6",
+        "version": "2.41-12+deb13u4"
+      },
+      "librtmp.so.1": {
+        "package": "librtmp1",
+        "version": "2.4+20151223.gitfa8646d.1-2+b5"
+      },
+      "libsasl2.so.2": {
+        "package": "libsasl2-2",
+        "version": "2.1.28+dfsg1-9"
+      },
+      "libsqlite3.so.0": {
+        "package": "libsqlite3-0",
+        "version": "3.46.1-7+deb13u2"
+      },
+      "libssh2.so.1": {
+        "package": "libssh2-1t64",
+        "version": "1.11.1-1+deb13u2"
+      },
+      "libssl.so.3": {
+        "package": "libssl3t64",
+        "version": "3.5.7-1~deb13u3"
+      },
+      "libstdc++.so.6": {
+        "package": "libstdc++6",
+        "version": "14.2.0-19"
+      },
+      "libtasn1.so.6": {
+        "package": "libtasn1-6",
+        "version": "4.20.0-2+deb13u1"
+      },
+      "libunistring.so.5": {
+        "package": "libunistring5",
+        "version": "1.3-2"
+      },
+      "libuuid.so.1": {
+        "package": "libuuid1",
+        "version": "2.41.5-0+deb13u1"
+      },
+      "libz.so.1": {
+        "package": "zlib1g",
+        "version": "1:1.3.dfsg+really1.3.1-1+b1"
+      },
+      "libzstd.so.1": {
+        "package": "libzstd1",
+        "version": "1.5.7+dfsg-1"
+      }
+    }
+  },
+  "privateGraph": {
+    "@inspector": [
+      "libsqlite3.so.0",
+      "libswiftCore.so",
+      "libswiftObservation.so",
+      "libswift_Concurrency.so",
+      "libswift_StringProcessing.so",
+      "libswift_RegexParser.so",
+      "libswiftSynchronization.so",
+      "libswiftGlibc.so",
+      "libBlocksRuntime.so",
+      "libdispatch.so",
+      "libswiftDispatch.so",
+      "libFoundation.so",
+      "libFoundationEssentials.so",
+      "libFoundationInternationalization.so",
+      "libFoundationNetworking.so",
+      "libm.so.6",
+      "libstdc++.so.6",
+      "libpam.so.0",
+      "libuuid.so.1",
+      "libgcc_s.so.1",
+      "libc.so.6",
+      "ld-linux-x86-64.so.2"
+    ],
+    "libBlocksRuntime.so": [
+      "libc.so.6"
+    ],
+    "libFoundation.so": [
+      "libFoundationInternationalization.so",
+      "libswiftDispatch.so",
+      "libFoundationEssentials.so",
+      "lib_FoundationICU.so",
+      "libdispatch.so",
+      "libBlocksRuntime.so",
+      "libswiftCore.so",
+      "libswiftObservation.so",
+      "libswift_Concurrency.so",
+      "libswift_StringProcessing.so",
+      "libswift_RegexParser.so",
+      "libswiftSynchronization.so",
+      "libswiftGlibc.so",
+      "libm.so.6",
+      "libgcc_s.so.1",
+      "libc.so.6"
+    ],
+    "libFoundationEssentials.so": [
+      "libswiftCore.so",
+      "libswiftObservation.so",
+      "libswift_Concurrency.so",
+      "libswift_StringProcessing.so",
+      "libswift_RegexParser.so",
+      "libswiftSynchronization.so",
+      "libswiftGlibc.so",
+      "libm.so.6",
+      "libgcc_s.so.1",
+      "libc.so.6"
+    ],
+    "libFoundationInternationalization.so": [
+      "libFoundationEssentials.so",
+      "lib_FoundationICU.so",
+      "libswiftCore.so",
+      "libswiftObservation.so",
+      "libswift_Concurrency.so",
+      "libswift_StringProcessing.so",
+      "libswift_RegexParser.so",
+      "libswiftSynchronization.so",
+      "libswiftGlibc.so",
+      "libm.so.6",
+      "libgcc_s.so.1",
+      "libc.so.6"
+    ],
+    "libFoundationNetworking.so": [
+      "libFoundation.so",
+      "libcurl.so.4",
+      "libFoundationInternationalization.so",
+      "libFoundationEssentials.so",
+      "lib_FoundationICU.so",
+      "libswiftDispatch.so",
+      "libdispatch.so",
+      "libBlocksRuntime.so",
+      "libswiftCore.so",
+      "libswiftObservation.so",
+      "libswift_Concurrency.so",
+      "libswift_StringProcessing.so",
+      "libswift_RegexParser.so",
+      "libswiftSynchronization.so",
+      "libswiftGlibc.so",
+      "libm.so.6",
+      "libgcc_s.so.1",
+      "libc.so.6"
+    ],
+    "lib_FoundationICU.so": [
+      "libstdc++.so.6",
+      "libm.so.6",
+      "libgcc_s.so.1",
+      "libc.so.6",
+      "ld-linux-x86-64.so.2"
+    ],
+    "libdispatch.so": [
+      "libBlocksRuntime.so",
+      "libstdc++.so.6",
+      "libm.so.6",
+      "libgcc_s.so.1",
+      "libc.so.6",
+      "ld-linux-x86-64.so.2"
+    ],
+    "libswiftCore.so": [
+      "libstdc++.so.6",
+      "libm.so.6",
+      "libgcc_s.so.1",
+      "libc.so.6",
+      "ld-linux-x86-64.so.2"
+    ],
+    "libswiftDispatch.so": [
+      "libdispatch.so",
+      "libBlocksRuntime.so",
+      "libswiftCore.so",
+      "libswift_Concurrency.so",
+      "libswift_StringProcessing.so",
+      "libswift_RegexParser.so",
+      "libc.so.6"
+    ],
+    "libswiftGlibc.so": [
+      "libswiftCore.so",
+      "libstdc++.so.6",
+      "libm.so.6",
+      "libgcc_s.so.1",
+      "libc.so.6"
+    ],
+    "libswiftObservation.so": [
+      "libswift_Concurrency.so",
+      "libswiftGlibc.so",
+      "libswiftCore.so",
+      "libstdc++.so.6",
+      "libm.so.6",
+      "libgcc_s.so.1",
+      "libc.so.6",
+      "ld-linux-x86-64.so.2"
+    ],
+    "libswiftSynchronization.so": [
+      "libswiftGlibc.so",
+      "libswiftCore.so",
+      "libstdc++.so.6",
+      "libm.so.6",
+      "libgcc_s.so.1",
+      "libc.so.6"
+    ],
+    "libswift_Builtin_float.so": [
+      "libswiftCore.so",
+      "libstdc++.so.6",
+      "libm.so.6",
+      "libgcc_s.so.1",
+      "libc.so.6"
+    ],
+    "libswift_Concurrency.so": [
+      "libdispatch.so",
+      "libswift_Builtin_float.so",
+      "libswiftGlibc.so",
+      "libswiftCore.so",
+      "libstdc++.so.6",
+      "libm.so.6",
+      "libgcc_s.so.1",
+      "libc.so.6",
+      "ld-linux-x86-64.so.2"
+    ],
+    "libswift_RegexParser.so": [
+      "libswiftGlibc.so",
+      "libswiftCore.so",
+      "libstdc++.so.6",
+      "libm.so.6",
+      "libgcc_s.so.1",
+      "libc.so.6"
+    ],
+    "libswift_StringProcessing.so": [
+      "libswift_RegexParser.so",
+      "libswiftGlibc.so",
+      "libswiftCore.so",
+      "libstdc++.so.6",
+      "libm.so.6",
+      "libgcc_s.so.1",
+      "libc.so.6"
+    ]
+  },
+  "profile": "tractanda.layout17-system-closure-test.v1",
+  "provenance": {
+    "baselineRuntimeClosureSHA256": "3d9889a051e9f4d162b050e63ca80eb7e8efe57161689869de6f850ad94bb191",
+    "currentSystemMetadataSHA256": "4683c7c2bcebdb1af382a6b683630bc61675355c3a1158c1f8685aec30e8f22e"
+  },
+  "scenarios": {
+    "debian13": {
+      "graph": {
+        "ld-linux-x86-64.so.2": [],
+        "libaudit.so.1": [
+          "libcap-ng.so.0",
+          "libc.so.6"
+        ],
+        "libbrotlicommon.so.1": [
+          "libc.so.6"
+        ],
+        "libbrotlidec.so.1": [
+          "libbrotlicommon.so.1",
+          "libc.so.6"
+        ],
+        "libc.so.6": [
+          "ld-linux-x86-64.so.2"
+        ],
+        "libcap-ng.so.0": [
+          "libc.so.6",
+          "ld-linux-x86-64.so.2"
+        ],
+        "libcom_err.so.2": [
+          "libc.so.6",
+          "ld-linux-x86-64.so.2"
+        ],
+        "libcrypto.so.3": [
+          "libz.so.1",
+          "libzstd.so.1",
+          "libc.so.6"
+        ],
+        "libcurl.so.4": [
+          "libnghttp3.so.9",
+          "libnghttp2.so.14",
+          "libidn2.so.0",
+          "librtmp.so.1",
+          "libssh2.so.1",
+          "libpsl.so.5",
+          "libssl.so.3",
+          "libcrypto.so.3",
+          "libgssapi_krb5.so.2",
+          "libldap.so.2",
+          "liblber.so.2",
+          "libzstd.so.1",
+          "libbrotlidec.so.1",
+          "libz.so.1",
+          "libc.so.6"
+        ],
+        "libffi.so.8": [
+          "libc.so.6"
+        ],
+        "libgcc_s.so.1": [
+          "libc.so.6",
+          "ld-linux-x86-64.so.2"
+        ],
+        "libgmp.so.10": [
+          "libc.so.6"
+        ],
+        "libgnutls.so.30": [
+          "libp11-kit.so.0",
+          "libidn2.so.0",
+          "libunistring.so.5",
+          "libtasn1.so.6",
+          "libhogweed.so.6",
+          "libnettle.so.8",
+          "libgmp.so.10",
+          "libc.so.6",
+          "ld-linux-x86-64.so.2"
+        ],
+        "libgssapi_krb5.so.2": [
+          "libkrb5.so.3",
+          "libk5crypto.so.3",
+          "libcom_err.so.2",
+          "libkrb5support.so.0",
+          "libc.so.6"
+        ],
+        "libhogweed.so.6": [
+          "libnettle.so.8",
+          "libgmp.so.10",
+          "libc.so.6"
+        ],
+        "libidn2.so.0": [
+          "libunistring.so.5",
+          "libc.so.6"
+        ],
+        "libk5crypto.so.3": [
+          "libkrb5support.so.0",
+          "libc.so.6"
+        ],
+        "libkeyutils.so.1": [
+          "libc.so.6"
+        ],
+        "libkrb5.so.3": [
+          "libk5crypto.so.3",
+          "libcom_err.so.2",
+          "libkrb5support.so.0",
+          "libkeyutils.so.1",
+          "libresolv.so.2",
+          "libc.so.6"
+        ],
+        "libkrb5support.so.0": [
+          "libc.so.6"
+        ],
+        "liblber.so.2": [
+          "libc.so.6"
+        ],
+        "libldap.so.2": [
+          "liblber.so.2",
+          "libsasl2.so.2",
+          "libssl.so.3",
+          "libcrypto.so.3",
+          "libc.so.6"
+        ],
+        "libm.so.6": [
+          "libc.so.6",
+          "ld-linux-x86-64.so.2"
+        ],
+        "libnettle.so.8": [
+          "libc.so.6"
+        ],
+        "libnghttp2.so.14": [
+          "libc.so.6"
+        ],
+        "libnghttp3.so.9": [
+          "libc.so.6"
+        ],
+        "libp11-kit.so.0": [
+          "libffi.so.8",
+          "libc.so.6",
+          "ld-linux-x86-64.so.2"
+        ],
+        "libpam.so.0": [
+          "libaudit.so.1",
+          "libc.so.6"
+        ],
+        "libpsl.so.5": [
+          "libunistring.so.5",
+          "libidn2.so.0",
+          "libc.so.6"
+        ],
+        "libresolv.so.2": [
+          "libc.so.6"
+        ],
+        "librtmp.so.1": [
+          "libgnutls.so.30",
+          "libhogweed.so.6",
+          "libnettle.so.8",
+          "libgmp.so.10",
+          "libz.so.1",
+          "libc.so.6"
+        ],
+        "libsasl2.so.2": [
+          "libcrypto.so.3",
+          "libc.so.6"
+        ],
+        "libsqlite3.so.0": [
+          "libm.so.6",
+          "libc.so.6"
+        ],
+        "libssh2.so.1": [
+          "libcrypto.so.3",
+          "libz.so.1",
+          "libc.so.6"
+        ],
+        "libssl.so.3": [
+          "libcrypto.so.3",
+          "libc.so.6"
+        ],
+        "libstdc++.so.6": [
+          "libm.so.6",
+          "libc.so.6",
+          "ld-linux-x86-64.so.2",
+          "libgcc_s.so.1"
+        ],
+        "libtasn1.so.6": [
+          "libc.so.6"
+        ],
+        "libunistring.so.5": [
+          "libc.so.6"
+        ],
+        "libuuid.so.1": [
+          "libc.so.6",
+          "ld-linux-x86-64.so.2"
+        ],
+        "libz.so.1": [
+          "libc.so.6"
+        ],
+        "libzstd.so.1": [
+          "libc.so.6"
+        ]
+      },
+      "providers": {
+        "ld-linux-x86-64.so.2": "libc6",
+        "libaudit.so.1": "libaudit1",
+        "libbrotlicommon.so.1": "libbrotli1",
+        "libbrotlidec.so.1": "libbrotli1",
+        "libc.so.6": "libc6",
+        "libcap-ng.so.0": "libcap-ng0",
+        "libcom_err.so.2": "libcom-err2",
+        "libcrypto.so.3": "libssl3t64",
+        "libcurl.so.4": "libcurl4t64",
+        "libffi.so.8": "libffi8",
+        "libgcc_s.so.1": "libgcc-s1",
+        "libgmp.so.10": "libgmp10",
+        "libgnutls.so.30": "libgnutls30t64",
+        "libgssapi_krb5.so.2": "libgssapi-krb5-2",
+        "libhogweed.so.6": "libhogweed6t64",
+        "libidn2.so.0": "libidn2-0",
+        "libk5crypto.so.3": "libk5crypto3",
+        "libkeyutils.so.1": "libkeyutils1",
+        "libkrb5.so.3": "libkrb5-3",
+        "libkrb5support.so.0": "libkrb5support0",
+        "liblber.so.2": "libldap2",
+        "libldap.so.2": "libldap2",
+        "libm.so.6": "libc6",
+        "libnettle.so.8": "libnettle8t64",
+        "libnghttp2.so.14": "libnghttp2-14",
+        "libnghttp3.so.9": "libnghttp3-9",
+        "libp11-kit.so.0": "libp11-kit0",
+        "libpam.so.0": "libpam0g",
+        "libpsl.so.5": "libpsl5t64",
+        "libresolv.so.2": "libc6",
+        "librtmp.so.1": "librtmp1",
+        "libsasl2.so.2": "libsasl2-2",
+        "libsqlite3.so.0": "libsqlite3-0",
+        "libssh2.so.1": "libssh2-1t64",
+        "libssl.so.3": "libssl3t64",
+        "libstdc++.so.6": "libstdc++6",
+        "libtasn1.so.6": "libtasn1-6",
+        "libunistring.so.5": "libunistring5",
+        "libuuid.so.1": "libuuid1",
+        "libz.so.1": "zlib1g",
+        "libzstd.so.1": "libzstd1"
+      },
+      "records": {
+        "libaudit1": [
+          "install ok installed",
+          "1:4.0.2-2+deb13u1",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libbrotli1": [
+          "install ok installed",
+          "1.1.0-2+b7",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libc6": [
+          "install ok installed",
+          "2.41-12+deb13u4",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libcap-ng0": [
+          "install ok installed",
+          "0.8.5-4+b1",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libcom-err2": [
+          "install ok installed",
+          "1.47.2-3+b12",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libcurl4t64": [
+          "install ok installed",
+          "8.14.1-2+deb13u5",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libffi8": [
+          "install ok installed",
+          "3.4.8-2",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libgcc-s1": [
+          "install ok installed",
+          "14.2.0-19",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libgmp10": [
+          "install ok installed",
+          "2:6.3.0+dfsg-3",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libgnutls30t64": [
+          "install ok installed",
+          "3.8.9-3+deb13u4",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libgssapi-krb5-2": [
+          "install ok installed",
+          "1.21.3-5+deb13u1",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libhogweed6t64": [
+          "install ok installed",
+          "3.10.1-1",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libidn2-0": [
+          "install ok installed",
+          "2.3.8-2",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libk5crypto3": [
+          "install ok installed",
+          "1.21.3-5+deb13u1",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libkeyutils1": [
+          "install ok installed",
+          "1.6.3-6",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libkrb5-3": [
+          "install ok installed",
+          "1.21.3-5+deb13u1",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libkrb5support0": [
+          "install ok installed",
+          "1.21.3-5+deb13u1",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libldap2": [
+          "install ok installed",
+          "2.6.10+dfsg-1",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libnettle8t64": [
+          "install ok installed",
+          "3.10.1-1",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libnghttp2-14": [
+          "install ok installed",
+          "1.64.0-1.1+deb13u1",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libnghttp3-9": [
+          "install ok installed",
+          "1.8.0-1",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libp11-kit0": [
+          "install ok installed",
+          "0.25.5-3",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libpam0g": [
+          "install ok installed",
+          "1.7.0-5",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libpsl5t64": [
+          "install ok installed",
+          "0.21.2-1.1+b1",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "librtmp1": [
+          "install ok installed",
+          "2.4+20151223.gitfa8646d.1-2+b5",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libsasl2-2": [
+          "install ok installed",
+          "2.1.28+dfsg1-9",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libsqlite3-0": [
+          "install ok installed",
+          "3.46.1-7+deb13u2",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libssh2-1t64": [
+          "install ok installed",
+          "1.11.1-1+deb13u2",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libssl3t64": [
+          "install ok installed",
+          "3.5.7-1~deb13u3",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libstdc++6": [
+          "install ok installed",
+          "14.2.0-19",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libtasn1-6": [
+          "install ok installed",
+          "4.20.0-2+deb13u1",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libunistring5": [
+          "install ok installed",
+          "1.3-2",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libuuid1": [
+          "install ok installed",
+          "2.41.5-0+deb13u1",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "libzstd1": [
+          "install ok installed",
+          "1.5.7+dfsg-1",
+          "amd64",
+          "",
+          "",
+          ""
+        ],
+        "zlib1g": [
+          "install ok installed",
+          "1:1.3.dfsg+really1.3.1-1+b1",
+          "amd64",
+          "",
+          "",
+          ""
+        ]
+      }
+    },
+    "stashCurl822": {
+      "graph": {
+        "ld-linux-x86-64.so.2": [],
+        "libaudit.so.1": [
+          "libcap-ng.so.0",
+          "libc.so.6"
+        ],
+        "libbrotlicommon.so.1": [
+          "libc.so.6"
+        ],
+        "libbrotlidec.so.1": [
+          "libbrotlicommon.so.1",
+          "libc.so.6"
+        ],
+        "libc.so.6": [
+          "ld-linux-x86-64.so.2"
+        ],
+        "libcap-ng.so.0": [
+          "libc.so.6",
+          "ld-linux-x86-64.so.2"
+        ],
+        "libcom_err.so.2": [
+          "libc.so.6",
+          "ld-linux-x86-64.so.2"
+        ],
+        "libcrypto.so.3": [
+          "libz.so.1",
+          "libzstd.so.1",
+          "libc.so.6"
+        ],
+        "libcurl.so.4": [
+          "libnghttp3.so.9",
+          "libngtcp2_crypto_ossl.so.0",
+          "libngtcp2.so.16",
+          "libnghttp2.so.14",
+          "libidn2.so.0",
+          "libldap.so.2",
+          "liblber.so.2",
+          "libssh2.so.1",
+          "libpsl.so.5",
+          "libssl.so.3",
+          "libcrypto.so.3",
+          "libgssapi_krb5.so.2",
+          "libzstd.so.1",
+          "libbrotlidec.so.1",
+          "libz.so.1",
+          "libc.so.6"
+        ],
+        "libgcc_s.so.1": [
+          "libc.so.6",
+          "ld-linux-x86-64.so.2"
+        ],
+        "libgssapi_krb5.so.2": [
+          "libkrb5.so.3",
+          "libk5crypto.so.3",
+          "libcom_err.so.2",
+          "libkrb5support.so.0",
+          "libc.so.6"
+        ],
+        "libidn2.so.0": [
+          "libunistring.so.5",
+          "libc.so.6"
+        ],
+        "libk5crypto.so.3": [
+          "libkrb5support.so.0",
+          "libc.so.6"
+        ],
+        "libkeyutils.so.1": [
+          "libc.so.6"
+        ],
+        "libkrb5.so.3": [
+          "libk5crypto.so.3",
+          "libcom_err.so.2",
+          "libkrb5support.so.0",
+          "libkeyutils.so.1",
+          "libresolv.so.2",
+          "libc.so.6"
+        ],
+        "libkrb5support.so.0": [
+          "libc.so.6"
+        ],
+        "liblber.so.2": [
+          "libc.so.6"
+        ],
+        "libldap.so.2": [
+          "liblber.so.2",
+          "libsasl2.so.2",
+          "libssl.so.3",
+          "libcrypto.so.3",
+          "libc.so.6"
+        ],
+        "libm.so.6": [
+          "libc.so.6",
+          "ld-linux-x86-64.so.2"
+        ],
+        "libnghttp2.so.14": [
+          "libc.so.6"
+        ],
+        "libnghttp3.so.9": [
+          "libc.so.6"
+        ],
+        "libngtcp2.so.16": [
+          "libc.so.6"
+        ],
+        "libngtcp2_crypto_ossl.so.0": [
+          "libngtcp2.so.16",
+          "libssl.so.3",
+          "libcrypto.so.3",
+          "libc.so.6"
+        ],
+        "libpam.so.0": [
+          "libaudit.so.1",
+          "libc.so.6"
+        ],
+        "libpsl.so.5": [
+          "libidn2.so.0",
+          "libunistring.so.5",
+          "libc.so.6"
+        ],
+        "libresolv.so.2": [
+          "libc.so.6"
+        ],
+        "libsasl2.so.2": [
+          "libcrypto.so.3",
+          "libc.so.6"
+        ],
+        "libsqlite3.so.0": [
+          "libm.so.6",
+          "libc.so.6"
+        ],
+        "libssh2.so.1": [
+          "libcrypto.so.3",
+          "libz.so.1",
+          "libc.so.6"
+        ],
+        "libssl.so.3": [
+          "libcrypto.so.3",
+          "libc.so.6"
+        ],
+        "libstdc++.so.6": [
+          "libm.so.6",
+          "libc.so.6",
+          "ld-linux-x86-64.so.2",
+          "libgcc_s.so.1"
+        ],
+        "libunistring.so.5": [
+          "libc.so.6"
+        ],
+        "libuuid.so.1": [
+          "libc.so.6",
+          "ld-linux-x86-64.so.2"
+        ],
+        "libz.so.1": [
+          "libc.so.6"
+        ],
+        "libzstd.so.1": [
+          "libc.so.6"
+        ]
+      },
+      "providers": {
+        "ld-linux-x86-64.so.2": "libc6",
+        "libaudit.so.1": "libaudit1",
+        "libbrotlicommon.so.1": "libbrotli1",
+        "libbrotlidec.so.1": "libbrotli1",
+        "libc.so.6": "libc6",
+        "libcap-ng.so.0": "libcap-ng0",
+        "libcom_err.so.2": "libcom-err2",
+        "libcrypto.so.3": "libssl3t64",
+        "libcurl.so.4": "libcurl4t64",
+        "libgcc_s.so.1": "libgcc-s1",
+        "libgssapi_krb5.so.2": "libgssapi-krb5-2",
+        "libidn2.so.0": "libidn2-0",
+        "libk5crypto.so.3": "libk5crypto3",
+        "libkeyutils.so.1": "libkeyutils1",
+        "libkrb5.so.3": "libkrb5-3",
+        "libkrb5support.so.0": "libkrb5support0",
+        "liblber.so.2": "libldap2",
+        "libldap.so.2": "libldap2",
+        "libm.so.6": "libc6",
+        "libnghttp2.so.14": "libnghttp2-14",
+        "libnghttp3.so.9": "libnghttp3-9",
+        "libngtcp2.so.16": "libngtcp2-16",
+        "libngtcp2_crypto_ossl.so.0": "libngtcp2-crypto-ossl0",
+        "libpam.so.0": "libpam0g",
+        "libpsl.so.5": "libpsl5t64",
+        "libresolv.so.2": "libc6",
+        "libsasl2.so.2": "libsasl2-2",
+        "libsqlite3.so.0": "libsqlite3-0",
+        "libssh2.so.1": "libssh2-1t64",
+        "libssl.so.3": "libssl3t64",
+        "libstdc++.so.6": "libstdc++6",
+        "libunistring.so.5": "libunistring5",
+        "libuuid.so.1": "libuuid1",
+        "libz.so.1": "zlib1g",
+        "libzstd.so.1": "libzstd1"
+      },
+      "records": {
+        "libaudit1": [
+          "install ok installed",
+          "1:4.1.2-1+b2",
+          "amd64",
+          "libaudit-common (>= 1:4.1.2-1), libc6 (>= 2.38), libcap-ng0 (>= 0.7.9)",
+          "",
+          ""
+        ],
+        "libbrotli1": [
+          "install ok installed",
+          "1.2.0-4+b2",
+          "amd64",
+          "libc6 (>= 2.29)",
+          "",
+          ""
+        ],
+        "libc6": [
+          "install ok installed",
+          "2.43-7",
+          "amd64",
+          "libgcc-s1, libc-gconv-modules-extra (= 2.43-7)",
+          "",
+          ""
+        ],
+        "libcap-ng0": [
+          "install ok installed",
+          "0.9.6-1+b1",
+          "amd64",
+          "libc6 (>= 2.38)",
+          "",
+          ""
+        ],
+        "libcom-err2": [
+          "install ok installed",
+          "1.47.4-1+b2",
+          "amd64",
+          "libc6 (>= 2.38)",
+          "",
+          "libcom-err2t64 (= 1.47.4-1+b2), libcomerr2 (= 1.47.4-1+b2)"
+        ],
+        "libcurl4t64": [
+          "install ok installed",
+          "8.22.0-1",
+          "amd64",
+          "libnghttp3-9 (>= 1.11.0~), libngtcp2-16 (>= 1.24.0), libbrotli1 (>= 0.6.0), libc6 (>= 2.43), libgssapi-krb5-2 (>= 1.17), libidn2-0 (>= 2.0.0), libldap2 (>= 2.6.2), libnghttp2-14 (>= 1.50.0), libngtcp2-crypto-ossl0 (>= 1.24.0), libpsl5t64 (>= 0.16.0), libssh2-1t64 (>= 1.11.1), libssl3t64 (>= 3.5.0), libzstd1 (>= 1.5.5), zlib1g (>= 1:1.2.3.4)",
+          "",
+          "libcurl4 (= 8.22.0-1)"
+        ],
+        "libgcc-s1": [
+          "install ok installed",
+          "16.2.0-3",
+          "amd64",
+          "gcc-16-base (= 16.2.0-3), libc6 (>= 2.35)",
+          "",
+          "libgcc1 (= 1:16.2.0-3)"
+        ],
+        "libgssapi-krb5-2": [
+          "install ok installed",
+          "1.22.1-3",
+          "amd64",
+          "libkrb5-3 (= 1.22.1-3), libc6 (>= 2.38), libcom-err2 (>= 1.43.9), libk5crypto3 (>= 1.20), libkrb5support0 (= 1.22.1-3)",
+          "",
+          ""
+        ],
+        "libidn2-0": [
+          "install ok installed",
+          "2.3.8-5",
+          "amd64",
+          "libc6 (>= 2.14), libunistring5 (>= 1.1)",
+          "",
+          ""
+        ],
+        "libk5crypto3": [
+          "install ok installed",
+          "1.22.1-3",
+          "amd64",
+          "libc6 (>= 2.38), libkrb5support0 (= 1.22.1-3)",
+          "",
+          ""
+        ],
+        "libkeyutils1": [
+          "install ok installed",
+          "1.6.3-6+b2",
+          "amd64",
+          "libc6 (>= 2.38)",
+          "",
+          ""
+        ],
+        "libkrb5-3": [
+          "install ok installed",
+          "1.22.1-3",
+          "amd64",
+          "libkrb5support0 (= 1.22.1-3), libc6 (>= 2.38), libcom-err2 (>= 1.43.9), libk5crypto3 (>= 1.20), libkeyutils1 (>= 1.5.9), libssl3t64 (>= 3.0.0)",
+          "",
+          ""
+        ],
+        "libkrb5support0": [
+          "install ok installed",
+          "1.22.1-3",
+          "amd64",
+          "libc6 (>= 2.38)",
+          "",
+          ""
+        ],
+        "libldap2": [
+          "install ok installed",
+          "2.6.14+dfsg-2",
+          "amd64",
+          "libc6 (>= 2.38), libsasl2-2 (>= 2.1.28+dfsg1), libssl3t64 (>= 3.0.0)",
+          "",
+          ""
+        ],
+        "libnghttp2-14": [
+          "install ok installed",
+          "1.70.0-1",
+          "amd64",
+          "libc6 (>= 2.17)",
+          "",
+          ""
+        ],
+        "libnghttp3-9": [
+          "install ok installed",
+          "1.17.0-1",
+          "amd64",
+          "libc6 (>= 2.14)",
+          "",
+          ""
+        ],
+        "libngtcp2-16": [
+          "install ok installed",
+          "1.24.0-1",
+          "amd64",
+          "libc6 (>= 2.25)",
+          "",
+          ""
+        ],
+        "libngtcp2-crypto-ossl0": [
+          "install ok installed",
+          "1.24.0-1",
+          "amd64",
+          "libc6 (>= 2.14), libngtcp2-16 (>= 1.24.0), libssl3t64 (>= 3.5.1)",
+          "",
+          ""
+        ],
+        "libpam0g": [
+          "install ok installed",
+          "1.7.0-8",
+          "amd64",
+          "libaudit1 (>= 1:2.2.1), libc6 (>= 2.34), debconf (>= 0.5) | debconf-2.0",
+          "",
+          ""
+        ],
+        "libpsl5t64": [
+          "install ok installed",
+          "0.23.3-1",
+          "amd64",
+          "libidn2-0 (>= 0.16), libc6 (>= 2.38), libunistring5 (>= 1.1)",
+          "",
+          "libpsl5 (= 0.23.3-1)"
+        ],
+        "libsasl2-2": [
+          "install ok installed",
+          "2.1.28+dfsg1-12",
+          "amd64",
+          "libsasl2-modules-db (>= 2.1.28+dfsg1-12), libc6 (>= 2.38), libssl3t64 (>= 3.0.0)",
+          "",
+          ""
+        ],
+        "libsqlite3-0": [
+          "install ok installed",
+          "3.53.4-2",
+          "amd64",
+          "libc6 (>= 2.38)",
+          "",
+          ""
+        ],
+        "libssh2-1t64": [
+          "install ok installed",
+          "1.11.1-6",
+          "amd64",
+          "libc6 (>= 2.38), libssl3t64 (>= 3.0.0), zlib1g (>= 1:1.1.4)",
+          "",
+          "libssh2-1 (= 1.11.1-6)"
+        ],
+        "libssl3t64": [
+          "install ok installed",
+          "3.6.5-1",
+          "amd64",
+          "libc6 (>= 2.38), libzstd1 (>= 1.5.5), zlib1g (>= 1:1.1.4), openssl-provider-legacy",
+          "",
+          "libssl3 (= 3.6.5-1)"
+        ],
+        "libstdc++6": [
+          "install ok installed",
+          "16.2.0-3",
+          "amd64",
+          "gcc-16-base (= 16.2.0-3), libc6 (>= 2.38), libgcc-s1 (>= 4.3)",
+          "",
+          ""
+        ],
+        "libunistring5": [
+          "install ok installed",
+          "1.4.2-1",
+          "amd64",
+          "libc6 (>= 2.34)",
+          "",
+          ""
+        ],
+        "libuuid1": [
+          "install ok installed",
+          "2.42.4-1",
+          "amd64",
+          "libc6 (>= 2.38)",
+          "",
+          "libuuid1t64 (= 2.42.4-1)"
+        ],
+        "libzstd1": [
+          "install ok installed",
+          "1.5.7+dfsg-4",
+          "amd64",
+          "libc6 (>= 2.34)",
+          "",
+          ""
+        ],
+        "zlib1g": [
+          "install ok installed",
+          "1:1.3.dfsg+really1.3.2-3",
+          "amd64",
+          "libc6 (>= 2.14)",
+          "",
+          "libz1"
+        ]
+      }
+    }
+  }
+}

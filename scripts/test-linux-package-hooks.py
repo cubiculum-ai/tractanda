@@ -496,11 +496,16 @@ class Layout17ControlInspectorTests(unittest.TestCase):
                 elif args[1] == '--search':
                     out = ('libsqlite3-0:amd64: ' if args[2] == sqlite else 'libc6:amd64: ') + args[3] + '\n'
                 elif args[1] == '-W':
-                    out = 'install ok installed\t9.0\tamd64\n'
+                    out = 'install ok installed\t9.0\tamd64\t\t\t\n'
                 else:
                     self.assertEqual(args[1], '--compare-versions'); out = ''
                 return subprocess.CompletedProcess(args, 0, out, '')
-            with mock.patch.object(m, 'layout17_native_command', side_effect=command), \
+            dependencies = {stage + '/bin/tractanda-layout17': (['libSwiftFixture.so', 'libsqlite3.so.0'], None),
+                            stage + '/lib/libSwiftFixture.so': ([], 'libSwiftFixture.so'),
+                            sqlite: (['ld-linux-x86-64.so.2'], 'libsqlite3.so.0'),
+                            real_loader: ([], 'ld-linux-x86-64.so.2')}
+            with mock.patch.object(m, 'layout17_elf_dependencies', side_effect=lambda p, a: dependencies[p]), \
+                    mock.patch.object(m, 'layout17_native_command', side_effect=command), \
                     mock.patch.object(m, 'root_directory_chain'), \
                     mock.patch.object(m.os, 'lstat', return_value=SimpleNamespace(st_uid=0, st_mode=stat.S_IFREG | 0o644)), \
                     mock.patch.object(m.os.path, 'realpath', side_effect=lambda p: real_loader if p == loader else p):
