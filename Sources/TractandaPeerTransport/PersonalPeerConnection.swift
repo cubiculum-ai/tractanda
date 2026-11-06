@@ -3,6 +3,12 @@ import NIOCore
 import TractandaCore
 import TractandaPeerTLS
 
+#if canImport(Darwin)
+    import Darwin
+#else
+    import Glibc
+#endif
+
 /// Personal wire operations are deliberately disjoint from the historical authority gateway.
 package struct PersonalPeerOperations: Sendable {
     package let validate: @Sendable (PeerExchangeBinding) async throws -> Void
@@ -90,7 +96,9 @@ package final class PersonalPeerConnection: Sendable {
         limits: PersonalPeerLimits = .init()
     ) -> EventLoopFuture<PersonalPeerConnection> {
         do { try limits.validate() } catch { return channel.eventLoop.makeFailedFuture(error) }
-        return pairing.tls.install(on: channel) { _ in }.flatMap {
+        return configureKeepalive(on: channel).flatMap {
+            pairing.tls.install(on: channel) { _ in }
+        }.flatMap {
             channel.eventLoop.submit {
                 let handler = PersonalPeerHandler(
                     pairings: [pairing.tls.profile.pairingID: pairing], operations: operations,
@@ -105,7 +113,9 @@ package final class PersonalPeerConnection: Sendable {
         operations: PersonalPeerOperations, limits: PersonalPeerLimits = .init()
     ) -> EventLoopFuture<PersonalPeerConnection> {
         do { try limits.validate() } catch { return channel.eventLoop.makeFailedFuture(error) }
-        return responder.tls.install(on: channel) { _ in }.flatMap {
+        return configureKeepalive(on: channel).flatMap {
+            responder.tls.install(on: channel) { _ in }
+        }.flatMap {
             channel.eventLoop.submit {
                 let handler = PersonalPeerHandler(
                     pairings: responder.pairings, operations: operations, limits: limits,
@@ -113,6 +123,24 @@ package final class PersonalPeerConnection: Sendable {
                 try channel.pipeline.syncOperations.addHandler(handler)
                 return PersonalPeerConnection(channel: channel, handler: handler)
             }
+        }
+    }
+    private static func configureKeepalive(on channel: any Channel) -> EventLoopFuture<Void> {
+        // Embedded channels have no kernel socket. Both native peer roles use TCP sockets.
+        guard channel is any SocketOptionProvider else { return channel.eventLoop.makeSucceededVoidFuture() }
+        #if canImport(Darwin)
+            let idleOption = TCP_KEEPALIVE
+        #else
+            let idleOption = TCP_KEEPIDLE
+        #endif
+        // Allow at least 240 seconds after the first unanswered probe. A responsive TCP peer
+        // can keep an operation in flight for as long as it needs.
+        return channel.setOption(.tcpOption(.init(rawValue: idleOption)), value: 60).flatMap {
+            channel.setOption(.tcpOption(.init(rawValue: TCP_KEEPINTVL)), value: 30)
+        }.flatMap {
+            channel.setOption(.tcpOption(.init(rawValue: TCP_KEEPCNT)), value: 9)
+        }.flatMap {
+            channel.setOption(.socketOption(.so_keepalive), value: 1)
         }
     }
     package func request(_ request: PeerExchangeRequest) -> EventLoopFuture<Data> {

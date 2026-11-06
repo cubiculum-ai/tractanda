@@ -8,10 +8,19 @@ import XCTest
 @testable import TractandaCore
 @testable import TractandaPeerTransport
 
+#if canImport(Darwin)
+    import Darwin
+#else
+    import Glibc
+#endif
+
 private final class PersonalTestConnections: Sendable {
-    let values = Mutex<[PersonalPeerConnection]>([])
-    func add(_ value: PersonalPeerConnection) { values.withLock { $0.append(value) } }
-    var snapshot: [PersonalPeerConnection] { values.withLock { $0 } }
+    typealias Installed = (connection: PersonalPeerConnection, channel: any Channel)
+    let values = Mutex<[Installed]>([])
+    func add(_ connection: PersonalPeerConnection, on channel: any Channel) {
+        values.withLock { $0.append((connection, channel)) }
+    }
+    var snapshot: [Installed] { values.withLock { $0 } }
 }
 private final class PersonalTestAdmission: Sendable {
     let admitted = Mutex(true)
@@ -21,7 +30,34 @@ private final class PersonalTestAdmission: Sendable {
     }
 }
 
+private final class PersonalDroppedReply: ChannelOutboundHandler, Sendable {
+    typealias OutboundIn = IOData
+    let dropped: EventLoopPromise<Void>
+    init(loop: any EventLoop) { dropped = loop.makePromise() }
+    func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
+        promise?.succeed(())
+        dropped.succeed(())
+        context.close(promise: nil)
+    }
+}
+
 final class PersonalPeerConnectionTests: XCTestCase {
+    private func assertKeepalive(on channel: any Channel) async throws {
+        #if canImport(Darwin)
+            let idleOption = TCP_KEEPALIVE
+        #else
+            let idleOption = TCP_KEEPIDLE
+        #endif
+        let enabled = try await channel.getOption(.socketOption(.so_keepalive)).get()
+        let idle = try await channel.getOption(.tcpOption(.init(rawValue: idleOption))).get()
+        let interval = try await channel.getOption(.tcpOption(.init(rawValue: TCP_KEEPINTVL))).get()
+        let probes = try await channel.getOption(.tcpOption(.init(rawValue: TCP_KEEPCNT))).get()
+        XCTAssertNotEqual(enabled, 0)
+        XCTAssertEqual(idle, 60)
+        XCTAssertEqual(interval, 30)
+        XCTAssertEqual(probes, 9)
+    }
+
     func testActualTLSLoopbackIsBidirectionalAndRechecksMembershipForEachOperation() async throws {
         // No filesystem fixture. Wire memory is less than 2MiB and payloads below 256KiB.
         let store = try UUID.makeVersion1().uuidString.lowercased()
@@ -50,35 +86,40 @@ final class PersonalPeerConnectionTests: XCTestCase {
             "descriptor": .bytes(try JSON.encode(descriptor)), "offset": .integer(0),
             "limit": .integer(Int64(bytes.count)),
         ]
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { try? await group.shutdownGracefully() }
         let operations = PersonalPeerOperations(
             validate: { _ in try admission.validate() },
             handle: { _, request in
                 admission.requests.withLock { $0 += 1 }
+                if request.operation == "personal.sync.ready" {
+                    return try JSON.encode(["ready": true])
+                }
                 return bytes
             })
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { try? await group.shutdownGracefully() }
         let accepted = PersonalTestConnections()
         let installed = PersonalTestConnections()
         let listener = try await ServerBootstrap(group: group).childChannelInitializer { channel in
             PersonalPeerConnection.install(on: channel, responder: responder, operations: operations)
-                .map { accepted.add($0) }
+                .map { accepted.add($0, on: channel) }
         }.bind(host: "127.0.0.1", port: 0).get()
         defer {
             try? await listener.close().get()
-            for connection in installed.snapshot + accepted.snapshot { try? await connection.close().get() }
+            for entry in installed.snapshot + accepted.snapshot { try? await entry.connection.close().get() }
         }
         let port = try XCTUnwrap(listener.localAddress?.port)
         _ = try await ClientBootstrap(group: group).channelInitializer { channel in
             PersonalPeerConnection.install(on: channel, pairing: clientPairing, operations: operations)
-                .map { installed.add($0) }
+                .map { installed.add($0, on: channel) }
         }.connect(host: "127.0.0.1", port: port).get()
-        let left = try XCTUnwrap(installed.snapshot.first)
+        let (left, leftSocket) = try XCTUnwrap(installed.snapshot.first)
         let readyLeft = try await left.ready.get()
         XCTAssertEqual(readyLeft.remoteReplicaID, rightID)
-        let right = try XCTUnwrap(accepted.snapshot.first)
+        let (right, rightSocket) = try XCTUnwrap(accepted.snapshot.first)
         let readyRight = try await right.ready.get()
         XCTAssertEqual(readyRight.remoteReplicaID, leftID)
+        try await assertKeepalive(on: leftSocket)
+        try await assertKeepalive(on: rightSocket)
         async let outbound = left.request(.init("personal.read", readFields)).get()
         async let inbound = right.request(.init("personal.read", readFields)).get()
         let results = try await (outbound, inbound)
@@ -91,6 +132,18 @@ final class PersonalPeerConnectionTests: XCTestCase {
             XCTFail("Removed member executed an operation")
         } catch { XCTAssertEqual((error as? TractandaError)?.code, "untrustedPeer") }
         XCTAssertEqual(admission.requests.withLock { $0 }, 2)
+
+        admission.admitted.withLock { $0 = true }
+        // Drop the next encrypted reply and close the underlying socket while the
+        // initiator still has a pending RPC.
+        let droppedReply = PersonalDroppedReply(loop: rightSocket.eventLoop)
+        try await rightSocket.pipeline.addHandler(droppedReply, position: .first).get()
+        let pending = left.request(.init("personal.sync.ready"))
+        try await droppedReply.dropped.futureResult.get()
+        try await right.closed.get()
+        let reply = try? await pending.get()
+        XCTAssertNil(reply, "A disconnected peer returned a successful pending reply.")
+        try await left.closed.get()
     }
 
     func testPersonalOperationDeadlineIsOptInAndOtherBudgetsRemainConfigurable() throws {
