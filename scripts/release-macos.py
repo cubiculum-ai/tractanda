@@ -30,6 +30,10 @@ ROOT = Path(__file__).resolve().parents[1]
 _delivery_spec = importlib.util.spec_from_file_location('release_delivery', Path(__file__).with_name('release-delivery.py'))
 delivery = importlib.util.module_from_spec(_delivery_spec)
 _delivery_spec.loader.exec_module(delivery)
+_maintenance_spec = importlib.util.spec_from_file_location(
+    'release_resource_maintenance', Path(__file__).with_name('release-resource-maintenance.py'))
+maintenance = importlib.util.module_from_spec(_maintenance_spec)
+_maintenance_spec.loader.exec_module(maintenance)
 RELEASE_STEPS = tuple(json.loads(Path(__file__).with_name('release-steps-legacy-v2.json').read_text()))
 PUBLIC_STEPS = tuple(json.loads(Path(__file__).with_name('release-steps.json').read_text()))
 CONTROL = ROOT / 'work/release-pipeline'
@@ -120,6 +124,8 @@ def release_info(repository, tag):
 
 @contextmanager
 def lock():
+    if CONTROL.parent.is_symlink() or CONTROL.is_symlink() or (CONTROL / 'pipeline.lock').is_symlink():
+        raise RuntimeError('Release lock paths must not be symlinks.')
     CONTROL.mkdir(parents=True, exist_ok=True)
     with (CONTROL / 'pipeline.lock').open('a') as stream:
         try:
@@ -217,47 +223,141 @@ def is_verified_published(state):
                     or steps.get('install-authorization', {}).get('result') != state['delivery']['installAuthorization']
                     or steps.get('cluster-acceptance', {}).get('result') != state['delivery']['acceptance'])):
                 return False
-        except (KeyError, TypeError, RuntimeError):
+        except (AttributeError, KeyError, TypeError, RuntimeError):
             return False
-    if delivery.public(state) and (hashes.get('apt-site.tar.gz') is None
-            or steps.get('published-source', {}).get('result', {}).get('commit') != state['commit']
-            or steps.get('published-source', {}).get('result', {}).get('tree') != state.get('tree')
-            or not steps.get('pages', {}).get('result', {}).get('runID')):
-        return False
+    if delivery.public(state):
+        try:
+            if (hashes.get('apt-site.tar.gz') is None
+                    or steps['published-source']['result']['commit'] != state['commit']
+                    or steps['published-source']['result']['tree'] != state['tree']
+                    or not steps['pages']['result']['runID']):
+                return False
+        except (KeyError, TypeError):
+            return False
     return (isinstance(hashes, dict) and expected.issubset(hashes)
             and all(isinstance(name, str) and Path(name).name == name
                     and isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value)
                     for name, value in hashes.items()))
 
 
-def prune_releases():
+def prune_retired_artifacts(directory, state, report):
+    """Remove prior candidate payloads when the archived bytes match their receipts."""
+    version = state['version']
+    package = f'Tractanda-{version}-arm64.pkg'
+    archive = f'tractanda-{version}-macos-arm64.tar.gz'
+    archive_roots = {name: directory / name for name in ('artifact-history', 'delivery-history')}
+    artifacts, deliveries = {}, {}
+    previous = state.get('previousCandidates', [])
+    for entry in previous if isinstance(previous, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        commit = entry.get('commit')
+        if not isinstance(commit, str) or commit == state['commit'] or not re.fullmatch(r'[0-9a-f]{40}', commit):
+            continue
+        expected = artifacts.setdefault(commit, {})
+        steps = entry.get('steps')
+        if isinstance(steps, dict):
+            for step, names in (('artifacts', (archive, package, 'apt-site.tar.gz')),
+                                ('notarization', (package,)), ('package', (package,))):
+                result = steps.get(step)
+                result = result.get('result') if isinstance(result, dict) else None
+                if not isinstance(result, dict):
+                    continue
+                for name in names:
+                    digest = result.get(name if step == 'artifacts' else 'sha256')
+                    if isinstance(digest, str) and re.fullmatch(r'[0-9a-f]{64}', digest):
+                        expected.setdefault(name, set()).add(digest)
+        delivery_state = entry.get('delivery')
+        evidence = entry.get('deliveryEvidence')
+        if not isinstance(delivery_state, dict) or not isinstance(evidence, str):
+            continue
+        retained = Path(evidence)
+        if (retained.parent != archive_roots['delivery-history']
+                or not re.fullmatch(commit[:12] + r'-[a-z0-9_]+-retained', retained.name)):
+            continue
+        rows = delivery_state.get('linuxAssets')
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            name, digest = row.get('name'), row.get('sha256')
+            if (isinstance(name, str) and re.fullmatch(r'tractanda_[0-9A-Za-z.+~:-]+_(amd64|arm64)\.deb', name)
+                    and isinstance(digest, str) and re.fullmatch(r'[0-9a-f]{64}', digest)):
+                deliveries.setdefault(retained, {}).setdefault(name, set()).add(digest)
+                expected.setdefault(name, set()).add(digest)
+
+    def remove_matching(path, digests):
+        try:
+            if not digests or delivery.fingerprint(path)['sha256'] not in digests:
+                raise RuntimeError('no matching retired artifact receipt')
+            path.unlink()
+            report['removedRetiredArtifacts'].append(str(path.relative_to(directory)))
+        except (OSError, RuntimeError) as error:
+            report['skipped'].append({'version': version, 'path': str(path.relative_to(directory)), 'reason': str(error)})
+
+    for kind, root in archive_roots.items():
+        if not root.exists() and not root.is_symlink():
+            continue
+        if root.is_symlink() or not root.is_dir() or root.is_mount():
+            report['skipped'].append({'version': version, 'path': kind, 'reason': 'unsafe artifact history'})
+            continue
+        for item in sorted(root.iterdir()):
+            if kind == 'artifact-history' and item.suffix in ('.pkg', '.gz', '.deb'):
+                digests = set().union(*(files.get(item.name, set()) for files in artifacts.values()))
+                remove_matching(item, digests)
+                continue
+            if kind == 'delivery-history':
+                files = deliveries.get(item)
+            else:
+                matches = [files for commit, files in artifacts.items() if item.name in (commit, commit[:12])]
+                files = matches[0] if len(matches) == 1 else None
+            if files is None or item.is_symlink() or not item.is_dir() or item.is_mount():
+                if item.suffix != '.json' or item.is_symlink():
+                    report['skipped'].append({'version': version, 'path': str(item.relative_to(directory)),
+                                              'reason': 'unregistered or unsafe artifact history entry'})
+                continue
+            for payload in sorted(item.iterdir()):
+                if payload.suffix in ('.pkg', '.gz', '.deb'):
+                    remove_matching(payload, files.get(payload.name))
+
+
+def prune_releases(*, maintain_resources=True):
     """Caller holds pipeline.lock. Reclaim only self-bound, published build trees."""
-    report = {'removed': [], 'compacted': [], 'retained': [], 'skipped': [], 'prunedWorktrees': []}
+    report = {'removed': [], 'compacted': [], 'retained': [], 'skipped': [], 'prunedWorktrees': [],
+              'removedRetiredArtifacts': []}
     if not CONTROL.exists():
         return report
     receipts = CONTROL / 'receipts'
     current_path = CONTROL / 'current.json'
-    if CONTROL.is_symlink() or receipts.is_symlink() or current_path.is_symlink():
+    if CONTROL.parent.is_symlink() or CONTROL.is_symlink() or receipts.is_symlink() or current_path.is_symlink():
         raise RuntimeError('Release control/receipt paths must not be symlinks.')
     current = read(current_path) if current_path.exists() else {}
     if not isinstance(current, dict):
         raise RuntimeError('Invalid current release state; refusing cleanup.')
     active = current.get('directory') if current.get('status') != 'complete' else None
     active_path = Path(active).resolve() if isinstance(active, str) and active else None
+    protected = {active_path.name} if active_path is not None and release_version(active_path) else set()
+    if current.get('status') != 'complete' and isinstance(current.get('version'), str) and release_version(current['version']):
+        protected.add(current['version'])
     candidates = []
     for path in sorted(CONTROL.iterdir()):
-        if release_version(path) is None or path.is_symlink() or not path.is_dir():
+        if release_version(path) is None:
+            continue
+        if path.is_symlink() or not path.is_dir() or path.is_mount() or path.name in protected:
+            protected.add(path.name)
             continue
         state_path = path / 'state.json'
         if state_path.is_symlink() or not state_path.is_file():
+            protected.add(path.name)
             continue
         try:
             state = read(state_path)
         except (OSError, ValueError):
+            protected.add(path.name)
             report['skipped'].append({'version': path.name, 'reason': 'unreadable state'})
             continue
         if (not is_verified_published(state) or state.get('directory') != str(path)
                 or state['version'] != path.name):
+            protected.add(path.name)
             continue
         candidates.append((path, state))
     newest = max((path for path, _ in candidates), key=release_version, default=None)
@@ -269,12 +369,15 @@ def prune_releases():
         elif field.startswith('locked') and entry:
             registered[entry]['locked'] = True
     for path, state in candidates:
-        if path.resolve() == active_path:
-            report['retained'].append(path.name)
-            continue
         source = path / 'source'
         source_key = str(source.resolve())
-        if source.is_symlink() or (source.exists() and not source.is_dir()):
+        if any(Path(name).is_relative_to(path.resolve()) and name != source_key for name in registered):
+            protected.add(path.name)
+            report['skipped'].append({'version': path.name, 'reason': 'other registered checkout within release tree'})
+            continue
+        if (source.is_symlink() or (source.exists() and not source.is_dir())
+                or (source / '.git').is_dir() or (source / '.git').is_symlink()):
+            protected.add(path.name)
             report['skipped'].append({'version': path.name, 'reason': 'unsafe source path'})
             continue
         if source.exists():
@@ -282,22 +385,26 @@ def prune_releases():
                 if (source_key not in registered or registered[source_key]['locked']
                         or git('rev-parse', 'HEAD', cwd=source) != state['commit']
                         or git('status', '--porcelain', cwd=source)):
+                    protected.add(path.name)
                     report['skipped'].append({'version': path.name, 'reason': 'source changed, locked or unregistered'})
                     continue
             except (OSError, subprocess.CalledProcessError):
+                protected.add(path.name)
                 report['skipped'].append({'version': path.name, 'reason': 'source check failed'})
                 continue
-        # Persist provenance before removing any version tree. write() replaces
+        # Record provenance before removing any version tree. write() replaces
         # a receipt atomically and never follows a pre-existing receipt symlink.
         write(receipts / (path.name + '.json'), state)
         if source.exists() or source_key in registered:
             try:
                 if registered.get(source_key, {}).get('locked'):
+                    protected.add(path.name)
                     report['skipped'].append({'version': path.name, 'reason': 'locked checkout'})
                     continue
                 git('worktree', 'remove', '--force', str(source))
                 registered.pop(source_key, None)
             except (OSError, subprocess.CalledProcessError):
+                protected.add(path.name)
                 report['skipped'].append({'version': path.name, 'reason': 'checkout removal failed'})
                 continue
         if path != newest:
@@ -313,6 +420,7 @@ def prune_releases():
             if target.is_symlink(): target.unlink()
             elif target.is_dir(): shutil.rmtree(target)
             elif target.exists(): target.unlink()
+        prune_retired_artifacts(path, state, report)
         report['compacted'].append(path.name)
         report['retained'].append(path.name)
     # The user may already have removed a version folder. Remove only its
@@ -320,7 +428,7 @@ def prune_releases():
     for name, details in registered.items():
         source = Path(name)
         if (source.name != 'source' or source.parent.parent.resolve() != CONTROL.resolve()
-                or release_version(source.parent) is None or source.parent.resolve() == active_path
+                or release_version(source.parent) is None or source.parent.name in protected
                 or details['locked'] or source.exists() or source.is_symlink()):
             continue
         try:
@@ -328,24 +436,58 @@ def prune_releases():
             report['prunedWorktrees'].append(name)
         except (OSError, subprocess.CalledProcessError):
             report['skipped'].append({'version': source.parent.name, 'reason': 'stale checkout removal failed'})
+    if maintain_resources:
+        try:
+            # Prior releases may already have been compacted into receipts. A
+            # missing or unpublished version is never retirement authority.
+            published = {}
+            for receipt in sorted(receipts.glob('*.json')):
+                version = receipt.stem
+                if version in protected or release_version(version) is None or receipt.is_symlink() or not receipt.is_file():
+                    continue
+                try:
+                    saved = read(receipt)
+                except (OSError, ValueError):
+                    report['skipped'].append({'version': version, 'reason': 'unreadable compact publication receipt'})
+                    continue
+                if (is_verified_published(saved) and saved['version'] == version
+                        and saved.get('directory') == str(CONTROL / version)):
+                    published[version] = saved
+            if published:
+                latest = max(published, key=release_version)
+                repository = published[latest]['configuration']['repository']
+                retired = {version for version, saved in published.items()
+                           if saved['configuration']['repository'] == repository}
+                report['buildResources'] = maintenance.maintain(CONTROL, published[latest], protected, retired)
+        except (AttributeError, KeyError, OSError, TypeError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+            report['buildResources'] = {'warning': str(error)}
     return report
 
 
 def record_release_retention(pipeline):
     """A cleanup failure must not make a published release require rebuilding."""
     try:
-        result = prune_releases()
+        result = prune_releases(maintain_resources=is_verified_published(pipeline.state))
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:
         result = {'warning': str(error)}
+    resources = result.get('buildResources', {})
+    if (result.get('warning') or result.get('skipped') or resources.get('warning')
+            or resources.get('warnings') or resources.get('skipped')
+            or resources.get('unregistered') or resources.get('unregisteredImages')):
+        print('Warning: post-release maintenance reported items requiring review. See the retention report.',
+              file=sys.stderr)
     pipeline.state['retention'] = result
-    pipeline.save()
+    try:
+        pipeline.save()
+    except OSError as error:
+        print(f'Warning: could not save post-release retention report: {error}', file=sys.stderr)
 
 
 def prepare(settings, notes):
     current_path = CONTROL / 'current.json'
     if current_path.exists() and read(current_path)['status'] != 'complete':
         raise RuntimeError('Finish or explicitly retire the pending release before preparing another.')
-    prune_releases()
+    prune_releases(maintain_resources=False)
     if git('branch', '--show-current') != settings['branch']:
         raise RuntimeError('Prepare from the configured publication branch.')
     origins = {f'https://github.com/{settings["repository"]}.git', f'git@github.com:{settings["repository"]}.git'}
@@ -1223,7 +1365,7 @@ class Pipeline:
         self.state.pop('activeStepStartedAt', None)
         self.state.pop('error', None)
         self.save()
-        # Publication is durably complete before any sealed checkout is removed.
+        # Save the completed publication before removing any sealed checkout.
         if getattr(self, 'directory', None) is not None:
             record_release_retention(self)
 

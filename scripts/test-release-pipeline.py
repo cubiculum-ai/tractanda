@@ -864,12 +864,118 @@ class ReleaseTests(unittest.TestCase):
                 return directory
             old, newest = published('0.1.0-poc.9'), published('0.1.0-poc.10')
             malformed = root / '0.1.0-poc.8'; malformed.mkdir(); (malformed / 'state.json').write_text('{bad')
-            with patch.object(release, 'git', return_value=''):
+            with patch.object(release, 'git', return_value=''), patch.object(release.maintenance, 'maintain'):
                 result = release.prune_releases()
             self.assertEqual(result['removed'], ['0.1.0-poc.9'])
             self.assertFalse((old / 'bundle').exists())
             self.assertFalse((newest / 'bundle').exists())
             self.assertTrue(malformed.exists())
+
+    def test_prune_removes_only_hash_bound_retired_artifacts_after_publication(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            control = Path(temporary)
+            version = '0.1.0-poc.20'
+            directory = control / version
+            commit = 'a' * 40
+            package = f'Tractanda-{version}-arm64.pkg'
+            archive = f'tractanda-{version}-macos-arm64.tar.gz'
+            linux = 'tractanda_0.1.0~poc.20-1_arm64.deb'
+            artifact_history = directory / 'artifact-history' / commit
+            delivery_history = directory / 'delivery-history' / (commit[:12] + '-archive-retained')
+            artifact_history.mkdir(parents=True)
+            delivery_history.mkdir(parents=True)
+            (artifact_history / package).write_bytes(b'previous package')
+            (artifact_history / archive).write_bytes(b'changed archive')
+            (delivery_history / linux).write_bytes(b'previous Debian package')
+            evidence = delivery_history / 'linux-evidence.json'
+            evidence.write_text('{}')
+            live_package = directory / package
+            live_package.write_bytes(b'current package')
+            unknown = directory / 'delivery-history/unregistered'
+            unknown.mkdir()
+            (unknown / linux).write_bytes((delivery_history / linux).read_bytes())
+            flat_link = directory / 'artifact-history' / package
+            flat_link.symlink_to(live_package)
+            state = {'version': version, 'directory': str(directory), 'status': 'failed', 'commit': 'b' * 40,
+                     'configuration': {'repository': 'owner/repo'}, 'steps': {'publish': {'result': {
+                         'url': f'https://github.com/owner/repo/releases/tag/v{version}', 'sha256': {
+                             package: release.sha(live_package), archive: '1' * 64, 'SHA256SUMS': '2' * 64}}}},
+                     'previousCandidates': [{'commit': commit, 'deliveryEvidence': str(delivery_history),
+                         'delivery': {'linuxAssets': [{'name': linux, 'sha256': release.sha(delivery_history / linux)}]},
+                         'steps': {'artifacts': {'result': {package: release.sha(artifact_history / package),
+                                                           archive: '3' * 64}}}}]}
+            with patch.object(release, 'CONTROL', control), patch.object(release, 'git', return_value=''), \
+                    patch.object(release.maintenance, 'maintain') as maintain:
+                release.write(directory / 'state.json', state)
+                self.assertEqual(release.prune_releases()['removedRetiredArtifacts'], [])
+                maintain.assert_not_called()
+                state['status'] = 'complete'
+                release.write(directory / 'state.json', state)
+                result = release.prune_releases()
+                self.assertCountEqual(result['removedRetiredArtifacts'], [
+                    str((artifact_history / package).relative_to(directory)),
+                    str((delivery_history / linux).relative_to(directory)),
+                ])
+                self.assertEqual(release.prune_releases()['removedRetiredArtifacts'], [])
+            self.assertEqual(live_package.read_bytes(), b'current package')
+            self.assertEqual(evidence.read_text(), '{}')
+            self.assertTrue(flat_link.is_symlink())
+            self.assertTrue((artifact_history / archive).is_file())
+            self.assertTrue((unknown / linux).is_file())
+            self.assertEqual(len(result['skipped']), 3)
+
+    def test_resource_retirement_uses_verified_receipts_and_protects_pending_state(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            control = Path(temporary)
+
+            def published(version):
+                return {'version': version, 'directory': str(control / version), 'status': 'complete',
+                        'commit': 'a' * 40, 'configuration': {'repository': 'owner/repo'},
+                        'steps': {'publish': {'result': {
+                            'url': f'https://github.com/owner/repo/releases/tag/v{version}', 'sha256': {
+                                f'Tractanda-{version}-arm64.pkg': '1' * 64,
+                                f'tractanda-{version}-macos-arm64.tar.gz': '2' * 64,
+                                'SHA256SUMS': '3' * 64,
+                            }}}}}
+
+            retired, verified, pending, malformed = (f'0.1.0-poc.{n}' for n in (17, 18, 19, 20))
+            for version in (retired, verified, pending):
+                release.write(control / 'receipts' / (version + '.json'), published(version))
+            release.write(control / verified / 'state.json', published(verified))
+            release.write(control / 'current.json', {**published(pending), 'status': 'failed'})
+            (control / malformed).mkdir()
+            (control / malformed / 'state.json').write_text('{')
+            with patch.object(release, 'CONTROL', control), patch.object(release, 'git', return_value=''), \
+                    patch.object(release.maintenance, 'maintain', return_value={'trimmed': []}) as maintain:
+                release.prune_releases(maintain_resources=False)
+                maintain.assert_not_called()
+                report = release.prune_releases()
+                maintain.assert_called_once_with(control, published(verified), {pending, malformed}, {retired, verified})
+                self.assertEqual(report['buildResources'], {'trimmed': []})
+
+    def test_malformed_runtime_inventory_leaves_published_release_complete(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            control = Path(temporary)
+            version = '0.1.0-poc.20'
+            state = {'version': version, 'directory': str(control / version), 'status': 'complete',
+                     'commit': 'a' * 40, 'configuration': {'repository': 'owner/repo'},
+                     'steps': {'publish': {'result': {
+                         'url': f'https://github.com/owner/repo/releases/tag/v{version}', 'sha256': {
+                             f'Tractanda-{version}-arm64.pkg': '1' * 64,
+                             f'tractanda-{version}-macos-arm64.tar.gz': '2' * 64,
+                             'SHA256SUMS': '3' * 64,
+                         }}}}}
+            malformed = subprocess.CompletedProcess([], 0, stdout='[null]')
+            with patch.object(release, 'CONTROL', control), patch.object(release, 'git', return_value=''), \
+                    patch.object(release.maintenance, 'invoke', return_value=malformed) as invoke:
+                pipeline = release.Pipeline(state)
+                pipeline.save()
+                release.record_release_retention(pipeline)
+                invoke.assert_called()
+            saved = release.read(control / 'current.json')
+            self.assertEqual(saved['status'], 'complete')
+            resources = saved['retention']['buildResources']
+            self.assertTrue(resources.get('warning') or resources.get('warnings'), resources)
 
     def test_prune_does_not_follow_version_or_receipt_symlinks(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -968,7 +1074,8 @@ class ReleaseTests(unittest.TestCase):
             shutil.rmtree(directories['2'] / 'source')
             release.write(control / 'current.json', state('0.1.0-poc.11', directories['11'], False))
             def adapter(*args, cwd=None): return run(*args, cwd=Path(cwd) if cwd else repo)
-            with patch.object(release, 'CONTROL', control), patch.object(release, 'git', side_effect=adapter):
+            with patch.object(release, 'CONTROL', control), patch.object(release, 'git', side_effect=adapter), \
+                    patch.object(release.maintenance, 'maintain'):
                 first = release.prune_releases()
                 self.assertIn('0.1.0-poc.9', first['removed'], first)
                 self.assertFalse(directories['9'].exists())

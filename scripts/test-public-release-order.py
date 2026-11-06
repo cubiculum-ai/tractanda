@@ -26,7 +26,10 @@ class PublicReleaseTests(unittest.TestCase):
                      'commit': 'a' * 40, 'tree': 'b' * 40, 'status': 'ready', 'steps': {},
                      'delivery': R.delivery.public_fresh()}
             p = R.Pipeline(state); observed = []
-            p.save = lambda: None
+            def save():
+                if state['status'] == 'complete':
+                    observed.append('saved-complete')
+            p.save = save
             for name in ('build', 'assemble', 'build_package', 'notarize_package', 'build_apt',
                          'package_artifacts', 'push', 'publish', 'verify_published_source',
                          'published_pages', 'install', 'health', 'cleanup'):
@@ -34,12 +37,14 @@ class PublicReleaseTests(unittest.TestCase):
             p.run_command = lambda *args: observed.append('verify')
             p.verify_artifacts = lambda: None
             p.wait_for_ci = lambda timeout: state['steps'].update(ci={})
-            with patch.object(R, 'git', side_effect=['a' * 40, '']), patch.object(R, 'record_release_retention'):
+            with patch.object(R, 'git', side_effect=['a' * 40, '']), \
+                    patch.object(R, 'record_release_retention', side_effect=lambda _: observed.append('retention')):
                 p.run()
             self.assertEqual(list(state['steps']), list(R.PUBLIC_STEPS))
             self.assertLess(observed.index('publish'), observed.index('install'))
             self.assertLess(observed.index('published_pages'), observed.index('install'))
             self.assertLess(observed.index('verify_published_source'), observed.index('install'))
+            self.assertLess(observed.index('saved-complete'), observed.index('retention'))
             self.assertNotIn('install-authorization', state['steps'])
             self.assertEqual(state['status'], 'complete')
 

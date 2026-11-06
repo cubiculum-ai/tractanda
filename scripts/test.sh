@@ -15,6 +15,7 @@ else
 fi
 python3 scripts/test-release-pipeline.py
 python3 scripts/test-public-release-order.py
+python3 scripts/test-release-resource-maintenance.py
 python3 scripts/verify-release-skills.py
 python3 scripts/test-apt-repository.py
 python3 scripts/test-assemble-pages.py
