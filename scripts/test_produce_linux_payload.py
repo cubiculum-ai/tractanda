@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tiny contract/failure-path fixtures. No compiler, models, dpkg or inference."""
 import argparse
+import errno
 import importlib.util
 import json
 import os
@@ -124,6 +125,47 @@ class ProducerTests(unittest.TestCase):
             self.assertGreaterEqual(used, data.stat().st_blocks * 512)
             with self.assertRaisesRegex(ValueError, 'allocation'):
                 P.build_storage(root, 1)
+
+    def test_compiler_storage_accepts_disappearing_temporary_directory(self):
+        root = (self.root / 'work').resolve()
+        transient = root / 'tmp/TemporaryDirectory.fixture'
+        transient.mkdir(parents=True)
+        data = self.put(root / 'source/input', b'input')
+        original_scandir = os.scandir
+
+        def scan(path):
+            if Path(path) == transient:
+                transient.rmdir()
+            return original_scandir(path)
+
+        with mock.patch.object(P.B, 'capacity'), mock.patch.object(P.os, 'scandir', side_effect=scan):
+            used = P.build_storage(root, 1024**2)
+        self.assertGreaterEqual(used, data.stat().st_blocks * 512)
+        self.assertFalse(transient.exists())
+
+    def test_compiler_storage_rejects_other_walk_errors(self):
+        root = (self.root / 'work').resolve()
+        root.mkdir()
+        failures = (
+            PermissionError(errno.EACCES, 'denied', str(root / 'tmp/child')),
+            OSError(errno.EIO, 'I/O failure', str(root / 'tmp/child')),
+            FileNotFoundError(errno.ENOENT, 'missing'),
+            FileNotFoundError(errno.ENOENT, 'missing', str(root / 'source/child')),
+            FileNotFoundError(errno.ENOENT, 'missing', str(root / 'payload/child')),
+            FileNotFoundError(errno.ENOENT, 'missing', str(root / 'tmp/../source/child')),
+            FileNotFoundError(errno.ENOENT, 'missing', str(root / 'tmp')),
+            FileNotFoundError(errno.ENOENT, 'missing', str(root)),
+            FileNotFoundError(errno.ENOENT, 'missing', str(self.root / 'outside')),
+        )
+        for failure in failures:
+            with self.subTest(filename=failure.filename, error=type(failure).__name__):
+                def walk(*args, **kwargs):
+                    kwargs['onerror'](failure)
+                    return iter(())
+
+                with mock.patch.object(P.B, 'capacity'), mock.patch.object(P.os, 'walk', side_effect=walk):
+                    with self.assertRaises(type(failure)):
+                        P.build_storage(root, 1024**2)
 
     def test_compiler_storage_rejects_escape_cross_subtree_source_and_special_entries(self):
         with mock.patch.object(P.B, 'capacity'):

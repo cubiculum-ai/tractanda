@@ -6,6 +6,7 @@ omitted by default; --include-model-weights admits only complete pinned local sn
 Only the selected baseline's reviewed registry entries can be used. See linux-payload-producer.md.
 """
 import argparse
+import errno
 import math
 from contextlib import ExitStack
 import hashlib
@@ -66,6 +67,12 @@ def build_storage(root, maximum, additional=0):
     allowed = tuple((root / name).absolute() for name in ('modules', 'scratch', 'cache'))
 
     def failed(error):
+        # Swift deletes temporary subdirectories between enumeration and scandir.
+        if isinstance(error, FileNotFoundError) and error.errno == errno.ENOENT and error.filename is not None:
+            missing = Path(error.filename)
+            if (missing.is_absolute() and '..' not in missing.parts
+                    and missing.parent.is_relative_to(root / 'tmp')):
+                return
         raise error
 
     for directory, dirs, names in os.walk(root, followlinks=False, onerror=failed):
