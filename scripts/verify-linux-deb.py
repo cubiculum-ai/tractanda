@@ -9,6 +9,7 @@ import argparse
 from contextlib import contextmanager
 import errno
 import hashlib
+import grp
 import json
 import os
 from pathlib import Path
@@ -21,6 +22,7 @@ import stat
 import subprocess
 import sys
 import time
+import uuid
 import http.client
 
 RESERVE = 10 * 1024**3
@@ -240,13 +242,75 @@ def configured_uuid_node(context):
     return value
 
 
+HISTORICAL_171_PACKAGES = {
+    'ce930c5934ddecdd7f897a5685b12274964efff714f69a59f4fb5012294eb1cb',
+    '0009c7bc28673ce305b661f69ca93ee3404a64a3d19159b4cbdf01ea4e47b846',
+}
+HISTORICAL_FIXTURE_SUBJECT = 'Explore your shared knowledge base'
+HISTORICAL_FIXTURE_BODY = 'Synthetic private upgrade qualification fixture.'
+
+
+def historical_fixture_permissions(owner, group):
+    text = lambda value: {'type': 'text', 'value': value}
+    return {'type': 'object', 'value': {
+        'profile': text('tractanda.permissions.posix.v1'), 'owner': text(owner), 'group': text(group),
+        'mode': {'type': 'integer', 'value': '384'}, 'acl': {'type': 'object', 'value': {}},
+    }}
+
+
+def historical_fixture_command(context, name):
+    owner = context['owner']
+    group = grp.getgrgid(pwd.getpwnam(owner).pw_gid).gr_name
+    request = {'action': 'create', 'classID': 'Item',
+               'operationID': 'kali-upgrade-fixture-v1-' + context['runID'], 'unset': [],
+               'changes': {'subject': {'type': 'text', 'value': HISTORICAL_FIXTURE_SUBJECT},
+                           'body': {'type': 'text', 'value': HISTORICAL_FIXTURE_BODY},
+                           'permissions': historical_fixture_permissions(owner, group)}}
+    return [CLI, '--no-start', '--socket', '/run/tractanda/' + name + '/server.sock', 'call',
+            'TractandaItem/commit', json.dumps(request, sort_keys=True, separators=(',', ':'))]
+
+
+def validate_fixture_receipt(receipt, operation_id):
+    require(isinstance(receipt, dict) and set(receipt) ==
+            {'itemId', 'revisionId', 'operationId', 'replayed', 'indexReady', 'diagnostics'},
+            'Historical fixture returned an invalid mutation receipt')
+    try:
+        identities = [uuid.UUID(receipt[key]) for key in ('itemId', 'revisionId')]
+    except (ValueError, TypeError, AttributeError):
+        raise ValueError('Historical fixture receipt identities are invalid')
+    require(all(value.version == 1 and str(value) == receipt[key]
+                for value, key in zip(identities, ('itemId', 'revisionId')))
+            and receipt['operationId'] == operation_id and type(receipt['replayed']) is bool
+            and type(receipt['indexReady']) is bool and isinstance(receipt['diagnostics'], list)
+            and len(receipt['diagnostics']) == len(set(receipt['diagnostics']))
+            and all(value in ('indexDelayed', 'checkpointPending', 'additionalDiagnostics')
+                    for value in receipt['diagnostics']), 'Historical fixture receipt does not match the committed operation')
+    return receipt['itemId']
+
+
+def validate_historical_readback(fetched, item_id, revision_id, operation_id, owner, group):
+    require(isinstance(fetched, dict) and isinstance(fetched.get('list'), list) and len(fetched['list']) == 1
+            and isinstance(fetched['list'][0], dict) and fetched['list'][0].get('id') == item_id
+            and fetched['list'][0].get('revisionId') == revision_id,
+            'Historical fixture identity could not be read back exactly')
+    fields = fetched['list'][0].get('fields')
+    require(isinstance(fields, dict)
+            and fields.get('subject') == {'type': 'text', 'value': HISTORICAL_FIXTURE_SUBJECT}
+            and fields.get('body') == {'type': 'text', 'value': HISTORICAL_FIXTURE_BODY}
+            and fields.get('operationID') == {'type': 'text', 'value': operation_id}
+            and fields.get('permissions') == historical_fixture_permissions(owner, group),
+            'Historical fixture content, operation or private permissions differ')
+
+
 def setup_arguments(context, name):
     setup = [SETUP, 'install', '--name', name, '--owner', context['owner'], '--port', str(context['port'])]
     node = configured_uuid_node(context)
     if node is not None:
         setup += ['--uuid-node', node]
     if context['selection'] == 'first-source':
-        setup += ['--first-source', '--sample']
+        setup += ['--first-source']
+        if context.get('fixtureSeed', 'sample') == 'sample':
+            setup += ['--sample']
     else:
         setup += ['--adopt-prepared', '--store-id', context['storeID'], '--replica-id', context['replicaID'], '--empty']
     return setup
@@ -264,6 +328,19 @@ def validate_context(context):
     if context.get('buildOS', 'debian13') == 'kali-rolling':
         require(isinstance(context.get('artifactBindings'), dict), 'Kali validation requires explicit artifact bindings')
     bindings = context.get('artifactBindings', {})
+    seed = context.get('fixtureSeed', 'sample')
+    require(seed in ('sample', 'historical-api'), 'Unknown fixture seed mode')
+    if seed == 'historical-api':
+        package = bindings.get('package', {})
+        upgrade = bindings.get('upgrade', {})
+        require(context.get('buildOS') == 'kali-rolling' and context['selection'] == 'first-source'
+                and package.get('packageSHA256') in HISTORICAL_171_PACKAGES
+                and package.get('buildOS') == 'debian13' and package.get('payloadMode') == 'slim'
+                and upgrade.get('buildOS') == 'kali-rolling' and upgrade.get('payloadMode') == 'slim'
+                and isinstance(upgrade.get('packageSHA256'), str)
+                and re.fullmatch(r'[0-9a-f]{64}', upgrade['packageSHA256'])
+                and upgrade['packageSHA256'] != package['packageSHA256'],
+                'Historical API fixture requires a genuine bound predecessor and distinct Kali upgrade')
     first_mode = bindings.get('package', {}).get('payloadMode', context.get('payloadMode', 'full'))
     any_slim = first_mode == 'slim' or any(isinstance(v, dict) and v.get('payloadMode') == 'slim' for v in bindings.values())
     if any_slim:
@@ -317,6 +394,7 @@ class Validation:
         self.command_timeout_seconds = min(command_timeout_seconds, timeout_seconds)
         self.deadline = time.monotonic() + timeout_seconds
         self.name = 'd5-' + context['runID']
+        self.fixture_item_id = None
         self.store = Path('/opt/tractanda/var/lib/tractanda/Stores') / self.name
         self.index = Path('/opt/tractanda/var/lib/tractanda/StoreIndices') / self.name
         self.private = Path('/opt/tractanda/etc/tractanda/peer-runtime') / (self.name + '.json')
@@ -361,8 +439,12 @@ class Validation:
                         env['TRACTANDA_UUID_NODE'] = node
                 if server_probe:
                     prefix = [CLI, '--no-start', '--socket', '/run/tractanda/' + self.name + '/server.sock']
-                    require(row['argv'] in (prefix + ['info'], prefix + ['search', 'shared knowledge base']),
-                            'Daemon peer binding is only permitted for the fixed native probes')
+                    allowed = [prefix + ['info'], prefix + ['search', 'shared knowledge base']]
+                    if self.context.get('fixtureSeed', 'sample') == 'historical-api':
+                        allowed.append(historical_fixture_command(self.context, self.name))
+                        if self.fixture_item_id is not None:
+                            allowed.append(prefix + ['get', self.fixture_item_id])
+                    require(row['argv'] in allowed, 'Daemon peer binding is only permitted for the fixed native probes')
                     env['TRACTANDA_SERVER_USER'] = 'daemon'
                     row['serverUser'] = 'daemon'
                 process = subprocess.Popen(row['argv'], stdout=out, stderr=subprocess.STDOUT,
@@ -576,10 +658,25 @@ def execute(args):
                 pass
             finally:
                 health_connection.close()
+            if context.get('fixtureSeed', 'sample') == 'historical-api':
+                operation_id = 'kali-upgrade-fixture-v1-' + context['runID']
+                receipt = json.loads(check.command(historical_fixture_command(context, check.name), server_probe=True))
+                check.fixture_item_id = validate_fixture_receipt(receipt, operation_id)
+                fetched = json.loads(check.command([CLI, '--no-start', '--socket', socket_path,
+                                                    'get', check.fixture_item_id], server_probe=True))
+                owner = context['owner']
+                group = grp.getgrgid(pwd.getpwnam(owner).pw_gid).gr_name
+                validate_historical_readback(fetched, check.fixture_item_id, receipt['revisionId'],
+                                             operation_id, owner, group)
+                check.result['cases']['historical-api-fixture'] = {
+                    'status': 'PASS', 'itemID': check.fixture_item_id,
+                    'revisionID': receipt['revisionId'], 'operationID': operation_id}
             result = json.loads(check.command([CLI, '--no-start', '--socket', socket_path, 'search',
                                                'shared knowledge base'], server_probe=True))
             require(context['selection'] == 'first-source' and isinstance(result.get('ids'), list)
-                    and len(result['ids']) > 0, 'Offline sample full-text search did not return an item')
+                    and len(result['ids']) > 0
+                    and (check.fixture_item_id is None or check.fixture_item_id in result['ids']),
+                    'Offline fixture full-text search did not return the expected item')
             check.result['cases']['slim-offline-core-fts'] = {'status': 'PASS', 'packageSHA256': current['receipt']['packageSHA256']}
             embedding_unit = 'tractanda-embeddings-' + check.name + '.service'
             check.command([SETUP, 'stop', '--name', check.name], timeout=check.command_timeout_seconds)

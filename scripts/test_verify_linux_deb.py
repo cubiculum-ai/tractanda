@@ -104,6 +104,70 @@ class ValidationTests(unittest.TestCase):
         path.write_text('{}')
         with self.assertRaisesRegex(ValueError, 'commitment'): V.require_package_baseline(package, 'kali-rolling', path)
 
+    def test_historical_fixture_is_bound_to_exact_predecessor_and_distinct_kali_upgrade(self):
+        old = 'ce930c5934ddecdd7f897a5685b12274964efff714f69a59f4fb5012294eb1cb'
+        value = {'schema': 'tractanda.package-validation.v1', 'runID': '012345abcdef',
+                 'fixtureCapBytes': V.FIXTURE_CAP, 'reserveBytes': V.RESERVE,
+                 'softwareAllowanceBytes': 32 * 1024**3, 'selection': 'first-source',
+                 'port': 49179, 'expiresAt': time.time() + 600, 'buildOS': 'kali-rolling',
+                 'fixtureSeed': 'historical-api', 'owner': 'fixture', 'uuidNode': '00:11:22:33:44:55',
+                 'offlineModelSource': '/inputs/models', 'offlineModelCatalog': '/inputs/catalog.json',
+                 'artifactBindings': {'package': {'payloadMode': 'slim', 'buildOS': 'debian13', 'packageSHA256': old},
+                                      'upgrade': {'payloadMode': 'slim', 'buildOS': 'kali-rolling', 'packageSHA256': 'a'*64}}}
+        V.validate_context(value)
+        self.assertNotIn('--sample', V.setup_arguments(value, 'fixture'))
+        self.assertIn('--sample', V.setup_arguments(dict(value, fixtureSeed='sample'), 'fixture'))
+        for changes in ({'artifactBindings': {'package': value['artifactBindings']['package']}},
+                        {'artifactBindings': {'package': dict(value['artifactBindings']['package'], packageSHA256='b'*64),
+                                              'upgrade': value['artifactBindings']['upgrade']}},
+                        {'artifactBindings': {'package': value['artifactBindings']['package'],
+                                              'upgrade': dict(value['artifactBindings']['upgrade'], buildOS='debian13')}},
+                        {'selection': 'prepared'}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                V.validate_context(dict(value, **changes))
+
+    def test_historical_fixture_command_is_fixed_private_wire_request(self):
+        from types import SimpleNamespace
+        context = {'runID': '012345abcdef', 'owner': 'fixture'}
+        with patch.object(V.pwd, 'getpwnam', return_value=SimpleNamespace(pw_gid=123)), \
+             patch.object(V.grp, 'getgrgid', return_value=SimpleNamespace(gr_name='fixture-group')):
+            command = V.historical_fixture_command(context, 'd5-012345abcdef')
+        self.assertEqual(command[-2], 'TractandaItem/commit')
+        request = json.loads(command[-1])
+        self.assertEqual(request['operationID'], 'kali-upgrade-fixture-v1-012345abcdef')
+        self.assertEqual(request['changes']['permissions'], V.historical_fixture_permissions('fixture', 'fixture-group'))
+        self.assertEqual(request['changes']['permissions']['value']['mode']['value'], '384')
+
+    def test_historical_fixture_receipt_requires_exact_operation_and_valid_ids(self):
+        receipt = {'itemId': '00112233-4455-11f1-8000-001122334455',
+                   'revisionId': '00112234-4455-11f1-8000-001122334455',
+                   'operationId': 'fixed-operation', 'replayed': False, 'indexReady': True, 'diagnostics': []}
+        self.assertEqual(V.validate_fixture_receipt(receipt, 'fixed-operation'), receipt['itemId'])
+        self.assertEqual(V.validate_fixture_receipt(dict(receipt, replayed=True), 'fixed-operation'), receipt['itemId'])
+        for changes in ({'operationId': 'foreign'}, {'itemId': 'bad'}, {'replayed': 'true'},
+                        {'diagnostics': ['unknown']}, {'diagnostics': ['indexDelayed', 'indexDelayed']}, {'indexReady': 'true'}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                V.validate_fixture_receipt(dict(receipt, **changes), 'fixed-operation')
+
+    def test_historical_fixture_readback_binds_identity_content_operation_and_privacy(self):
+        fields = {'subject': {'type': 'text', 'value': V.HISTORICAL_FIXTURE_SUBJECT},
+                  'body': {'type': 'text', 'value': V.HISTORICAL_FIXTURE_BODY},
+                  'operationID': {'type': 'text', 'value': 'operation'},
+                  'permissions': V.historical_fixture_permissions('fixture', 'fixture')}
+        row = {'id': 'item', 'revisionId': 'revision', 'fields': fields}
+        def check(fetched):
+            V.validate_historical_readback(fetched, 'item', 'revision', 'operation', 'fixture', 'fixture')
+        check({'list': [row]})
+        altered = [dict(fields, body={'type': 'text', 'value': 'other'}),
+                   dict(fields, operationID={'type': 'text', 'value': 'foreign'}),
+                   dict(fields, permissions=V.historical_fixture_permissions('other', 'fixture')),
+                   dict(fields, permissions={'type': 'object', 'value': {'mode': {'type':'integer','value':'420'}}})]
+        for fetched in ([{'list': []}, {'list': [dict(row, id='other')]},
+                         {'list': [dict(row, revisionId='other')]}]
+                        + [{'list': [dict(row, fields=value)]} for value in altered]):
+            with self.subTest(fetched=fetched), self.assertRaises(ValueError):
+                check(fetched)
+
     def test_slim_context_requires_first_source_offline_inputs(self):
         value = {'schema': 'tractanda.package-validation.v1', 'runID': '012345abcdef',
                  'fixtureCapBytes': V.FIXTURE_CAP, 'reserveBytes': V.RESERVE,
