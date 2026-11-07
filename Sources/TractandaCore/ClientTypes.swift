@@ -48,6 +48,7 @@ public typealias AttachmentDocumentSource = TractandaClient.AttachmentDocumentSo
 public typealias AttachmentDocumentPage = TractandaClient.AttachmentDocumentPage
 public typealias DocumentStoredSemanticProfile = TractandaClient.DocumentStoredSemanticProfile
 public typealias DocumentConverterIdentity = TractandaClient.DocumentConverterIdentity
+public typealias LinuxBuildBaseline = TractandaClient.LinuxBuildBaseline
 public typealias DocumentValue = TractandaClient.DocumentValue
 public typealias DocumentGeneratedPage = TractandaClient.DocumentGeneratedPage
 public typealias DocumentConversionResult = TractandaClient.DocumentConversionResult
