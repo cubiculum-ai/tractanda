@@ -20,11 +20,20 @@ class TemplateNormalizationTests(unittest.TestCase):
                 changed=source.replace(original['amd64'].encode(),b'a'*64).replace(original['arm64'].encode(),b'b'*64)
                 normalized_changed,values=N.normalize(path,changed)
                 self.assertEqual(normalized,normalized_changed)
-                self.assertEqual(values,{'amd64':'a'*64,'arm64':'b'*64,'kali-amd64':None,'kali-arm64':None})
-                bound=changed.replace(b'kaliARM64: String? = nil',b'kaliARM64: String? = "'+b'c'*64+b'"')
+                self.assertEqual(values,{**original,'amd64':'a'*64,'arm64':'b'*64})
+                old_kali=b'nil' if original['kali-arm64'] is None else b'"'+original['kali-arm64'].encode()+b'"'
+                old_slot=b'kaliARM64: String? = '+old_kali
+                self.assertEqual(changed.count(old_slot),1)
+                nil_slot=b'kaliARM64: String? = nil'
+                unbound=changed.replace(old_slot,nil_slot,1)
+                normalized_unbound,unbound_values=N.normalize(path,unbound)
+                self.assertEqual(normalized_unbound,normalized)
+                self.assertIsNone(unbound_values['kali-arm64'])
+                replacement='d'*64 if original['kali-arm64']=='c'*64 else 'c'*64
+                bound=unbound.replace(nil_slot,b'kaliARM64: String? = "'+replacement.encode()+b'"',1)
                 normalized_bound,bound_values=N.normalize(path,bound)
                 self.assertEqual(normalized_bound,normalized)
-                self.assertEqual(bound_values['kali-arm64'],'c'*64)
+                self.assertEqual(bound_values['kali-arm64'],replacement)
                 altered=changed.replace(b'owner',b'ownerX') if b'owner' in changed else changed.replace(b'Finite',b'FinitE')
                 other,_=N.normalize(path,altered);self.assertNotEqual(hashlib.sha256(normalized).digest(),hashlib.sha256(other).digest())
     def test_missing_or_extra_digest_fields_fail(self):
