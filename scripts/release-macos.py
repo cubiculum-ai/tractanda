@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import signal
 import shutil
 import subprocess
 import sys
@@ -34,6 +35,9 @@ _maintenance_spec = importlib.util.spec_from_file_location(
     'release_resource_maintenance', Path(__file__).with_name('release-resource-maintenance.py'))
 maintenance = importlib.util.module_from_spec(_maintenance_spec)
 _maintenance_spec.loader.exec_module(maintenance)
+_storage_spec = importlib.util.spec_from_file_location('macos_disposable_storage', Path(__file__).with_name('macos-disposable-storage.py'))
+storage = importlib.util.module_from_spec(_storage_spec)
+_storage_spec.loader.exec_module(storage)
 RELEASE_STEPS = tuple(json.loads(Path(__file__).with_name('release-steps-legacy-v2.json').read_text()))
 PUBLIC_STEPS = tuple(json.loads(Path(__file__).with_name('release-steps.json').read_text()))
 CONTROL = ROOT / 'work/release-pipeline'
@@ -151,6 +155,7 @@ def config(path):
         raise ValueError('Published releases require persistent Developer ID identities.')
     if not re.fullmatch(r'[A-Z0-9]{10}', value['developerTeamID']):
         raise ValueError('developerTeamID must identify the expected Apple Developer team.')
+    storage.validate_settings(value)
     return value
 
 
@@ -896,6 +901,84 @@ class Pipeline:
         self.signed_package = self.directory / 'signed' / self.package.name
         self.archive = self.directory / (self.bundle.name + '.tar.gz')
         self.environment = {**os.environ, 'CLANG_MODULE_CACHE_PATH': str(self.source / '.build/module-cache')}
+        self.disposable = None
+
+    def retire_disposable(self):
+        identity = self.state.pop('disposableStorage', None)
+        if identity is not None:
+            pending = self.state.setdefault('retiredDisposableStorage', [])
+            if identity not in pending:
+                pending.append(identity)
+            self.save()
+
+    def reconcile_disposable(self):
+        pending = self.state.get('retiredDisposableStorage', [])
+        remaining = []
+        errors = []
+        for identity in pending:
+            if identity == self.state.get('disposableStorage'):
+                remaining.append(identity)
+                errors.append('Refusing to clean the active disposable run.')
+                continue
+            try:
+                parent = (Path(self.settings['disposableRoot']) if identity.get('mount')
+                          else self.directory / 'disposable-fallback')
+                storage.dispose(identity, parent)
+            except Exception as error:
+                # Cleanup is best effort after the internal bundle checkpoint;
+                # retain unknown or unavailable identities for later review.
+                remaining.append(identity)
+                errors.append(str(error))
+        if pending:
+            self.state['retiredDisposableStorage'] = remaining
+            self.state['disposableCleanupErrors'] = errors
+            self.save()
+
+    def prepare_disposable(self):
+        # Once the verified bundle is promoted, subsequent stages require only
+        # internal inputs. Never reset notarization or any deployment checkpoint.
+        if 'bundle' in self.state['steps']:
+            self.retire_disposable()
+            self.reconcile_disposable()
+            return
+        self.reconcile_disposable()
+        configured_root = self.settings.get('disposableRoot')
+        if configured_root:
+            candidate = storage.physical(configured_root)
+            for protected in (storage.physical(self.directory), storage.physical(ROOT)):
+                if candidate == protected or candidate in protected.parents or protected in candidate.parents:
+                    raise RuntimeError('Disposable root must not overlap the source or release control directory.')
+        fallback = self.directory / 'disposable-fallback'
+        if not fallback.exists():
+            fallback.mkdir(mode=0o700)
+        storage.private_directory(fallback)
+        identity = self.state.get('disposableStorage')
+        if identity:
+            try:
+                storage.verify(identity)
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                self.retire_disposable()
+                identity = None
+                self.state['steps'].pop('release-build', None)
+        if identity is None:
+            self.state['steps'].pop('release-build', None)
+            identity = storage.select(self.settings, fallback)
+            self.state['disposableStorage'] = identity
+            self.save()
+        self.disposable = Path(identity['path'])
+        self.environment['CLANG_MODULE_CACHE_PATH'] = str(self.disposable / 'module-cache')
+        self.environment['TRACTANDA_TEST_SCRATCH'] = str(self.disposable / 'verification')
+        temporary = self.disposable / 'tmp'
+        temporary.mkdir(mode=0o700, exist_ok=True)
+        storage.private_directory(temporary)
+        self.environment['TMPDIR'] = str(temporary)
+
+    def verify_disposable(self):
+        if self.disposable is not None:
+            storage.verify(self.state['disposableStorage'])
+
+    def swift_scratch(self, component):
+        return ['--scratch-path', str(self.disposable / component)] if self.disposable is not None else []
 
     def save(self):
         self.state['updatedAt'] = now()
@@ -903,6 +986,7 @@ class Pipeline:
         write(CONTROL / 'current.json', self.state)
 
     def run_command(self, name, args, cwd=None):
+        self.verify_disposable()
         self.state['activeStep'] = name
         self.state['activeStepStartedAt'] = now()
         self.state['status'] = 'running'
@@ -911,14 +995,56 @@ class Pipeline:
         with (self.directory / (name + '.log')).open('a') as log:
             log.write('\n' + now() + ' ' + shlex.join(map(str, args)) + '\n')
             log.flush()
-            subprocess.run(list(map(str, args)), cwd=cwd or self.source, env=self.environment,
-                           stdout=log, stderr=subprocess.STDOUT, check=True)
+            if self.disposable is None:
+                subprocess.run(list(map(str, args)), cwd=cwd or self.source, env=self.environment,
+                               stdout=log, stderr=subprocess.STDOUT, check=True)
+            else:
+                # Isolate only our own child process tree so loss of its selected
+                # volume can stop it without touching other jobs or services.
+                child = subprocess.Popen(list(map(str, args)), cwd=cwd or self.source, env=self.environment,
+                                         stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                try:
+                    while True:
+                        try:
+                            code = child.wait(timeout=2)
+                            break
+                        except subprocess.TimeoutExpired:
+                            self.verify_disposable()
+                    self.verify_disposable()
+                    if code:
+                        raise subprocess.CalledProcessError(code, args)
+                except BaseException:
+                    if child.poll() is None:
+                        try:
+                            os.killpg(child.pid, signal.SIGTERM)
+                        except ProcessLookupError:
+                            pass
+                        try:
+                            child.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            try:
+                                os.killpg(child.pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                            child.wait()
+                    raise
+        self.verify_disposable()
 
     def step(self, name, action):
         if name not in self.state['steps']:
             result = action()
             self.state['steps'][name] = {'completedAt': now(), 'result': result}
             self.save()
+            if name == 'bundle':
+                self.disposable = None
+                if 'TMPDIR' in os.environ:
+                    self.environment['TMPDIR'] = os.environ['TMPDIR']
+                else:
+                    self.environment.pop('TMPDIR', None)
+                self.environment.pop('TRACTANDA_TEST_SCRATCH', None)
+                self.environment['CLANG_MODULE_CACHE_PATH'] = str(self.source / '.build/module-cache')
+                self.retire_disposable()
+                self.reconcile_disposable()
 
     def linux_context(self):
         # Use the candidate's existing source capture/configuration algorithm.
@@ -960,7 +1086,7 @@ class Pipeline:
 
     def document_build_arguments(self):
         # Separate paths keep the patched native runtime out of the embedding/root graphs.
-        base = self.directory / 'docling-build'
+        base = (self.disposable or self.directory) / 'docling-build'
         return [argument for name in ('scratch', 'cache', 'config', 'security')
                 for argument in ('--' + name, str(base / name))]
 
@@ -973,14 +1099,14 @@ class Pipeline:
 
     def build(self):
         self.run_command('release-build', ['swift', 'build', '-c', 'release', '--disable-sandbox',
-                                        '--disable-automatic-resolution'])
+                                        '--disable-automatic-resolution', *self.swift_scratch('swift-root')])
         # The provider is part of this source snapshot too. Reusing an installed
         # helper can silently pair an old runtime/model profile with new weights.
         self.run_command('release-build', ['swift', 'build', '-c', 'release',
             '--package-path', 'Packages/TractandaEmbeddings', '--disable-sandbox',
-            '--disable-automatic-resolution'])
+            '--disable-automatic-resolution', *self.swift_scratch('swift-embeddings')])
         products = command(['swift', 'build', '-c', 'release', '--show-bin-path',
-            '--package-path', 'Packages/TractandaEmbeddings'], cwd=self.source, env=self.environment)
+            '--package-path', 'Packages/TractandaEmbeddings', *self.swift_scratch('swift-embeddings')], cwd=self.source, env=self.environment)
         self.run_command('release-build', ['sh', 'scripts/validate-granite-runtime.sh',
             str(Path(products) / 'TractandaEmbeddingsHost'), self.settings['modelDirectory']])
 
@@ -991,20 +1117,25 @@ class Pipeline:
     def assemble(self):
         if self.bundle.exists():
             self.bundle.rename(self.bundle.with_name(self.bundle.name + '.incomplete-' + str(os.getpid())))
-        products = command(['swift', 'build', '-c', 'release', '--show-bin-path'], cwd=self.source,
+        products = command(['swift', 'build', '-c', 'release', '--show-bin-path', *self.swift_scratch('swift-root')], cwd=self.source,
                            env=self.environment)
         embedding_products = command(['swift', 'build', '-c', 'release', '--show-bin-path',
-            '--package-path', 'Packages/TractandaEmbeddings'], cwd=self.source, env=self.environment)
+            '--package-path', 'Packages/TractandaEmbeddings', *self.swift_scratch('swift-embeddings')], cwd=self.source, env=self.environment)
         document_products = command(['swift', 'build', '-c', 'release', '--show-bin-path',
             '--package-path', 'Packages/TractandaDocuments',
             *[argument for name in ('scratch', 'cache', 'config', 'security')
-              for argument in ('--' + name + '-path', str(self.directory / 'docling-build' / name))]],
+              for argument in ('--' + name + '-path', str((self.disposable or self.directory) / 'docling-build' / name))]],
             cwd=self.source, env=self.environment)
         s = self.settings
+        output_bundle = self.disposable / self.bundle.name if self.disposable else self.bundle
+        if output_bundle != self.bundle and output_bundle.exists():
+            output_bundle.rename(output_bundle.with_name(output_bundle.name + '.incomplete-' + str(time.time_ns())))
         self.run_command('bundle', [sys.executable, 'scripts/package-macos.py', '--build-products', products,
-            '--output', self.bundle, '--version', self.state['version'], '--sign-identity', s['applicationIdentity'],
+            '--output', output_bundle, '--version', self.state['version'], '--sign-identity', s['applicationIdentity'],
             '--embeddings-host', str(Path(embedding_products) / 'TractandaEmbeddingsHost'),
             '--document-converter', str(Path(document_products) / 'tractanda-document-converter')])
+        if output_bundle != self.bundle:
+            self.promote_bundle(output_bundle)
         bundle_manifest = json.loads((self.bundle / 'bundle-manifest.json').read_text(encoding='utf-8'))
         catalog = self.bundle / 'models/manifest.json'
         if (bundle_manifest.get('modelProvisioningManifestPath') != 'models/manifest.json'
@@ -1012,6 +1143,63 @@ class Pipeline:
             raise RuntimeError('Slim release bundle does not bind the pinned model artifact catalog.')
         self.run_command('bundle-skills', [sys.executable, 'scripts/verify-release-skills.py', '--bundle', self.bundle])
         return {'manifestSHA256': sha(self.bundle / 'bundle-manifest.json')}
+
+    def promote_bundle(self, source):
+        self.verify_disposable()
+        size = sum(p.stat().st_size for p in source.rglob('*') if p.is_file() and not p.is_symlink())
+        fs = os.statvfs(self.directory)
+        if fs.f_frsize <= 0 or fs.f_bavail * fs.f_frsize < size + storage.RESERVE:
+            raise RuntimeError('Internal bundle promotion would violate the 10 GiB reserve.')
+        staging = self.bundle.with_name(self.bundle.name + '.incomplete-' + str(time.time_ns()))
+        self.run_command('bundle-promote', ['/usr/bin/ditto', str(source), str(staging)], self.directory)
+        self.verify_disposable()
+        source_paths = {item.relative_to(source) for item in source.rglob('*')}
+        if source_paths != {item.relative_to(staging) for item in staging.rglob('*')}:
+            raise RuntimeError('Bundle promotion changed its inventory.')
+        for relative in source_paths:
+            item = source / relative
+            target = staging / relative
+            if (item.lstat().st_mode & 0o7777) != (target.lstat().st_mode & 0o7777):
+                raise RuntimeError('Bundle promotion changed file modes.')
+            if item.is_symlink():
+                if not target.is_symlink() or os.readlink(item) != os.readlink(target):
+                    raise RuntimeError('Bundle promotion changed a symlink.')
+            elif item.is_file() and (not target.is_file() or sha(item) != sha(target)):
+                raise RuntimeError('Bundle promotion changed file contents.')
+        self.verify_disposable()
+        staging.rename(self.bundle)
+
+    def verify_promoted_bundle(self):
+        """Check the checkpoint-bound internal candidate before external effects."""
+        manifest_path = self.bundle / 'bundle-manifest.json'
+        expected_manifest = self.state['steps']['bundle']['result']['manifestSHA256']
+        if manifest_path.is_symlink() or sha(manifest_path) != expected_manifest:
+            raise RuntimeError('The promoted bundle manifest is missing or changed.')
+        manifest = read(manifest_path)
+        expected = set()
+        for row in manifest['files']:
+            name = row['path']
+            if not isinstance(name, str) or not name or name.startswith('/') or any(x in ('', '.', '..') for x in name.split('/')):
+                raise RuntimeError('Unsafe path in promoted bundle manifest.')
+            if name in expected or name == 'bundle-manifest.json':
+                raise RuntimeError('Duplicate path in promoted bundle manifest.')
+            expected.add(name)
+            path = self.bundle / name
+            if any(part.is_symlink() for part in (path, *path.parents) if part != self.bundle.parent):
+                raise RuntimeError('Symlink in promoted bundle path.')
+            if (not path.is_file() or path.stat().st_size != row['size']
+                    or path.stat().st_mode & 0o777 != row['mode'] or sha(path) != row['sha256']):
+                raise RuntimeError('The promoted bundle payload is missing or changed: ' + name)
+        actual = set()
+        for path in self.bundle.rglob('*'):
+            if path.is_symlink():
+                raise RuntimeError('Symlink in promoted bundle.')
+            if path.is_file():
+                actual.add(path.relative_to(self.bundle).as_posix())
+            elif not path.is_dir():
+                raise RuntimeError('Unsupported promoted bundle entry.')
+        if actual != expected | {'bundle-manifest.json'}:
+            raise RuntimeError('The promoted bundle inventory changed.')
 
     def build_package(self):
         self.signed_package.parent.mkdir(parents=True, exist_ok=True)
@@ -1327,6 +1515,7 @@ class Pipeline:
 
     def run(self, ci_timeout=3600):
         if self.state['status'] == 'complete':
+            self.prepare_disposable()
             return
         if not delivery.active(self.state):
             raise RuntimeError('Revise the pending legacy candidate explicitly to the current Linux/cluster delivery contract.')
@@ -1336,11 +1525,13 @@ class Pipeline:
         self.state.pop('pauseReason', None)
         if git('rev-parse', 'HEAD', cwd=self.source) != self.state['commit'] or git('status', '--porcelain', cwd=self.source):
             raise RuntimeError('The sealed source checkout changed; refusing to release an unverified tree.')
+        self.prepare_disposable()
         self.state['plannedSteps'] = delivery.release_plan(RELEASE_STEPS)
         self.save()
         self.step('verify', lambda: self.run_command('verify', ['sh', 'scripts/test.sh']))
         self.step('release-build', self.build)
         self.step('bundle', self.assemble)
+        self.verify_promoted_bundle()
         self.step('package', self.build_package)
         self.step('notarization', self.notarize_package)
         self.step('artifacts', self.package_artifacts)
@@ -1373,11 +1564,13 @@ class Pipeline:
         self.state.pop('error', None)
         if git('rev-parse', 'HEAD', cwd=self.source) != self.state['commit'] or git('status', '--porcelain', cwd=self.source):
             raise RuntimeError('Public release source changed after sealing.')
+        self.prepare_disposable()
         self.state['plannedSteps'] = list(PUBLIC_STEPS)
         self.save()
         self.step('verify', lambda: self.run_command('verify', ['sh', 'scripts/test.sh']))
         self.step('release-build', self.build)
         self.step('bundle', self.assemble)
+        self.verify_promoted_bundle()
         self.step('package', self.build_package)
         self.step('notarization', self.notarize_package)
         self.step('apt', self.build_apt)

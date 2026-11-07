@@ -3,7 +3,8 @@
 set -eu
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$project_dir"
-export CLANG_MODULE_CACHE_PATH="$project_dir/.build/module-cache"
+scratch_root=${TRACTANDA_TEST_SCRATCH:-.build}
+export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-$project_dir/.build/module-cache}"
 mkdir -p work/verification
 sh scripts/check-style.sh
 if command -v node >/dev/null 2>&1; then
@@ -14,6 +15,7 @@ else
     echo 'Node.js unavailable; browser logic checks must run on the macOS release host.'
 fi
 python3 scripts/test-release-pipeline.py
+python3 scripts/test-macos-disposable-storage.py
 python3 scripts/test-public-release-order.py
 python3 scripts/test-release-resource-maintenance.py
 python3 scripts/verify-release-skills.py
@@ -32,10 +34,11 @@ python3 scripts/test_build_linux_deb.py
 python3 scripts/test-release-delivery.py
 python3 scripts/test-swift-test-wrapper.py
 run_tests() (
+    scratch_root=${TRACTANDA_TEST_SCRATCH:-.build}
     log=$1; scratch=$2; shift 2
     result=0
-    swift test --scratch-path "$scratch" --cache-path .build/cache --config-path .build/config \
-        --security-path .build/security --disable-sandbox "$@" > "$log" 2>&1 || result=$?
+    swift test --scratch-path "$scratch" --cache-path "$scratch_root/cache" --config-path "$scratch_root/config" \
+        --security-path "$scratch_root/security" --disable-sandbox "$@" > "$log" 2>&1 || result=$?
     cat "$log"
     python3 - "$log" <<'PY'
 import re,sys
@@ -54,10 +57,10 @@ if not re.search(r'Executed [1-9][0-9]* tests|Test run with [1-9][0-9]* tests',t
 PY
     test "$result" -eq 0
 )
-run_tests work/verification/swift-tests.log .build
-run_tests work/verification/client-tests.log .build/client-tests --package-path Packages/TractandaClient
-binary_dir=$(swift build --show-bin-path --scratch-path .build --cache-path .build/cache \
-    --config-path .build/config --security-path .build/security --disable-sandbox)
+run_tests work/verification/swift-tests.log "$scratch_root"
+run_tests work/verification/client-tests.log "$scratch_root/client-tests" --package-path Packages/TractandaClient
+binary_dir=$(swift build --show-bin-path --scratch-path "$scratch_root" --cache-path "$scratch_root/cache" \
+    --config-path "$scratch_root/config" --security-path "$scratch_root/security" --disable-sandbox)
 python3 scripts/verify-ipc.py "$binary_dir/tractanda"
 python3 scripts/verify-samples.py "$binary_dir/tractanda"
 python3 scripts/verify-agent-access-plan.py --binary "$binary_dir/tractanda" \

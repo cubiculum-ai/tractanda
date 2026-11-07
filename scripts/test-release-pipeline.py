@@ -649,11 +649,127 @@ class ReleaseTests(unittest.TestCase):
         pipeline.install_gate = lambda: pipeline.state['steps'].update({'install-authorization': {}}) or True
         pipeline.cluster_gate = lambda: pipeline.state['steps'].update({'cluster-acceptance': {}}) or True
         pipeline.wait_for_ci = lambda timeout: pipeline.state['steps'].update({'ci': {}})
+        pipeline.prepare_disposable = lambda: None
+        pipeline.verify_promoted_bundle = lambda: None
         with patch.object(release, 'git', side_effect=['test', '']):
             pipeline.run()
         self.assertEqual(pipeline.state['plannedSteps'], release.delivery.release_plan(release.RELEASE_STEPS))
         self.assertEqual(list(pipeline.state['steps']), release.delivery.release_plan(release.RELEASE_STEPS))
         self.assertEqual(pipeline.state['status'], 'complete')
+
+    def test_disposable_loss_before_and_after_bundle_checkpoint(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary).resolve()
+            state = {'directory': str(directory), 'configuration': {}, 'version': 'test',
+                     'steps': {'release-build': {'result': None}},
+                     'disposableStorage': {'path': '/lost', 'device': 1, 'inode': 2,
+                                           'mount': '/lost-volume', 'volumeUUID': 'uuid'}}
+            pipeline = release.Pipeline(state)
+            pipeline.save = lambda: None
+            with patch.object(release.storage, 'verify', side_effect=RuntimeError('lost')), \
+                    patch.object(release.storage, 'RESERVE', 0):
+                pipeline.prepare_disposable()
+            self.assertNotIn('release-build', state['steps'])
+            self.assertEqual(pipeline.disposable.parent, directory / 'disposable-fallback')
+            state['steps']['bundle'] = {'result': {'manifestSHA256': 'sealed'}}
+            after = release.Pipeline(state)
+            with patch.object(release.storage, 'dispose', side_effect=RuntimeError('volume unavailable')):
+                after.prepare_disposable()
+            self.assertTrue(state['retiredDisposableStorage'])
+            self.assertIsNone(after.disposable)
+            self.assertIn('bundle', state['steps'])
+
+    def test_promoted_bundle_rejected_if_payload_missing_or_changed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary).resolve()
+            state = {'directory': str(directory), 'configuration': {}, 'version': 'test', 'steps': {}}
+            pipeline = release.Pipeline(state)
+            pipeline.bundle.mkdir()
+            payload = pipeline.bundle / 'payload'
+            payload.write_bytes(b'candidate')
+            payload.chmod(0o644)
+            manifest = pipeline.bundle / 'bundle-manifest.json'
+            release.write(manifest, {'files': [{'path': 'payload', 'size': 9, 'mode': 0o644,
+                                                  'sha256': hashlib.sha256(b'candidate').hexdigest()}]})
+            state['steps']['bundle'] = {'result': {'manifestSHA256': release.sha(manifest)}}
+            pipeline.verify_promoted_bundle()
+            payload.write_bytes(b'corrupt!!')
+            with self.assertRaisesRegex(RuntimeError, 'missing or changed'):
+                pipeline.verify_promoted_bundle()
+            payload.unlink()
+            with self.assertRaisesRegex(RuntimeError, 'missing or changed'):
+                pipeline.verify_promoted_bundle()
+
+    def test_bundle_retirement_queues_unavailable_and_reconciles_on_resume(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary).resolve()
+            state = {'directory': str(directory), 'configuration': {}, 'version': 'test', 'steps': {}}
+            pipeline = release.Pipeline(state)
+            pipeline.save = lambda: None
+            with patch.object(release.storage, 'RESERVE', 0):
+                pipeline.prepare_disposable()
+            run = pipeline.disposable
+            (run / 'derived').write_text('derived')
+            with patch.object(release.storage, 'dispose', side_effect=RuntimeError('volume unavailable')):
+                pipeline.step('bundle', lambda: {'manifestSHA256': 'sealed'})
+            self.assertTrue(run.exists())
+            self.assertNotIn('disposableStorage', state)
+            self.assertEqual(len(state['retiredDisposableStorage']), 1)
+            resumed = release.Pipeline(state)
+            resumed.save = lambda: None
+            resumed.prepare_disposable()
+            self.assertFalse(run.exists())
+            self.assertEqual(state['retiredDisposableStorage'], [])
+            self.assertIn('bundle', state['steps'])
+
+    def test_promotion_crash_keeps_internal_candidate_and_rebuilds_pre_side_effects(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary).resolve()
+            state = {'directory': str(directory), 'configuration': {}, 'version': 'test',
+                     'steps': {'release-build': {'result': None}},
+                     'disposableStorage': {'path': '/lost', 'device': 1, 'inode': 2,
+                                           'mount': '/lost-volume', 'volumeUUID': 'uuid'}}
+            pipeline = release.Pipeline(state)
+            pipeline.save = lambda: None
+            pipeline.bundle.mkdir()
+            (pipeline.bundle / 'candidate').write_text('preserved pending rebuild')
+            with patch.object(release.storage, 'verify', side_effect=RuntimeError('lost')), \
+                    patch.object(release.storage, 'RESERVE', 0):
+                pipeline.prepare_disposable()
+            self.assertEqual((pipeline.bundle / 'candidate').read_text(), 'preserved pending rebuild')
+            self.assertNotIn('release-build', state['steps'])
+            self.assertNotIn('bundle', state['steps'])
+            self.assertEqual(len(state['retiredDisposableStorage']), 1)
+            self.assertFalse(any(step in state['steps'] for step in ('package', 'notarization', 'install', 'publish')))
+
+    def test_running_disposable_child_stops_when_volume_is_lost(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary).resolve()
+            state = {'directory': str(directory), 'configuration': {}, 'version': 'test', 'steps': {}}
+            pipeline = release.Pipeline(state)
+            pipeline.source = directory
+            pipeline.disposable = directory
+            pipeline.save = lambda: None
+            with patch.object(pipeline, 'verify_disposable', side_effect=[None, RuntimeError('volume lost')]):
+                with self.assertRaisesRegex(RuntimeError, 'volume lost'):
+                    pipeline.run_command('build', [sys.executable, '-c', 'import time; time.sleep(30)'])
+            self.assertEqual(state['activeStep'], 'build')
+
+    def test_promote_bundle_checks_copy_and_preserves_internal_candidate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary).resolve()
+            pipeline = release.Pipeline({'directory': str(directory), 'configuration': {},
+                                         'version': 'test', 'steps': {}})
+            pipeline.disposable = directory / 'external'
+            pipeline.save = lambda: None
+            pipeline.disposable.mkdir()
+            source = pipeline.disposable / pipeline.bundle.name
+            source.mkdir()
+            (source / 'payload').write_bytes(b'signed candidate')
+            with patch.object(pipeline, 'verify_disposable'), patch.object(release.storage, 'RESERVE', 0):
+                pipeline.promote_bundle(source)
+            self.assertEqual((pipeline.bundle / 'payload').read_bytes(), b'signed candidate')
+            self.assertTrue((source / 'payload').exists())
 
     def test_release_configuration_does_not_require_a_notary_profile(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -664,6 +780,15 @@ class ReleaseTests(unittest.TestCase):
             settings.update(repository='owner/repo', instance='production', developerTeamID='ABCDE12345')
             release.write(path, settings)
             self.assertEqual(release.config(path), settings)
+            settings.update(disposableVolumeMount='/Volumes/example',
+                            disposableRoot='/Volumes/example/build',
+                            disposableVolumeUUID='12345678-1234-4ABC-8DEF-1234567890AB')
+            release.write(path, settings)
+            self.assertEqual(release.config(path), settings)
+            settings.pop('disposableRoot')
+            release.write(path, settings)
+            with self.assertRaisesRegex(RuntimeError, 'configured together'):
+                release.config(path)
 
     def test_release_builds_the_embedding_host_from_the_sealed_source(self):
         pipeline = release.Pipeline({'directory': '/unused', 'configuration': {'modelDirectory': '/model', 'documentModelDirectory': '/documents'},
@@ -1011,6 +1136,8 @@ class ReleaseTests(unittest.TestCase):
         pipeline.install_gate = lambda: pipeline.state['steps'].update({'install-authorization': {}}) or True
         pipeline.cluster_gate = lambda: pipeline.state['steps'].update({'cluster-acceptance': {}}) or True
         pipeline.wait_for_ci = lambda timeout: pipeline.state['steps'].update({'ci': {}})
+        pipeline.prepare_disposable = lambda: None
+        pipeline.verify_promoted_bundle = lambda: None
         seen = []
         def retention(value):
             self.assertEqual(value.state['status'], 'complete')
