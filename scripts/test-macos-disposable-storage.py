@@ -109,6 +109,17 @@ class StorageTests(unittest.TestCase):
         storage.dispose(changed, self.root, mounted=self.mounted, uuid=self.read_uuid)
         self.assertFalse(Path(identity['path']).exists())
 
+    def test_uuid_reader_only_accepts_the_configured_mount(self):
+        def mount_uuid(path):
+            if Path(path) != self.mount:
+                raise AssertionError('UUID reader must receive the mount, not a descendant')
+            return self.uuid
+        self.root.rmdir()
+        identity = self.choose(uuid=mount_uuid)
+        storage.verify(identity, mounted=self.mounted, uuid=mount_uuid)
+        storage.dispose(identity, self.root, mounted=self.mounted, uuid=mount_uuid)
+        storage.dispose(identity, self.root, mounted=self.mounted, uuid=mount_uuid)
+
     def test_optional_configuration_is_complete_and_valid(self):
         self.assertIsNone(storage.validate_settings({}))
         self.assertEqual(storage.validate_settings(self.config)[0], self.mount)

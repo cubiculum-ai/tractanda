@@ -62,8 +62,7 @@ def select(configuration, fallback, *, mounted=os.path.ismount, uuid=volume_uuid
                 parent_info = parent.lstat()
                 if (not stat.S_ISDIR(parent_info.st_mode) or parent_info.st_uid not in (0, os.getuid())
                         or stat.S_IMODE(parent_info.st_mode) & 0o022
-                        or parent_info.st_dev != os.stat(mount).st_dev
-                        or uuid(parent).upper() != expected.upper()):
+                        or parent_info.st_dev != os.stat(mount).st_dev):
                     raise RuntimeError('Disposable root parent is not a safe directory on the configured volume.')
                 parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
                 try:
@@ -75,7 +74,7 @@ def select(configuration, fallback, *, mounted=os.path.ismount, uuid=volume_uuid
                 finally:
                     os.close(parent_fd)
             private_directory(root)
-            if os.stat(root).st_dev != os.stat(mount).st_dev or uuid(root).upper() != expected.upper():
+            if os.stat(root).st_dev != os.stat(mount).st_dev:
                 raise RuntimeError('Disposable root is not on the configured volume.')
             external = True
         else:
@@ -88,6 +87,9 @@ def select(configuration, fallback, *, mounted=os.path.ismount, uuid=volume_uuid
     fs = os.statvfs(root)
     if fs.f_frsize <= 0 or fs.f_bavail * fs.f_frsize < RESERVE:
         raise RuntimeError('Disposable volume lacks the 10 GiB free-space reserve.')
+    if external and (not mounted(mount) or uuid(mount).upper() != expected.upper()
+                     or os.stat(root).st_dev != os.stat(mount).st_dev):
+        raise RuntimeError('Configured disposable volume changed before run creation.')
     run = Path(tempfile.mkdtemp(prefix='macos-release-', dir=root))
     info = private_directory(run)
     return {'path': str(run), 'device': info.st_dev, 'inode': info.st_ino,
@@ -105,7 +107,7 @@ def verify(identity, *, mounted=os.path.ismount, uuid=volume_uuid):
         info = private_directory(path)
     except FileNotFoundError as error:
         raise RuntimeError('Selected disposable directory disappeared.') from error
-    if mount and (os.stat(mount).st_dev != info.st_dev or uuid(path).upper() != identity['volumeUUID']):
+    if mount and os.stat(mount).st_dev != info.st_dev:
         raise RuntimeError('Disposable directory is not on its selected volume.')
     if (info.st_dev, info.st_ino) != (identity['device'], identity['inode']):
         raise RuntimeError('Selected disposable directory identity changed.')
@@ -122,8 +124,7 @@ def dispose(identity, allowed_parent, *, mounted=os.path.ismount, uuid=volume_uu
         if not mounted(mount) or uuid(mount).upper() != identity['volumeUUID']:
             raise RuntimeError('Selected disposable volume is unavailable or changed.')
     parent_info = private_directory(parent)
-    if mount and (parent_info.st_dev != os.stat(mount).st_dev
-                  or uuid(parent).upper() != identity['volumeUUID']):
+    if mount and parent_info.st_dev != os.stat(mount).st_dev:
         raise RuntimeError('Cleanup parent is not on the selected volume.')
     parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
