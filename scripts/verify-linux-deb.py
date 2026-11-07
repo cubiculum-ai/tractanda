@@ -6,7 +6,7 @@ guest limits, optional deadline and eventual guest destruction after preserving 
 This script never creates an account, guest, package, model or canonical migration.
 """
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import errno
 import hashlib
 import grp
@@ -494,17 +494,22 @@ class Validation:
             require(fs.f_frsize > 0 and fs.f_frsize * fs.f_bavail >= RESERVE, 'Model filesystem reserve rejected')
         inventory([self.store, self.index, self.private, self.work], hashes=False)
 
-    def command(self, argv, failure=False, timeout=300, codes=None, server_probe=False, progress=None):
+    def command(self, argv, failure=False, timeout=300, codes=None, server_probe=False, progress=None, separate_stderr=False):
         self.guard()
         remaining = None if self.deadline is None else self.deadline - time.monotonic()
         effective_timeout = None if remaining is None else min(timeout, remaining)
         require(effective_timeout is None or effective_timeout > 0, 'Whole validation deadline leaves no command budget')
         row = {'argv': list(map(str, argv)), 'log': str(self.work / ('command-%03d.log' % len(self.result['commands']))),
                'timeoutSeconds': effective_timeout}
+        if separate_stderr:
+            row['stderrLog'] = str(Path(row['log']).with_suffix('.stderr.log'))
         self.result['commands'].append(row); self.save()
+        log_bytes = lambda: sum(Path(row[key]).stat().st_size for key in ('log', 'stderrLog') if key in row)
         process = None; started = time.monotonic()
         try:
-            with open(row['log'], 'xb') as out:
+            with ExitStack() as files:
+                out = files.enter_context(open(row['log'], 'xb'))
+                diagnostics = files.enter_context(open(row['stderrLog'], 'xb')) if separate_stderr else subprocess.STDOUT
                 env = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LC_ALL': 'C', 'DEBIAN_FRONTEND': 'noninteractive'}
                 if row['argv'][0] in ('/usr/bin/dpkg', SETUP):
                     node = configured_uuid_node(self.context)
@@ -520,20 +525,20 @@ class Validation:
                     require(row['argv'] in allowed, 'Daemon peer binding is only permitted for the fixed native probes')
                     env['TRACTANDA_SERVER_USER'] = 'daemon'
                     row['serverUser'] = 'daemon'
-                process = subprocess.Popen(row['argv'], stdout=out, stderr=subprocess.STDOUT,
+                process = subprocess.Popen(row['argv'], stdout=out, stderr=diagnostics,
                                            stdin=subprocess.DEVNULL, env=env, start_new_session=True)
                 row['pid'] = process.pid; self.save()
                 while process.poll() is None:
                     self.guard()
                     require((effective_timeout is None or time.monotonic() - started < effective_timeout)
-                            and Path(row['log']).stat().st_size <= 4 * 1024**2,
+                            and log_bytes() <= 4 * 1024**2,
                             'Command deadline/log cap exceeded')
                     if progress is not None:
                         progress(process)
                     time.sleep(.1)
                 row['exit'] = process.wait(); self.guard()
                 require(effective_timeout is None or time.monotonic() - started <= effective_timeout, 'Command deadline exceeded')
-                require(Path(row['log']).stat().st_size <= 4 * 1024**2, 'Final log cap exceeded')
+                require(log_bytes() <= 4 * 1024**2, 'Final log cap exceeded')
                 text = Path(row['log']).read_text(errors='replace')
                 expected = row['exit'] in codes if codes is not None else (row['exit'] != 0 if failure else row['exit'] == 0)
                 require(expected, 'Unexpected command status; retain guest/logs')
@@ -893,7 +898,7 @@ def execute(args):
             require(info.get('documentExtraction', {}).get('state') == 'awaitingModel', 'Document model was not initially absent')
             initial_status = json.loads(check.command(['/usr/bin/sudo', '-n', '-u', 'daemon', '--', CLI,
                 'models', 'status', '--manifest', str(PAYLOAD / 'models/manifest.json'), '--storage',
-                '/opt/tractanda/var/lib/tractanda/Models']))
+                '/opt/tractanda/var/lib/tractanda/Models'], separate_stderr=True))
             require(model_status_complete(initial_status, ready=False),
                     'Model artifact unexpectedly ready before offline import')
             health_connection = http.client.HTTPConnection('127.0.0.1', context['port'] + 1, timeout=2)
@@ -937,7 +942,7 @@ def execute(args):
                           timeout=check.command_timeout_seconds)
             model_status = json.loads(check.command(['/usr/bin/sudo', '-n', '-u', 'daemon', '--', CLI,
                 'models', 'status', '--manifest', str(PAYLOAD / 'models/manifest.json'), '--storage',
-                '/opt/tractanda/var/lib/tractanda/Models']))
+                '/opt/tractanda/var/lib/tractanda/Models'], separate_stderr=True))
             require(model_status_complete(model_status, ready=True),
                     'Imported model artifacts are not ready')
             check.command([SETUP, 'start', '--name', check.name], timeout=check.command_timeout_seconds)
@@ -1024,7 +1029,7 @@ def execute(args):
             check.command([SETUP, 'stop', '--name', check.name], timeout=check.command_timeout_seconds)
             requirement = json.loads(check.command(['/usr/bin/sudo', '-n', '-u', 'daemon', '--', SETUP,
                                                     '--canonical-reader-admit', check.store],
-                                                    timeout=check.command_timeout_seconds))
+                                                    timeout=check.command_timeout_seconds, separate_stderr=True))
             check.result['actualCanonicalRequirement'] = requirement
             check.command([SETUP, 'start', '--name', check.name], timeout=check.command_timeout_seconds)
             identity = check.ready(current)

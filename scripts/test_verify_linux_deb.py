@@ -72,6 +72,24 @@ class ValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'log cap'):
                 check.command(['/fixed/mock'], timeout=None)
 
+    def test_machine_json_keeps_stderr_diagnostic_and_rejects_nonzero_exit(self):
+        check = V.Validation({'runID': '012345abcdef'}, self.root, no_execution_deadline=True)
+        script = 'import sys; print("[1,2]"); print("sudo: unable to resolve host fixture", file=sys.stderr)'
+        with patch.object(check, 'guard'):
+            self.assertEqual(json.loads(check.command([sys.executable, '-c', script], separate_stderr=True)), [1, 2])
+            row = check.result['commands'][-1]
+            self.assertIn('unable to resolve host', Path(row['stderrLog']).read_text())
+            self.assertEqual(row['exit'], 0)
+            with self.assertRaisesRegex(ValueError, 'Unexpected command status'):
+                check.command([sys.executable, '-c', script + '; sys.exit(7)'], separate_stderr=True)
+            self.assertEqual(check.result['commands'][-1]['exit'], 7)
+
+    def test_machine_json_stderr_shares_total_log_cap(self):
+        check = V.Validation({'runID': '012345abcdef'}, self.root, no_execution_deadline=True)
+        script = 'import sys; print("{}"); sys.stderr.write("x" * (4 * 1024**2 + 1))'
+        with patch.object(check, 'guard'), self.assertRaisesRegex(ValueError, 'log cap'):
+            check.command([sys.executable, '-c', script], separate_stderr=True)
+
     def test_command_budget_is_capped_by_whole_validation_budget(self):
         check = V.Validation({'runID': '012345abcdef'}, self.root, 1800, 7200)
         self.assertEqual(check.timeout_seconds, 1800)
