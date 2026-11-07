@@ -302,15 +302,20 @@ class PackageHookTests(unittest.TestCase):
             elif args[0] == "disappear":
                 self.assertEqual(records, [{"program": "python-hook", "args": ["-I", "-", "uuidd-remove"]}])
             else:
-                self.assertEqual(records[0]["args"], ["-I", "-", "postrm-remove" if args[0] in ("remove", "purge") else "postrm"])
-                self.assertEqual(records[1], {"program": "systemctl", "args": ["daemon-reload"]})
+                action = ("postrm-remove" if args[0] in ("remove", "purge") else
+                          "abort-upgrade" if args[0] == "abort-upgrade" else "postrm")
+                self.assertEqual(records[0]["args"], ["-I", "-", action])
+                if args[0] == "abort-upgrade":
+                    self.assertEqual(len(records), 1)
+                else:
+                    self.assertEqual(records[1], {"program": "systemctl", "args": ["daemon-reload"]})
 
     def test_postrm_same_17_abort_binds_the_incoming_manifest(self):
         version = "0.1.0~poc.17-1"
         for arguments, expected in (
             (("abort-upgrade", version, version), ["layout17-reinstall-abort", "c" * 64]),
             (("abort-upgrade", "0.1.0~poc.16.2-1", version), ["layout17-abort-upgrade"]),
-            (("abort-upgrade", version, "0.1.0~poc.17-2"), ["postrm"]),
+            (("abort-upgrade", version, "0.1.0~poc.17-2"), ["abort-upgrade"]),
             (("failed-upgrade", version, version), ["postrm"]),
         ):
             self.harness.clear()
@@ -324,7 +329,7 @@ class PackageHookTests(unittest.TestCase):
             ("0.1.0~poc.17-1", corrected, ["layout17-compatible-abort", "c" * 64]),
             ("0.1.0~poc.16.2-1", corrected, ["layout17-abort-upgrade"]),
             (corrected, corrected, ["layout17-reinstall-abort", "c" * 64]),
-            ("0.1.0~poc.17-1", "0.1.0~poc.17.2-1", ["postrm"]),
+            ("0.1.0~poc.17-1", "0.1.0~poc.17.2-1", ["abort-upgrade"]),
         ):
             self.harness.clear()
             result = self.harness.run("tractanda.postrm", "abort-upgrade", old, new,
@@ -1080,6 +1085,83 @@ class FallbackUnitTests(unittest.TestCase):
                 self.fallback.fallback(["postrm"])
             with self.assertRaisesRegex(SystemExit, "validation-only hook has no captured package state"):
                 self.fallback.fallback(["abort-remove"])
+
+    def test_abort_before_capture_keeps_later_initialized_instance_and_writer_untouched(self):
+        import fcntl
+        import uuid
+        m = self.fallback
+        active, state_path, receipts = Path(m.ACTIVE), Path(m.STATE), Path(m.RECEIPTS)
+        active.mkdir(parents=True)
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        receipts.mkdir()
+        raw = json.dumps({"version": "0.1.0-poc.17.1"}).encode()
+        (active / "bundle-manifest.json").write_bytes(raw)
+        digest = hashlib.sha256(raw).hexdigest()
+        commitment = {"version": "0.1.0-poc.17.1", "manifestSHA256": digest}
+        state = {"profile": "tractanda.package-transaction.v1", "operationID": str(uuid.uuid1()),
+                 "phase": "committed", "instances": [], "startupPermitted": [],
+                 "incoming": commitment, "observed": commitment}
+        state_path.write_text(json.dumps(state))
+        store, index = self.root / "stores/one", self.root / "indexes/one"
+        store.mkdir(parents=True, mode=0o700)
+        index.mkdir(parents=True, mode=0o700)
+        lock = store / ".writer.lock"
+        lock.write_bytes(b"")
+        lock.chmod(0o600)
+        receipt = {"version": 1, "instance": "one", "release": m.ACTIVE,
+                   "manifestSHA256": digest, "initialized": True, "state": "active",
+                   "store": str(store), "indexDirectory": str(index)}
+        receipt_path = receipts / "one.json"
+        receipt_path.write_text(json.dumps(receipt))
+        real_lstat = os.lstat
+        def lstat(path):
+            if os.fspath(path) == str(receipts):
+                return SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0)
+            return real_lstat(path)
+        with lock.open("rb") as writer, \
+                mock.patch.object(m, "root_directory_chain"), \
+                mock.patch.object(m.os, "lstat", side_effect=lstat), \
+                mock.patch.object(m.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=os.getuid())), \
+                mock.patch.object(m, "verify_helper", return_value=0) as verify, \
+                mock.patch.object(m, "write_state") as write, \
+                mock.patch.object(m, "run_systemctl") as systemctl:
+            fcntl.flock(writer, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            before = state_path.read_bytes(), receipt_path.read_bytes()
+            self.assertEqual(self.invoke_as_root(["abort-upgrade"]), 0)
+            verify.assert_called_once_with(["verify-helper", m.ACTIVE + "/bin/tractanda-setup"])
+            write.assert_not_called()
+            systemctl.assert_not_called()
+            self.assertEqual((state_path.read_bytes(), receipt_path.read_bytes()), before)
+            verify.side_effect = SystemExit("untrusted old helper")
+            with self.assertRaisesRegex(SystemExit, "untrusted old helper"):
+                self.invoke_as_root(["abort-upgrade"])
+            verify.side_effect = None
+            with mock.patch.object(m.os, "lstat", side_effect=lambda path:
+                    SimpleNamespace(st_mode=stat.S_IFDIR | 0o777, st_uid=0)
+                    if os.fspath(path) == str(receipts) else real_lstat(path)):
+                with self.assertRaisesRegex(SystemExit, "receipt directory has unsafe custody"):
+                    self.invoke_as_root(["abort-upgrade"])
+            # Pending handoffs retain exact membership and quiescence requirements.
+            state["phase"] = "awaitingUnpack"
+            state_path.write_text(json.dumps(state))
+            with self.assertRaisesRegex(SystemExit, "receipt inventory differs"):
+                self.invoke_as_root(["abort-upgrade"])
+            state["instances"] = [{"name": "one", "originalManifestSHA256": digest,
+                                   "wasRunning": True, "wasEnabled": True,
+                                   "embeddingWasRunning": False, "authenticationWasRunning": True}]
+            state_path.write_text(json.dumps(state))
+            with self.assertRaisesRegex(SystemExit, "canonical writer lock is held"):
+                self.invoke_as_root(["abort-upgrade"])
+            # A committed refusal cannot excuse payload or receipt drift.
+            state["phase"] = "committed"
+            state_path.write_text(json.dumps(state))
+            receipt["manifestSHA256"] = "f" * 64
+            receipt_path.write_text(json.dumps(receipt))
+            with self.assertRaisesRegex(SystemExit, "abort receipt differs"):
+                self.invoke_as_root(["abort-upgrade"])
+            (active / "bundle-manifest.json").write_bytes(raw + b" ")
+            with self.assertRaisesRegex(SystemExit, "intact committed package"):
+                self.invoke_as_root(["abort-upgrade"])
 
     def test_receipts_allow_separate_protected_custom_roots_and_reject_overlap(self):
         import stat

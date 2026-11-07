@@ -475,7 +475,15 @@ def read_receipts(instances, quiescent=True):
         return {}
     if not stat.S_ISDIR(directory.st_mode) or directory.st_uid != 0 or directory.st_mode & 0o022:
         refuse("receipt directory has unsafe custody")
-    if len(instances) > 1024 or set(os.listdir(RECEIPTS)) != {name + ".json" for name in instances}:
+    entries = os.listdir(RECEIPTS)
+    if instances is None:
+        # A committed transaction records its completed operation, not later explicit
+        # instance initialization. Discovery is only for read-only committed aborts.
+        if len(entries) > 1024 or any(not name.endswith(".json") or not valid_instance(name[:-5])
+                                      for name in entries):
+            refuse("receipt inventory contains an unknown entry")
+        instances = {name[:-5] for name in entries}
+    if len(instances) > 1024 or set(entries) != {name + ".json" for name in instances}:
         refuse("receipt inventory differs from transaction")
     try:
         daemon_uid = pwd.getpwnam("daemon").pw_uid
@@ -1497,6 +1505,36 @@ def fallback(arguments):
         if len(arguments) != 1:
             refuse("invalid uuidd-remove arguments")
         return uuidd_remove()
+    if action == "abort-upgrade":
+        if len(arguments) != 1:
+            refuse("invalid abort-upgrade arguments")
+        try:
+            state = decode_object(read_private_regular(STATE), STATE_REQUIRED, STATE_ALLOWED)
+        except FileNotFoundError:
+            return fallback(["postrm"])
+        if state.get("phase") != "committed":
+            return fallback(["postrm"])
+        # Refusal before capturing a new transaction leaves the previous committed
+        # payload and its services intact. Do not require its historical instance list
+        # to include instances explicitly initialized after that package configure.
+        raw = read_private_regular(os.path.join(ACTIVE, "bundle-manifest.json"),
+                                   16 * 1024 * 1024, private=False)
+        manifest = decode_object(raw)
+        digest = hashlib.sha256(raw).hexdigest()
+        incoming, observed = state.get("incoming"), state.get("observed")
+        if (state.get("owner") is not None or state.get("startupPermitted") != []
+                or type(incoming) is not dict or type(observed) is not dict
+                or incoming.get("manifestSHA256") != digest
+                or observed.get("manifestSHA256") != digest
+                or incoming.get("version") != manifest.get("version")
+                or observed.get("version") != manifest.get("version")):
+            refuse("abort lacks the intact committed package payload")
+        verify_helper(["verify-helper", os.path.join(ACTIVE, "bin/tractanda-setup")])
+        receipts = read_receipts(None, quiescent=False)
+        if any(receipt["state"] != "removed" and receipt["manifestSHA256"] != digest
+               for receipt in receipts.values()):
+            refuse("abort receipt differs from the committed package payload")
+        return 0
     if action in ("layout17-abort-upgrade", "layout17-reinstall-abort", "layout17-compatible-abort"):
         reinstall = action == "layout17-reinstall-abort"
         compatible = action == "layout17-compatible-abort"
