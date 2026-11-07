@@ -82,6 +82,73 @@ class ValidationTests(unittest.TestCase):
         Path(str(p) + '.inventory.json').write_text(json.dumps(r))
         with self.assertRaisesRegex(ValueError, 'Both bundled models'): V.artifact(p)
 
+    def test_slim_artifact_requires_workers_and_catalog_but_no_weight_trees(self):
+        p, receipt = self.package()
+        receipt['inventory'] = [x for x in receipt['inventory'] if '/models/' not in x['path']]
+        receipt['inventory'].append({'path': 'opt/tractanda/current/models/manifest.json', 'sha256': 'b' * 64})
+        Path(str(p) + '.inventory.json').write_text(json.dumps(receipt))
+        self.assertEqual(V.artifact(p, 'slim')['serverSHA256'], 'a' * 64)
+        receipt['inventory'].append({'path': 'opt/tractanda/current/models/granite-docling-258m-mlx/partial', 'sha256': 'c' * 64})
+        Path(str(p) + '.inventory.json').write_text(json.dumps(receipt))
+        with self.assertRaisesRegex(ValueError, 'omit both'): V.artifact(p, 'slim')
+
+    def test_explicit_guest_and_bound_manifest_baseline_are_not_interchangeable(self):
+        V.require_guest_baseline('kali-rolling', {'ID': 'kali', 'VERSION_ID': '2026.3', 'VERSION_CODENAME': 'kali-rolling'})
+        V.require_guest_baseline('debian13', {'ID': 'debian', 'VERSION_ID': '13'})
+        with self.assertRaisesRegex(ValueError, 'baseline'): V.require_guest_baseline('debian13', {'ID': 'kali'})
+        with self.assertRaisesRegex(ValueError, 'baseline'): V.require_guest_baseline('kali-rolling', {'ID': 'debian', 'VERSION_ID': '13'})
+        path = self.root / 'manifest.json'; path.write_text(json.dumps({'linuxBuildOS': 'kali-rolling'}))
+        package = {'receipt': {'bundleManifestSHA256': V.digest(path)}}
+        V.require_package_baseline(package, 'kali-rolling', path)
+        with self.assertRaisesRegex(ValueError, 'baseline'): V.require_package_baseline(package, 'debian13', path)
+        path.write_text('{}')
+        with self.assertRaisesRegex(ValueError, 'commitment'): V.require_package_baseline(package, 'kali-rolling', path)
+
+    def test_slim_context_requires_first_source_offline_inputs(self):
+        value = {'schema': 'tractanda.package-validation.v1', 'runID': '012345abcdef',
+                 'fixtureCapBytes': V.FIXTURE_CAP, 'reserveBytes': V.RESERVE,
+                 'softwareAllowanceBytes': 32 * 1024**3, 'selection': 'first-source',
+                 'port': 49179, 'expiresAt': time.time() + 600, 'buildOS': 'kali-rolling',
+                 'artifactBindings': {'package': {'payloadMode': 'slim'}}, 'uuidNode': '00:11:22:33:44:55', 'offlineModelSource': '/inputs/models', 'offlineModelCatalog': '/inputs/catalog.json'}
+        V.validate_context(value)
+        with self.assertRaisesRegex(ValueError, 'sample'): V.validate_context(dict(value, selection='prepared'))
+        with self.assertRaisesRegex(ValueError, 'absolute'): V.validate_context(dict(value, offlineModelSource='relative'))
+        with self.assertRaisesRegex(ValueError, 'binding'): V.validate_context(dict(value, artifactBindings=None))
+        with self.assertRaisesRegex(ValueError, 'UUID node'): V.validate_context({k: v for k, v in value.items() if k != 'uuidNode'})
+
+    def test_slim_catalog_and_status_require_exact_artifact_set(self):
+        names = ['granite-embedding-311m-multilingual-r2', 'granite-docling-258m-mlx']
+        path = self.root / 'catalog.json'
+        path.write_text(json.dumps({'artifacts': [{'identifier': n, 'files': [{'size': 17}]} for n in names]}))
+        manifest = {'modelProvisioningManifestSHA256': V.digest(path)}
+        self.assertEqual(V.model_catalog_bytes(path, manifest), 34)
+        status = [{'artifact': n, 'phase': 'ready'} for n in names]
+        self.assertTrue(V.model_status_complete(status, True))
+        self.assertFalse(V.model_status_complete([status[0], status[0]], True))
+        self.assertFalse(V.model_status_complete(status, False))
+        path.write_text('{}')
+        with self.assertRaisesRegex(ValueError, 'commitment'): V.model_catalog_bytes(path, manifest)
+
+    def test_artifact_roles_preserve_debian_old_and_kali_target_provenance(self):
+        old, old_receipt = self.package()
+        new = self.root / 'new.deb'; new.write_bytes(b'new package fixture')
+        old_manifest = self.root / 'old.json'; old_manifest.write_text('{}')
+        new_manifest = self.root / 'new.json'; new_manifest.write_text(json.dumps({'linuxBuildOS': 'kali-rolling'}))
+        def item(path, mode):
+            return {'path': path, 'receipt': {'packageSHA256': V.digest(path),
+                    'bundleManifestSHA256': V.digest(old_manifest if path == old else new_manifest)}, 'serverSHA256': 'a' * 64}
+        context = {'artifactBindings': {
+            'package': {'packageSHA256': V.digest(old), 'manifest': str(old_manifest), 'buildOS': 'debian13', 'payloadMode': 'slim'},
+            'upgrade': {'packageSHA256': V.digest(new), 'manifest': str(new_manifest), 'buildOS': 'kali-rolling', 'payloadMode': 'slim'}}}
+        with patch.object(V, 'artifact', side_effect=item):
+            result = V.bind_artifacts(context, [('package', old), ('upgrade', new)])
+            self.assertEqual([p['buildOS'] for p in result], ['debian13', 'kali-rolling'])
+            V.require_target_baseline('kali-rolling', result)
+            with self.assertRaisesRegex(ValueError, 'Target package'): V.require_target_baseline('kali-rolling', result[:1])
+            bad = json.loads(json.dumps(context)); bad['artifactBindings']['package']['buildOS'] = 'kali-rolling'
+            with self.assertRaisesRegex(ValueError, 'baseline'): V.bind_artifacts(bad, [('package', old), ('upgrade', new)])
+            with self.assertRaisesRegex(ValueError, 'roles'): V.bind_artifacts(context, [('package', old)])
+
     def test_revision_or_filename_changes_are_not_an_older_binary(self):
         first = {'serverSHA256': 'a' * 64, 'receipt': {'packageSHA256': 'b' * 64}}
         second = {'serverSHA256': 'a' * 64, 'receipt': {'packageSHA256': 'c' * 64}}

@@ -20,6 +20,7 @@ import stat
 import subprocess
 import sys
 import time
+import http.client
 
 RESERVE = 10 * 1024**3
 FIXTURE_CAP = 128 * 1024**2
@@ -75,7 +76,8 @@ def read_json(path, maximum=16 * 1024**2):
     return json.loads(raw, object_pairs_hook=unique)
 
 
-def artifact(path):
+def artifact(path, payload_mode="full"):
+    require(payload_mode in ("full", "slim"), "Unknown payload mode")
     """Use D3's adjacent receipt, hash the .deb without unpacking/duplicating models."""
     path = path.resolve(strict=True)
     require(path.is_file() and path.suffix == '.deb', 'Supply a regular complete .deb')
@@ -87,10 +89,78 @@ def artifact(path):
     require(all(prefix + 'bin/' + name in files for name in ('tractanda', 'tractanda-tui', 'tractanda-mcp',
                 'tractanda-setup', 'tractanda-auth-helper', 'tractanda-embeddings', 'tractanda-document-converter')),
             'Complete seven-binary D3 payload required')
-    require(all(any(p.startswith(prefix + 'models/' + name + '/') for p in files) for name in
-                ('granite-embedding-311m-multilingual-r2', 'granite-docling-258m-mlx')), 'Both bundled models required')
+    model_prefixes = [prefix + 'models/' + name + '/' for name in
+                      ('granite-embedding-311m-multilingual-r2', 'granite-docling-258m-mlx')]
+    present = [any(p.startswith(base) for p in files) for base in model_prefixes]
+    if payload_mode == 'full':
+        require(all(present), 'Both bundled models required')
+    else:
+        require(not any(present) and prefix + 'models/manifest.json' in files,
+                'Slim package must omit both weight trees and include the model catalog')
     require(files[prefix + 'bundle-manifest.json']['sha256'] == receipt['bundleManifestSHA256'], 'Manifest commitment differs')
     return {'path': path, 'receipt': receipt, 'serverSHA256': files[prefix + 'bin/tractanda']['sha256']}
+
+
+def require_guest_baseline(build_os, release):
+    os_id = release.get('ID', '').strip('\"')
+    version = release.get('VERSION_ID', '').strip('\"')
+    codename = release.get('VERSION_CODENAME', '').strip('\"')
+    require(bool(re.fullmatch(r'[0-9]+(?:\.[0-9]+)*', version)) and
+            ((build_os == 'debian13' and os_id == 'debian' and version.split('.')[0] == '13')
+             or (build_os == 'kali-rolling' and os_id == 'kali' and codename == 'kali-rolling')),
+            'Guest baseline differs from explicit context')
+
+
+def require_package_baseline(package, build_os, manifest_path):
+    require(digest(manifest_path) == package['receipt']['bundleManifestSHA256'], 'Package manifest commitment differs')
+    manifest = read_json(manifest_path, 4 * 1024**2)
+    require(manifest.get('linuxBuildOS', 'debian13') == build_os, 'Package baseline differs from guest context')
+
+
+def model_catalog_bytes(path, manifest):
+    catalog = read_json(path)
+    require(digest(path) == manifest.get('modelProvisioningManifestSHA256'), 'Model catalog commitment differs')
+    artifacts = catalog.get('artifacts', [])
+    require(len(artifacts) == 2 and {a.get('identifier') for a in artifacts} == {
+        'granite-embedding-311m-multilingual-r2', 'granite-docling-258m-mlx'}, 'Unexpected model catalog')
+    sizes = [f.get('size') for a in artifacts for f in a.get('files', [])]
+    require(sizes and all(type(n) is int and n > 0 for n in sizes), 'Invalid model catalog sizes')
+    return sum(sizes)
+
+
+def model_status_complete(status, ready):
+    expected = {'granite-embedding-311m-multilingual-r2', 'granite-docling-258m-mlx'}
+    return (isinstance(status, list) and len(status) == 2
+            and {row.get('artifact') for row in status if isinstance(row, dict)} == expected
+            and all((row.get('phase') == 'ready') == ready for row in status))
+
+
+def bind_artifacts(context, roles):
+    bindings = context.get('artifactBindings')
+    if bindings is not None:
+        require(set(bindings) == {role for role, _ in roles}, 'Artifact binding roles differ from requested inputs')
+    packages = []
+    for role, path in roles:
+        binding = bindings[role] if bindings is not None else {
+            'buildOS': 'debian13', 'payloadMode': context.get('payloadMode', 'full')}
+        require(isinstance(binding, dict) and binding.get('buildOS') in ('debian13', 'kali-rolling')
+                and binding.get('payloadMode') in ('full', 'slim'), 'Invalid artifact binding')
+        package = artifact(path, binding['payloadMode'])
+        package['buildOS'], package['payloadMode'], package['role'] = binding['buildOS'], binding['payloadMode'], role
+        if bindings is not None:
+            require(binding.get('packageSHA256') == package['receipt']['packageSHA256'], 'Artifact role hash differs')
+            manifest = binding.get('manifest')
+            require(isinstance(manifest, str) and Path(manifest).is_absolute(), 'Missing package manifest binding')
+            require_package_baseline(package, binding['buildOS'], Path(manifest))
+            package['manifestPath'] = manifest
+        packages.append(package)
+    return packages
+
+
+def require_target_baseline(guest_os, packages):
+    target = next((p for p in packages if p['role'] == 'upgrade'), packages[0])
+    if guest_os == 'kali-rolling':
+        require(target['buildOS'] == 'kali-rolling', 'Target package must have Kali build provenance')
 
 
 def distinct_binary(first, second):
@@ -182,6 +252,23 @@ def validate_context(context):
             'Keep software allowance separate; fixture/reserve limits are fixed')
     require(context['selection'] in ('first-source', 'prepared'), 'Explicit store selection required')
     configured_uuid_node(context)
+    require(context.get('buildOS', 'debian13') in ('debian13', 'kali-rolling'), 'Unknown guest baseline')
+    if context.get('buildOS', 'debian13') == 'kali-rolling':
+        require(isinstance(context.get('artifactBindings'), dict), 'Kali validation requires explicit artifact bindings')
+    bindings = context.get('artifactBindings', {})
+    first_mode = bindings.get('package', {}).get('payloadMode', context.get('payloadMode', 'full'))
+    any_slim = first_mode == 'slim' or any(isinstance(v, dict) and v.get('payloadMode') == 'slim' for v in bindings.values())
+    if any_slim:
+        require(configured_uuid_node(context) is not None, 'Slim loopback guest requires controller-attested UUID node')
+    require(first_mode in ('full', 'slim'), 'Unknown payload mode')
+    if first_mode == 'slim':
+        require(context['selection'] == 'first-source', 'Slim offline FTS requires the first-source sample')
+        source = context.get('offlineModelSource')
+        require(isinstance(source, str) and source.startswith('/') and source != '/',
+                'Slim validation requires an absolute offline model source')
+        catalog = context.get('offlineModelCatalog')
+        require(isinstance(catalog, str) and catalog.startswith('/') and catalog != '/',
+                'Slim validation requires the exact offline model catalog')
     require(49152 <= context['port'] <= 65535 and 0 < context['expiresAt'] - time.time() <= 3600,
             'Context port or validity window rejected')
 
@@ -215,6 +302,11 @@ class Validation:
         for path in (Path('/opt'), Path('/etc'), Path('/var/lib'), Path('/var/cache'), self.work):
             fs = os.statvfs(path)
             require(fs.f_frsize > 0 and fs.f_bavail * fs.f_frsize >= RESERVE, 'Actual guest filesystem reserve rejected')
+        model_storage = Path('/opt/tractanda/var/lib/tractanda/Models')
+        require(not model_storage.is_symlink(), 'Unsafe guest model storage link')
+        if model_storage.exists():
+            fs = os.statvfs(model_storage)
+            require(fs.f_frsize > 0 and fs.f_frsize * fs.f_bavail >= RESERVE, 'Model filesystem reserve rejected')
         inventory([self.store, self.index, self.private, self.work], hashes=False)
 
     def command(self, argv, failure=False, timeout=300, codes=None, server_probe=False):
@@ -230,8 +322,9 @@ class Validation:
             with open(row['log'], 'xb') as out:
                 env = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LC_ALL': 'C', 'DEBIAN_FRONTEND': 'noninteractive'}
                 if server_probe:
-                    require(row['argv'] == [CLI, '--no-start', '--socket', '/run/tractanda/' + self.name + '/server.sock', 'info'],
-                            'Daemon peer binding is only permitted for the fixed native info probe')
+                    prefix = [CLI, '--no-start', '--socket', '/run/tractanda/' + self.name + '/server.sock']
+                    require(row['argv'] in (prefix + ['info'], prefix + ['search', 'shared knowledge base']),
+                            'Daemon peer binding is only permitted for the fixed native probes')
                     env['TRACTANDA_SERVER_USER'] = 'daemon'
                     row['serverUser'] = 'daemon'
                 process = subprocess.Popen(row['argv'], stdout=out, stderr=subprocess.STDOUT,
@@ -290,8 +383,10 @@ class Validation:
         manifest = read_json(PAYLOAD / 'bundle-manifest.json', 4 * 1024**2)
         require(digest(PAYLOAD / 'bundle-manifest.json') == package['receipt']['bundleManifestSHA256']
                 and manifest.get('embedding') and manifest.get('documentExtraction'), 'Actual active full payload differs')
+        expected_os = package.get('buildOS', self.context.get('buildOS', 'debian13'))
+        require(manifest.get('linuxBuildOS', 'debian13') == expected_os, 'Package baseline differs from guest context')
         require(manifest['version'] != '', 'Missing source version')
-        self.command([SETUP, 'plan', '--bundle', PAYLOAD])
+        self.command([SETUP, 'plan', '--bundle', PAYLOAD], timeout=self.command_timeout_seconds)
         for name in ('tractanda', 'tractanda-setup'):
             owned = self.command(['/usr/bin/dpkg-query', '-S', str(PAYLOAD / 'bin' / name)])
             require(owned.startswith('tractanda: '), 'dpkg does not own active software')
@@ -345,16 +440,40 @@ def execute(args):
             and Path('/run/systemd/container').read_text().strip() in ('podman', 'other'), 'Only explicit disposable systemd guests')
     require(Path('/etc/machine-id').read_text().strip() == context['guestMachineID'], 'Controller guest binding differs')
     release = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text().splitlines() if '=' in line)
-    require(release['ID'].strip('"') == 'debian' and release['VERSION_ID'].strip('"') == '13', 'Native Debian13 required')
-    arch = ARCH[platform.machine()]; packages = [artifact(p) for p in (args.package, args.upgrade, args.older_refusal) if p]
+    build_os = context.get('buildOS', 'debian13')
+    require_guest_baseline(build_os, release)
+    roles = [('package', args.package), ('upgrade', args.upgrade), ('olderRefusal', args.older_refusal)]
+    roles = [(role, path) for role, path in roles if path is not None]
+    packages = bind_artifacts(context, roles)
     require((args.older_refusal is None) == (args.older_manifest is None), 'Older refusal needs its actual hash-bound bundle manifest')
+    arch = ARCH[platform.machine()]
     require(all(p['receipt']['arch'] == arch for p in packages), 'Package/native architecture mismatch')
+    require_target_baseline(build_os, packages)
+    payload_mode = packages[0]['payloadMode']
+    if any(p['payloadMode'] == 'slim' for p in packages):
+        require(all(name == 'lo' for _, name in socket.if_nameindex()), 'Slim offline guest must have loopback only')
+    if payload_mode == 'slim':
+        model_source = Path(context['offlineModelSource'])
+        require(model_source.is_absolute() and not model_source.is_symlink() and model_source.is_dir()
+                and os.statvfs(model_source).f_flag & os.ST_RDONLY, 'Model source must be a read-only mount')
     require(all(not path.exists() and not path.is_symlink() for path in
                 (PAYLOAD, Path('/opt/tractanda/var/lib/tractanda/Installation/receipts'), Path('/usr/sbin/policy-rc.d'))),
             'Use a fresh isolated image without another installation/policy fixture or dangling link')
+    if payload_mode == 'slim':
+        require('manifestPath' in packages[0], 'Slim package needs its bound manifest')
+        manifest_path = Path(packages[0]['manifestPath'])
+        manifest = read_json(manifest_path, 4 * 1024**2)
+        catalog_path = Path(context['offlineModelCatalog'])
+        model_bytes = model_catalog_bytes(catalog_path, manifest)
+        require(context['softwareAllowanceBytes'] >= 2 * model_bytes + sum(p['receipt']['installedKiB'] * 1024 for p in packages),
+                'Software allowance does not cover package and model import staging')
+        model_storage = Path('/opt/tractanda/var/lib/tractanda/Models')
+        require(not model_storage.exists() and not model_storage.is_symlink(), 'Slim test requires fresh model storage')
     pwd.getpwnam('daemon'); pwd.getpwnam(context['owner'])  # Never provision an account.
     work = Path('/var/tmp/tractanda-package-validation-' + context['runID']); work.mkdir(mode=0o700)
     check = Validation(context, work, args.timeout_seconds, args.command_timeout_seconds); current = packages[0]
+    check.result['artifacts'] = [{'role': p['role'], 'packageSHA256': p['receipt']['packageSHA256'],
+                                  'buildOS': p['buildOS'], 'payloadMode': p['payloadMode']} for p in packages]
     try:
         data_root = check.store.parent
         require(not data_root.exists() or {p.name for p in data_root.iterdir()} <=
@@ -375,6 +494,78 @@ def execute(args):
                     '--no-legend', '--no-pager', 'tractanda-*.service']).strip(), 'Fresh package started/registered an unrelated service')
         check.command(setup_arguments(context, check.name), timeout=check.command_timeout_seconds)
         identity = check.ready(current)
+        if payload_mode == 'slim':
+            socket_path = '/run/tractanda/' + check.name + '/server.sock'
+            info = json.loads(check.command([CLI, '--no-start', '--socket', socket_path, 'info'], server_probe=True))
+            require(info.get('documentExtraction', {}).get('state') == 'awaitingModel', 'Document model was not initially absent')
+            initial_status = json.loads(check.command(['/usr/bin/sudo', '-n', '-u', 'daemon', '--', CLI,
+                'models', 'status', '--manifest', str(PAYLOAD / 'models/manifest.json'), '--storage',
+                '/opt/tractanda/var/lib/tractanda/Models']))
+            require(model_status_complete(initial_status, ready=False),
+                    'Model artifact unexpectedly ready before offline import')
+            health_connection = http.client.HTTPConnection('127.0.0.1', context['port'] + 1, timeout=2)
+            try:
+                health_connection.request('GET', '/health')
+                response = health_connection.getresponse()
+                require(response.status != 200, 'Embedding worker unexpectedly ready before offline import')
+            except (OSError, http.client.HTTPException):
+                pass
+            finally:
+                health_connection.close()
+            result = json.loads(check.command([CLI, '--no-start', '--socket', socket_path, 'search',
+                                               'shared knowledge base'], server_probe=True))
+            require(context['selection'] == 'first-source' and isinstance(result.get('ids'), list)
+                    and len(result['ids']) > 0, 'Offline sample full-text search did not return an item')
+            check.result['cases']['slim-offline-core-fts'] = {'status': 'PASS', 'packageSHA256': current['receipt']['packageSHA256']}
+            embedding_unit = 'tractanda-embeddings-' + check.name + '.service'
+            check.command([SETUP, 'stop', '--name', check.name], timeout=check.command_timeout_seconds)
+            check.stopped()
+            require(not model_storage.is_symlink() and model_storage.is_dir(), 'Unsafe guest model storage')
+            fs = os.statvfs(model_storage)
+            require(fs.f_frsize * fs.f_bavail >= RESERVE + 2 * model_bytes, 'Model backing filesystem reserve rejected')
+            check.command(['/usr/bin/sudo', '-n', '-u', 'daemon', '--', CLI, 'models', 'import',
+                           '--manifest', str(PAYLOAD / 'models/manifest.json'), '--storage',
+                           '/opt/tractanda/var/lib/tractanda/Models', '--from', str(model_source)],
+                          timeout=check.command_timeout_seconds)
+            model_status = json.loads(check.command(['/usr/bin/sudo', '-n', '-u', 'daemon', '--', CLI,
+                'models', 'status', '--manifest', str(PAYLOAD / 'models/manifest.json'), '--storage',
+                '/opt/tractanda/var/lib/tractanda/Models']))
+            require(model_status_complete(model_status, ready=True),
+                    'Imported model artifacts are not ready')
+            check.command([SETUP, 'start', '--name', check.name], timeout=check.command_timeout_seconds)
+            identity = check.ready(current)
+            while True:
+                check.guard()
+                connection = http.client.HTTPConnection('127.0.0.1', context['port'] + 1, timeout=2)
+                try:
+                    connection.request('GET', '/health')
+                    response = connection.getresponse()
+                    health = json.loads(response.read(65537))
+                    if (response.status == 200 and health.get('ready') is True
+                            and health.get('model') == 'tractanda-granite-embedding-311m-multilingual-r2-vmlx-fp32-44399559'):
+                        break
+                except (OSError, ValueError, http.client.HTTPException):
+                    pass
+                finally:
+                    connection.close()
+                time.sleep(1)
+            service = check.command(['/usr/bin/systemctl', 'show', embedding_unit, '--property=MainPID']).strip()
+            require(service.startswith('MainPID=') and service[8:].isdigit() and int(service[8:]) > 0,
+                    'Embedding service has no main process')
+            pid = int(service[8:])
+            require(health.get('pid') == pid, 'Embedding health is from another process')
+            listener = check.command(['/usr/bin/sudo', '-n', '-u', 'daemon', '--', '/usr/bin/lsof', '-nP', '-a', '-p', str(pid),
+                                      '-iTCP:' + str(context['port'] + 1), '-sTCP:LISTEN', '-Fpn'])
+            require('p' + str(pid) in listener.splitlines()
+                    and 'n127.0.0.1:' + str(context['port'] + 1) in listener.splitlines(),
+                    'Embedding service does not own the health listener')
+            info = json.loads(check.command([CLI, '--no-start', '--socket', socket_path, 'info'], server_probe=True))
+            require(info.get('documentExtraction', {}).get('state') == 'configured', 'Imported document model not configured')
+            check.result['modelArtifactBytes'] = model_bytes
+            check.result['embeddingWorkerPID'] = pid
+            converter = check.command(['/usr/bin/sudo', '-n', '-u', 'daemon', '--', str(PAYLOAD / 'bin/tractanda-document-converter')], codes=(1,))
+            require('usage: converter prepare|convert' in converter, 'Document worker did not load')
+            check.result['cases']['slim-offline-model-import-and-worker'] = {'status': 'PASS', 'packageSHA256': current['receipt']['packageSHA256']}
         check.command([SETUP, 'stop', '--name', check.name], timeout=check.command_timeout_seconds)
         baseline = check.snapshot()
         check.result['retainedFixture'] = baseline
