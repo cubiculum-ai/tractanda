@@ -281,6 +281,18 @@ def validate_context(context):
             'Context port or validity window rejected')
 
 
+def status_fields(text):
+    """Parse fixed systemd-style status output, allowing only empty separator lines."""
+    fields = {}
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        key, separator, value = line.partition('=')
+        require(separator and key and key not in fields, 'Malformed or duplicate status field')
+        fields[key] = value
+    return fields
+
+
 class Validation:
     def __init__(self, context, work, timeout_seconds=DEFAULT_TIMEOUT_SECONDS,
                  command_timeout_seconds=DEFAULT_TIMEOUT_SECONDS):
@@ -364,7 +376,7 @@ class Validation:
     def stopped(self, disabled=False):
         for unit in self.units:
             value = self.command(['/usr/bin/systemctl', 'show', unit, '--property=LoadState,ActiveState,MainPID,UnitFileState'], codes=(0, 1, 4))
-            fields = dict(line.split('=', 1) for line in value.splitlines())
+            fields = status_fields(value)
             require(fields['LoadState'] in ('loaded', 'not-found') and fields['ActiveState'] in ('inactive', 'failed')
                     and fields['MainPID'] == '0', 'Writer/support service not stopped')
             if disabled:
@@ -373,7 +385,7 @@ class Validation:
                         'Pending/failed package could start at boot')
 
     def ready(self, package, previous=None):
-        state = dict(line.split('=', 1) for line in self.command([SETUP, 'status', '--name', self.name]).splitlines())
+        state = status_fields(self.command([SETUP, 'status', '--name', self.name]))
         info = json.loads(self.command([CLI, '--no-start', '--socket', '/run/tractanda/' + self.name + '/server.sock', 'info'], server_probe=True))
         server = info['server']
         require(server['executableSHA256'] == package['serverSHA256']

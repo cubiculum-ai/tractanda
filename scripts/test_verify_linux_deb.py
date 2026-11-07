@@ -327,6 +327,13 @@ class ValidationTests(unittest.TestCase):
         with patch.object(c, 'command', return_value='LoadState=loaded\nActiveState=inactive\nMainPID=0\nUnitFileState=enabled\n'):
             with self.assertRaisesRegex(ValueError, 'boot'): c.stopped(disabled=True)
 
+    def test_systemd_status_allows_blank_lines_but_rejects_bad_or_duplicate_fields(self):
+        status = 'LoadState=loaded\nActiveState=active\nMainPID=422\nUnitFileState=enabled\n\n'
+        self.assertEqual(V.status_fields(status)['MainPID'], '422')
+        for value in ('LoadState=loaded\ninvalid\n', 'MainPID=1\nMainPID=2\n', '=value\n'):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'Malformed or duplicate'):
+                V.status_fields(value)
+
     def test_missing_boot_state_is_not_proof_of_disabled_loaded_service(self):
         c = V.Validation({'runID': '012345abcdef'}, self.root)
         with patch.object(c, 'command', return_value='LoadState=loaded\nActiveState=inactive\nMainPID=0\n'):
