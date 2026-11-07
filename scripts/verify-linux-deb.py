@@ -384,6 +384,22 @@ def classify_policy_reinstall(exit_code, output, dpkg_status, continuous):
     return 'safe-refusal-retry-required'
 
 
+def fixture_port_sockets(text, port):
+    """Bounded kernel TCP rows for one owned fixture port."""
+    rows = []
+    for line in text.splitlines()[1:]:
+        fields = line.split()
+        require(len(fields) >= 10, 'Malformed kernel TCP observation')
+        local = fields[1].rsplit(':', 1)
+        require(len(local) == 2 and re.fullmatch(r'[0-9A-Fa-f]{4}', local[1]),
+                'Malformed kernel TCP endpoint')
+        if int(local[1], 16) == port:
+            require(re.fullmatch(r'[0-9A-Fa-f]{2}', fields[3]) and fields[9].isdigit(),
+                    'Malformed kernel TCP state or inode')
+            rows.append({'state': fields[3].upper(), 'inode': fields[9]})
+    return rows
+
+
 def upgrade_port_blocker(port):
     """Bind an exclusive listener despite TIME_WAIT from the stopped fixture server."""
     blocker = socket.socket()
@@ -532,6 +548,65 @@ class Validation:
             self.command(['/usr/bin/systemctl', 'is-active', unit])
         self.result['nativeIdentity'] = server
         return server
+
+    def observe_embedding_port(self, label):
+        port = self.context['port'] + 1
+        rows = []
+        for filename in ('/proc/net/tcp', '/proc/net/tcp6'):
+            with open(filename, 'r', encoding='ascii') as stream:
+                text = stream.read(1024 * 1024 + 1)
+            require(len(text) <= 1024 * 1024, 'Kernel TCP observation exceeds bound')
+            rows.extend(fixture_port_sockets(text, port))
+        listener = self.command(['/usr/bin/sudo', '-n', '-u', 'daemon', '--', '/usr/bin/lsof',
+                                 '-nP', '-iTCP:' + str(port), '-sTCP:LISTEN', '-Fpn'], codes=(0, 1))
+        observation = {'port': port, 'kernelSockets': rows, 'daemonListenerLines': listener.splitlines()}
+        self.result.setdefault('embeddingPortObservations', {})[label] = observation
+        self.save()
+        return observation
+
+    def wait_embedding_ready(self):
+        unit = 'tractanda-embeddings-' + self.name + '.service'
+        while True:
+            self.guard()
+            fields = status_fields(self.command(['/usr/bin/systemctl', 'show', unit,
+                                                  '--property=ActiveState,SubState,MainPID']))
+            if not (fields.get('ActiveState') in ('active', 'activating')
+                    and fields.get('SubState') not in ('auto-restart', 'failed', 'dead', None)
+                    and fields.get('MainPID', '').isdigit()):
+                reason = 'Embedding service failed or became inactive during readiness'
+                self.result['embeddingReadinessFailure'] = {'reason': reason, 'serviceState': fields}
+                self.save()
+                try:
+                    self.observe_embedding_port('readiness-failure')
+                except Exception as diagnostic_error:
+                    self.result['embeddingReadinessFailure']['diagnosticError'] = str(diagnostic_error)
+                    self.save()
+                raise ValueError(reason)
+            connection = http.client.HTTPConnection('127.0.0.1', self.context['port'] + 1, timeout=2)
+            try:
+                connection.request('GET', '/health')
+                response = connection.getresponse()
+                health = json.loads(response.read(65537))
+                if (response.status == 200 and health.get('ready') is True
+                        and health.get('model') == 'tractanda-granite-embedding-311m-multilingual-r2-vmlx-fp32-44399559'):
+                    break
+            except (OSError, ValueError, http.client.HTTPException):
+                pass
+            finally:
+                connection.close()
+            time.sleep(1)
+        fields = status_fields(self.command(['/usr/bin/systemctl', 'show', unit,
+                                              '--property=ActiveState,SubState,MainPID']))
+        require(fields.get('ActiveState') == 'active' and fields.get('MainPID', '').isdigit()
+                and int(fields['MainPID']) > 0 and health.get('pid') == int(fields['MainPID']),
+                'Embedding health is not bound to the active service process')
+        pid = int(fields['MainPID'])
+        listener = self.command(['/usr/bin/sudo', '-n', '-u', 'daemon', '--', '/usr/bin/lsof', '-nP', '-a', '-p', str(pid),
+                                 '-iTCP:' + str(self.context['port'] + 1), '-sTCP:LISTEN', '-Fpn'])
+        require('p' + str(pid) in listener.splitlines()
+                and 'n127.0.0.1:' + str(self.context['port'] + 1) in listener.splitlines(),
+                'Embedding service does not own the health listener')
+        return pid
 
     def installed(self, package, configured=True):
         fields = self.command(['/usr/bin/dpkg-query', '-W', '-f=${Status}\t${Version}\t${Architecture}', 'tractanda']).strip().split('\t')
@@ -708,31 +783,7 @@ def execute(args):
                     'Imported model artifacts are not ready')
             check.command([SETUP, 'start', '--name', check.name], timeout=check.command_timeout_seconds)
             identity = check.ready(current)
-            while True:
-                check.guard()
-                connection = http.client.HTTPConnection('127.0.0.1', context['port'] + 1, timeout=2)
-                try:
-                    connection.request('GET', '/health')
-                    response = connection.getresponse()
-                    health = json.loads(response.read(65537))
-                    if (response.status == 200 and health.get('ready') is True
-                            and health.get('model') == 'tractanda-granite-embedding-311m-multilingual-r2-vmlx-fp32-44399559'):
-                        break
-                except (OSError, ValueError, http.client.HTTPException):
-                    pass
-                finally:
-                    connection.close()
-                time.sleep(1)
-            service = check.command(['/usr/bin/systemctl', 'show', embedding_unit, '--property=MainPID']).strip()
-            require(service.startswith('MainPID=') and service[8:].isdigit() and int(service[8:]) > 0,
-                    'Embedding service has no main process')
-            pid = int(service[8:])
-            require(health.get('pid') == pid, 'Embedding health is from another process')
-            listener = check.command(['/usr/bin/sudo', '-n', '-u', 'daemon', '--', '/usr/bin/lsof', '-nP', '-a', '-p', str(pid),
-                                      '-iTCP:' + str(context['port'] + 1), '-sTCP:LISTEN', '-Fpn'])
-            require('p' + str(pid) in listener.splitlines()
-                    and 'n127.0.0.1:' + str(context['port'] + 1) in listener.splitlines(),
-                    'Embedding service does not own the health listener')
+            pid = check.wait_embedding_ready()
             info = json.loads(check.command([CLI, '--no-start', '--socket', socket_path, 'info'], server_probe=True))
             require(info.get('documentExtraction', {}).get('state') == 'configured', 'Imported document model not configured')
             check.result['modelArtifactBytes'] = model_bytes
@@ -741,10 +792,17 @@ def execute(args):
             require('usage: converter prepare|convert' in converter, 'Document worker did not load')
             check.result['cases']['slim-offline-model-import-and-worker'] = {'status': 'PASS', 'packageSHA256': current['receipt']['packageSHA256']}
         check.command([SETUP, 'stop', '--name', check.name], timeout=check.command_timeout_seconds)
+        check.stopped()
         baseline = check.snapshot()
         check.result['retainedFixture'] = baseline
+        if payload_mode == 'slim':
+            observation = check.observe_embedding_port('before-baseline-restart')
+            require(not any(row['state'] == '0A' for row in observation['kernelSockets']),
+                    'Embedding port has an active listener after owned services stopped')
         check.command([SETUP, 'start', '--name', check.name], timeout=check.command_timeout_seconds)
         identity = check.ready(current)
+        if payload_mode == 'slim':
+            check.result['embeddingWorkerPIDAfterRestart'] = check.wait_embedding_ready()
         check.result['cases']['explicit-selection'] = 'PASS'
         if args.upgrade:
             incoming = next(p for p in packages if p['path'] == args.upgrade.resolve()); distinct_binary(current, incoming)

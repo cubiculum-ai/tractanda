@@ -442,6 +442,58 @@ class ValidationTests(unittest.TestCase):
                     other.bind(('127.0.0.1', port))
                     other.listen(1)
 
+    def test_embedding_readiness_binds_health_pid_and_listener_and_rejects_failure(self):
+        check = V.Validation({'runID': '012345abcdef', 'port': 52179}, self.root)
+        class Response:
+            status = 200
+            def read(self, maximum):
+                return json.dumps({'ready': True, 'pid': 42,
+                    'model': 'tractanda-granite-embedding-311m-multilingual-r2-vmlx-fp32-44399559'}).encode()
+        class Connection:
+            def __init__(self, *args, **kwargs): pass
+            def request(self, *args): pass
+            def getresponse(self): return Response()
+            def close(self): pass
+        def command(argv, **kwargs):
+            if argv[0] == '/usr/bin/systemctl': return 'ActiveState=active\nSubState=running\nMainPID=42\n'
+            return 'p42\nn127.0.0.1:52180\n'
+        with patch.object(check, 'guard'), patch.object(check, 'command', side_effect=command), \
+             patch.object(V.http.client, 'HTTPConnection', Connection):
+            self.assertEqual(check.wait_embedding_ready(), 42)
+        with patch.object(check, 'guard'), patch.object(check, 'observe_embedding_port') as observation, \
+             patch.object(check, 'command', return_value='ActiveState=failed\nSubState=failed\nMainPID=0\n'), \
+             patch.object(V.http.client, 'HTTPConnection') as connection:
+            with self.assertRaisesRegex(ValueError, 'failed or became inactive'):
+                check.wait_embedding_ready()
+            connection.assert_not_called()
+            observation.assert_called_once_with('readiness-failure')
+        with patch.object(check, 'guard'), patch.object(check, 'observe_embedding_port'), patch.object(check, 'command', return_value='ActiveState=activating\nSubState=auto-restart\nMainPID=0\n'):
+            with self.assertRaisesRegex(ValueError, 'failed or became inactive'):
+                check.wait_embedding_ready()
+        with patch.object(check, 'guard'), patch.object(check, 'command', return_value='ActiveState=active\nSubState=running\nMainPID=43\n'), \
+             patch.object(V.http.client, 'HTTPConnection', Connection):
+            with self.assertRaisesRegex(ValueError, 'not bound'):
+                check.wait_embedding_ready()
+
+    def test_fixture_port_observation_distinguishes_listener_and_timewait(self):
+        header = '  sl local_address rem_address st tx rx tr tm retr uid timeout inode\n'
+        wait = '0: 0100007F:CBD4 0100007F:C7D0 06 0 0 0 0 0 0 0 0\n'
+        listener = '1: 0100007F:CBD4 00000000:0000 0A 0 0 0 0 0 123 0\n'
+        other = '2: 0100007F:1234 00000000:0000 0A 0 0 0 0 0 456 0\n'
+        self.assertEqual(V.fixture_port_sockets(header + wait + listener + other, 52180),
+                         [{'state': '06', 'inode': '0'}, {'state': '0A', 'inode': '123'}])
+        with self.assertRaisesRegex(ValueError, 'Malformed'):
+            V.fixture_port_sockets(header + 'bad\n', 52180)
+
+    def test_worker_failure_is_preserved_when_port_diagnostic_fails(self):
+        check = V.Validation({'runID': '012345abcdef', 'port': 52179}, self.root)
+        with patch.object(check, 'guard'), patch.object(check, 'command', return_value='ActiveState=failed\nSubState=failed\nMainPID=0\n'), \
+             patch.object(check, 'observe_embedding_port', side_effect=OSError('diagnostic unavailable')):
+            with self.assertRaisesRegex(ValueError, 'failed or became inactive'):
+                check.wait_embedding_ready()
+        self.assertEqual(check.result['embeddingReadinessFailure']['serviceState']['ActiveState'], 'failed')
+        self.assertIn('diagnostic unavailable', check.result['embeddingReadinessFailure']['diagnosticError'])
+
     def test_missing_boot_state_is_not_proof_of_disabled_loaded_service(self):
         c = V.Validation({'runID': '012345abcdef'}, self.root)
         with patch.object(c, 'command', return_value='LoadState=loaded\nActiveState=inactive\nMainPID=0\n'):
