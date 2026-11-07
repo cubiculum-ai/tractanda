@@ -18,11 +18,16 @@ import subprocess
 import tarfile
 import tempfile
 import time
+import types
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location('tractanda_linux_bundle', ROOT / 'scripts/package-linux.py')
 B = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(B)
+CPU_PATH = ROOT / 'debian/tractanda-runtime-cpu.py'
+CPU_SOURCE = B.captured_bytes(CPU_PATH, 65_536).decode('utf-8')
+CPU = types.ModuleType('tractanda_runtime_cpu')
+exec(compile(CPU_SOURCE, str(CPU_PATH), 'exec'), CPU.__dict__)
 COMMANDS = ('tractanda', 'tractanda-tui', 'tractanda-mcp', 'tractanda-setup')
 DEFAULT_MAINTAINER = 'rcfa - Cubiculum-AI <1831995+rcfa@users.noreply.github.com>'
 BUGS_URL = 'https://github.com/cubiculum-ai/tractanda/issues'
@@ -222,6 +227,8 @@ def stage_package(bundle, stage, snapshot, arch, maintainer, copyright_bytes, re
     for name, template in HOOKS.items():
         data = render((ROOT / 'debian' / template).read_text(), {
             'TRACTANDA_PACKAGE_DESCRIPTOR_JSON': descriptor,
+            'TRACTANDA_DEBIAN_ARCH': arch,
+            'TRACTANDA_RUNTIME_CPU_CHECK_PY': CPU_SOURCE,
             'TRACTANDA_PACKAGE_HOOK_FALLBACK_PY': fallback,
             'TRACTANDA_LAYOUT17_INSPECTOR_SHA256': control_hash,
             'TRACTANDA_LAYOUT17_DEBIAN_VERSION': version if inspector is not None else '-',
@@ -232,6 +239,7 @@ def stage_package(bundle, stage, snapshot, arch, maintainer, copyright_bytes, re
     installed_kib = sum((row['size'] + 1023) // 1024 for row in files if not row['path'].startswith('DEBIAN/'))
     control = render((ROOT / 'debian/tractanda.control.in').read_text(), {
         'TRACTANDA_DEBIAN_VERSION': version, 'TRACTANDA_DEBIAN_ARCH': arch,
+        'TRACTANDA_RUNTIME_CPU_FEATURES_JSON': B.canonical(list(CPU.required_features(arch))).decode(),
         'TRACTANDA_MAINTAINER': maintainer, 'TRACTANDA_RUNTIME_DEPENDS': ', '.join(depends),
         'TRACTANDA_PRE_DEPENDS': ', '.join(sorted(pre_depends)),
         'TRACTANDA_INSTALLED_KIB': str(installed_kib), 'TRACTANDA_BUGS_URL': BUGS_URL,
@@ -253,6 +261,8 @@ def stage_package(bundle, stage, snapshot, arch, maintainer, copyright_bytes, re
         os.utime(directory, (epoch, epoch), follow_symlinks=False)
     B.owned_storage(stage.parent, maximum)
     return dict(version=version, arch=arch, depends=depends, installedKiB=installed_kib,
+                runtimeRequiredCPUFeatures=list(CPU.required_features(arch)),
+                runtimeCPUCheckSHA256=hashlib.sha256(CPU_SOURCE.encode()).hexdigest(),
                 sourceDateEpoch=epoch, inventory=B.inventory(stage))
 
 

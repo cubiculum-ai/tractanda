@@ -28,6 +28,9 @@ case "${1-}" in
  *) echo "tractanda preinst: unsupported dpkg action" >&2; exit 2 ;;
 esac
 if [ "$lifecycle" != abort-upgrade ]; then
+ /usr/bin/python3 -I - '@TRACTANDA_DEBIAN_ARCH@' <<'TRACTANDA_RUNTIME_CPU_CHECK_EOF'
+@TRACTANDA_RUNTIME_CPU_CHECK_PY@
+TRACTANDA_RUNTIME_CPU_CHECK_EOF
  umask 077
  descriptor=$(/usr/bin/mktemp /run/tractanda-package-descriptor.XXXXXX)
  cat >"$descriptor" <<'TRACTANDA_PACKAGE_DESCRIPTOR_EOF'

@@ -44,6 +44,19 @@ For the first migration from the legacy layout to per-instance ephemeral runtime
 
 Use the [signed preview APT repository](apt.md) for ordinary installation and updates. Direct `.deb` assets are also attached to each release; check the selected architecture against that release's `SHA256SUMS`. APT can install a downloaded local package and satisfy its dependencies from configured Debian repositories:
 
+For AMD64 packages that use the official Swift 6.4.2 runtime, every online CPU must expose
+the CX16 (`CMPXCHG16B`) feature. Pre-CX16 processors are unsupported; there is no processor-year,
+model-name or x86-64-v2 cutoff. During install or upgrade the Debian preinst check verifies the
+kernel-reported `cx16` flag on every online CPU and checks that the online set did not change
+while it read the flags. A missing or inconsistent feature report stops before any Swift helper
+starts. The package records this as `X-Tractanda-Runtime-CPU-Features: ["cx16"]`. ARM64 keeps
+its existing armv8-a baseline; this CX16 check does not apply to ARM64. Dpkg's `abort-upgrade`
+recovery path skips the feature gate.
+
+On upgrade, dpkg may run the previous package's `prerm` and update its bookkeeping before the
+incoming package's `preinst` runs. A CX16 refusal is before the incoming Swift helper starts; it
+does not claim that the entire dpkg transaction or previous package scripts made no changes.
+
 ~~~sh
 sudo apt install ./tractanda_0.1.0.poc.17.1-1_amd64.deb
 ~~~

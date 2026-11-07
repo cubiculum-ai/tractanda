@@ -32,6 +32,26 @@ the provisional RAM guidance above has not been revalidated for simultaneous con
 Document scratch/preparation and durable job state survive uninstall independently of unused
 release cleanup. See [bundled document installation](install.md#bundled-native-document-extraction).
 
+## Linux package CPU requirements
+
+Linux amd64 packages that use the official Swift 6.4.2 runtime require the **CX16**
+(`CMPXCHG16B`) CPU feature on every online processor. A pre-CX16 AMD64 processor is unsupported.
+This is a feature-based runtime requirement, not a processor-year/model rule or a broad
+x86-64-v2 requirement. The compiler/ELF target remains `x86-64`; the supplemental package
+metadata is `runtimeRequiredCPUFeatures: ["cx16"]`. ARM64 keeps its existing `armv8-a`
+baseline and has no CX16 requirement.
+
+On install or upgrade, the Debian preinst check reads Linux kernel flags from `/proc/cpuinfo`
+for each online CPU and verifies that the online CPU set remains stable during the check. It
+runs before any Swift helper; a missing feature, inconsistent CPU records, or changing online
+set fails the package action before Swift startup. `abort-upgrade` deliberately skips this gate
+so dpkg recovery remains possible. The Debian control field is
+`X-Tractanda-Runtime-CPU-Features`; it describes the package's runtime feature contract, not a
+CPU model or release date. The check uses kernel-exposed flags rather than a direct CPUID
+instruction or model/stepping allowlist. Accepted evidence combines existing native model
+behavior on CX16-supported hardware with the declared-feature check and model-free startup
+diagnostic. No model inference run on a pre-CX16 machine is required or supported.
+
 ## Source builds and Linux
 
 Building the core from source requires Swift 6.4. The complete macOS application targets macOS 15 or later. The embedding host can be built separately; on macOS it uses Apple's developer toolchain and Metal, while the portable Linux host uses a CPU backend. The Debian packaging workflow targets amd64 and arm64; the recent private managed installation and three-node cluster validation includes native amd64 Linux. That does not establish that current-source packages for both architectures are publicly downloadable. Final release artifacts, their size checks and the signed APT repository remain release work. The new slim model-provisioning changes are not deployed or published yet. Linux embedding inference has also been functionally checked in a Debian 12 container, but that check alone is not an end-user package requirement. See [embedding runtime build and checks](embedding-runtime.md) and [Linux package lifecycle](linux-package-validation.md).

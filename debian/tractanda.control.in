@@ -1,6 +1,7 @@
 Package: tractanda
 Version: @TRACTANDA_DEBIAN_VERSION@
 Architecture: @TRACTANDA_DEBIAN_ARCH@
+X-Tractanda-Runtime-CPU-Features: @TRACTANDA_RUNTIME_CPU_FEATURES_JSON@
 Maintainer: @TRACTANDA_MAINTAINER@
 Bugs: @TRACTANDA_BUGS_URL@
 Section: utils

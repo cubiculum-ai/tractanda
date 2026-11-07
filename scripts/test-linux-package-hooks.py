@@ -78,6 +78,9 @@ sys.exit(int(os.environ.get("MOCK_SYSTEMCTL_EXIT", "0")))
         self._write_mock("mock-python", """
 import json, os, sys
 arguments = sys.argv[1:]
+if arguments in (["-I", "-", "amd64"], ["-I", "-", "arm64"]):
+    sys.stdin.read()
+    sys.exit(0)
 with open(os.environ["MOCK_LOG"], "a", encoding="utf-8") as f:
     f.write(json.dumps({"program":"python-hook", "args":arguments}) + "\\n")
 sys.exit(int(os.environ.get("MOCK_PYTHON_EXIT", "0")))
@@ -102,6 +105,8 @@ sys.exit(int(os.environ.get("MOCK_PYTHON_EXIT", "0")))
                   if hook == "legacy.prerm" else (DEBIAN / hook)).read_text()
         fallback = FALLBACK.read_text()
         source = source.replace("@TRACTANDA_PACKAGE_HOOK_FALLBACK_PY@", fallback)
+        source = source.replace("@TRACTANDA_DEBIAN_ARCH@", "amd64")
+        source = source.replace("@TRACTANDA_RUNTIME_CPU_CHECK_PY@", (DEBIAN / "tractanda-runtime-cpu.py").read_text())
         source = source.replace("@TRACTANDA_PACKAGE_DESCRIPTOR_JSON@", DESCRIPTOR)
         source = source.replace("@TRACTANDA_LAYOUT17_INSPECTOR_SHA256@", "b" * 64)
         source = source.replace("@TRACTANDA_LAYOUT17_DEBIAN_VERSION@", layout17_version)
