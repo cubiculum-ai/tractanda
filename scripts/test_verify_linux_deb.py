@@ -321,6 +321,33 @@ class ValidationTests(unittest.TestCase):
         self.assertNotIn('LD_PRELOAD', launched[0])
         self.assertEqual(c.result['commands'][0]['serverUser'], 'daemon')
 
+    def test_dpkg_and_setup_receive_only_validated_context_uuid_node(self):
+        for argv in (["/usr/bin/dpkg", "--install", "/fixture.deb"], [V.SETUP, "status", "--name", "fixture"]):
+            for node in (None, "38:05:25:32:10:ca"):
+                with self.subTest(argv=argv, node=node), tempfile.TemporaryDirectory() as temp:
+                    context = {"runID": "012345abcdef"}
+                    if node is not None:
+                        context["uuidNode"] = node
+                    check = V.Validation(context, Path(temp)); launched = []
+                    class Process:
+                        pid = 123
+                        returncode = 0
+                        def __init__(self, *args, **kwargs): launched.append(kwargs["env"])
+                        def wait(self, timeout=None): return 0
+                        def poll(self): return 0
+                    with patch.object(check, "guard"), patch.object(V.subprocess, "Popen", Process), \
+                         patch.dict(os.environ, {"TRACTANDA_UUID_NODE": "foreign", "LD_PRELOAD": "foreign"}):
+                        check.command(argv)
+                    self.assertEqual(launched[0].get("TRACTANDA_UUID_NODE"), node)
+                    self.assertNotIn("LD_PRELOAD", launched[0])
+
+    def test_invalid_context_uuid_node_refuses_before_launch(self):
+        check = V.Validation({"runID": "012345abcdef", "uuidNode": "02:00:00:00:00:01"}, self.root)
+        with patch.object(check, "guard"), patch.object(V.subprocess, "Popen") as launch:
+            with self.assertRaisesRegex(ValueError, "globally administered"):
+                check.command(["/usr/bin/dpkg", "--install", "/fixture.deb"])
+            launch.assert_not_called()
+
     def test_echoed_canonical_filename_and_unrelated_failure_never_pass_refusal(self):
         c = V.Validation({'runID': '012345abcdef'}, self.root)
         def failed(argv, **kwargs):

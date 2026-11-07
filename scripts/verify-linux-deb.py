@@ -321,6 +321,10 @@ class Validation:
         try:
             with open(row['log'], 'xb') as out:
                 env = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LC_ALL': 'C', 'DEBIAN_FRONTEND': 'noninteractive'}
+                if row['argv'][0] in ('/usr/bin/dpkg', SETUP):
+                    node = configured_uuid_node(self.context)
+                    if node is not None:
+                        env['TRACTANDA_UUID_NODE'] = node
                 if server_probe:
                     prefix = [CLI, '--no-start', '--socket', '/run/tractanda/' + self.name + '/server.sock']
                     require(row['argv'] in (prefix + ['info'], prefix + ['search', 'shared knowledge base']),
