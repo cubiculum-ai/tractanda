@@ -601,6 +601,53 @@ class ValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'Unexpected active'):
                 check.wait_historical_embedding_timewait_drain()
 
+    def test_candidate_embedding_recovery_requires_exact_owned_bind_evidence(self):
+        fields = {'ActiveState': 'activating', 'SubState': 'auto-restart', 'MainPID': '0',
+                  'Result': 'core-dump', 'ExecMainStatus': '4', 'NRestarts': '1', 'InvocationID': 'a'*32}
+        observation = {'kernelSockets': [{'state': '06', 'inode': '0'}], 'daemonListenerLines': []}
+        journal = 'Swift: Fatal error: bind(descriptor): Address already in use (errno: 98)'
+        self.assertTrue(V.observed_candidate_embedding_bind_recovery(fields, observation, journal))
+        for changed in (dict(fields, InvocationID='bad'), dict(fields, Result='exit-code'),
+                        dict(fields, ExecMainStatus='1'), dict(fields, MainPID='42')):
+            self.assertFalse(V.observed_candidate_embedding_bind_recovery(changed, observation, journal))
+        for changed in (dict(observation, kernelSockets=[]),
+                        dict(observation, kernelSockets=[{'state':'0A', 'inode':'9'}]),
+                        dict(observation, daemonListenerLines=['p123'])):
+            self.assertFalse(V.observed_candidate_embedding_bind_recovery(fields, changed, journal))
+        self.assertFalse(V.observed_candidate_embedding_bind_recovery(fields, observation, 'Fatal error: unrelated'))
+
+    def test_candidate_embedding_recovery_waits_for_same_unit_health_after_proven_conflict(self):
+        check = V.Validation({'runID': '012345abcdef', 'port': 52179}, self.root, no_execution_deadline=True)
+        failed = ('ActiveState=activating\nSubState=auto-restart\nMainPID=0\nResult=core-dump\n'
+                  'ExecMainStatus=4\nNRestarts=1\nInvocationID=' + 'a'*32 + '\n')
+        active = 'ActiveState=active\nSubState=running\nMainPID=42\n'
+        states = iter((failed, active, active))
+        def command(argv, **kwargs):
+            if argv[0] == '/usr/bin/systemctl': return next(states)
+            if argv[0] == '/usr/bin/journalctl': return 'Fatal error: bind(x): Address already in use (errno: 98)'
+            return 'p42\nn127.0.0.1:52180\n'
+        class Response:
+            status = 200
+            def read(self, maximum):
+                return json.dumps({'ready': True, 'pid': 42,
+                    'model': 'tractanda-granite-embedding-311m-multilingual-r2-vmlx-fp32-44399559'}).encode()
+        class Connection:
+            def __init__(self, *args, **kwargs): pass
+            def request(self, *args): pass
+            def getresponse(self): return Response()
+            def close(self): pass
+        observation = {'kernelSockets': [{'state':'06', 'inode':'0'}], 'daemonListenerLines': []}
+        with patch.object(check, 'guard'), patch.object(check, 'command', side_effect=command), \
+             patch.object(check, 'observe_embedding_port', return_value=observation), \
+             patch.object(V.http.client, 'HTTPConnection', Connection), patch.object(V.time, 'sleep'):
+            self.assertEqual(check.wait_embedding_ready(allow_address_recovery=True), 42)
+        self.assertEqual(check.result['candidateEmbeddingRecovery']['status'], 'PASS')
+        self.assertGreaterEqual(check.result['candidateEmbeddingRecovery']['observedWaitSeconds'], 0)
+        self.assertIn('observedEpoch', check.result['candidateEmbeddingRecovery']['events'][0])
+        self.assertIn('recoveredEpoch', check.result['candidateEmbeddingRecovery'])
+        self.assertEqual(check.result['cases']['candidate-embedding-handoff']['degradedInvocations'], 1)
+        self.assertNotIn('embeddingReadinessFailure', check.result)
+
     def test_missing_boot_state_is_not_proof_of_disabled_loaded_service(self):
         c = V.Validation({'runID': '012345abcdef'}, self.root)
         with patch.object(c, 'command', return_value='LoadState=loaded\nActiveState=inactive\nMainPID=0\n'):

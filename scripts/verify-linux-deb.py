@@ -427,6 +427,20 @@ def observed_owned_bind_conflict(fields, journal):
             and any('bind(' in line and 'Address already in use' in line for line in journal.splitlines()))
 
 
+def observed_candidate_embedding_bind_recovery(fields, observation, journal):
+    invocation = fields.get('InvocationID', '')
+    fatal_lines = [line for line in journal.splitlines() if 'Fatal error:' in line]
+    return (fields.get('ActiveState') == 'activating' and fields.get('SubState') == 'auto-restart'
+            and fields.get('MainPID') == '0' and fields.get('Result') == 'core-dump'
+            and fields.get('ExecMainStatus') == '4' and fields.get('NRestarts', '').isdecimal()
+            and re.fullmatch(r'[0-9a-f]{32}', invocation) is not None
+            and bool(observation['kernelSockets'])
+            and all(row['state'] == '06' for row in observation['kernelSockets'])
+            and not observation['daemonListenerLines'] and bool(fatal_lines)
+            and 'bind(' in fatal_lines[-1] and 'Address already in use' in fatal_lines[-1]
+            and 'errno: 98' in fatal_lines[-1])
+
+
 def upgrade_port_blocker(port):
     """Bind an exclusive listener despite TIME_WAIT from the stopped fixture server."""
     blocker = socket.socket()
@@ -565,7 +579,7 @@ class Validation:
         self.save()
         return observation
 
-    def ready(self, package, previous=None):
+    def ready(self, package, previous=None, defer_embedding=False):
         state = status_fields(self.command([SETUP, 'status', '--name', self.name]))
         info = json.loads(self.command([CLI, '--no-start', '--socket', '/run/tractanda/' + self.name + '/server.sock', 'info'], server_probe=True))
         server = info['server']
@@ -576,6 +590,8 @@ class Validation:
         if previous:
             require(server['instanceID'] != previous['instanceID'] and server['processID'] != previous['processID'], 'Old daemon survived replacement')
         for unit in self.units:
+            if defer_embedding and unit == 'tractanda-embeddings-' + self.name + '.service':
+                continue
             self.command(['/usr/bin/systemctl', 'is-active', unit])
         self.result['nativeIdentity'] = server
         return server
@@ -621,12 +637,12 @@ class Validation:
                 return
             time.sleep(1)
 
-    def wait_embedding_ready(self):
+    def wait_embedding_ready(self, allow_address_recovery=False):
         unit = 'tractanda-embeddings-' + self.name + '.service'
         while True:
             self.guard()
             fields = status_fields(self.command(['/usr/bin/systemctl', 'show', unit,
-                                                  '--property=ActiveState,SubState,MainPID']))
+                                                  '--property=ActiveState,SubState,MainPID,Result,ExecMainStatus,NRestarts,InvocationID']))
             if not (fields.get('ActiveState') in ('active', 'activating')
                     and fields.get('SubState') not in ('auto-restart', 'failed', 'dead', None)
                     and fields.get('MainPID', '').isdigit()):
@@ -634,7 +650,25 @@ class Validation:
                 self.result['embeddingReadinessFailure'] = {'reason': reason, 'serviceState': fields}
                 self.save()
                 try:
-                    self.observe_embedding_port('readiness-failure')
+                    observation = self.observe_embedding_port('readiness-failure')
+                    invocation = fields.get('InvocationID', '')
+                    if allow_address_recovery and re.fullmatch(r'[0-9a-f]{32}', invocation):
+                        journal = self.command(['/usr/bin/journalctl', '-u', unit,
+                            '_SYSTEMD_INVOCATION_ID=' + invocation, '-n', '30', '--no-pager', '-o', 'cat'])
+                        if observed_candidate_embedding_bind_recovery(fields, observation, journal):
+                            observed_epoch, observed_monotonic = time.time(), time.monotonic()
+                            recovery = self.result.setdefault('candidateEmbeddingRecovery',
+                                {'status': 'WAITING', 'events': [], 'firstObservedEpoch': observed_epoch,
+                                 'firstObservedMonotonic': observed_monotonic})
+                            if not any(event['invocationID'] == invocation for event in recovery['events']):
+                                recovery['events'].append({'invocationID': invocation, 'serviceState': fields,
+                                    'portObservation': observation, 'observedEpoch': observed_epoch,
+                                    'observedMonotonic': observed_monotonic,
+                                    'reason': 'Observed bind EADDRINUSE with only TIME_WAIT'})
+                            self.result.pop('embeddingReadinessFailure', None)
+                            self.save()
+                            time.sleep(1)
+                            continue
                 except Exception as diagnostic_error:
                     self.result['embeddingReadinessFailure']['diagnosticError'] = str(diagnostic_error)
                     self.save()
@@ -653,7 +687,7 @@ class Validation:
                 connection.close()
             time.sleep(1)
         fields = status_fields(self.command(['/usr/bin/systemctl', 'show', unit,
-                                              '--property=ActiveState,SubState,MainPID']))
+                                              '--property=ActiveState,SubState,MainPID,Result,ExecMainStatus,NRestarts,InvocationID']))
         require(fields.get('ActiveState') == 'active' and fields.get('MainPID', '').isdigit()
                 and int(fields['MainPID']) > 0 and health.get('pid') == int(fields['MainPID']),
                 'Embedding health is not bound to the active service process')
@@ -663,6 +697,16 @@ class Validation:
         require('p' + str(pid) in listener.splitlines()
                 and 'n127.0.0.1:' + str(self.context['port'] + 1) in listener.splitlines(),
                 'Embedding service does not own the health listener')
+        if allow_address_recovery:
+            recovery = self.result.setdefault('candidateEmbeddingRecovery', {'events': []})
+            recovered_epoch, recovered_monotonic = time.time(), time.monotonic()
+            recovery.update(status='PASS', readyPID=pid, recoveredEpoch=recovered_epoch,
+                            recoveredMonotonic=recovered_monotonic,
+                            observedWaitSeconds=(max(0.0, recovered_monotonic - recovery['firstObservedMonotonic'])
+                                                 if recovery['events'] else 0.0))
+            self.result['cases']['candidate-embedding-handoff'] = {
+                'status': 'PASS', 'degradedInvocations': len(recovery['events']), 'readyPID': pid}
+            self.save()
         return pid
 
     def installed(self, package, configured=True):
@@ -956,7 +1000,9 @@ def execute(args):
                     'Same configure process did not recover after the observed conflict')
             current = incoming
             check.installed(current)
-            identity = check.ready(current, identity)
+            identity = check.ready(current, identity, defer_embedding=(payload_mode == 'slim'))
+            if payload_mode == 'slim':
+                check.wait_embedding_ready(allow_address_recovery=True)
             check.result['cases']['real-upgrade-wait-and-recovery'] = {
                 'status': 'PASS', 'configurePID': conflict['configurePID'],
                 'scope': 'Observed bind conflict while blocker held; same configure succeeded after release.'}
