@@ -427,12 +427,14 @@ def observed_owned_bind_conflict(fields, journal):
             and any('bind(' in line and 'Address already in use' in line for line in journal.splitlines()))
 
 
-def observed_candidate_embedding_bind_recovery(fields, observation, journal, allow_cleared=False):
+def observed_candidate_embedding_bind_recovery(fields, observation, journal, allow_cleared=False, architecture='x86_64'):
+    termination = {'x86_64': ('core-dump', '4'), 'aarch64': ('signal', '5')}.get(architecture)
     invocation = fields.get('InvocationID', '')
     fatal_lines = [line for line in journal.splitlines() if 'Fatal error:' in line]
     return (fields.get('ActiveState') == 'activating' and fields.get('SubState') == 'auto-restart'
-            and fields.get('MainPID') == '0' and fields.get('Result') == 'core-dump'
-            and fields.get('ExecMainStatus') == '4' and fields.get('NRestarts', '').isdecimal()
+            and fields.get('MainPID') == '0' and termination is not None
+            and (fields.get('Result'), fields.get('ExecMainStatus')) == termination
+            and fields.get('NRestarts', '').isdecimal()
             and re.fullmatch(r'[0-9a-f]{32}', invocation) is not None
             and (bool(observation['kernelSockets']) or allow_cleared)
             and all(row['state'] == '06' for row in observation['kernelSockets'])
@@ -658,7 +660,8 @@ class Validation:
                         existing = self.result.get('candidateEmbeddingRecovery', {}).get('events', [])
                         prior = next((event for event in existing if event['invocationID'] == invocation), None)
                         if observed_candidate_embedding_bind_recovery(fields, observation, journal,
-                                                                        allow_cleared=prior is not None):
+                                                                        allow_cleared=prior is not None,
+                                                                        architecture=platform.machine()):
                             observed_epoch, observed_monotonic = time.time(), time.monotonic()
                             recovery = self.result.setdefault('candidateEmbeddingRecovery',
                                 {'status': 'WAITING', 'events': [], 'firstObservedEpoch': observed_epoch,
