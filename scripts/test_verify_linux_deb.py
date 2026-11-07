@@ -432,6 +432,16 @@ class ValidationTests(unittest.TestCase):
         with patch.object(check, 'command', return_value='0'):
             self.assertEqual(check.observe_uuidd('inactive')['state'], 'inactive')
 
+    def test_upgrade_port_blocker_reuses_timewait_without_sharing_live_listener(self):
+        with V.upgrade_port_blocker(0) as blocker:
+            self.assertTrue(blocker.getsockopt(V.socket.SOL_SOCKET, V.socket.SO_REUSEADDR))
+            port = blocker.getsockname()[1]
+            with V.socket.socket() as other:
+                other.setsockopt(V.socket.SOL_SOCKET, V.socket.SO_REUSEADDR, 1)
+                with self.assertRaises(OSError):
+                    other.bind(('127.0.0.1', port))
+                    other.listen(1)
+
     def test_missing_boot_state_is_not_proof_of_disabled_loaded_service(self):
         c = V.Validation({'runID': '012345abcdef'}, self.root)
         with patch.object(c, 'command', return_value='LoadState=loaded\nActiveState=inactive\nMainPID=0\n'):

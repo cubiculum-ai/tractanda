@@ -384,6 +384,19 @@ def classify_policy_reinstall(exit_code, output, dpkg_status, continuous):
     return 'safe-refusal-retry-required'
 
 
+def upgrade_port_blocker(port):
+    """Bind an exclusive listener despite TIME_WAIT from the stopped fixture server."""
+    blocker = socket.socket()
+    try:
+        blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        blocker.bind(('127.0.0.1', port))
+        blocker.listen(1)
+        return blocker
+    except BaseException:
+        blocker.close()
+        raise
+
+
 class Validation:
     def __init__(self, context, work, timeout_seconds=DEFAULT_TIMEOUT_SECONDS,
                  command_timeout_seconds=DEFAULT_TIMEOUT_SECONDS):
@@ -738,8 +751,7 @@ def execute(args):
             check.command(['/usr/bin/dpkg', '--compare-versions', current['receipt']['version'], 'lt', incoming['receipt']['version']])
             check.command(['/usr/bin/dpkg', '--unpack', incoming['path']], timeout=check.command_timeout_seconds)
             check.stopped(disabled=True)
-            with socket.socket() as blocker:
-                blocker.bind(('127.0.0.1', context['port'])); blocker.listen(1)
+            with upgrade_port_blocker(context['port']):
                 check.command(['/usr/bin/dpkg', '--configure', 'tractanda'], failure=True,
                               timeout=check.command_timeout_seconds)
             check.stopped(disabled=True); check.installed(incoming, configured=False); retained(baseline, check.snapshot())
