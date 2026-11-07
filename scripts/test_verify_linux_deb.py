@@ -547,6 +547,23 @@ class ValidationTests(unittest.TestCase):
             V.require_committed_abort_unchanged(managed, managed, units,
                 {'fixture.service': {'ActiveState': 'active', 'MainPID': '7'}})
 
+    def test_historical_drain_waits_on_observed_timewait_and_rejects_live_socket(self):
+        check = V.Validation({'runID': '012345abcdef', 'port': 52179}, self.root,
+                             no_execution_deadline=True)
+        with patch.object(check, 'guard'), patch.object(check, 'stopped') as stopped, \
+             patch.object(check, 'embedding_port_sockets', side_effect=[
+                 [{'state': '06', 'inode': '0'}], [{'state': '06', 'inode': '0'}], []]), \
+             patch.object(V.time, 'sleep') as sleep:
+            check.wait_historical_embedding_timewait_drain()
+        self.assertEqual(stopped.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+        self.assertEqual(check.result['historicalEmbeddingTimeWaitDrain']['status'], 'PASS')
+        self.assertEqual(check.result['historicalEmbeddingTimeWaitDrain']['maximumTimeWaitSockets'], 1)
+        with patch.object(check, 'guard'), patch.object(check, 'stopped'), \
+             patch.object(check, 'embedding_port_sockets', return_value=[{'state': '0A', 'inode': '1'}]):
+            with self.assertRaisesRegex(ValueError, 'Unexpected active'):
+                check.wait_historical_embedding_timewait_drain()
+
     def test_missing_boot_state_is_not_proof_of_disabled_loaded_service(self):
         c = V.Validation({'runID': '012345abcdef'}, self.root)
         with patch.object(c, 'command', return_value='LoadState=loaded\nActiveState=inactive\nMainPID=0\n'):

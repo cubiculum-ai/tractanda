@@ -563,7 +563,7 @@ class Validation:
         self.result['nativeIdentity'] = server
         return server
 
-    def observe_embedding_port(self, label):
+    def embedding_port_sockets(self):
         port = self.context['port'] + 1
         rows = []
         for filename in ('/proc/net/tcp', '/proc/net/tcp6'):
@@ -571,12 +571,38 @@ class Validation:
                 text = stream.read(1024 * 1024 + 1)
             require(len(text) <= 1024 * 1024, 'Kernel TCP observation exceeds bound')
             rows.extend(fixture_port_sockets(text, port))
+        return rows
+
+    def observe_embedding_port(self, label):
+        port = self.context['port'] + 1
+        rows = self.embedding_port_sockets()
         listener = self.command(['/usr/bin/sudo', '-n', '-u', 'daemon', '--', '/usr/bin/lsof',
                                  '-nP', '-iTCP:' + str(port), '-sTCP:LISTEN', '-Fpn'], codes=(0, 1))
         observation = {'port': port, 'kernelSockets': rows, 'daemonListenerLines': listener.splitlines()}
         self.result.setdefault('embeddingPortObservations', {})[label] = observation
         self.save()
         return observation
+
+    def wait_historical_embedding_timewait_drain(self):
+        """Wait only for observed old-fixture TIME_WAIT, with stopped services and no deadline."""
+        observations = 0
+        maximum = 0
+        while True:
+            self.guard()
+            self.stopped()
+            rows = self.embedding_port_sockets()
+            require(all(row['state'] == '06' for row in rows),
+                    'Unexpected active embedding socket while historical fixture is stopped')
+            observations += 1
+            maximum = max(maximum, len(rows))
+            self.result['historicalEmbeddingTimeWaitDrain'] = {
+                'status': 'WAITING' if rows else 'PASS', 'observations': observations,
+                'maximumTimeWaitSockets': maximum, 'remainingTimeWaitSockets': len(rows),
+                'scope': 'Historical predecessor baseline restart only; candidate activation is not delayed.'}
+            self.save()
+            if not rows:
+                return
+            time.sleep(1)
 
     def wait_embedding_ready(self):
         unit = 'tractanda-embeddings-' + self.name + '.service'
@@ -867,6 +893,8 @@ def execute(args):
             observation = check.observe_embedding_port('before-baseline-restart')
             require(not any(row['state'] == '0A' for row in observation['kernelSockets']),
                     'Embedding port has an active listener after owned services stopped')
+            if context.get('fixtureSeed', 'sample') == 'historical-api':
+                check.wait_historical_embedding_timewait_drain()
         check.command([SETUP, 'start', '--name', check.name], timeout=check.command_timeout_seconds)
         identity = check.ready(current)
         if payload_mode == 'slim':
