@@ -658,7 +658,8 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(pipeline.state['status'], 'complete')
 
     def test_disposable_loss_before_and_after_bundle_checkpoint(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.object(release, 'CONTROL', Path(temporary) / 'control'):
             directory = Path(temporary).resolve()
             state = {'directory': str(directory), 'configuration': {}, 'version': 'test',
                      'steps': {'release-build': {'result': None}},
@@ -678,6 +679,7 @@ class ReleaseTests(unittest.TestCase):
             self.assertTrue(state['retiredDisposableStorage'])
             self.assertIsNone(after.disposable)
             self.assertIn('bundle', state['steps'])
+            self.assertTrue((release.CONTROL / 'current.json').is_file())
 
     def test_promoted_bundle_rejected_if_payload_missing_or_changed(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -969,6 +971,56 @@ class ReleaseTests(unittest.TestCase):
         self.assertTrue(release.significant(['Tools/Layout17Bridge/main.swift']))
         self.assertTrue(release.significant(['plugins/tractanda/skills/tractanda/SKILL.md']))
         self.assertFalse(release.significant(['work/notes.md', 'outputs/Tractanda-Resume.md']))
+
+    def test_unpublished_changes_checks_remote_and_history(self):
+        remote = 'a' * 40
+        row = remote + '\trefs/heads/main'
+        def run_case(heads, ancestor, committed='', dirty='', untracked=''):
+            def fake_git(*args):
+                if args[0] == 'ls-remote': return heads.pop(0)
+                if args[0] == 'fetch': return ''
+                if args[0] == 'rev-parse': return remote
+                if args[:3] == ('diff', '--name-only', remote): return committed
+                if args[:3] == ('diff', '--name-only', 'HEAD'): return dirty
+                if args[0] == 'ls-files': return untracked
+                raise AssertionError(args)
+            with patch.object(release, 'git', side_effect=fake_git), \
+                    patch.object(release.subprocess, 'run') as run:
+                run.return_value.returncode = ancestor
+                return release.unpublished_changes('main')
+        self.assertTrue(release.significant(run_case([row, row], 0, 'Sources/change.swift')))
+        self.assertTrue(release.significant(run_case([row, row], 0, dirty='Package.swift')))
+        self.assertFalse(release.significant(run_case([row, row], 0)))
+        with self.assertRaisesRegex(RuntimeError, 'behind or diverged'):
+            run_case([row, row], 1, 'Sources/change.swift')
+        with self.assertRaisesRegex(RuntimeError, 'moved'):
+            run_case([row, 'b' * 40 + '\trefs/heads/main'], 0)
+        with self.assertRaisesRegex(RuntimeError, 'identity'):
+            run_case(['malformed'], 0)
+
+    def test_unpublished_changes_against_real_remote(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo, remote = root / 'repo', root / 'remote.git'
+            subprocess.run(['git', 'init', '--bare', '-q', str(remote)], check=True)
+            subprocess.run(['git', 'init', '-q', '-b', 'main', str(repo)], check=True)
+            def git(*args):
+                return subprocess.check_output(['git', *args], cwd=repo, text=True).strip()
+            git('config', 'user.name', 'Test')
+            git('config', 'user.email', 'test@example.invalid')
+            (repo / 'README.md').write_text('base\n')
+            git('add', 'README.md')
+            git('commit', '-qm', 'base')
+            git('remote', 'add', 'origin', str(remote))
+            git('push', '-q', 'origin', 'main')
+            with patch.object(release, 'ROOT', repo), patch.object(release, 'git', side_effect=git):
+                self.assertFalse(release.significant(release.unpublished_changes('main')))
+                (repo / 'README.md').write_text('committed change\n')
+                git('commit', '-qam', 'change')
+                self.assertTrue(release.significant(release.unpublished_changes('main')))
+                git('reset', '--hard', '-q', 'HEAD^')
+                (repo / 'README.md').write_text('dirty change\n')
+                self.assertTrue(release.significant(release.unpublished_changes('main')))
 
     def test_prune_keeps_newest_verified_publication_and_preserves_malformed(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(release, 'CONTROL', Path(temporary)):

@@ -182,6 +182,33 @@ def significant(paths):
     } for p in paths)
 
 
+def unpublished_changes(branch):
+    """Compare with a freshly checked origin branch and reject divergent history."""
+    ref = 'refs/heads/' + branch
+    def remote_head():
+        rows = git('ls-remote', '--exit-code', 'origin', ref).splitlines()
+        if len(rows) != 1:
+            raise RuntimeError('Cannot verify the remote publication branch.')
+        fields = rows[0].split()
+        if len(fields) != 2 or fields[1] != ref or not re.fullmatch(r'[0-9a-f]{40}', fields[0]):
+            raise RuntimeError('Invalid remote publication branch identity.')
+        return fields[0]
+
+    before = remote_head()
+    git('fetch', '--no-tags', 'origin', ref)
+    fetched = git('rev-parse', 'FETCH_HEAD^{commit}')
+    if fetched != before or remote_head() != before:
+        raise RuntimeError('Remote publication branch moved during verification.')
+    ancestor = subprocess.run(['git', 'merge-base', '--is-ancestor', fetched, 'HEAD'],
+                              cwd=ROOT, check=False)
+    if ancestor.returncode != 0:
+        raise RuntimeError('Local publication branch is behind or diverged from origin.')
+    changed = git('diff', '--name-only', fetched, 'HEAD').splitlines()
+    changed += git('diff', '--name-only', 'HEAD').splitlines()
+    changed += git('ls-files', '--others', '--exclude-standard').splitlines()
+    return changed
+
+
 def next_version(version):
     match = re.fullmatch(r'(\d+\.\d+\.\d+-poc\.)(\d+)(?:\.\d+)?', version)
     if not match:
@@ -503,10 +530,9 @@ def prepare(settings, notes):
     command([sys.executable, 'scripts/audit-release.py', '--output', audit_path])
     audited = read(audit_path)
     paths = [entry['path'] for entry in audited['manifest']]
-    changed = git('diff', '--name-only', 'HEAD').splitlines()
-    changed += git('ls-files', '--others', '--exclude-standard').splitlines()
+    changed = unpublished_changes(settings['branch'])
     if not significant(changed):
-        raise RuntimeError('No significant unpublished working-tree change was found.')
+        raise RuntimeError('No significant unpublished change was found.')
     version = next_version((ROOT / 'VERSION').read_text().strip())
     (ROOT / 'VERSION').write_text(version + '\n')
     for relative in VERSION_FILES:
