@@ -614,6 +614,7 @@ public final class ItemService {
                 args,
                 allowed: [
                     "action", "itemID", "expectedRevisionID", "classID", "changes", "unset", "operationID",
+                    "fieldOperations",
                 ])
             let request = try decode(CommitRequest.self, args)
             return PreparedCopyCall(callID: callID, admission: try store.prepareAttachmentCopy(request))
@@ -1804,6 +1805,43 @@ public final class ItemService {
                     oversizedIDs: oversized, state: store.state))
         case "TractandaItem/get", "TractandaItem/getBounded":
             return try readGet(args, bounded: method == "TractandaItem/getBounded")
+        case "TractandaItem/listTail":
+            try check(args, allowed: ["itemID", "field", "limit"])
+            let itemID = try string(args, "itemID")
+            let field = try string(args, "field")
+            guard !field.isEmpty, !field.contains("\0") else {
+                throw TractandaError("invalidArguments", "field must be a nonempty literal field name.")
+            }
+            let limit = try integer(args, "limit", default: 10, range: 1...256)
+            let revision: Revision
+            do { revision = try store.get(itemID) } catch let error as TractandaError
+                where error.code == "notFound" || error.code == "forbidden"
+            {
+                throw TractandaError("notFound", "Item not found.")
+            }
+            let values: [ItemValue]
+            if let value = revision.fields[field] {
+                guard case .list(let list) = value else {
+                    throw TractandaError("invalidArguments", "The selected field is not a list.")
+                }
+                values = list
+            } else {
+                values = []
+            }
+            let start = max(0, values.count - limit)
+            let result: [String: Any] = [
+                "itemId": revision.itemID, "revisionId": revision.revisionID, "state": store.state,
+                "field": field, "fieldPresent": revision.fields[field] != nil,
+                "total": values.count, "start": start, "values": try object(Array(values[start...])),
+            ]
+            let encoded = try JSONSerialization.data(withJSONObject: result)
+            let wire = try TractandaJMAPCodec.extensionResultToWire(
+                method: method, result: JMAPValue.decode(encoded)
+            ).encoded()
+            guard wire.count <= 480 * 1024 else {
+                throw TractandaError("responseTooLarge", "List tail exceeds its byte budget; reduce limit.")
+            }
+            return result
         case "TractandaItem/extractedTextUnit":
             throw TractandaError(
                 "extractedTextUnitsRequireCoordinator",
@@ -2028,6 +2066,7 @@ public final class ItemService {
                 args,
                 allowed: [
                     "action", "itemID", "expectedRevisionID", "classID", "changes", "unset", "operationID",
+                    "fieldOperations",
                 ])
             let request = try decode(CommitRequest.self, args)
             return try object(
@@ -2114,7 +2153,8 @@ public final class ItemService {
                     ServerFeature.revisionProjection.rawValue,
                     ServerFeature.personalItemState.rawValue,
                     ServerFeature.personalConflictResolution.rawValue, ServerFeature.personalSharing.rawValue,
-                    ServerFeature.inlineCapture.rawValue,
+                    ServerFeature.inlineCapture.rawValue, ServerFeature.itemFieldOperations.rawValue,
+                    ServerFeature.itemListTail.rawValue,
                     ServerFeature.runtimeIdentity.rawValue, ServerFeature.asynchronousStoreRebuild.rawValue,
                     ServerFeature.semanticJobTiming.rawValue,
                     ServerFeature.categoryMembershipSort.rawValue,
@@ -2710,8 +2750,9 @@ public final class ItemService {
                 args,
                 allowed: [
                     "action", "itemID", "expectedRevisionID", "classID", "changes", "unset", "operationID",
+                    "fieldOperations",
                 ])
-            _ = try decode(CommitRequest.self, args)
+            _ = try ItemFieldOperationPlan(decode(CommitRequest.self, args))
         case "TractandaItem/commitCapture":
             try check(
                 args,

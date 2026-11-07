@@ -6054,6 +6054,7 @@ public final class ItemStore {
             }
             return .replay(result)
         }
+        _ = try ItemFieldOperationPlan(request)
         let source = try get(itemID)
         guard source.revisionID == revisionID else {
             throw TractandaError("revisionConflict", "Copy source changed; reconcile before copying.")
@@ -6154,6 +6155,10 @@ public final class ItemStore {
             }
         }
         let request = preparation.request
+        guard request.fieldOperations?.isEmpty != false else {
+            throw TractandaError(
+                "invalidArguments", "Field operations use direct commit rather than capture preparation.")
+        }
         let base: Revision?
         if request.action == .create {
             guard request.itemID == nil, request.expectedRevisionID == nil, request.classID != nil else {
@@ -6300,6 +6305,10 @@ public final class ItemStore {
                 revision: previous, wasReplayed: true, isIndexReady: index != nil, warnings: [],
                 itemState: revisionProjectionEnabled ? (try? itemState(previous.itemID)) : nil)
         }
+        let fieldOperations = try ItemFieldOperationPlan(request)
+        let changesPermissions =
+            request.changes["permissions"] != nil
+            || request.unset.contains("permissions") || fieldOperations.fields.contains("permissions")
         try requireActivePublishingOrigin()
         guard Set(request.unset).count == request.unset.count,
             Set(request.changes.keys).isDisjoint(with: request.unset),
@@ -6325,10 +6334,7 @@ public final class ItemStore {
             }
             base = try get(id)
             if request.action != .copy {
-                try requireEdit(
-                    base!,
-                    changesPermissions: request.changes["permissions"] != nil
-                        || request.unset.contains("permissions"))
+                try requireEdit(base!, changesPermissions: changesPermissions)
             }
             guard base!.revisionID == expected else {
                 throw TractandaError("revisionConflict", "The item changed; fetch it and reconcile the edit.")
@@ -6446,13 +6452,14 @@ public final class ItemStore {
         if !isNew { fields["supersedes"] = .text(base!.revisionID) }
         for (name, value) in request.changes { fields[name] = value }
         for name in request.unset { fields.removeValue(forKey: name) }
+        let appliedFields = try fieldOperations.apply(to: &fields)
         let isConfiguration = fields["classID"]?.string == AccessConfiguration.classID
         if revisionProjectionEnabled && accessConfigurationProofUnavailable {
             throw TractandaError(
                 "configurationConflict", "Establish current store authority before publishing edits.")
         }
         if revisionProjectionEnabled && accessConfigurationAmbiguous && !isConfiguration
-            && (isNew || request.changes["permissions"] != nil || request.unset.contains("permissions"))
+            && (isNew || changesPermissions)
         {
             throw TractandaError(
                 "configurationConflict", "Resolve access divergence before creating or changing sharing.")
@@ -6579,7 +6586,7 @@ public final class ItemStore {
         replicaID = localIdentity.replicaID
         let semantic = RevisionMerge.semanticFields(revision)
         let oldSemantic = isNew ? [:] : base.map(RevisionMerge.semanticFields) ?? [:]
-        let addressed = Set(request.changes.keys).union(request.unset)
+        let addressed = Set(request.changes.keys).union(request.unset).union(appliedFields)
         let changed = Set(semantic.keys).union(oldSemantic.keys).filter { semantic[$0] != oldSemantic[$0] }
         let normalized = isNew ? Set(semantic.keys) : Set(changed).union(addressed)
         let ancestry = try RevisionProvenance(
@@ -6627,10 +6634,7 @@ public final class ItemStore {
                             "revisionConflict", "Current projection changed before publication.")
                     }
                     if request.action != .copy {
-                        try requireEdit(
-                            current,
-                            changesPermissions: request.changes["permissions"] != nil
-                                || request.unset.contains("permissions"))
+                        try requireEdit(current, changesPermissions: changesPermissions)
                     }
                 }
                 if isConfiguration { try requireAdministrator() }
@@ -6724,7 +6728,7 @@ public final class ItemStore {
                     resolver: PrincipalResolver(directory: accounts, configuration: updatedConfiguration),
                     isAdministrator: context.isAdministrator)
             }
-            let changedFields = Set(request.changes.keys).union(request.unset)
+            let changedFields = Set(request.changes.keys).union(request.unset).union(appliedFields)
             let broadSavedViewInvalidation =
                 request.action == .create
                 || request.action == .copy

@@ -172,6 +172,164 @@ final class MCPTests: XCTestCase {
         }
     }
 
+    func testListTailDenialMatchesMissingAndRejectsOversizedAndMalformed() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "tail-negative-" + Identifier.make())
+        defer { try? FileManager.default.removeItem(at: root) }
+        let accounts = AttachmentAccounts()
+        let store = try ItemStore.initializeFresh(
+            root: root, accounts: accounts,
+            initialAccessConfiguration: .object([
+                "profile": .text(AccessConfiguration.profile),
+                "users": .list([.text("alice"), .text("bob")]),
+            ]))
+        let revision = try store.commit(
+            .init(
+                classID: "Item",
+                changes: [
+                    "notes": .list([.text(String(repeating: "x", count: 500_000))]),
+                    "subject": .text("scalar"),
+                    "permissions": .object([
+                        "profile": .text(ItemPermissions.profile), "owner": .text("alice"),
+                        "group": .text("staff"), "mode": .integer(0o600), "acl": .object([:]),
+                    ]),
+                ], operationID: "tail-negative")
+        ).revision
+        let service = ItemService(store: store)
+        let aliceBridge = NativeServiceBridge(service: service, peerUID: accounts.alice)
+        let bobBridge = NativeServiceBridge(service: service, peerUID: accounts.bob)
+        let alice = NativeGateway(backend: { aliceBridge.handle($0) })
+        let bob = NativeGateway(backend: { bobBridge.handle($0) })
+        let tool = try XCTUnwrap(ToolCatalog.definitions().first { $0.tool.name == "tractanda_list_tail" })
+        func error(_ gateway: NativeGateway, _ args: [String: Value]) async -> TractandaError? {
+            do {
+                _ = try await MCPAdapter.callNativeTool(definition: tool, supplied: args, gateway: gateway)
+                return nil
+            } catch { return error as? TractandaError }
+        }
+        let base: [String: Value] = ["itemID": .string(revision.itemID), "field": .string("notes")]
+        let denied = await error(bob, base)
+        var absent = base
+        absent["itemID"] = .string(Identifier.make())
+        let missing = await error(bob, absent)
+        XCTAssertEqual(denied?.code, "notFound")
+        XCTAssertEqual(denied, missing)
+        let oversized = await error(alice, base)
+        XCTAssertEqual(oversized?.code, "responseTooLarge")
+        var scalar = base
+        scalar["field"] = .string("subject")
+        let wrongType = await error(alice, scalar)
+        XCTAssertEqual(wrongType?.code, "invalidArguments")
+        for invalid in [Value.int(0), .int(257), .string("2"), .bool(true)] {
+            var args = base
+            args["limit"] = invalid
+            let result = await error(alice, args)
+            XCTAssertEqual(result?.code, "invalidArguments")
+        }
+        var unknown = base
+        unknown["unexpected"] = .bool(true)
+        let unknownError = await error(alice, unknown)
+        XCTAssertEqual(unknownError?.code, "invalidArguments")
+    }
+
+    func testListTailReturnsBoundedTypedCurrentValues() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "tail-mcp-" + Identifier.make())
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try ItemStore.initializeFresh(root: root)
+        let revision = try store.commit(
+            .init(
+                classID: "Item",
+                changes: [
+                    "notes": .list([.text("first"), .integer(Int64.max), .integer(Int64.max)]),
+                    "subject": .text("not a list"),
+                ], operationID: "create-tail")
+        ).revision
+        let bridge = NativeServiceBridge(service: ItemService(store: store), peerUID: store.ownerUID)
+        let gateway = NativeGateway(backend: { bridge.handle($0) })
+        let tool = try XCTUnwrap(ToolCatalog.definitions().first { $0.tool.name == "tractanda_list_tail" })
+        func read(_ field: String, _ limit: Int = 2) async throws -> Value {
+            let data = try await MCPAdapter.callNativeTool(
+                definition: tool,
+                supplied: [
+                    "itemID": .string(revision.itemID), "field": .string(field), "limit": .int(limit),
+                ], gateway: gateway)
+            return try JSONDecoder().decode(Value.self, from: data)
+        }
+        let tail = try await read("notes")
+        XCTAssertEqual(tail.objectValue?["revisionId"]?.stringValue, revision.revisionID)
+        XCTAssertEqual(tail.objectValue?["total"]?.intValue, 3)
+        XCTAssertEqual(tail.objectValue?["start"]?.intValue, 1)
+        let values = try XCTUnwrap(tail.objectValue?["values"]?.arrayValue)
+        XCTAssertEqual(values.count, 2)
+        XCTAssertEqual(values[0].objectValue?["value"]?.stringValue, String(Int64.max))
+        XCTAssertEqual(values[0], values[1])
+        let missing = try await read("absent")
+        XCTAssertEqual(missing.objectValue?["fieldPresent"], .bool(false))
+        XCTAssertEqual(missing.objectValue?["total"]?.intValue, 0)
+        do {
+            _ = try await read("subject")
+            XCTFail("Expected type error")
+        } catch { XCTAssertEqual((error as? TractandaError)?.code, "invalidArguments") }
+        do {
+            _ = try await read("notes", 257)
+            XCTFail("Expected limit error")
+        } catch { XCTAssertEqual((error as? TractandaError)?.code, "invalidArguments") }
+    }
+
+    func testCommitFieldOperationsGateOnlyNewRequests() async throws {
+        let definition = try XCTUnwrap(
+            ToolCatalog.definitions().first { $0.tool.name == "tractanda_commit" })
+        let arguments: [String: Value] = [
+            "action": .string("revise"), "itemID": .string("item"),
+            "expectedRevisionID": .string("revision"), "operationID": .string("operation"),
+            "changes": .object([:]), "unset": .array([]),
+        ]
+        let operation: Value = .object([
+            "op": .string("append"), "field": .string("notes"),
+            "value": .object(["type": .string("text"), "value": .string("one")]),
+        ])
+        let oldServer = NativeGateway(backend: { data in
+            if let discovery = try mcpFixtureDiscoveryReply(data) { return discovery }
+            let envelope = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+            let call = (envelope["methodCalls"] as! [[Any]])[0]
+            let method = call[0] as! String
+            let result: [String: Any] = method == "TractandaStore/info" ? ["features": []] : ["ok": true]
+            return try JSONSerialization.data(withJSONObject: [
+                "methodResponses": [[method, result, call[2]]]
+            ])
+        })
+        _ = try await MCPAdapter.callNativeTool(
+            definition: definition, supplied: arguments, gateway: oldServer)
+        var partial = arguments
+        partial["fieldOperations"] = .array([operation])
+        do {
+            _ = try await MCPAdapter.callNativeTool(
+                definition: definition, supplied: partial, gateway: oldServer)
+            XCTFail("Expected capability rejection")
+        } catch {
+            XCTAssertEqual((error as? TractandaError)?.code, "unsupportedCapability")
+        }
+        let newServer = NativeGateway(backend: { data in
+            if let discovery = try mcpFixtureDiscoveryReply(data) { return discovery }
+            let envelope = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+            let call = (envelope["methodCalls"] as! [[Any]])[0]
+            let method = call[0] as! String
+            let result: [String: Any]
+            if method == "TractandaStore/info" {
+                result = ["features": ["tractanda.item-field-operations.v1"]]
+            } else {
+                let args = call[1] as! [String: Any]
+                XCTAssertNotNil(args["fieldOperations"])
+                result = ["ok": true]
+            }
+            return try JSONSerialization.data(withJSONObject: [
+                "methodResponses": [[method, result, call[2]]]
+            ])
+        })
+        _ = try await MCPAdapter.callNativeTool(definition: definition, supplied: partial, gateway: newServer)
+    }
+
     func testResolveConflictToolGatesFeatureAndReturnsCompactReceipt() async throws {
         let itemID = "11111111-1111-1111-8111-111111111111"
         let revisionID = "22222222-2222-1222-8222-222222222222"

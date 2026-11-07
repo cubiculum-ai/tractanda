@@ -4,7 +4,8 @@ import Foundation
 public enum TractandaJMAPCodec {
     private static func argumentPaths(_ method: String) -> [[String]] {
         switch method {
-        case "TractandaItem/commit", "TractandaItem/resolveConflict", "TractandaSync/acceptReview":
+        case "TractandaItem/commit": return [["changes", "*"], ["fieldOperations", "*", "value"]]
+        case "TractandaItem/resolveConflict", "TractandaSync/acceptReview":
             return [["changes", "*"]]
         case "TractandaItem/prepareCapture": return [["request", "changes", "*"]]
         case "TractandaItem/commitCapture":
@@ -23,6 +24,7 @@ public enum TractandaJMAPCodec {
             return [["request", "changes", "*"], ["commitRequest", "changes", "*"]]
         case "TractandaItem/sharing", "TractandaItem/setSharing": return [["permissions"]]
         case "TractandaItem/resolve": return [["value"]]
+        case "TractandaItem/listTail": return [["values", "*"]]
         default: return []
         }
     }

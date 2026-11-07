@@ -401,6 +401,16 @@ public struct ItemClient: Sendable {
         }
         return status
     }
+    public func listTail(_ request: ItemListTailRequest) async throws -> ItemListTailResult {
+        let result = try await call(
+            "TractandaItem/listTail", arguments: request, returning: ItemListTailResult.self)
+        guard result.itemId == request.itemID, result.field == request.field,
+            result.total >= 0, result.start >= 0, result.start <= result.total,
+            result.values.count == result.total - result.start, result.values.count <= request.limit,
+            result.fieldPresent || (result.total == 0 && result.start == 0)
+        else { throw TractandaError("protocolError", "Invalid list tail result.") }
+        return result
+    }
     public func commit(_ request: CommitRequest) async throws -> MutationReceipt {
         let result: MutationReceipt
         while true {

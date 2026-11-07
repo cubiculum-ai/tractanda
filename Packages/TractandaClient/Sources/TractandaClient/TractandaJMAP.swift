@@ -44,6 +44,7 @@ public enum TractandaJMAP {
         "TractandaItem/extractedTextUnit",
         "TractandaItem/get", "TractandaItem/getBounded",
         "TractandaItem/history",
+        "TractandaItem/listTail",
         "TractandaItem/prepareCapture",
         "TractandaItem/query",
         "TractandaItem/resolve",

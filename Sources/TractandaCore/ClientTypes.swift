@@ -11,6 +11,7 @@ public typealias NativeMethodResult = TractandaClient.NativeMethodResult
 public typealias Revision = TractandaClient.Revision
 public typealias RevisionProvenance = TractandaClient.RevisionProvenance
 public typealias CommitRequest = TractandaClient.CommitRequest
+public typealias ItemFieldOperation = TractandaClient.ItemFieldOperation
 public typealias CommitResult = TractandaClient.CommitResult
 public typealias MutationReceipt = TractandaClient.MutationReceipt
 public typealias ItemState = TractandaClient.ItemState

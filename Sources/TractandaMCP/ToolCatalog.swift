@@ -693,9 +693,19 @@ enum ToolCatalog {
             properties: ["itemID": identifier, "categoryID": identifier],
             required: ["itemID", "categoryID"]),
         .init(
+            "tractanda_list_tail", method: "TractandaItem/listTail",
+            description:
+                "Read the last values of one current list field with revision and state. Missing fields return fieldPresent false. Oversized results fail; reduce limit. Requires tractanda.item-list-tail.v1.",
+            properties: [
+                "itemID": identifier, "field": text,
+                "limit": .object([
+                    "type": .string("integer"), "minimum": .int(1), "maximum": .int(256), "default": .int(10),
+                ]),
+            ], required: ["itemID", "field"], requiredFeature: "tractanda.item-list-tail.v1"),
+        .init(
             "tractanda_commit", method: "TractandaItem/commit",
             description:
-                "Commit one whole edit. Create needs classID; revise/retype/copy need itemID and expectedRevisionID; retype also needs classID. changes is a dictionary of native tagged values; unset is required and removes named keys (send [] when removing nothing). All writes require operationID. Deletes/restores revise isDeleted; copies start a new private history. Preserve unknown properties. Read tractanda://reference/items first. Success returns a compact confirmed receipt (itemId, revisionId, operationId, replayed, indexReady, diagnostics). To read saved content, use tractanda_revision with ids:[revisionId] and verify the returned itemId; a read failure does not undo the saved edit.",
+                "Commit one edit. Create needs classID; revise/retype/copy need itemID and expectedRevisionID; retype also needs classID. fieldOperations supports ordered append, setKey, and removeKey on literal top-level fields; All edits require the usual revision guard. Requires tractanda.item-field-operations.v1 when used. changes is a dictionary of native tagged values; unset is required and removes named keys (send [] when removing nothing). All writes require operationID. Deletes/restores revise isDeleted; copies start a new private history. Preserve unknown properties. Read tractanda://reference/items first. Success returns a compact confirmed receipt (itemId, revisionId, operationId, replayed, indexReady, diagnostics). To read saved content, use tractanda_revision with ids:[revisionId] and verify the returned itemId; a read failure does not undo the saved edit.",
             properties: [
                 "action": .object([
                     "type": .string("string"),
@@ -705,6 +715,21 @@ enum ToolCatalog {
                 "operationID": operation,
                 "changes": .object(["type": .string("object"), "additionalProperties": tagged]),
                 "unset": .object(["type": .string("array"), "items": text]),
+                "fieldOperations": .object([
+                    "type": .string("array"), "maxItems": .int(256),
+                    "items": .object([
+                        "type": .string("object"),
+                        "properties": .object([
+                            "op": .object([
+                                "type": .string("string"),
+                                "enum": .array(["append", "setKey", "removeKey"].map(Value.string)),
+                            ]),
+                            "field": text, "key": text, "value": tagged,
+                        ]),
+                        "required": .array([.string("op"), .string("field")]),
+                        "additionalProperties": .bool(false),
+                    ]),
+                ]),
             ],
             required: ["action", "operationID", "changes", "unset"], readOnly: false,
             idempotent: true, destructive: true),

@@ -217,7 +217,11 @@ public enum MCPAdapter {
         {
             arguments["projection"] = .string("content")
         }
-        if let feature = definition.requiredFeature {
+        let feature =
+            definition.requiredFeature
+            ?? (definition.nativeMethod == "TractandaItem/commit" && arguments["fieldOperations"] != nil
+                ? "tractanda.item-field-operations.v1" : nil)
+        if let feature {
             let info = try await gateway.call("TractandaStore/info", arguments: [:])
             try requireFeature(feature, serverInfoData: info)
         }
