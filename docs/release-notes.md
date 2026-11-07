@@ -39,7 +39,7 @@ After verifying all members have upgraded, run the installed helper with `comple
 - Shared daemon: optional loopback HTTP browser/API surface and authenticated Streamable HTTP MCP in the same process.
 - A macOS arm64 installer with boot-time system LaunchDaemons, empty/sample stores, separate canonical/index locations, a system connection registry and a shared client path with an owned `/usr/local/bin/tractanda-tui` symlink.
 - Upgrade rollback and data-preserving uninstall. The preview reuses the existing `daemon` account and creates no users or groups.
-- Distribution targets are macOS arm64 and Debian 13 amd64 and arm64. Consult the matching release for its exact artifact and qualification evidence.
+- The published 0.1.0-poc.17.1 Linux package set targets Debian 13 amd64 and arm64. The current source's next-package build baseline is Kali Rolling; consult the matching release for exact assets and qualification evidence, since source support does not establish a downloadable package.
 - Current-permission history access, system-administrator policy, and semantic `item-text-utf8-v2` input over eligible owned text fields.
 - A shared agent skill packaged for Claude Code, Codex and Agent Skills-compatible harnesses.
 
@@ -50,7 +50,7 @@ After verifying all members have upgraded, run the installed helper with `comple
 - macOS browser password login uses OpenDirectory. The Linux PAM broker passed real, synthetic-credential tests in a disposable Debian container; host installation remains an administrator action. No production password was used. See [PAM broker setup](pam-broker.md).
 - Do not run a server as root solely for PAM.
 - The bundled macOS semantic provider is Granite Embedding 311M multilingual R2 through vmlx-swift, with pinned model/runtime revisions, tokenizer fixes #487/#514 and the applicable model/tokenizer notices. Installer-managed Qwen profiles are upgraded and their derived vectors rebuilt. The obsolete subject/body-only input mode has been removed; indexes are rebuildable.
-- The published Linux package scope is Debian 13 on amd64 and arm64. That support statement is specific to those packages and does not establish other distributions or storage environments.
+- The published Debian 13 Linux support statement applies only to the exact 0.1.0-poc.17.1 artifacts and their receipts. It does not qualify the current-source Kali candidate or imply a future Debian build route.
 - Real macOS lifecycle checks passed on isolated empty/sample stores: both launchd jobs ran as `daemon`, restart preserved records, a deliberately failed upgrade rolled back, and uninstall preserved canonical data. Boot registration is configured, but an actual machine reboot is not part of that test. Production data was not used for uninstall testing.
 - Each release records the package builds and targeted checks actually run. Consult its version-specific evidence; the general workflow description does not imply a full-suite run for every release.
 - Personal/workgroup synchronization and attachment workflows are implemented. The `0.1.0-poc.16.2` evidence includes a three-node current/history consistency check; that result is specific to the recorded installation and does not establish arbitrary federation, rolling upgrades, failover, or exhaustive fault coverage. Broader recovery limits remain proof-of-concept scope. A native GUI and full agent-account provisioning remain future work.

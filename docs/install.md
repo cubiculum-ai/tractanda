@@ -1,6 +1,6 @@
-# macOS and Debian preview installation
+# macOS and Linux preview installation
 
-Follow the version-pinned instructions for the selected macOS or Debian release. Use 17.1 for new migrations from 16.2. A standalone 16.2 installation migrates automatically. Clusters prepare all members, install while held, and run `complete` on each member only after every installation finishes. Resume an interrupted 17 operation with its exact original package before updating to 17.1. See the [17.1 release notes](release-notes.md#010-poc171--retain-reviews-backed-by-canonical-history).
+Follow the version-pinned instructions for the selected release. Kali Rolling is the current Linux package build baseline. The Debian 13 package and installation details below describe the already-published 0.1.0-poc.17.1 artifacts and their historical receipts only; they do not qualify current-source packages on Debian or promise a future Debian build route. A new Linux release is available only when its exact artifacts and checksums are attached to that release. Use 17.1 for new migrations from 16.2. A standalone 16.2 installation migrates automatically. Clusters prepare all members, install while held, and run `complete` on each member only after every installation finishes. Resume an interrupted 17 operation with its exact original package before updating to 17.1. See the [17.1 release notes](release-notes.md#010-poc171--retain-reviews-backed-by-canonical-history).
 
 See [system requirements](system-requirements.md) for the macOS version/architecture floor and provisional RAM and disk planning guidance.
 
@@ -20,7 +20,7 @@ The preview reuses the existing `daemon` OS account and creates no users or grou
 
 The installer registers system LaunchDaemons for the server and included local model workers. The core service starts after its identity, admission policy and HTTP endpoint checks pass; it does not wait for model downloads. Standard packages include pinned model metadata but omit bulky weights; configured workers retrieve missing files from their fixed model revisions and verify file sizes and SHA-256 values. This first-use step needs network access. For offline installation, provide complete verified model artifacts or use a full package built with `--include-model-weights` on the Mac packager or Linux producer and packager. Package assembly itself never downloads weights. See [model status, prefetch and offline import](embedding-runtime.md) for the `Models` paths and vector catch-up behavior.
 
-The following is the **approved managed server layout**, used by current macOS and Debian packages. Keep one directory per store, including its separate rebuildable index.
+The following layout is used by current macOS packages and the historical Debian 13 0.1.0-poc.17.1 packages. It is the layout basis for the Kali Rolling candidate; only candidate-bound package receipts can qualify that implementation. Keep one directory per store, including its separate rebuildable index.
 
 | Purpose | macOS target | Debian target |
 | --- | --- | --- |
@@ -40,11 +40,13 @@ The macOS service uses `/Library/LaunchDaemons`. No server data or cache is plac
 
 For the first migration from the legacy layout to per-instance ephemeral runtime preparation, the old helper cannot truthfully roll back a failed new-layout startup. If candidate startup fails, keep that host stopped in its preparing state and retry only the exact candidate; the other verified node remains available. Once the new layout is installed, a later qualified rollback regenerates the matching root-preparer from the restored release receipt. Each instance selects its helper release from its own receipt, independently of `Software/current`; boot-time checks cover the bounded manifest and helper entry, not model payloads.
 
-## Install a Debian package
+## Historical Debian 13 package: 0.1.0-poc.17.1
 
-Use the [signed preview APT repository](apt.md) for ordinary installation and updates. Direct `.deb` assets are also attached to each release; check the selected architecture against that release's `SHA256SUMS`. APT can install a downloaded local package and satisfy its dependencies from configured Debian repositories:
+The following commands and package requirements apply to the published 0.1.0-poc.17.1 Debian 13 artifacts only. Do not use them as evidence or instructions for an unbuilt Kali candidate. For any later release, use its own attached assets, checksum file and version-pinned installation guidance. Historical Debian receipts do not qualify current-source Debian packages.
 
-For AMD64 packages that use the official Swift 6.4.2 runtime, every online CPU must expose
+Use the [signed preview APT repository](apt.md) for the published 17.1 package and updates. The 17.1 direct `.deb` assets are attached to their release; check the selected architecture against that release's `SHA256SUMS`. APT can install a downloaded local package and satisfy its dependencies from configured Debian repositories:
+
+For the historical Debian 13 AMD64 package that uses the official Swift 6.4.2 runtime, every online CPU must expose
 the CX16 (`CMPXCHG16B`) feature. Pre-CX16 processors are unsupported; there is no processor-year,
 model-name or x86-64-v2 cutoff. During install or upgrade the Debian preinst check verifies the
 kernel-reported `cx16` flag on every online CPU and checks that the online set did not change
