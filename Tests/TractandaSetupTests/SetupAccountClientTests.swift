@@ -93,15 +93,20 @@ extension SetupAccountClientTests {
                         "primaryAccounts": [capability: account],
                     ]
                 case "TractandaCategory/installTemplate":
-                    result = ["items": [
-                        "status": "000000a0-0000-1000-8000-001122334455",
-                        "status.ready": "000000a1-0000-1000-8000-001122334455",
-                        "status.doing": "000000a2-0000-1000-8000-001122334455",
-                        "status.done": "000000a3-0000-1000-8000-001122334455",
-                    ]]
+                    result = [
+                        "items": [
+                            "status": "000000a0-0000-1000-8000-001122334455",
+                            "status.ready": "000000a1-0000-1000-8000-001122334455",
+                            "status.doing": "000000a2-0000-1000-8000-001122334455",
+                            "status.done": "000000a3-0000-1000-8000-001122334455",
+                        ]
+                    ]
                 default:
                     XCTAssertEqual(method, "TractandaItem/commit")
-                    if case .untilCompletion = wait {} else { XCTFail("Sample writes require completion wait") }
+                    if case .untilCompletion = wait {
+                    } else {
+                        XCTFail("Sample writes require completion wait")
+                    }
                     result = try receipt(arguments)
                 }
                 return try JSONSerialization.data(withJSONObject: [
@@ -120,7 +125,8 @@ extension SetupAccountClientTests {
             let intent = try JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys])
             if let previous = published[operationID] {
                 XCTAssertEqual(intent, previous.intent)
-                return try self.compactReceipt(operationID: operationID, index: previous.index, replayed: true)
+                return try self.compactReceipt(
+                    operationID: operationID, index: previous.index, replayed: true)
             }
             let index = published.count + 1
             published[operationID] = (intent, index)
@@ -160,7 +166,8 @@ extension SetupAccountClientTests {
                 if legacy {
                     return ["revision": ["fields": ["itemID": ["type": "text", "value": "unvalidated"]]]]
                 }
-                var result = try self.compactReceipt(operationID: arguments["operationID"] as! String, index: 1)
+                var result = try self.compactReceipt(
+                    operationID: arguments["operationID"] as! String, index: 1)
                 result["itemId"] = "unvalidated"
                 return result
             }
