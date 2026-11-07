@@ -49,21 +49,29 @@ class ProducerTests(unittest.TestCase):
             return P.component(path, tree, 'embeddings', 'amd64', P.sha(P.B.canonical(value)))
 
     def test_unadmitted_stops_before_heavy_or_environment_work(self):
-        with mock.patch.object(P.B, 'native_baseline') as native, \
+        registry = P.B.read_json(P.REGISTRY)
+        registry['baselines'][P.B.PRIMARY_BUILD_OS]['amd64'] = dict.fromkeys(P.COMPONENTS)
+        path = self.put(self.root / 'registry.json', json.dumps(registry).encode())
+        with mock.patch.object(P, 'REGISTRY', path), \
+                mock.patch.object(P.B, 'native_baseline') as native, \
                 mock.patch.object(P, 'source_rows') as source, mock.patch.object(P, 'build_environment') as env:
             with self.assertRaisesRegex(ValueError, 'Unadmitted kali-rolling amd64 components: embeddings, documents'):
                 P.produce(argparse.Namespace(arch='amd64', build_os=P.B.PRIMARY_BUILD_OS))
             native.assert_not_called()
             source.assert_not_called()
             env.assert_not_called()
-        self.assertEqual(list(self.root.iterdir()), [])
+        self.assertEqual(list(self.root.iterdir()), [path])
         self.assertTrue(all(P.registry('amd64', P.B.DEBIAN_BUILD_OS).values()))
 
     def test_registry_rejects_unknown_component_or_nonhash(self):
         value = P.B.read_json(P.REGISTRY)
+        value['baselines'][P.B.PRIMARY_BUILD_OS]['arm64'] = dict.fromkeys(P.COMPONENTS)
         path = self.put(self.root / 'registry.json', json.dumps(value).encode())
         with mock.patch.object(P, 'REGISTRY', path):
             self.assertEqual(P.registry('arm64'), {'embeddings': None, 'documents': None})
+            value['baselines'][P.B.PRIMARY_BUILD_OS]['arm64']['documents'] = 'd' * 64
+            path.write_text(json.dumps(value))
+            self.assertEqual(P.registry('arm64'), {'embeddings': None, 'documents': 'd' * 64})
             value['baselines'][P.B.PRIMARY_BUILD_OS]['arm64']['documents'] = 'approved'
             path.write_text(json.dumps(value))
             with self.assertRaisesRegex(ValueError, 'reviewed normalized'):

@@ -2,7 +2,7 @@
 
 `scripts/produce-linux-payload.py` is the tracked bridge from a frozen source tree and reviewed native ML components to the complete `package-linux.py` bundle. It builds the five core executables, stages resources and both local ML components, and invokes the full assembler. The default output is slim: pinned model metadata and worker binaries are included, while weights are omitted. Add `--include-model-weights` and supply both complete local model roots for an offline package. It never installs a package, creates a store/account, starts a service or publishes anything. `VERSION` is unchanged.
 
-The input registry keeps separate approvals for Kali rolling and Debian 13. Kali rolling is the default. Its embeddings and documents entries are currently empty on both architectures, so `produce` stops before tool discovery, model work or compilation. Existing Debian 13 approvals retain their original identities and require explicit selection.
+The input registry keeps separate reviewed manifest approvals for Kali rolling and Debian 13, per component and architecture. Kali rolling is the default. `produce` requires both the embeddings and documents manifests to be admitted for the selected baseline/architecture; a missing admission stops before source or model work, tool discovery, or compilation. Existing Debian 13 approvals retain their original identities and require explicit selection.
 
 ```
 python3 -B scripts/produce-linux-payload.py plan --arch amd64

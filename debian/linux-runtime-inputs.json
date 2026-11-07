@@ -4,12 +4,12 @@
   "baselines": {
     "kali-rolling": {
       "amd64": {
-        "embeddings": null,
-        "documents": null
+        "embeddings": "9d386e60814efb74cfe0e9838da503b41ea35ea019dd8f43b1a69ed957ee2ce6",
+        "documents": "86f6817b7b4be321081263bd7a5ee2b16533c028e5fea1ab821519e8a3a7db80"
       },
       "arm64": {
-        "embeddings": null,
-        "documents": null
+        "embeddings": "b97fdb32ed693a7ce967e3191ad6a05310705351df63bb84c222053f39a54c4a",
+        "documents": "9f1001956af0deb95ccf6137c7f46b8e69c9e321017ac61287a8cee643ac807b"
       }
     },
     "debian13": {
