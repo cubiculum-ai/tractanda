@@ -427,14 +427,14 @@ def observed_owned_bind_conflict(fields, journal):
             and any('bind(' in line and 'Address already in use' in line for line in journal.splitlines()))
 
 
-def observed_candidate_embedding_bind_recovery(fields, observation, journal):
+def observed_candidate_embedding_bind_recovery(fields, observation, journal, allow_cleared=False):
     invocation = fields.get('InvocationID', '')
     fatal_lines = [line for line in journal.splitlines() if 'Fatal error:' in line]
     return (fields.get('ActiveState') == 'activating' and fields.get('SubState') == 'auto-restart'
             and fields.get('MainPID') == '0' and fields.get('Result') == 'core-dump'
             and fields.get('ExecMainStatus') == '4' and fields.get('NRestarts', '').isdecimal()
             and re.fullmatch(r'[0-9a-f]{32}', invocation) is not None
-            and bool(observation['kernelSockets'])
+            and (bool(observation['kernelSockets']) or allow_cleared)
             and all(row['state'] == '06' for row in observation['kernelSockets'])
             and not observation['daemonListenerLines'] and bool(fatal_lines)
             and 'bind(' in fatal_lines[-1] and 'Address already in use' in fatal_lines[-1]
@@ -655,16 +655,21 @@ class Validation:
                     if allow_address_recovery and re.fullmatch(r'[0-9a-f]{32}', invocation):
                         journal = self.command(['/usr/bin/journalctl', '-u', unit,
                             '_SYSTEMD_INVOCATION_ID=' + invocation, '-n', '30', '--no-pager', '-o', 'cat'])
-                        if observed_candidate_embedding_bind_recovery(fields, observation, journal):
+                        existing = self.result.get('candidateEmbeddingRecovery', {}).get('events', [])
+                        prior = next((event for event in existing if event['invocationID'] == invocation), None)
+                        if observed_candidate_embedding_bind_recovery(fields, observation, journal,
+                                                                        allow_cleared=prior is not None):
                             observed_epoch, observed_monotonic = time.time(), time.monotonic()
                             recovery = self.result.setdefault('candidateEmbeddingRecovery',
                                 {'status': 'WAITING', 'events': [], 'firstObservedEpoch': observed_epoch,
                                  'firstObservedMonotonic': observed_monotonic})
-                            if not any(event['invocationID'] == invocation for event in recovery['events']):
+                            if prior is None:
                                 recovery['events'].append({'invocationID': invocation, 'serviceState': fields,
                                     'portObservation': observation, 'observedEpoch': observed_epoch,
                                     'observedMonotonic': observed_monotonic,
                                     'reason': 'Observed bind EADDRINUSE with only TIME_WAIT'})
+                            elif not observation['kernelSockets'] and 'clearedEpoch' not in prior:
+                                prior.update(clearedEpoch=observed_epoch, clearedMonotonic=observed_monotonic)
                             self.result.pop('embeddingReadinessFailure', None)
                             self.save()
                             time.sleep(1)

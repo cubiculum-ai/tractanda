@@ -615,13 +615,15 @@ class ValidationTests(unittest.TestCase):
                         dict(observation, daemonListenerLines=['p123'])):
             self.assertFalse(V.observed_candidate_embedding_bind_recovery(fields, changed, journal))
         self.assertFalse(V.observed_candidate_embedding_bind_recovery(fields, observation, 'Fatal error: unrelated'))
+        self.assertTrue(V.observed_candidate_embedding_bind_recovery(fields, dict(observation, kernelSockets=[]), journal, allow_cleared=True))
+        self.assertFalse(V.observed_candidate_embedding_bind_recovery(fields, dict(observation, kernelSockets=[]), journal))
 
     def test_candidate_embedding_recovery_waits_for_same_unit_health_after_proven_conflict(self):
         check = V.Validation({'runID': '012345abcdef', 'port': 52179}, self.root, no_execution_deadline=True)
         failed = ('ActiveState=activating\nSubState=auto-restart\nMainPID=0\nResult=core-dump\n'
                   'ExecMainStatus=4\nNRestarts=1\nInvocationID=' + 'a'*32 + '\n')
         active = 'ActiveState=active\nSubState=running\nMainPID=42\n'
-        states = iter((failed, active, active))
+        states = iter((failed, failed, active, active))
         def command(argv, **kwargs):
             if argv[0] == '/usr/bin/systemctl': return next(states)
             if argv[0] == '/usr/bin/journalctl': return 'Fatal error: bind(x): Address already in use (errno: 98)'
@@ -638,12 +640,13 @@ class ValidationTests(unittest.TestCase):
             def close(self): pass
         observation = {'kernelSockets': [{'state':'06', 'inode':'0'}], 'daemonListenerLines': []}
         with patch.object(check, 'guard'), patch.object(check, 'command', side_effect=command), \
-             patch.object(check, 'observe_embedding_port', return_value=observation), \
+             patch.object(check, 'observe_embedding_port', side_effect=[observation, dict(observation, kernelSockets=[])]), \
              patch.object(V.http.client, 'HTTPConnection', Connection), patch.object(V.time, 'sleep'):
             self.assertEqual(check.wait_embedding_ready(allow_address_recovery=True), 42)
         self.assertEqual(check.result['candidateEmbeddingRecovery']['status'], 'PASS')
         self.assertGreaterEqual(check.result['candidateEmbeddingRecovery']['observedWaitSeconds'], 0)
         self.assertIn('observedEpoch', check.result['candidateEmbeddingRecovery']['events'][0])
+        self.assertIn('clearedEpoch', check.result['candidateEmbeddingRecovery']['events'][0])
         self.assertIn('recoveredEpoch', check.result['candidateEmbeddingRecovery'])
         self.assertEqual(check.result['cases']['candidate-embedding-handoff']['degradedInvocations'], 1)
         self.assertNotIn('embeddingReadinessFailure', check.result)
