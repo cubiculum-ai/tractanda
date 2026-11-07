@@ -3,8 +3,8 @@
     /// This compiler input remains in descriptor source hashes. Only exact baseline
     /// and architecture digest slots are normalized to avoid self-reference.
     enum ApprovedLinuxDocumentClosure {
-        static let kaliAMD64: String? = "f37b953f2b64dd7e40dc62a883bd979e8086545649ae472b325ebca572fe4c82"
-        static let kaliARM64: String? = "5dbf73ced9736abedb026910be3c7e281c3767f4aa40e3e62cb99444c9e23d48"
+        static let kaliAMD64: String? = "dfff10e7ae933b5e8eb3c0840dec58f04b681979d68a8c113ff5e1171ef9e453"
+        static let kaliARM64: String? = "a46387cb7ebc1e50d74d2134803e3898f575820d40b3fc252203970f8864abbd"
         #if arch(x86_64)
             static let sha256: String? = "4d5b73350265f8c8d00fd14c84bb52865a218113ecf4407d500c021e55cc5f44"
             static let kaliSHA256 = kaliAMD64
