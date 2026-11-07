@@ -5,6 +5,7 @@ let package = Package(
     name: "TractandaEmbeddings",
     platforms: [.macOS(.v14)],
     dependencies: [
+        .package(path: "ListenerRuntime"),
         .package(
             url: "https://github.com/osaurus-ai/vmlx-swift.git",
             revision: "61a4b20d4ad01b10466e8fc94c50402a9f994430"),
@@ -15,6 +16,7 @@ let package = Package(
         .executableTarget(
             name: "TractandaEmbeddingsHost",
             dependencies: [
+                .product(name: "TractandaListenerRuntime", package: "ListenerRuntime"),
                 .product(name: "MLX", package: "vmlx-swift"),
                 .product(name: "MLXEmbedders", package: "vmlx-swift"),
                 .product(name: "MLXLMCommon", package: "vmlx-swift"),

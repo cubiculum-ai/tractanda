@@ -1,8 +1,25 @@
 import Foundation
 import MLX
 
+#if os(Linux)
+    import Glibc
+#else
+    import Darwin
+#endif
+
 @main enum Main {
-    static func main() async throws {
+    static func main() async {
+        do {
+            try await start()
+        } catch {
+            let message = String(String(describing: error).prefix(2_048))
+            FileHandle.standardError.write(
+                Data(("tractanda-embeddings: startup failed: " + message + "\n").utf8))
+            exit(EXIT_FAILURE)
+        }
+    }
+
+    private static func start() async throws {
         let arguments = Array(CommandLine.arguments.dropFirst())
         if arguments == ["--describe"] {
             let encoder = JSONEncoder()

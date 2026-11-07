@@ -59,6 +59,7 @@ PY
 )
 run_tests work/verification/swift-tests.log "$scratch_root"
 run_tests work/verification/client-tests.log "$scratch_root/client-tests" --package-path Packages/TractandaClient
+run_tests work/verification/listener-tests.log "$scratch_root/listener-tests" --package-path Packages/TractandaEmbeddings/ListenerRuntime
 binary_dir=$(swift build --show-bin-path --scratch-path "$scratch_root" --cache-path "$scratch_root/cache" \
     --config-path "$scratch_root/config" --security-path "$scratch_root/security" --disable-sandbox)
 python3 scripts/verify-ipc.py "$binary_dir/tractanda"

@@ -4,6 +4,8 @@ project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$project_dir"
 set -- Sources Tests Package.swift Packages/TractandaClient/Sources Packages/TractandaClient/Tests \
     Packages/TractandaClient/Package.swift Packages/TractandaEmbeddings/Sources Packages/TractandaEmbeddings/Package.swift \
+    Packages/TractandaEmbeddings/ListenerRuntime/Package.swift \
+    Packages/TractandaEmbeddings/ListenerRuntime/Sources Packages/TractandaEmbeddings/ListenerRuntime/Tests \
     Packages/TractandaDocuments/Sources Packages/TractandaDocuments/Package.swift
 # Local research checkouts are intentionally absent from a public source checkout.
 for optional in experiments/category-learning experiments/declarative-client/Sources \

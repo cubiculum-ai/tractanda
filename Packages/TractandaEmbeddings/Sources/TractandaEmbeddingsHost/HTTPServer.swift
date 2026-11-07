@@ -2,6 +2,7 @@ import Foundation
 import NIOCore
 import NIOHTTP1
 import NIOPosix
+import TractandaListenerRuntime
 
 private let maximumRequestBodyBytes = 2 * 1024 * 1024
 private let maximumInputs = 16
@@ -266,10 +267,9 @@ func serveEmbeddings(engine: any EmbeddingServing, port: Int) async throws {
     let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     let gate = AdmissionGate()
     do {
-        let channel = try await ServerBootstrap(group: group)
-            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
-            .serverChannelOption(ChannelOptions.backlog, value: 16)
-            .childChannelInitializer { channel in
+        let channel = try await LoopbackListener.bind(
+            group: group, port: port,
+            childChannelInitializer: { channel in
                 do {
                     try channel.pipeline.syncOperations.addHandler(
                         IdleStateHandler(readTimeout: .seconds(20)))
@@ -284,9 +284,10 @@ func serveEmbeddings(engine: any EmbeddingServing, port: Int) async throws {
                 } catch {
                     return channel.eventLoop.makeFailedFuture(error)
                 }
-            }
-            .bind(host: "127.0.0.1", port: port)
-            .get()
+            },
+            report: { message in
+                FileHandle.standardError.write(Data((message + "\n").utf8))
+            })
         try await channel.closeFuture.get()
         try await group.shutdownGracefully()
     } catch {
