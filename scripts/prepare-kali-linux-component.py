@@ -39,6 +39,18 @@ def require(condition, message):
         raise ValueError(message)
 
 
+def contains_digest(path, digest):
+    needle = digest.encode()
+    tail = b''
+    with path.open('rb') as stream:
+        while block := stream.read(1024 * 1024):
+            data = tail + block
+            if needle in data:
+                return True
+            tail = data[-(len(needle) - 1):]
+    return False
+
+
 def compiler_input(work, role, arch, baseline):
     source = B.read_json(work / 'source-inputs.json', 16 * 1024**2)
     result = B.read_json(work / 'result.json', 16 * 1024**2)
@@ -183,6 +195,7 @@ def prepare(args):
                       'sourceFiles': normalized, 'toolchain': toolchain, 'buildFlags': flags,
                       'vendor': vendor, 'nativeClosure': closure, 'patcherSHA256': B.digest(patcher)}
         P.write_json(output / PROVENANCE, provenance)
+        (output / PROVENANCE).chmod(0o644)
         descriptor = {key: historical[key] for key in (
             'schema', 'operatingSystem', 'architecture', 'backend', 'runtimeBaseRevision', 'modelAssetsSHA256',
             'preprocessing', 'parser', 'sourceRevisions', 'patchSHA256s')}
@@ -190,12 +203,13 @@ def prepare(args):
                           files=[row for row in P.rows(output, maximum=CAP) if row['path'] != helper],
                           privateDependencies=private, osDependencies=system)
         P.write_json(output / DESCRIPTOR, descriptor)
+        (output / DESCRIPTOR).chmod(0o644)
         descriptor_digest = B.digest(output / DESCRIPTOR)
         document['identity']['converter'] = document['identity']['converter'].rsplit('.', 1)[0] + '.' + descriptor_digest
         if args.expected_descriptor:
             require(descriptor_digest == args.expected_descriptor
                     and generated[N.CLIENT]['digests']['kali-' + arch] == descriptor_digest
-                    and descriptor_digest.encode() in (output / helper).read_bytes(),
+                    and contains_digest(output / helper, descriptor_digest),
                     'Second-pass executable or stable descriptor differs from the reviewed commitment.')
         source_sha = P.sha(B.canonical(provenance))
     else:

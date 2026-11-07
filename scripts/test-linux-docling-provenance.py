@@ -80,6 +80,14 @@ class ConverterClosureTests(unittest.TestCase):
             with self.assertRaises(AssertionError):G.check_converter_elf('amd64',facts,recorded,descriptor)
 
 class KaliFirstAdmissionTests(unittest.TestCase):
+    def test_executable_digest_scan_crosses_chunk_boundaries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / 'converter'
+            digest = 'a'*64
+            binary.write_bytes(b'x'*(1024*1024-31) + digest.encode() + b'y')
+            self.assertTrue(K.contains_digest(binary, digest))
+            self.assertFalse(K.contains_digest(binary, 'b'*64))
+
     def test_provider_versions_only_come_from_definitions(self):
         text = (
             "Version symbols section '.gnu.version' contains 2 entries:\n"
