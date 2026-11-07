@@ -87,18 +87,20 @@ struct SetupNativeClient {
         func create(_ key: String, _ fields: [String: Any]) throws -> String {
             var fields = fields
             fields["permissions"] = permissions
+            let operationID = "setup-sample-v1-" + instance + "-" + key
             let result = try call(
                 "TractandaItem/commit",
                 [
                     "action": "create", "classID": "Item",
-                    "operationID": "setup-sample-v1-" + instance + "-" + key,
+                    "operationID": operationID,
                     "changes": fields, "unset": [],
                 ], waitForMutation: true)
-            guard let revision = result["revision"] as? [String: Any],
-                let values = revision["fields"] as? [String: Any],
-                let identity = values["itemID"] as? [String: Any], let value = identity["value"] as? String
-            else { throw SetupError("Sample commit did not return an item identity.") }
-            return value
+            let receipt = try JSONDecoder().decode(
+                MutationReceipt.self, from: JSONSerialization.data(withJSONObject: result))
+            guard receipt.operationID == operationID else {
+                throw SetupError("Sample commit returned a receipt for another operation.")
+            }
+            return receipt.itemID
         }
         let categoryColumns: [[String: Any]] = [
             ("priority", "Priority"), ("urgency", "Urgency"), ("work-type", "Work type"),
