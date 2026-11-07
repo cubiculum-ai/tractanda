@@ -30,13 +30,24 @@ class ProducerTests(unittest.TestCase):
 
     def fixture(self):
         recipe = self.put(self.root / 'scripts/component.py')
+        for name in P.EXECUTION_RECIPES:
+            self.put(self.root / name)
+        self.put(self.root / 'Packages/TractandaDocuments/RuntimePatches/manifest.json')
+        package = self.root / 'Packages/TractandaEmbeddings'
+        self.put(package / 'Package.swift', b'let dependencies = [.package(path: "ListenerRuntime")]')
+        self.put(package / 'Package.resolved', b'{"pins": []}')
+        self.put(package / 'Sources/Helper/HTTPServer.swift', b'listener with reuse address')
+        self.put(package / 'ListenerRuntime/Package.swift', b'let dependencies = []')
+        self.put(package / 'ListenerRuntime/Package.resolved', b'{"pins": []}')
+        self.put(package / 'ListenerRuntime/Sources/Listener/LoopbackListener.swift', b'listener implementation')
         tree = self.root / 'artifacts'
         self.put(tree / 'bin/tractanda-embeddings', b'fixture-executable', 0o755)
         self.put(tree / 'licenses/runtime/LICENSE')
-        value = dict(profile='tractanda.linux-component-artifacts.v1', component='embeddings', arch='amd64',
+        value = dict(profile='tractanda.linux-component-artifacts.v2', component='embeddings', arch='amd64',
                      baseline={'buildOS': 'debian13', 'minimumCPU': 'x86-64', 'swiftABI': '6.4'},
                      modelRevision=P.MODELS['embeddings'], runtimeRevision=P.RUNTIME,
-                     sourceInputsSHA256='1' * 64, recipe={'path': 'scripts/component.py', 'sha256': P.B.digest(recipe)},
+                     sourceInputsSHA256='1' * 64, executionSource=P.execution_source(self.root, 'embeddings'),
+                     recipe={'path': 'scripts/component.py', 'sha256': P.B.digest(recipe)},
                      patches=[], toolchain={'version': 'Swift version 6.4.1', 'swiftSHA256': '2' * 64,
                      'swiftFrontendSHA256': '3' * 64, 'clangSHA256': '4' * 64}, files=P.rows(tree),
                      dynamicLoads=[], runtimeNotices=['licenses/runtime/LICENSE'], documentExtraction=None)
@@ -47,6 +58,64 @@ class ProducerTests(unittest.TestCase):
     def admit(self, path, tree, value):
         with mock.patch.object(P, 'ROOT', self.root):
             return P.component(path, tree, 'embeddings', 'amd64', P.sha(P.B.canonical(value)))
+
+    def test_legacy_opaque_source_hash_cannot_admit_old_helper(self):
+        path, tree, value = self.fixture()
+        del value['executionSource']
+        value['profile'] = 'tractanda.linux-component-artifacts.v1'
+        path.write_bytes(P.B.canonical(value))
+        with self.assertRaisesRegex(ValueError, 'execution source binding is missing'):
+            self.admit(path, tree, value)
+
+    def test_same_compiled_closure_is_accepted(self):
+        path, tree, value = self.fixture()
+        self.assertEqual(self.admit(path, tree, value), value)
+
+    def test_helper_and_nested_local_dependency_changes_reject_artifact(self):
+        path, tree, value = self.fixture()
+        for relative in ('Sources/Helper/HTTPServer.swift',
+                         'ListenerRuntime/Sources/Listener/LoopbackListener.swift',
+                         'ListenerRuntime/Package.resolved'):
+            source = self.root / 'Packages/TractandaEmbeddings' / relative
+            previous = source.read_bytes()
+            source.write_bytes(previous + b' changed')
+            with self.subTest(path=relative), self.assertRaisesRegex(ValueError, 'execution source is missing or changed'):
+                self.admit(path, tree, value)
+            source.write_bytes(previous)
+        self.assertEqual(self.admit(path, tree, value), value)
+
+    def test_unrelated_app_tests_and_docs_do_not_require_helper_rebuild(self):
+        path, tree, value = self.fixture()
+        for name in ('Sources/Tractanda/app.swift', 'Tests/app.swift', 'VERSION',
+                     'Packages/TractandaEmbeddings/Tests/Test.swift',
+                     'Packages/TractandaEmbeddings/ListenerRuntime/Tests/Test.swift',
+                     'Packages/TractandaEmbeddings/README.md'):
+            self.put(self.root / name, b'unrelated change')
+        self.assertEqual(self.admit(path, tree, value), value)
+
+    def test_execution_binding_requires_actual_frozen_compiler_rows(self):
+        _, _, value = self.fixture()
+        captured = P.rows(self.root, skip=P.SKIP)
+        self.assertEqual(P.execution_source(self.root, 'embeddings', captured), value['executionSource'])
+        for altered in ([row for row in captured if not row['path'].endswith('HTTPServer.swift')],
+                        [{**row, 'sha256': 'f' * 64} if row['path'].endswith('HTTPServer.swift') else row
+                         for row in captured], captured + [captured[0]]):
+            with self.assertRaisesRegex(ValueError, 'actual frozen compiler input receipt'):
+                P.execution_source(self.root, 'embeddings', altered)
+
+    def test_local_package_dynamic_escape_and_link_fail_closed(self):
+        self.fixture()
+        package = self.root / 'Packages/TractandaEmbeddings'
+        for manifest in (b'.package(path: variable)', b'.package(path: "../../outside")',
+                         b'.package(path: "ListenerRuntime", other: true)', b'.package(path: compute())',
+                         b'.package /* hidden local dependency */ (path: "ListenerRuntime")'):
+            self.put(package / 'Package.swift', manifest)
+            with self.subTest(manifest=manifest), self.assertRaises(ValueError):
+                P.execution_source(self.root, 'embeddings')
+        self.put(package / 'Package.swift', b'.package(path: "Alias")')
+        (package / 'Alias').symlink_to(package / 'ListenerRuntime')
+        with self.assertRaisesRegex(ValueError, 'escapes the real repository'):
+            P.execution_source(self.root, 'embeddings')
 
     def test_unadmitted_stops_before_heavy_or_environment_work(self):
         registry = P.B.read_json(P.REGISTRY)

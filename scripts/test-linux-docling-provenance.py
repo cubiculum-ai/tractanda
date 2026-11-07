@@ -11,6 +11,7 @@ N=load('normalization',ROOT/'scripts/linux-docling-provenance.py')
 P=load('producer',ROOT/'scripts/produce-linux-payload.py')
 G=load('generator',ROOT/'scripts/generate-linux-docling-binding.py')
 K=load('kali_review',ROOT/'scripts/prepare-kali-linux-component.py')
+A=load('historical_assembler',ROOT/'scripts/assemble-linux-docling-component.py')
 
 class TemplateNormalizationTests(unittest.TestCase):
     def test_only_architecture_digests_are_normalized(self):
@@ -89,6 +90,35 @@ class ConverterClosureTests(unittest.TestCase):
             with self.assertRaises(AssertionError):G.check_converter_elf('amd64',facts,recorded,descriptor)
 
 class KaliFirstAdmissionTests(unittest.TestCase):
+    def test_historical_recomposition_cannot_inherit_or_forge_execution_binding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for recipe, arguments in ((G, ('arm64', root, root, root, root, root)),
+                                      (A, ('arm64', root, root, root, root, root, root, root))):
+                with self.subTest(recipe=recipe.__name__), \
+                        self.assertRaisesRegex(ValueError, 'lacks an actual compiler input receipt'):
+                    recipe.prepare(*arguments)
+            self.assertEqual(list(root.iterdir()), [])
+
+    def test_old_compiler_receipt_cannot_be_relabelled_with_current_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            baseline = {'buildOS': 'kali-rolling'}
+            source = {'status': 'COMPILE_ONLY_UNADMITTED', 'files': [], 'component': 'embeddings',
+                      'arch': 'arm64', 'baseline': baseline, 'toolchain': {},
+                      'buildFlags': K.C.build_arguments('swift', [], 'arm64',
+                                                       K.C.ROLES['embeddings'][1], K.BASELINE)}
+            K.P.write_json(work / 'source-inputs.json', source)
+            result = {**source, 'status': 'NATIVE_HELPER_COMPILED_NOT_RUNTIME_ADMITTED_NOT_MODEL_EXECUTED',
+                      'sourceInputsSHA256': K.B.digest(work / 'source-inputs.json')}
+            K.P.write_json(work / 'result.json', result)
+            with patch.object(K.P, 'rows', return_value=[]), \
+                    patch.object(K.P, 'execution_source', return_value={'current': 'cannot relabel old compile'}), \
+                    patch.object(K.C, 'compiled_artifact') as artifact:
+                with self.assertRaisesRegex(ValueError, 'Actual compiler execution source binding is missing'):
+                    K.compiler_input(work, 'embeddings', 'arm64', baseline)
+                artifact.assert_not_called()
+
     def test_executable_digest_scan_crosses_chunk_boundaries(self):
         with tempfile.TemporaryDirectory() as directory:
             binary = Path(directory) / 'converter'
@@ -123,9 +153,11 @@ class KaliFirstAdmissionTests(unittest.TestCase):
                             for name, file in ((K.DESCRIPTOR, descriptor), (K.PROVENANCE, provenance))]
             content = {'files': files, 'baseline': {'buildOS': 'debian13'}, 'documentExtraction': {}}
             K.P.write_json(manifest, content)
-            with patch.object(K.P, 'require_admitted', return_value={'documents': K.P.sha(K.B.canonical(content))}):
+            with patch.object(K.P, 'require_admitted', return_value={'documents': K.P.sha(K.B.canonical(content))}), \
+                    patch.object(K.P, 'component', side_effect=AssertionError('Old helper must not be reused')) as gate:
                 _, _, vendor = K.vendor_facts('arm64', manifest, descriptor, provenance, rows)
                 self.assertEqual(vendor['supplierFiles'], rows)
+                gate.assert_not_called()
                 with self.assertRaisesRegex(ValueError, 'Raster supplier bytes differ'):
                     K.vendor_facts('arm64', manifest, descriptor, provenance, [dict(rows[0], sha256='d'*64), rows[1]])
 

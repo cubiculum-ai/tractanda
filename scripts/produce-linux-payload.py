@@ -4,6 +4,11 @@
 No network downloads, installation, model inference or release. Model weights are
 omitted by default; --include-model-weights admits only complete pinned local snapshots.
 Only the selected baseline's reviewed registry entries can be used. See linux-payload-producer.md.
+
+Component descriptors now require v2 execution-source bindings from actual frozen
+compiler receipts. Existing v1 artifacts/receipts remain historical evidence;
+helpers must be rebuilt and their new descriptors reviewed/admitted before any
+future payload build/publication. Document-format and peer identities are separate.
 """
 import argparse
 import errno
@@ -42,6 +47,59 @@ SOURCE_ROOTS = ('Sources', 'Tests', 'Packages', 'scripts', 'Tools')
 SOURCE_FILES = ('Package.swift', 'Package.resolved', 'VERSION', 'scripts/produce-linux-payload.py',
                 'scripts/package-linux.py', 'scripts/package-macos.py', 'scripts/validate-docling-model.py',
                 'config/model-artifacts.json', 'debian/linux-runtime-inputs.json')
+EXECUTION_SOURCE_PROFILE = 'tractanda.linux-helper-execution-source.v1'
+EXECUTION_PACKAGES = {'embeddings': 'Packages/TractandaEmbeddings', 'documents': 'Packages/TractandaDocuments'}
+EXECUTION_RECIPES = ('scripts/build-linux-ml-component.py', 'scripts/produce-linux-payload.py',
+                     'scripts/package-linux.py', 'scripts/package-macos.py')
+
+
+def execution_source(root, role, compiled_files=None):
+    """Bind helper execution inputs, independently of document/cluster semantics.
+
+    This is a conservative package source closure, not a claim that every file
+    produces instructions. Tests/docs, root app sources and generated admission
+    registries are excluded. Local dependencies must use reviewable literal
+    package declarations; changed manifest syntax needs explicit review here.
+    A compiler may emit this only from its frozen source with matching receipt
+    rows. Existing artifacts without that receipt cannot be relabelled.
+    """
+    root = Path(root).resolve(strict=True)
+    pending = [root / EXECUTION_PACKAGES[role]]
+    selected = list(EXECUTION_RECIPES) + ['Packages/TractandaDocuments/RuntimePatches']
+    seen = set()
+    while pending:
+        package = Path(os.path.normpath(pending.pop()))
+        if (not package.is_relative_to(root / 'Packages') or not package.is_dir()
+                or package.resolve(strict=True) != package):
+            raise ValueError('Execution source local package escapes the real repository Packages tree.')
+        if package in seen:
+            continue
+        seen.add(package)
+        manifest = package / 'Package.swift'
+        selected.extend((manifest.relative_to(root).as_posix(),
+                         (package / 'Sources').relative_to(root).as_posix()))
+        lock = package / 'Package.resolved'
+        if lock.exists() or lock.is_symlink():
+            selected.append(lock.relative_to(root).as_posix())
+        text = B.captured_bytes(manifest, 1024**2).decode('utf-8')
+        calls = re.findall(r'\.package\s*\(([^()]*)\)', text)
+        if len(calls) != len(re.findall(r'\.package\b', text)):
+            raise ValueError('Execution source package declarations require reviewed literal syntax.')
+        for call in calls:
+            if re.search(r'\bpath\s*:', call):
+                local = re.fullmatch(r'\s*path\s*:\s*"([^"\\\x00]+)"\s*,?\s*', call)
+                if local is None or Path(local[1]).is_absolute():
+                    raise ValueError('Execution source local package needs a literal relative path.')
+                pending.append(package / local[1])
+            elif not re.search(r'\burl\s*:\s*"[^"\\]+"', call):
+                raise ValueError('Execution source package declarations require reviewed literal syntax.')
+    files = rows(root, roots=selected, skip=SKIP)
+    if compiled_files is not None:
+        captured = {row['path']: row for row in compiled_files}
+        if len(captured) != len(compiled_files) or any(captured.get(row['path']) != row for row in files):
+            raise ValueError('Execution source closure differs from the actual frozen compiler input receipt.')
+    return {'profile': EXECUTION_SOURCE_PROFILE, 'component': role,
+            'files': files, 'filesSHA256': sha(B.canonical(files))}
 
 
 def core_products(version):
@@ -192,14 +250,18 @@ def file_entry(value):
 
 def component(path, root, role, arch, expected, build_os=B.DEBIAN_BUILD_OS):
     value = B.read_json(path, 16 * 1024**2)
-    keys = {'profile', 'component', 'arch', 'baseline', 'modelRevision', 'runtimeRevision', 'sourceInputsSHA256',
+    if isinstance(value, dict) and 'executionSource' not in value:
+        raise ValueError('Component execution source binding is missing; rebuild and review admission: ' + role)
+    keys = {'profile', 'component', 'arch', 'baseline', 'modelRevision', 'runtimeRevision', 'sourceInputsSHA256', 'executionSource',
             'recipe', 'patches', 'toolchain', 'files', 'dynamicLoads', 'runtimeNotices', 'documentExtraction'}
     if (not isinstance(value, dict) or set(value) != keys or sha(B.canonical(value)) != expected
-            or value['profile'] != 'tractanda.linux-component-artifacts.v1' or value['component'] != role
+            or value['profile'] != 'tractanda.linux-component-artifacts.v2' or value['component'] != role
             or value['arch'] != arch or value['runtimeRevision'] != RUNTIME or value['modelRevision'] != MODELS[role]
             or not hash_string(value['sourceInputsSHA256'])
             or value['baseline'] != {'buildOS': build_os, 'minimumCPU': B.ARCH[arch][2], 'swiftABI': '6.4'}):
         raise ValueError('Unapproved or mismatched normalized component manifest: ' + role)
+    if value['executionSource'] != execution_source(ROOT, role):
+        raise ValueError('Component execution source is missing or changed; rebuild and review admission: ' + role)
     tool = value['toolchain']
     if (not isinstance(tool, dict) or set(tool) != {'version', 'swiftSHA256', 'swiftFrontendSHA256', 'clangSHA256'}
             or not isinstance(tool['version'], str) or not SWIFT_6_4.match(tool['version'])
@@ -544,6 +606,8 @@ def produce(args):
     if frozen_hashes.get('debian/linux-runtime-inputs.json') != sha(registry_snapshot):
         raise ValueError('Runtime packaging approvals changed before source freeze.')
     for value in components.values():
+        if value['executionSource'] != execution_source(ROOT, value['component'], compiled_files=original):
+            raise ValueError('Component execution source changed before the frozen payload snapshot.')
         for commitment in [value['recipe'], *value['patches']]:
             if frozen_hashes.get(commitment['path']) != commitment['sha256']:
                 raise ValueError('Component recipe/patch changed before the frozen source snapshot.')

@@ -103,10 +103,12 @@ def main():
     for name in ('source', 'home', 'tmp', 'modules', 'cache', 'config', 'security'):
         (work / name).mkdir(mode=0o700)
     build_flags = build_arguments('swift', [], args.arch, ROLES[args.component][1], args.build_os)
+    P.merge_files(ROOT, work / 'source', original, args.max_work_bytes)
+    execution_source = P.execution_source(work / 'source', args.component, compiled_files=original)
     P.write_json(work / 'source-inputs.json', {'status': 'COMPILE_ONLY_UNADMITTED', 'files': original,
                  'component': args.component, 'arch': args.arch, 'toolchain': tools, 'baseline': baseline,
+                 'executionSource': execution_source,
                  'buildFlags': build_flags, 'buildTimeoutSeconds': args.build_timeout_seconds})
-    P.merge_files(ROOT, work / 'source', original, args.max_work_bytes)
     package_name, product = ROLES[args.component]
     package = work / 'source/Packages' / package_name
     expected_pins = B.read_json(package / 'Package.resolved')['pins']
@@ -158,9 +160,12 @@ def main():
         raise ValueError('Compiler, native baseline or original source changed during compilation.')
     if B.read_json(package / 'Package.resolved')['pins'] != expected_pins:
         raise ValueError('Selected dependency graph changed during compilation.')
+    if P.execution_source(work / 'source', args.component, compiled_files=original) != execution_source:
+        raise ValueError('Frozen helper execution source changed during compilation.')
     P.write_json(work / 'result.json', {'status': 'NATIVE_HELPER_COMPILED_NOT_RUNTIME_ADMITTED_NOT_MODEL_EXECUTED',
                  'component': args.component, 'arch': args.arch, 'toolchain': tools, 'baseline': baseline,
                  'sourceInputsSHA256': B.digest(work / 'source-inputs.json'), 'buildFlags': build_flags,
+                 'executionSource': execution_source,
                  'artifact': {'path': str(artifact), 'sha256': B.digest(artifact), 'size': artifact.stat().st_size},
                  'runtimePatch': patch_receipt, 'registryUpdated': False, 'documentIdentityAdmitted': False})
     print(json.dumps({'component': args.component, 'result': str(work / 'result.json'), 'runtimeAdmitted': False}))

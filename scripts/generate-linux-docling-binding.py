@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-"""Prepare a reviewed, finite Linux Docling descriptor; never admit or install it.
+"""Retain audited Docling helpers; historical recomposition fails closed.
 
-The compiler inputs include both generated Swift files. Only their two
-self-referential execution digest slots are normalized; the packaging registry is an
-output index and is excluded by exact path. All other source rows are bound.
-A new converter must match the reviewed dynamic closure, except for the
-independently audited direct zlib edge on the finite amd64 supplier bundle.
-Any other difference requires a fresh full closure audit.
+The old CLI accepted converter bytes without an actual compiler input receipt.
+Current Kali preparation imports these finite template/provider helpers but uses
+its own receipt-bound compiler result and complete native closure audit.
 """
-import argparse, hashlib, importlib.util, json, os, re, stat, subprocess
+import argparse, hashlib, importlib.util, json, re, subprocess
 from pathlib import Path
 
 if not __debug__:
@@ -56,61 +53,12 @@ def check_converter_elf(arch, facts, recorded, old_descriptor):
     return needed, direct_zlib
 
 def prepare(arch, component_root, manifest, converter, toolchain, output):
-    assert arch in ('arm64', 'amd64') and not output.exists() and not output.is_symlink()
-    assert component_root.is_dir() and converter.is_file() and not converter.is_symlink()
-    expected = P.require_admitted(arch)['documents']
-    component = P.component(manifest, component_root, 'documents', arch, expected)
-    old_descriptor = B.read_json(component_root / 'lib/tractanda/document-native-closure.json')
-    old_provenance = B.read_json(component_root / 'licenses/Docling/linux-build-provenance.json')
-    assert digest(component_root / 'lib/tractanda/document-native-closure.json') == component['documentExtraction']['identity']['converter'].rsplit('.', 1)[-1]
-    assert P.sha(B.canonical(old_provenance)) == component['sourceInputsSHA256']
-    actual_toolchain = B.read_json(toolchain); assert actual_toolchain == component['toolchain']
-    recorded = next(x for x in old_descriptor['privateDependencies'] if x['path'] == 'bin/tractanda-document-converter')
-    facts = B.elf(converter, arch)
-    needed, direct_zlib = check_converter_elf(arch, facts, recorded, old_descriptor)
-    allowed = {x['soname']: set(x['requiredSymbolVersions']) for x in old_descriptor['osDependencies']}
-    previous_needs = required_versions(component_root / 'bin/tractanda-document-converter')
-    for soname, versions in required_versions(converter).items():
-        limit = allowed.get(soname, previous_needs.get(soname, set()))
-        assert versions <= limit, (soname, versions - limit)
-    rows, generated = N.normalized_rows(P, C, ROOT, TEMPLATES)
-    provenance = {
-        'profile': 'tractanda.linux-docling-normalized-build.v1', 'architecture': arch,
-        'sourceSelectionProfile': N.SELECTION_PROFILE, 'sourceSelectionRoots': list(N.SOURCE_ROOTS),
-        'sourceFiles': rows, 'generatedDigestNormalizations': {
-            N.CLIENT: 'Only the four baseline and architecture digest slots use fixed placeholders.',
-            N.CONVERTER: 'Only the four baseline and architecture digest slots use fixed placeholders.',
-        }, 'excludedOutputIndex': N.EXCLUDED, 'normalizedTemplateSHA256': TEMPLATES,
-        'toolchain': actual_toolchain, 'buildFlags': C.build_arguments('/usr/bin/swift', [], arch, 'tractanda-document-converter'),
-        'runtimePatchSHA256': digest(ROOT / 'Packages/TractandaDocuments/RuntimePatches/vmlx-61a4b20-linux-docling.patch'),
-        'componentRecipeSHA256': digest(ROOT / 'scripts/build-linux-ml-component.py'),
-        'normalizationRecipeSHA256': digest(ROOT / 'scripts/linux-docling-provenance.py'),
-        'descriptorRecipeSHA256': digest(Path(__file__).resolve()),
-        'nativeSourceCommitmentsSHA256': old_provenance['nativeSourceCommitmentsSHA256'],
-        'nativeRecipeSHA256': old_provenance['nativeRecipeSHA256'],
-        'baselineNativeEvidence': {'descriptorSHA256': digest(component_root / 'lib/tractanda/document-native-closure.json'),
-                                   'provenanceSHA256': digest(component_root / 'licenses/Docling/linux-build-provenance.json'),
-                                   'componentManifestSHA256': expected},
-        'modelAssetsSHA256': old_descriptor['modelAssetsSHA256'],
-    }
-    output.mkdir(mode=0o700); prov = output / 'linux-build-provenance.json'; write(prov, provenance)
-    desc = dict(old_descriptor); desc['buildProvenanceSHA256'] = digest(prov); files = []
-    if direct_zlib:
-        desc['privateDependencies'] = [dict(row, needed=needed) if row['path'] == recorded['path'] else row
-                                       for row in old_descriptor['privateDependencies']]
-    for row in old_descriptor['files']:
-        name = B.safe_path(row['path']); entry = dict(row)
-        if name == 'licenses/Docling/linux-build-provenance.json': entry.update(sha256=digest(prov), size=prov.stat().st_size, mode=0o644)
-        else:
-            p = component_root / name; assert p.is_file() and not p.is_symlink() and p.stat().st_size == row['size'] and stat.S_IMODE(p.stat().st_mode) == row['mode'] and digest(p) == row['sha256'], name
-        files.append(entry)
-    desc['files'] = files; descriptor = output / 'document-native-closure.json'; write(descriptor, desc)
-    result = {'status': 'DESCRIPTOR_PREPARED_NOT_RUNTIME_ADMITTED', 'architecture': arch,
-              'descriptorSHA256': digest(descriptor), 'provenanceSHA256': digest(prov),
-              'normalizedProvenanceSHA256': P.sha(B.canonical(provenance)), 'generatedActual': generated,
-              'candidateConverterSHA256': digest(converter), 'baselineManifestSHA256': expected}
-    write(output / 'result.json', result); return result
+    raise ValueError(
+        "Historical Docling recomposition lacks an actual compiler input receipt; "
+        "use build-linux-ml-component.py and prepare-kali-linux-component.py "
+        "with a fresh bound compiler result. New Debian components require a "
+        "reviewed receipt-bound preparation route for that baseline.")
 
 def main():
-    a = argparse.ArgumentParser(); a.add_argument('--arch', required=True, choices=('amd64', 'arm64')); a.add_argument('--component-root', required=True, type=Path); a.add_argument('--manifest', required=True, type=Path); a.add_argument('--converter', required=True, type=Path); a.add_argument('--toolchain', required=True, type=Path); a.add_argument('--output', required=True, type=Path); x = a.parse_args(); print(json.dumps(prepare(x.arch, x.component_root, x.manifest, x.converter, x.toolchain, x.output), indent=2))
+    a = argparse.ArgumentParser(description=__doc__); a.add_argument('--arch', required=True, choices=('amd64', 'arm64')); a.add_argument('--component-root', required=True, type=Path); a.add_argument('--manifest', required=True, type=Path); a.add_argument('--converter', required=True, type=Path); a.add_argument('--toolchain', required=True, type=Path); a.add_argument('--output', required=True, type=Path); x = a.parse_args(); print(json.dumps(prepare(x.arch, x.component_root, x.manifest, x.converter, x.toolchain, x.output), indent=2))
 if __name__ == '__main__': main()

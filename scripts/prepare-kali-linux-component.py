@@ -3,6 +3,8 @@
 
 The isolated compiler, independently sourced runtime tree and behavior validation
 are separate inputs. This recipe never updates the finite runtime slots or registry.
+The v2 outer descriptor preserves the actual compiler execution-source binding;
+old unbound compiler results require a new build, never receipt relabelling.
 """
 import argparse
 import importlib.util
@@ -63,6 +65,11 @@ def compiler_input(work, role, arch, baseline):
             == (role, arch, baseline, flags), 'Native Kali compiler receipt differs.')
     require(source['files'] == P.rows(ROOT, roots=C.SOURCE_ROOTS, skip=P.SKIP),
             'The compiler source differs from the current frozen input.')
+    execution_source = P.execution_source(work / 'source', role, compiled_files=source['files'])
+    require(source.get('executionSource') == execution_source
+            and result.get('executionSource') == execution_source
+            and execution_source == P.execution_source(ROOT, role),
+            'Actual compiler execution source binding is missing or differs; rebuild before admission.')
     artifact = Path(result['artifact']['path'])
     require(artifact == C.compiled_artifact(str(artifact.parent), work, C.ROLES[role][1], arch)
             and artifact.stat().st_size == result['artifact']['size']
@@ -216,9 +223,10 @@ def prepare(args):
         source_sha = P.sha(B.canonical({'files': source['files'], 'baseline': baseline,
                                         'toolchain': toolchain, 'flags': flags, 'closure': closure}))
     rows = P.rows(output, maximum=CAP)
-    manifest = {'profile': 'tractanda.linux-component-artifacts.v1', 'component': role, 'arch': arch,
+    manifest = {'profile': 'tractanda.linux-component-artifacts.v2', 'component': role, 'arch': arch,
                 'baseline': {'buildOS': BASELINE, 'minimumCPU': B.ARCH[arch][2], 'swiftABI': '6.4'},
                 'modelRevision': P.MODELS[role], 'runtimeRevision': P.RUNTIME, 'sourceInputsSHA256': source_sha,
+                'executionSource': compiler['executionSource'],
                 'recipe': {'path': 'scripts/prepare-kali-linux-component.py', 'sha256': B.digest(Path(__file__))},
                 'patches': [{'path': rel, 'sha256': B.digest(ROOT / rel)} for rel in PATCHES],
                 'toolchain': toolchain, 'files': rows, 'dynamicLoads': dynamic,
