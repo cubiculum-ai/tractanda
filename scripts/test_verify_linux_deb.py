@@ -334,6 +334,40 @@ class ValidationTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'Malformed or duplicate'):
                 V.status_fields(value)
 
+    def test_policy_denial_accepts_only_observed_safe_refusal_or_safe_success(self):
+        diagnostic = V.UUIDD_POLICY_REFUSAL
+        self.assertEqual(V.classify_policy_reinstall(1, 'dpkg output\n' + diagnostic + '\n',
+                                                    'install ok half-configured', True),
+                         'safe-refusal-retry-required')
+        self.assertEqual(V.classify_policy_reinstall(0, '', 'install ok installed', False),
+                         'already-compliant-success')
+        for code, output, status, continuous in (
+            (1, 'other failure', 'install ok half-configured', True),
+            (1, diagnostic, 'install ok half-configured', False),
+            (1, diagnostic, 'install ok installed', True),
+            (2, diagnostic, 'install ok half-configured', True),
+            (0, '', 'install ok installed', True),
+            (0, '', 'install ok half-configured', False),
+        ):
+            with self.subTest(code=code, status=status, continuous=continuous), self.assertRaises(ValueError):
+                V.classify_policy_reinstall(code, output, status, continuous)
+
+    def test_uuidd_observation_requires_stable_identity_and_exact_continuous_flag(self):
+        check = V.Validation({'runID': '012345abcdef'}, self.root)
+        for command_line, expected in ((b'/usr/sbin/uuidd\0--socket-activation\0--cont-clock\0', True),
+                                       (b'/usr/sbin/uuidd\0--socket-activation\0', False)):
+            with self.subTest(expected=expected), patch.object(check, 'save'), patch.object(check, 'command', side_effect=['42', '42']), \
+                 patch.object(V.os, 'readlink', return_value='/usr/sbin/uuidd'), \
+                 patch.object(Path, 'open', return_value=io.BytesIO(command_line)):
+                self.assertEqual(check.observe_uuidd('test')['continuous'], expected)
+        with patch.object(check, 'save'), patch.object(check, 'command', side_effect=['42', '43']), \
+             patch.object(V.os, 'readlink', return_value='/usr/sbin/uuidd'), \
+             patch.object(Path, 'open', return_value=io.BytesIO(b'/usr/sbin/uuidd\0--cont-clock\0')):
+            with self.assertRaisesRegex(ValueError, 'changed'):
+                check.observe_uuidd('changed')
+        with patch.object(check, 'command', return_value='0'):
+            self.assertEqual(check.observe_uuidd('inactive')['state'], 'inactive')
+
     def test_missing_boot_state_is_not_proof_of_disabled_loaded_service(self):
         c = V.Validation({'runID': '012345abcdef'}, self.root)
         with patch.object(c, 'command', return_value='LoadState=loaded\nActiveState=inactive\nMainPID=0\n'):

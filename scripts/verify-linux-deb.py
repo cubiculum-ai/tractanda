@@ -293,6 +293,20 @@ def status_fields(text):
     return fields
 
 
+UUIDD_POLICY_REFUSAL = 'tractanda package fallback: uuidd still runs continuous-clock mode; restart may be policy-blocked'
+
+
+def classify_policy_reinstall(exit_code, output, dpkg_status, continuous):
+    if exit_code == 0:
+        require(dpkg_status == 'install ok installed' and not continuous,
+                'Successful policy-denied install lacks installed state or has continuous-clock uuidd')
+        return 'already-compliant-success'
+    require(exit_code == 1 and output.splitlines().count(UUIDD_POLICY_REFUSAL) == 1
+            and dpkg_status == 'install ok half-configured' and continuous,
+            'Policy-denied install failed without independently confirmed uuidd safety refusal')
+    return 'safe-refusal-retry-required'
+
+
 class Validation:
     def __init__(self, context, work, timeout_seconds=DEFAULT_TIMEOUT_SECONDS,
                  command_timeout_seconds=DEFAULT_TIMEOUT_SECONDS):
@@ -383,6 +397,31 @@ class Validation:
                 require(fields.get('UnitFileState') == 'disabled' if fields['LoadState'] == 'loaded'
                         else fields.get('UnitFileState', '') in ('', 'not-found'),
                         'Pending/failed package could start at boot')
+
+    def observe_uuidd(self, label):
+        command = ['/usr/bin/systemctl', 'show', 'uuidd.service', '--property=MainPID', '--value']
+        pid = self.command(command).strip()
+        require(pid.isdecimal(), 'uuidd PID is malformed')
+        if int(pid) == 0:
+            observation = {'state': 'inactive', 'pid': 0, 'continuous': False, 'argv': []}
+            self.result.setdefault('uuiddObservations', {})[label] = observation
+            self.save()
+            return observation
+        proc = Path('/proc') / pid
+        require(os.readlink(proc / 'exe') == '/usr/sbin/uuidd', 'uuidd process identity differs')
+        with (proc / 'cmdline').open('rb') as stream:
+            raw = stream.read(8193)
+        require(len(raw) <= 8192 and raw.endswith(b'\0'), 'uuidd command line is malformed')
+        args = [value.decode('ascii') for value in raw.split(b'\0') if value]
+        require(args and args[0] == '/usr/sbin/uuidd', 'uuidd command line identity differs')
+        require(self.command(command).strip() == pid, 'uuidd process changed during observation')
+        require(not any((value.startswith('--cont') and not re.fullmatch(r'--cont-clock(?:=[0-9]+[hd]?)?', value))
+                        or value.startswith('-C') for value in args[1:]), 'Ambiguous uuidd continuous-clock option')
+        observation = {'state': 'running', 'pid': int(pid), 'argv': args,
+                       'continuous': any(re.fullmatch(r'--cont-clock(?:=[0-9]+[hd]?)?', value) for value in args[1:])}
+        self.result.setdefault('uuiddObservations', {})[label] = observation
+        self.save()
+        return observation
 
     def ready(self, package, previous=None):
         state = status_fields(self.command([SETUP, 'status', '--name', self.name]))
@@ -511,6 +550,7 @@ def execute(args):
                     '--no-legend', '--no-pager', 'tractanda-*.service']).strip(), 'Existing Tractanda service in fresh guest')
         check.command(['/usr/bin/dpkg', '--install', current['path']], timeout=check.command_timeout_seconds)
         check.installed(current); check.stopped()
+        require(not check.observe_uuidd('initial-install')['continuous'], 'Initial install left continuous-clock uuidd running')
         require(inventory([check.store, check.private]) == before, 'Package implicitly bootstrapped/joined a store')
         require(not check.store.parent.exists() or {p.name for p in check.store.parent.iterdir()} <=
                 ({check.name} if context['selection'] == 'prepared' else set()), 'Package created an unrelated store')
@@ -631,12 +671,28 @@ def execute(args):
                 check.command(['/usr/bin/dpkg', '--install', current['path']], timeout=check.command_timeout_seconds)
                 identity = check.ready(current, identity)
         else: check.result['cases']['older-package-attempt'] = 'NOT EXERCISED: distinct incompatible older package not supplied'
+        require(not check.observe_uuidd('before-remove')['continuous'], 'Installed uuidd entered continuous-clock mode')
         check.command(['/usr/bin/dpkg', '--remove', 'tractanda'], timeout=check.command_timeout_seconds)
         check.stopped(); retained(baseline, check.snapshot())
+        check.observe_uuidd('after-remove')
         require(not Path(CLI).exists(), 'Removed payload still present')
         with denied_policy(context['runID']):
-            check.command(['/usr/bin/dpkg', '--install', current['path']], timeout=check.command_timeout_seconds)
-            check.installed(current); check.stopped()
+            output = check.command(['/usr/bin/dpkg', '--install', current['path']], codes=(0, 1),
+                                   timeout=check.command_timeout_seconds)
+            install_exit = check.result['commands'][-1]['exit']
+            dpkg_status = check.command(['/usr/bin/dpkg-query', '-W', '-f=${Status}', 'tractanda']).strip()
+            denied_uuidd = check.observe_uuidd('during-policy-denial')
+            branch = classify_policy_reinstall(install_exit, output, dpkg_status, denied_uuidd['continuous'])
+            check.stopped(disabled=True)
+            retained(baseline, check.snapshot())
+            if branch == 'already-compliant-success':
+                check.installed(current)
+        if branch == 'safe-refusal-retry-required':
+            check.command(['/usr/bin/dpkg', '--configure', 'tractanda'], timeout=check.command_timeout_seconds)
+            check.installed(current)
+            require(not check.observe_uuidd('after-normal-retry')['continuous'],
+                    'Normal retry left continuous-clock uuidd running')
+        check.result['cases']['policy-denied-reinstall'] = branch
         retained(baseline, check.snapshot())
         check.command([SETUP, 'start', '--name', check.name], timeout=check.command_timeout_seconds)
         check.ready(current)
