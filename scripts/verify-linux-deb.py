@@ -2,7 +2,7 @@
 """Finite full-package lifecycle checks inside a controller-owned disposable guest.
 
 Default is plan-only. The controller owns native CPU/backing-host capacity proof,
-guest limits/deadline and eventual guest destruction after preserving this evidence.
+guest limits, optional deadline and eventual guest destruction after preserving this evidence.
 This script never creates an account, guest, package, model or canonical migration.
 """
 import argparse
@@ -400,6 +400,18 @@ def fixture_port_sockets(text, port):
     return rows
 
 
+def require_committed_abort_fixture(state, receipt_names, fixture_name):
+    require(isinstance(state, dict) and state.get('phase') == 'committed'
+            and state.get('owner') is None and state.get('startupPermitted') == []
+            and state.get('instances') == [] and receipt_names == {fixture_name + '.json'},
+            'Committed abort proof requires a later initialized fixture receipt')
+
+
+def require_committed_abort_unchanged(before_managed, after_managed, before_units, after_units):
+    require(before_managed == after_managed, 'Committed abort changed managed bytes or custody')
+    require(before_units == after_units, 'Committed abort changed service state or PID')
+
+
 def upgrade_port_blocker(port):
     """Bind an exclusive listener despite TIME_WAIT from the stopped fixture server."""
     blocker = socket.socket()
@@ -415,13 +427,14 @@ def upgrade_port_blocker(port):
 
 class Validation:
     def __init__(self, context, work, timeout_seconds=DEFAULT_TIMEOUT_SECONDS,
-                 command_timeout_seconds=DEFAULT_TIMEOUT_SECONDS):
+                 command_timeout_seconds=DEFAULT_TIMEOUT_SECONDS, no_execution_deadline=False):
         self.context, self.work = context, work
         require(1 <= timeout_seconds <= MAX_TIMEOUT_SECONDS, 'Whole validation timeout is invalid')
         require(1 <= command_timeout_seconds <= MAX_TIMEOUT_SECONDS, 'Per-command timeout is invalid')
-        self.timeout_seconds = timeout_seconds
-        self.command_timeout_seconds = min(command_timeout_seconds, timeout_seconds)
-        self.deadline = time.monotonic() + timeout_seconds
+        self.no_execution_deadline = no_execution_deadline
+        self.timeout_seconds = None if no_execution_deadline else timeout_seconds
+        self.command_timeout_seconds = None if no_execution_deadline else min(command_timeout_seconds, timeout_seconds)
+        self.deadline = None if no_execution_deadline else time.monotonic() + timeout_seconds
         self.name = 'd5-' + context['runID']
         self.fixture_item_id = None
         self.store = Path('/opt/tractanda/var/lib/tractanda/Stores') / self.name
@@ -430,7 +443,7 @@ class Validation:
         self.units = ['tractanda-' + role + '-' + self.name + '.service'
                       for role in ('server', 'embeddings', 'authentication')]
         self.result = {'schema': 'tractanda.package-validation-result.v1', 'status': 'RUNNING', 'commands': [], 'cases': {},
-                       'timeoutBudgets': {'operationSeconds': timeout_seconds,
+                       'timeoutBudgets': {'operationSeconds': self.timeout_seconds,
                                           'longCommandMaxSeconds': self.command_timeout_seconds}}
 
     def save(self):
@@ -439,7 +452,7 @@ class Validation:
         temporary.replace(self.work / 'RESULT.json')
 
     def guard(self):
-        require(time.monotonic() < self.deadline, 'Whole validation deadline exceeded')
+        require(self.deadline is None or time.monotonic() < self.deadline, 'Whole validation deadline exceeded')
         for path in (Path('/opt'), Path('/etc'), Path('/var/lib'), Path('/var/cache'), self.work):
             fs = os.statvfs(path)
             require(fs.f_frsize > 0 and fs.f_bavail * fs.f_frsize >= RESERVE, 'Actual guest filesystem reserve rejected')
@@ -452,9 +465,9 @@ class Validation:
 
     def command(self, argv, failure=False, timeout=300, codes=None, server_probe=False):
         self.guard()
-        remaining = self.deadline - time.monotonic()
-        effective_timeout = min(timeout, remaining)
-        require(effective_timeout > 0, 'Whole validation deadline leaves no command budget')
+        remaining = None if self.deadline is None else self.deadline - time.monotonic()
+        effective_timeout = None if remaining is None else min(timeout, remaining)
+        require(effective_timeout is None or effective_timeout > 0, 'Whole validation deadline leaves no command budget')
         row = {'argv': list(map(str, argv)), 'log': str(self.work / ('command-%03d.log' % len(self.result['commands']))),
                'timeoutSeconds': effective_timeout}
         self.result['commands'].append(row); self.save()
@@ -481,11 +494,12 @@ class Validation:
                 row['pid'] = process.pid; self.save()
                 while process.poll() is None:
                     self.guard()
-                    require(time.monotonic() - started < effective_timeout and Path(row['log']).stat().st_size <= 4 * 1024**2,
+                    require((effective_timeout is None or time.monotonic() - started < effective_timeout)
+                            and Path(row['log']).stat().st_size <= 4 * 1024**2,
                             'Command deadline/log cap exceeded')
                     time.sleep(.1)
                 row['exit'] = process.wait(); self.guard()
-                require(time.monotonic() - started <= effective_timeout, 'Command deadline exceeded')
+                require(effective_timeout is None or time.monotonic() - started <= effective_timeout, 'Command deadline exceeded')
                 require(Path(row['log']).stat().st_size <= 4 * 1024**2, 'Final log cap exceeded')
                 text = Path(row['log']).read_text(errors='replace')
                 expected = row['exit'] in codes if codes is not None else (row['exit'] != 0 if failure else row['exit'] == 0)
@@ -639,6 +653,55 @@ class Validation:
             'qualification': 'Absent configuration/credential files were not exercised; no secret bytes are published.'}
         return value
 
+    def prove_committed_abort_hook(self, current, incoming, baseline):
+        control = self.work / 'incoming-control-for-abort-proof'
+        require(not control.exists() and not control.is_symlink(), 'Abort hook extraction target exists')
+        self.command(['/usr/bin/dpkg-deb', '--control', incoming['path'], control],
+                     timeout=self.command_timeout_seconds)
+        hook = control / 'postrm'
+        rows = [row for row in incoming['receipt']['inventory'] if row.get('path') == 'DEBIAN/postrm']
+        require(len(rows) == 1, 'Candidate package has no unique bound postrm')
+        info = hook.lstat()
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_nlink == 1
+                and stat.S_IMODE(info.st_mode) == rows[0]['mode'] and info.st_size == rows[0]['size']
+                and digest(hook) == rows[0]['sha256'], 'Extracted candidate postrm differs from package inventory')
+        installation = Path('/opt/tractanda/var/lib/tractanda/Installation')
+        managed_paths = [installation, PAYLOAD / 'bundle-manifest.json', PAYLOAD / 'bin/tractanda-setup']
+        managed_paths += [Path('/etc/systemd/system') / unit for unit in self.units]
+        def units():
+            result = {}
+            for unit in self.units:
+                output = self.command(['/usr/bin/systemctl', 'show', unit,
+                    '--property=LoadState,ActiveState,MainPID,UnitFileState'], codes=(0, 1, 4))
+                result[unit] = status_fields(output)
+            return result
+        self.stopped()
+        journal = read_json(installation / 'package-transaction.json', 1024 * 1024)
+        receipts = installation / 'receipts'
+        require(receipts.is_dir() and not receipts.is_symlink(), 'Committed receipt directory is absent or unsafe')
+        receipt_names = {path.name for path in receipts.iterdir()}
+        require_committed_abort_fixture(journal, receipt_names, self.name)
+        before_managed = inventory(managed_paths)
+        before_units = units()
+        require(all(value.get('MainPID') == '0' for value in before_units.values()),
+                'Committed abort proof requires stopped instance PIDs')
+        self.command([hook, 'abort-upgrade', current['receipt']['version'], incoming['receipt']['version']],
+                     timeout=self.command_timeout_seconds)
+        require(digest(hook) == rows[0]['sha256'], 'Candidate postrm changed during proof')
+        after_managed = inventory(managed_paths)
+        after_units = units()
+        require_committed_abort_unchanged(before_managed, after_managed, before_units, after_units)
+        retained(baseline, self.snapshot())
+        self.stopped()
+        encoded = json.dumps(before_managed, sort_keys=True, separators=(',', ':')).encode()
+        self.result['cases']['committed-abort-hook-no-mutation'] = {
+            'status': 'PASS', 'candidatePackageSHA256': incoming['receipt']['packageSHA256'],
+            'renderedHookSHA256': rows[0]['sha256'],
+            'managedBeforeAfterSHA256': hashlib.sha256(encoded).hexdigest(),
+            'journalPhase': journal['phase'], 'journalInstanceCount': len(journal['instances']),
+            'currentReceiptCount': len(receipt_names), 'unitsBeforeAfter': before_units}
+        self.save()
+
     def attempt_older_refusal(self, older):
         # Dpkg echoes paths and arbitrary hook text. A nonzero result is not a
         # structured compatibility diagnostic; the parent must review this log.
@@ -704,7 +767,8 @@ def execute(args):
         require(not model_storage.exists() and not model_storage.is_symlink(), 'Slim test requires fresh model storage')
     pwd.getpwnam('daemon'); pwd.getpwnam(context['owner'])  # Never provision an account.
     work = Path('/var/tmp/tractanda-package-validation-' + context['runID']); work.mkdir(mode=0o700)
-    check = Validation(context, work, args.timeout_seconds, args.command_timeout_seconds); current = packages[0]
+    check = Validation(context, work, args.timeout_seconds, args.command_timeout_seconds,
+                       no_execution_deadline=args.no_execution_deadline); current = packages[0]
     check.result['artifacts'] = [{'role': p['role'], 'packageSHA256': p['receipt']['packageSHA256'],
                                   'buildOS': p['buildOS'], 'payloadMode': p['payloadMode']} for p in packages]
     try:
@@ -795,6 +859,10 @@ def execute(args):
         check.stopped()
         baseline = check.snapshot()
         check.result['retainedFixture'] = baseline
+        if context.get('fixtureSeed', 'sample') == 'historical-api':
+            incoming = next(p for p in packages if p['role'] == 'upgrade')
+            distinct_binary(current, incoming)
+            check.prove_committed_abort_hook(current, incoming, baseline)
         if payload_mode == 'slim':
             observation = check.observe_embedding_port('before-baseline-restart')
             require(not any(row['state'] == '0A' for row in observation['kernelSockets']),
@@ -880,7 +948,7 @@ def execute(args):
         failures = []
         for unit in check.units:
             try:
-                subprocess.run(['/usr/bin/systemctl', 'stop', unit], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+                subprocess.run(['/usr/bin/systemctl', 'stop', unit], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=None if check.no_execution_deadline else 20)
             except Exception as error:
                 failures.append(unit + ': ' + str(error))
         try: check.stopped()
@@ -903,6 +971,8 @@ def main():
     parser.add_argument('--older-refusal', type=Path)
     parser.add_argument('--older-manifest', type=Path)
     parser.add_argument('--execute', action='store_true')
+    parser.add_argument('--no-execution-deadline', action='store_true',
+                        help='Disable elapsed-time limits for this owned local run; capacity and log guards remain.')
     parser.add_argument('--timeout-seconds', type=positive_timeout_seconds,
                         default=DEFAULT_TIMEOUT_SECONDS, help='Whole package validation budget (default: 24 hours).')
     parser.add_argument('--command-timeout-seconds', type=positive_timeout_seconds,
@@ -911,8 +981,8 @@ def main():
     if not args.execute:
         print(json.dumps({'status': 'PLAN_ONLY_NO_MUTATION', 'phases': COMMANDS,
                           'context': str(CONTEXT), 'fixtureCapBytes': FIXTURE_CAP, 'reserveBytes': RESERVE,
-                          'timeoutSeconds': args.timeout_seconds,
-                          'commandTimeoutSeconds': min(args.command_timeout_seconds, args.timeout_seconds)}, indent=2)); return
+                          'timeoutSeconds': None if args.no_execution_deadline else args.timeout_seconds,
+                          'commandTimeoutSeconds': None if args.no_execution_deadline else min(args.command_timeout_seconds, args.timeout_seconds)}, indent=2)); return
     def interrupted(signum, frame):
         for item in (signal.SIGTERM, signal.SIGHUP): signal.signal(item, signal.SIG_IGN)
         raise InterruptedError('Validation interrupted; owned child/service cleanup follows')

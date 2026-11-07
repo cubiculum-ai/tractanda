@@ -40,6 +40,38 @@ class ValidationTests(unittest.TestCase):
                     contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 V.main()
 
+    def test_explicit_no_deadline_keeps_log_bound_and_disables_elapsed_limits(self):
+        check = V.Validation({'runID': '012345abcdef'}, self.root, 1, 1, no_execution_deadline=True)
+        self.assertIsNone(check.deadline)
+        self.assertIsNone(check.command_timeout_seconds)
+        class Process:
+            pid = 999998
+            def __init__(self, _argv, **kwargs):
+                kwargs['stdout'].write(b'completed\n'); kwargs['stdout'].flush()
+            def poll(self): return 0
+            def wait(self): return 0
+        with patch.object(check, 'guard'), patch.object(V.time, 'monotonic', side_effect=[1.0, 10**12]), \
+             patch.object(V.subprocess, 'Popen', Process), patch.object(V.os, 'killpg'):
+            self.assertEqual(check.command(['/fixed/mock'], timeout=None), 'completed\n')
+        self.assertIsNone(check.result['commands'][0]['timeoutSeconds'])
+        with patch.object(V.sys, 'argv', ['verify-linux-deb.py', '--package', 'fixture.deb', '--no-execution-deadline']), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            V.main()
+        self.assertIsNone(json.loads(output.getvalue())['timeoutSeconds'])
+        self.assertIsNone(json.loads(output.getvalue())['commandTimeoutSeconds'])
+
+    def test_no_deadline_still_rejects_oversized_command_log(self):
+        check = V.Validation({'runID': '012345abcdef'}, self.root, no_execution_deadline=True)
+        class Process:
+            pid = 999998
+            def __init__(self, _argv, **kwargs):
+                kwargs['stdout'].write(b'x' * (4 * 1024**2 + 1)); kwargs['stdout'].flush()
+            def poll(self): return 0
+            def wait(self): return 0
+        with patch.object(check, 'guard'), patch.object(V.subprocess, 'Popen', Process), patch.object(V.os, 'killpg'):
+            with self.assertRaisesRegex(ValueError, 'log cap'):
+                check.command(['/fixed/mock'], timeout=None)
+
     def test_command_budget_is_capped_by_whole_validation_budget(self):
         check = V.Validation({'runID': '012345abcdef'}, self.root, 1800, 7200)
         self.assertEqual(check.timeout_seconds, 1800)
@@ -493,6 +525,27 @@ class ValidationTests(unittest.TestCase):
                 check.wait_embedding_ready()
         self.assertEqual(check.result['embeddingReadinessFailure']['serviceState']['ActiveState'], 'failed')
         self.assertIn('diagnostic unavailable', check.result['embeddingReadinessFailure']['diagnosticError'])
+
+    def test_committed_abort_fixture_requires_later_initialized_receipt(self):
+        state = {'phase': 'committed', 'owner': None, 'startupPermitted': [], 'instances': []}
+        V.require_committed_abort_fixture(state, {'d5-fixture.json'}, 'd5-fixture')
+        for changed, receipts in ((dict(state, phase='quiesced'), {'d5-fixture.json'}),
+                                  (dict(state, owner='active'), {'d5-fixture.json'}),
+                                  (dict(state, startupPermitted=['d5-fixture']), {'d5-fixture.json'}),
+                                  (dict(state, instances=['d5-fixture']), {'d5-fixture.json'}),
+                                  (state, set())):
+            with self.subTest(state=changed, receipts=receipts), self.assertRaises(ValueError):
+                V.require_committed_abort_fixture(changed, receipts, 'd5-fixture')
+
+    def test_committed_abort_proof_rejects_managed_or_unit_changes(self):
+        managed = {'receipt': {'kind': 'file', 'sha256': 'a' * 64}}
+        units = {'fixture.service': {'ActiveState': 'inactive', 'MainPID': '0'}}
+        V.require_committed_abort_unchanged(managed, managed, units, units)
+        with self.assertRaisesRegex(ValueError, 'managed bytes'):
+            V.require_committed_abort_unchanged(managed, {'receipt': {'kind': 'absent'}}, units, units)
+        with self.assertRaisesRegex(ValueError, 'service state or PID'):
+            V.require_committed_abort_unchanged(managed, managed, units,
+                {'fixture.service': {'ActiveState': 'active', 'MainPID': '7'}})
 
     def test_missing_boot_state_is_not_proof_of_disabled_loaded_service(self):
         c = V.Validation({'runID': '012345abcdef'}, self.root)
