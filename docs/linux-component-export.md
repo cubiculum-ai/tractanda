@@ -9,3 +9,17 @@ The wrapper's `recipe` commits this projection recipe. `sourceInputsSHA256` and 
 The finite current identities correspond to the verified AMD64/ARM64 descriptor bytes. Historical readability follows supported stored schemas and parser/preprocessing semantics rather than a finite build-fingerprint list; it never selects a historical runtime for execution. Setup accepts only the current finite identity for the declared platform/architecture and the exact native closure inventory entry; converter/Core checks still verify private file bytes at runtime. OS provider hashes remain build/test evidence, not deployed OS security-update pins.
 
 Kali rolling has separate registry entries for amd64 and arm64. Before admitting either architecture, build and qualify its native components, record the actual Swift and system provider provenance, and bind the verified Docling closure to the corresponding runtime identity. Review the normalized manifests before recording their digests in the Kali registry. The producer stops before compilation when either required Kali component is missing. Package assembly and isolated lifecycle verification follow component admission. [Linux payload producer](linux-payload-producer.md) · [Docling compiler-input provenance](linux-docling-provenance.md)
+
+For a first Kali admission, use the compile-only recipe with `--build-os kali-rolling`. Keep the native compiler receipt and its source-input receipt in the original scratch directory. Prepare a separate support root with the intended final `bin/`, `lib/`, and `licenses/` paths. Its files include the actual SwiftPM resource bundles, private toolchain/runtime libraries, and matched notices. The compiler executable, native descriptor, and generated provenance are supplied by the staging recipe. Keep model weights separate. For documents, include the two independently verified raster supplier DSOs under `lib/tractanda/document-native/`. Preserve their original supplier descriptor and build provenance, and the historical component manifest that commits their exact bytes.
+
+```sh
+python3 -B scripts/prepare-kali-linux-component.py \
+  --component documents --arch arm64 --swift /approved/swift/usr/bin/swift \
+  --compile-work /work/owned-compiler --runtime-root /inputs/qualified-support \
+  --supplier-manifest /inputs/original-component.json \
+  --supplier-descriptor /inputs/original-descriptor.json \
+  --supplier-provenance /inputs/original-provenance.json \
+  --output /work/unadmitted-component --report /work/first-component-review
+```
+
+For embeddings, omit the supplier arguments. The staging recipe checks the complete component against actual native loader/provider facts, then emits a review manifest and a result with no runtime admission. For documents, review the proposed descriptor, bind its digest in both finite generated slots for the same baseline and architecture, rebuild, and run the same staging recipe in fresh output directories with `--expected-descriptor SHA256`. The second pass checks exact descriptor reproduction and verifies that the new executable includes the selected commitment. Run real model behavior and minimum-CPU checks before recording either registry digest.

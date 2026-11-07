@@ -10,6 +10,7 @@ def load(name,path):
 N=load('normalization',ROOT/'scripts/linux-docling-provenance.py')
 P=load('producer',ROOT/'scripts/produce-linux-payload.py')
 G=load('generator',ROOT/'scripts/generate-linux-docling-binding.py')
+K=load('kali_review',ROOT/'scripts/prepare-kali-linux-component.py')
 
 class TemplateNormalizationTests(unittest.TestCase):
     def test_only_architecture_digests_are_normalized(self):
@@ -77,5 +78,39 @@ class ConverterClosureTests(unittest.TestCase):
             with self.assertRaises(AssertionError):G.check_converter_elf('amd64',facts,recorded,descriptor)
         with patch.object(G.B,'system_library',return_value=(Path('/provider'),provider)), patch.object(G,'digest',return_value='0'*64):
             with self.assertRaises(AssertionError):G.check_converter_elf('amd64',facts,recorded,descriptor)
+
+class KaliFirstAdmissionTests(unittest.TestCase):
+    def test_provider_versions_only_come_from_definitions(self):
+        text = (
+            "Version symbols section '.gnu.version' contains 2 entries:\n"
+            "  000: Name: REQUIRED-ONLY\n"
+            "Version definition section '.gnu.version_d' contains 2 entries:\n"
+            "  0x0000: Rev: 1 Flags: BASE Index: 1 Cnt: 1 Name: libfixture.so\n"
+            "  0x0020: Rev: 1 Flags: none Index: 2 Cnt: 1 Name: REQUIRED\n"
+            "Version needs section '.gnu.version_r' contains 1 entry:\n"
+            "  0x0010: Name: UNAVAILABLE Flags: none Version: 3\n"
+        )
+        with patch.object(K.B, 'run', return_value=text):
+            self.assertEqual(K.provided_versions(Path('/fixture')), {'libfixture.so', 'REQUIRED'})
+
+    def test_original_vendor_commitment_cannot_admit_changed_raster_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            provenance = root / 'provenance.json'
+            descriptor = root / 'descriptor.json'
+            manifest = root / 'component.json'
+            K.P.write_json(provenance, {'nativeSourceCommitmentsSHA256': 'a'*64, 'nativeRecipeSHA256': 'b'*64})
+            K.P.write_json(descriptor, {'architecture': 'arm64', 'buildProvenanceSHA256': K.B.digest(provenance)})
+            rows = [{'path': name, 'sha256': 'c'*64, 'size': 1, 'mode': 0o755} for name in sorted(K.SUPPLIERS)]
+            files = rows + [{'path': name, 'sha256': K.B.digest(file), 'size': file.stat().st_size, 'mode': 0o644}
+                            for name, file in ((K.DESCRIPTOR, descriptor), (K.PROVENANCE, provenance))]
+            content = {'files': files, 'baseline': {'buildOS': 'debian13'}, 'documentExtraction': {}}
+            K.P.write_json(manifest, content)
+            with patch.object(K.P, 'require_admitted', return_value={'documents': K.P.sha(K.B.canonical(content))}):
+                _, _, vendor = K.vendor_facts('arm64', manifest, descriptor, provenance, rows)
+                self.assertEqual(vendor['supplierFiles'], rows)
+                with self.assertRaisesRegex(ValueError, 'Raster supplier bytes differ'):
+                    K.vendor_facts('arm64', manifest, descriptor, provenance, [dict(rows[0], sha256='d'*64), rows[1]])
+
 
 if __name__=='__main__':unittest.main(verbosity=2)

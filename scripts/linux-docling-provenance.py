@@ -33,6 +33,7 @@ SOURCE_ROOTS=(
     'scripts/linux-docling-provenance.py',
     'scripts/generate-linux-docling-binding.py',
     'scripts/assemble-linux-docling-component.py',
+    'scripts/prepare-kali-linux-component.py',
 )
 
 

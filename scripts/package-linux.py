@@ -329,7 +329,7 @@ def system_library(soname, arch):
     return path, dict(soname=soname, path=str(path), sha256=digest(path), package=fields[0].split(':')[0], version=fields[1])
 
 
-def runtime_closure(root, rows, arch, dynamic_loads, build_os):
+def runtime_closure(root, rows, arch, dynamic_loads, build_os, required_products=CORE):
     private = {}
     for row in rows:
         path = root / row['path']
@@ -337,7 +337,7 @@ def runtime_closure(root, rows, arch, dynamic_loads, build_os):
             magic = stream.read(4)
         if magic == b'\x7fELF':
             private[row['path']] = elf(path, arch, build_os)
-    if any('bin/' + name not in private for name in CORE):
+    if any('bin/' + name not in private for name in required_products):
         raise ValueError('Every required first-party/helper executable must be an actual matching ELF.')
     if not isinstance(dynamic_loads, list) or len(set(dynamic_loads)) != len(dynamic_loads) or any(v not in private for v in dynamic_loads):
         raise ValueError('Explicit dlopen roots must be unique bundled ELF files.')
