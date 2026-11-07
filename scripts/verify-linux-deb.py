@@ -176,7 +176,12 @@ def inventory(roots, hashes=True):
     """Record absence, bytes and directory custody, excluding inode/time/directory-size churn."""
     result, total = {}, 0
     roots = tuple(Path(root) for root in roots)
-    monitored_roots = set(roots)
+    def vanished_descendant(error, path):
+        if hashes or error.errno != errno.ENOENT or path is None:
+            return False
+        path = Path(path)
+        return (path.is_absolute() and '..' not in path.parts
+                and any(root.is_absolute() and path != root and path.is_relative_to(root) for root in roots))
     def record(path):
         nonlocal total
         key = str(path)
@@ -185,7 +190,7 @@ def inventory(roots, hashes=True):
         try:
             info = path.lstat()
         except FileNotFoundError as error:
-            if error.errno == errno.ENOENT and not hashes and path.name == '.tractanda-checkpoint-dirty' and path.parent in monitored_roots:
+            if vanished_descendant(error, path):
                 return
             raise
         custody = {'mode': stat.S_IMODE(info.st_mode), 'uid': info.st_uid, 'gid': info.st_gid}
@@ -207,7 +212,9 @@ def inventory(roots, hashes=True):
         record(root)
         if root.is_file():
             continue
-        def failed(error): raise error
+        def failed(error):
+            if not vanished_descendant(error, error.filename):
+                raise error
         for directory, dirs, names in os.walk(root, followlinks=False, onerror=failed):
             record(Path(directory))
             require(all(not (Path(directory) / n).is_symlink() for n in dirs), 'Fixture directory link')
@@ -412,6 +419,14 @@ def require_committed_abort_unchanged(before_managed, after_managed, before_unit
     require(before_units == after_units, 'Committed abort changed service state or PID')
 
 
+def observed_owned_bind_conflict(fields, journal):
+    restarts = fields.get('NRestarts', '')
+    return (fields.get('ActiveState') == 'activating' and fields.get('SubState') == 'auto-restart'
+            and fields.get('MainPID') == '0' and fields.get('Result') == 'exit-code'
+            and fields.get('ExecMainStatus') == '1' and restarts.isdecimal() and int(restarts) > 0
+            and any('bind(' in line and 'Address already in use' in line for line in journal.splitlines()))
+
+
 def upgrade_port_blocker(port):
     """Bind an exclusive listener despite TIME_WAIT from the stopped fixture server."""
     blocker = socket.socket()
@@ -463,7 +478,7 @@ class Validation:
             require(fs.f_frsize > 0 and fs.f_frsize * fs.f_bavail >= RESERVE, 'Model filesystem reserve rejected')
         inventory([self.store, self.index, self.private, self.work], hashes=False)
 
-    def command(self, argv, failure=False, timeout=300, codes=None, server_probe=False):
+    def command(self, argv, failure=False, timeout=300, codes=None, server_probe=False, progress=None):
         self.guard()
         remaining = None if self.deadline is None else self.deadline - time.monotonic()
         effective_timeout = None if remaining is None else min(timeout, remaining)
@@ -497,6 +512,8 @@ class Validation:
                     require((effective_timeout is None or time.monotonic() - started < effective_timeout)
                             and Path(row['log']).stat().st_size <= 4 * 1024**2,
                             'Command deadline/log cap exceeded')
+                    if progress is not None:
+                        progress(process)
                     time.sleep(.1)
                 row['exit'] = process.wait(); self.guard()
                 require(effective_timeout is None or time.monotonic() - started <= effective_timeout, 'Command deadline exceeded')
@@ -905,14 +922,45 @@ def execute(args):
             check.command(['/usr/bin/dpkg', '--compare-versions', current['receipt']['version'], 'lt', incoming['receipt']['version']])
             check.command(['/usr/bin/dpkg', '--unpack', incoming['path']], timeout=check.command_timeout_seconds)
             check.stopped(disabled=True)
-            with upgrade_port_blocker(context['port']):
-                check.command(['/usr/bin/dpkg', '--configure', 'tractanda'], failure=True,
-                              timeout=check.command_timeout_seconds)
-            check.stopped(disabled=True); check.installed(incoming, configured=False); retained(baseline, check.snapshot())
-            check.command(['/usr/bin/dpkg', '--configure', 'tractanda'], timeout=check.command_timeout_seconds)
+            conflict = {'observed': False, 'nextProbe': 0.0}
+            since = int(time.time())
+            configure_index = len(check.result['commands'])
+            with upgrade_port_blocker(context['port']) as blocker:
+                def observe_conflict(process):
+                    now = time.monotonic()
+                    if conflict['observed'] or now < conflict['nextProbe']:
+                        return
+                    conflict['nextProbe'] = now + 1
+                    unit = check.units[0]
+                    fields = status_fields(check.command(['/usr/bin/systemctl', 'show', unit,
+                        '--property=ActiveState,SubState,MainPID,Result,ExecMainStatus,NRestarts']))
+                    if fields.get('SubState') != 'auto-restart':
+                        return
+                    journal = check.command(['/usr/bin/journalctl', '-u', unit, '--since', '@' + str(since),
+                                             '-n', '30', '--no-pager', '-o', 'cat'])
+                    if observed_owned_bind_conflict(fields, journal):
+                        require(process.poll() is None and blocker.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN)
+                                and blocker.getsockname() == ('127.0.0.1', context['port']),
+                                'Conflict blocker or original configure process is no longer active')
+                        conflict.update(observed=True, configurePID=process.pid, unitState=fields)
+                        check.result['cases']['upgrade-bind-conflict'] = {
+                            'status': 'OBSERVED_BLOCKER_HELD_NO_PREMATURE_SUCCESS',
+                            'configurePID': process.pid, 'unitState': fields}
+                        check.save()
+                        blocker.close()
+                check.command(['/usr/bin/dpkg', '--configure', 'tractanda'],
+                              timeout=check.command_timeout_seconds, progress=observe_conflict)
+            configure_row = check.result['commands'][configure_index]
+            require(conflict['observed'] and configure_row.get('pid') == conflict.get('configurePID')
+                    and configure_row.get('exit') == 0,
+                    'Same configure process did not recover after the observed conflict')
             current = incoming
-            identity = check.ready(current, identity); check.result['cases']['real-upgrade-failure-retry'] = 'PASS'
-        else: check.result['cases']['real-upgrade-failure-retry'] = 'NOT EXERCISED: distinct complete upgrade package not supplied'
+            check.installed(current)
+            identity = check.ready(current, identity)
+            check.result['cases']['real-upgrade-wait-and-recovery'] = {
+                'status': 'PASS', 'configurePID': conflict['configurePID'],
+                'scope': 'Observed bind conflict while blocker held; same configure succeeded after release.'}
+        else: check.result['cases']['real-upgrade-wait-and-recovery'] = 'NOT EXERCISED: distinct complete upgrade package not supplied'
         if args.older_refusal:
             # The controller must supply a genuinely incompatible old artifact; no format marker is fabricated.
             older = next(p for p in packages if p['path'] == args.older_refusal.resolve()); distinct_binary(current, older)

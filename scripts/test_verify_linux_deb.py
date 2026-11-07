@@ -272,32 +272,41 @@ class ValidationTests(unittest.TestCase):
         (self.root / 'link').unlink()
         with patch.object(V, 'FIXTURE_CAP', 4), self.assertRaisesRegex(ValueError, 'cap'): V.inventory([self.root])
 
-    def test_only_transient_checkpoint_marker_may_vanish_during_soft_monitor(self):
-        marker = self.root / '.tractanda-checkpoint-dirty'
-        other = self.root / 'other'
-        for target, hashes, allowed in ((marker, False, True), (marker, True, False), (other, False, False)):
-            target.write_bytes(b'x')
-            def disappearing_walk(root, **kwargs):
-                target.unlink()
-                yield str(root), [], [target.name]
-            with self.subTest(target=target.name, hashes=hashes), patch.object(V.os, 'walk', disappearing_walk):
-                if allowed:
-                    self.assertNotIn(str(target), V.inventory([self.root], hashes=hashes))
-                else:
-                    with self.assertRaises(FileNotFoundError):
-                        V.inventory([self.root], hashes=hashes)
-
-    def test_nested_checkpoint_marker_disappearance_is_not_suppressed(self):
+    def test_soft_monitor_tolerates_vanished_descendants_but_hashed_snapshot_is_strict(self):
         nested = self.root / 'nested'
         nested.mkdir()
-        marker = nested / '.tractanda-checkpoint-dirty'
-        marker.write_bytes(b'x')
-        def disappearing_walk(root, **kwargs):
-            yield str(root), ['nested'], []
-            marker.unlink()
-            yield str(nested), [], [marker.name]
-        with patch.object(V.os, 'walk', disappearing_walk), self.assertRaises(FileNotFoundError):
-            V.inventory((root for root in [self.root]), hashes=False)
+        for name in ('.tractanda-checkpoint-dirty', 'personal-rebuild-846d8810-dc90-4a5a-9c22-ed436d5bda58.sqlite-journal', 'other'):
+            for hashes in (False, True):
+                target = nested / name
+                target.write_bytes(b'x')
+                def disappearing_walk(root, **kwargs):
+                    yield str(root), ['nested'], []
+                    target.unlink()
+                    yield str(nested), [], [target.name]
+                with self.subTest(name=name, hashes=hashes), patch.object(V.os, 'walk', disappearing_walk):
+                    if hashes:
+                        with self.assertRaises(FileNotFoundError): V.inventory([self.root], hashes=True)
+                    else:
+                        self.assertNotIn(str(target), V.inventory((x for x in [self.root]), hashes=False))
+
+    def test_soft_monitor_walk_error_only_allows_missing_owned_descendant(self):
+        def walk_error(error):
+            def walk(root, **kwargs):
+                kwargs['onerror'](error)
+                yield str(root), [], []
+            return walk
+        allowed = FileNotFoundError(2, 'gone', str(self.root / 'child'))
+        with patch.object(V.os, 'walk', walk_error(allowed)):
+            V.inventory([self.root], hashes=False)
+        errors = (FileNotFoundError(2, 'gone', str(self.root)),
+                  FileNotFoundError(2, 'gone', str(self.root.parent / 'outside')),
+                  FileNotFoundError(2, 'gone', str(self.root / '..' / 'outside')),
+                  FileNotFoundError(2, 'gone'), PermissionError(13, 'denied', str(self.root / 'child')))
+        for error in errors:
+            with self.subTest(error=error), patch.object(V.os, 'walk', walk_error(error)):
+                with self.assertRaises(OSError): V.inventory([self.root], hashes=False)
+        with patch.object(V.os, 'walk', walk_error(allowed)), self.assertRaises(FileNotFoundError):
+            V.inventory([self.root], hashes=True)
 
     def test_regular_managed_leaf_has_presence_and_deletion_witness(self):
         leaf = self.root / 'd5-012345abcdef.json'
@@ -463,6 +472,34 @@ class ValidationTests(unittest.TestCase):
                 check.observe_uuidd('changed')
         with patch.object(check, 'command', return_value='0'):
             self.assertEqual(check.observe_uuidd('inactive')['state'], 'inactive')
+
+    def test_observed_bind_conflict_requires_exact_owned_unit_failure(self):
+        fields = {'ActiveState': 'activating', 'SubState': 'auto-restart', 'MainPID': '0',
+                  'Result': 'exit-code', 'ExecMainStatus': '1', 'NRestarts': '1'}
+        log = 'server: bind(descriptor): Address already in use (errno: 98)'
+        self.assertTrue(V.observed_owned_bind_conflict(fields, log))
+        for change in ({'NRestarts': '0'}, {'MainPID': '8'}, {'SubState': 'running'},
+                       {'Result': 'success'}, {'ExecMainStatus': '2'}):
+            with self.subTest(change=change):
+                self.assertFalse(V.observed_owned_bind_conflict(dict(fields, **change), log))
+        self.assertFalse(V.observed_owned_bind_conflict(fields, 'unrelated failure'))
+
+    def test_command_progress_observes_same_live_process_without_deadline(self):
+        check = V.Validation({'runID': '012345abcdef'}, self.root, no_execution_deadline=True)
+        events = []
+        class Process:
+            pid = 999998
+            def __init__(self, _argv, **kwargs): self.polls = 0
+            def poll(self):
+                self.polls += 1
+                return None if self.polls == 1 else 0
+            def wait(self): return 0
+        with patch.object(check, 'guard'), patch.object(V.subprocess, 'Popen', Process), \
+             patch.object(V.os, 'killpg'), patch.object(V.time, 'sleep'):
+            check.command(['/fixed/mock'], timeout=None, progress=lambda process: events.append(process.pid))
+        self.assertEqual(events, [999998])
+        self.assertEqual(check.result['commands'][0]['pid'], 999998)
+        self.assertEqual(check.result['commands'][0]['exit'], 0)
 
     def test_upgrade_port_blocker_reuses_timewait_without_sharing_live_listener(self):
         with V.upgrade_port_blocker(0) as blocker:
