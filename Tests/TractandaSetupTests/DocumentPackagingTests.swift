@@ -101,6 +101,8 @@ final class DocumentPackagingTests: XCTestCase {
                 DocumentExtractionPayload.self,
                 from: JSONSerialization.data(withJSONObject: object))
             XCTAssertNoThrow(try payload.validatePlatform(platform: "linux", arch: arch))
+            XCTAssertThrowsError(
+                try payload.validatePlatform(platform: "linux", arch: arch, linuxBuildOS: .kaliRolling))
             // Well-formed stored provenance cannot select a different active runtime.
             var otherIdentity = identity
             otherIdentity["runtimeRevision"] = String(repeating: "a", count: 40)

@@ -314,7 +314,7 @@ def build(bundle, output, arch, maintainer, copyright_file, revision, upgrade, e
         raise ValueError('Package output must be new with an existing parent.')
     snapshot = B.capture_manifest(bundle)
     spec = verified_build_receipt(bundle, snapshot, arch)['input']
-    manifest = B.verify_bundle(bundle, arch, snapshot)  # No incomplete-package bypass.
+    manifest = B.verify_bundle(bundle, arch, snapshot, spec['buildOS'])  # No incomplete-package bypass.
     B.public_assets(bundle)
     embedding, document = B.full_components(bundle, spec, manifest['files'])
     if (embedding, document) != (manifest['embedding'], manifest['documentExtraction']):
@@ -332,7 +332,7 @@ def build(bundle, output, arch, maintainer, copyright_file, revision, upgrade, e
     artifact = stage.parent / 'package.deb'
     try:
         result = stage_package(bundle, stage, snapshot, arch, maintainer, copyright_bytes, revision, upgrade, epoch, maximum)
-        B.verify_bundle(stage / 'opt/tractanda/current', arch, snapshot)
+        B.verify_bundle(stage / 'opt/tractanda/current', arch, snapshot, spec['buildOS'])
         compression_tmp = stage.parent / 'tmp'
         compression_tmp.mkdir(mode=0o700)
         env['TMPDIR'] = str(compression_tmp)
@@ -368,7 +368,7 @@ def build(bundle, output, arch, maintainer, copyright_file, revision, upgrade, e
             expected = {row['path'][len(prefix):] if control else row['path']: row for row in result['inventory']
                         if row['path'].startswith(prefix) == control}
             verify_archive(artifact, expected, control)
-        B.verify_bundle(bundle, arch, snapshot)
+        B.verify_bundle(bundle, arch, snapshot, spec['buildOS'])
         result.update(package=str(output), packageSHA256=B.digest(artifact), packageBytes=artifact.stat().st_size,
                       bundleManifestSHA256=snapshot.sha256,
                       installed=False, signed=False, published=False)

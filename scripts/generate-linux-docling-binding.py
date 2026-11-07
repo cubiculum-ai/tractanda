@@ -2,7 +2,7 @@
 """Prepare a reviewed, finite Linux Docling descriptor; never admit or install it.
 
 The compiler inputs include both generated Swift files. Only their two
-self-referential digest literals are normalized; the packaging registry is an
+self-referential execution digest slots are normalized; the packaging registry is an
 output index and is excluded by exact path. All other source rows are bound.
 A new converter must match the reviewed dynamic closure, except for the
 independently audited direct zlib edge on the finite amd64 supplier bundle.
@@ -21,8 +21,8 @@ def load(name, path):
 C = load('component', ROOT / 'scripts/build-linux-ml-component.py'); P = C.P; B = C.B
 N = load('normalization', ROOT / 'scripts/linux-docling-provenance.py')
 TEMPLATES = {
-    N.CLIENT: '215503da6ad1906f1423ef6c172a6f3e4a8f092a5d39250a411a93861826c927',
-    N.CONVERTER: '7ecc1d125d9a1edb278436ec78ee611a074d803fc46bdc8e9e8919d97d98f5c2',
+    N.CLIENT: '21034618f181e500195630bef8d80134d69551596e01efa07b765b2a9bac3d8a',
+    N.CONVERTER: 'c18067abb9a5263e6ef99978468572fb9c2eb22a46cb53594d0b0948a5c1aacb',
 }
 def digest(path):
     with path.open('rb') as f: return hashlib.file_digest(f, 'sha256').hexdigest()
@@ -78,8 +78,8 @@ def prepare(arch, component_root, manifest, converter, toolchain, output):
         'profile': 'tractanda.linux-docling-normalized-build.v1', 'architecture': arch,
         'sourceSelectionProfile': N.SELECTION_PROFILE, 'sourceSelectionRoots': list(N.SOURCE_ROOTS),
         'sourceFiles': rows, 'generatedDigestNormalizations': {
-            N.CLIENT: 'Only amd64 and arm64 digest literals replaced by fixed 64-byte placeholders.',
-            N.CONVERTER: 'Only x86_64 and arm64 digest literals replaced by fixed 64-byte placeholders.',
+            N.CLIENT: 'Only the four baseline and architecture digest slots use fixed placeholders.',
+            N.CONVERTER: 'Only the four baseline and architecture digest slots use fixed placeholders.',
         }, 'excludedOutputIndex': N.EXCLUDED, 'normalizedTemplateSHA256': TEMPLATES,
         'toolchain': actual_toolchain, 'buildFlags': C.build_arguments('/usr/bin/swift', [], arch, 'tractanda-document-converter'),
         'runtimePatchSHA256': digest(ROOT / 'Packages/TractandaDocuments/RuntimePatches/vmlx-61a4b20-linux-docling.patch'),

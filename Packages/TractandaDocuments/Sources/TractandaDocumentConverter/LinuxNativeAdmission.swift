@@ -42,7 +42,7 @@
         }
         static let relativePath = "lib/tractanda/document-native-closure.json"
         static func active() throws -> String {
-            guard let expected = ApprovedLinuxDocumentClosure.sha256 else {
+            guard let expected = ApprovedLinuxDocumentClosure.activeSHA256 else {
                 throw TractandaError("documentConverter", "Linux native document closure is not admitted")
             }
             #if arch(x86_64)

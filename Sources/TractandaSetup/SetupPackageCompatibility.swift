@@ -153,6 +153,11 @@ extension SetupEngine {
         try requirePackageRelease(packagePayload.path)
         if trustedOwnership { try requireTrustedAncestry(of: packagePayload) }
         let manifest = try verifyBundle(at: packagePayload)
+        #if os(Linux)
+            guard (manifest.linuxBuildOS ?? .debian13) == .compiled else {
+                throw SetupError("Installed Linux bundle and Setup build baseline differ.")
+            }
+        #endif
         if trustedOwnership, manifest.embedding == nil || manifest.documentExtraction == nil {
             throw SetupError(
                 "A proper Linux package must include the complete bundled embedding and document components; core-only delivery is not admitted."

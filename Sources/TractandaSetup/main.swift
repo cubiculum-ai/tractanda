@@ -175,6 +175,12 @@ do {
         try printJSON(CanonicalFormatSupport.current)
         exit(0)
     }
+    #if os(Linux)
+        if internalArguments == ["--linux-build-os"] {
+            print(LinuxBuildBaseline.compiled.rawValue)
+            exit(0)
+        }
+    #endif
     if internalArguments.first == "--canonical-reader-admit", internalArguments.count == 2 {
         let root = URL(fileURLWithPath: internalArguments[1]).resolvingSymlinksInPath()
         try printJSON(

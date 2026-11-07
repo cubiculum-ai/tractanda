@@ -54,9 +54,6 @@
             try require(isHash(digest), "Invalid compiled native descriptor commitment")
             return digest
         }
-        static func preflightIfAdmitted(_ configuration: DocumentConverterConfiguration) throws {
-            if try compiledCurrentDigest() != nil { try preflight(configuration) }
-        }
         static func preflight(_ configuration: DocumentConverterConfiguration) throws {
             guard let expected = try compiledCurrentDigest() else {
                 throw TractandaError("documentConverter", "Linux native document profile is not admitted")

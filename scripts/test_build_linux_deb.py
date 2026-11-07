@@ -102,6 +102,7 @@ class LinuxDebTests(unittest.TestCase):
         formats = dict(profile='fixture-only', readerLevel=1, writerLevel=1, read=[1], write=[1],
                        capabilities=[], writeCapabilities=[])
         manifest = dict(profile='tractanda.bundle.v1', platform='linux', arch='x86_64', version='0.1.0-poc.14',
+                        linuxBuildOS=D.B.PRIMARY_BUILD_OS,
                         files=D.B.inventory(bundle), canonicalFormats=formats,
                         embedding={'fixture': 'Granite descriptor admission mocked'},
                         documentExtraction={'fixture': 'Docling descriptor admission mocked'},

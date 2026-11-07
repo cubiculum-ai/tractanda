@@ -52,7 +52,7 @@ def compiled_artifact(bin_path_output, work, product, arch):
 
 
 
-def build_arguments(swift, common, arch, product):
+def build_arguments(swift, common, arch, product, build_os=B.DEBIAN_BUILD_OS):
     """Pinned native backend preserves release WMO and honors the CPU budget.
 
     Swift6.4.1's default Swift Build backend appends its host-visible thread
@@ -62,12 +62,13 @@ def build_arguments(swift, common, arch, product):
     """
     isa = '-march=' + B.ARCH[arch][2]
     B.global_isa_flags([isa, '-target-cpu', 'generic'], arch)
+    baseline = ['-Xswiftc', B.KALI_SWIFT_DEFINE] if build_os == B.PRIMARY_BUILD_OS else []
     return [swift, 'build', *common, '--build-system', 'native',
             '--force-resolved-versions', '--skip-update', '--disable-dependency-cache',
             '--disable-build-manifest-caching', '--manifest-cache', 'local',
             '--disable-index-store', '-c', 'release', '-debug-info-format', 'none', '-j', '1',
             '-Xcc', isa, '-Xcxx', isa, '-Xswiftc', '-target-cpu', '-Xswiftc', 'generic',
-            '-Xswiftc', '-num-threads', '-Xswiftc', '4', '--product', product]
+            '-Xswiftc', '-num-threads', '-Xswiftc', '4', *baseline, '--product', product]
 
 
 def stop(signum, frame):
@@ -145,7 +146,7 @@ def main():
         os.environ.clear(); os.environ.update(old_environment)
     P.write_json(work / 'runtime-patch.json', patch_receipt)
     environment['VMLX_LINUX_PROFILE'] = '1'
-    command = build_arguments(swift, common, args.arch, product)
+    command = build_arguments(swift, common, args.arch, product, args.build_os)
     compile_child(command, work, environment, args.max_work_bytes, timeout=args.build_timeout_seconds)
     bin_path = compile_child([*command, '--show-bin-path'], work, environment,
                              args.max_work_bytes, timeout=args.build_timeout_seconds, capture=True)

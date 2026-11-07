@@ -30,6 +30,7 @@ ARCH = {'amd64': ('x86_64', 62, 'x86-64', 'x86_64-linux-gnu', '/lib64/ld-linux-x
 PRIMARY_BUILD_OS = 'kali-rolling'
 DEBIAN_BUILD_OS = 'debian13'
 GLIBC_LIMITS = {PRIMARY_BUILD_OS: (2, 43), DEBIAN_BUILD_OS: (2, 41)}
+KALI_SWIFT_DEFINE = '-DTRACTANDA_KALI_ROLLING'
 CORE = ('tractanda', 'tractanda-tui', 'tractanda-mcp', 'tractanda-setup',
         'tractanda-auth-helper', 'tractanda-embeddings', 'tractanda-document-converter')
 SEMANTIC_PROFILE = 'tractanda.peer-exchange.v2'
@@ -454,6 +455,10 @@ def validate_spec(value, arch):
             or value['semanticProfile'] != SEMANTIC_PROFILE):
         raise ValueError('Unsupported complete Linux build-input contract.')
     global_isa_flags(value['buildFlags'], arch)
+    defines = [token for flag in value['buildFlags'] for token in shlex.split(flag)
+               if 'TRACTANDA_KALI_ROLLING' in token]
+    if defines != ([KALI_SWIFT_DEFINE] if value['buildOS'] == PRIMARY_BUILD_OS else []):
+        raise ValueError('Build flags do not select the declared finite Linux execution baseline.')
     if not isinstance(value['runtimeNotices'], list) or not value['runtimeNotices']:
         raise ValueError('Private runtime notices must be declared explicitly.')
     for path in value['runtimeNotices']:
@@ -534,10 +539,13 @@ def full_components(root, spec, rows, embedding_runner=None):
     return embedding, document
 
 
-def verify_bundle(root, arch, snapshot=None):
+def verify_bundle(root, arch, snapshot=None, build_os=None):
     snapshot = snapshot if snapshot is not None else capture_manifest(root)
     unchanged_manifest(root, snapshot)
     manifest = snapshot.manifest()
+    manifest_os = manifest.get('linuxBuildOS', DEBIAN_BUILD_OS)
+    if manifest_os not in GLIBC_LIMITS or (build_os is not None and manifest_os != build_os):
+        raise ValueError('Bundle build baseline differs from its verified package input.')
     rows = inventory(root, exclude=('bundle-manifest.json',))
     if (manifest.get('profile') != 'tractanda.bundle.v1' or manifest.get('platform') != 'linux'
             or manifest.get('arch') != ARCH[arch][0] or manifest.get('files') != rows
@@ -588,6 +596,8 @@ def assemble(payload, spec_path, output, arch, maximum, embedding_runner=None, i
         elf(payload / bridge['path'], arch, build_os)
     closure = runtime_closure(payload, rows, arch, spec['dynamicLoads'], build_os)
     embedding, document = full_components(payload, spec, rows, embedding_runner=embedding_runner)
+    if build_os == PRIMARY_BUILD_OS and run([payload / 'bin/tractanda-setup', '--linux-build-os']).strip() != build_os:
+        raise ValueError('Actual Setup was compiled for a different Linux execution baseline.')
     formats = json.loads(run([payload / 'bin/tractanda-setup', '--canonical-format-support']), object_pairs_hook=unique)
     if not isinstance(formats, dict) or set(formats) != {'profile', 'readerLevel', 'writerLevel', 'read', 'write', 'capabilities', 'writeCapabilities'}:
         raise ValueError('Actual Setup canonical capability declaration is invalid.')
@@ -609,13 +619,14 @@ def assemble(payload, spec_path, output, arch, maximum, embedding_runner=None, i
     receipt.write_bytes(metadata)
     receipt.chmod(0o644)
     manifest = dict(profile='tractanda.bundle.v1', version=spec['version'], platform='linux', arch=ARCH[arch][0],
+                    linuxBuildOS=build_os,
                     files=inventory(output), canonicalFormats=formats, embedding=embedding, documentExtraction=document,
                     modelProvisioningManifestPath='models/manifest.json',
                     modelProvisioningManifestSHA256=digest(catalog))
     snapshot = ManifestSnapshot(canonical(manifest) + b'\n')
     (output / 'bundle-manifest.json').write_bytes(snapshot.raw)
     (output / 'bundle-manifest.json').chmod(0o644)
-    verify_bundle(output, arch, snapshot)  # Current Linux Docling gate remains closed until real R2 admission.
+    verify_bundle(output, arch, snapshot, build_os)
     owned_storage(output, maximum)
     return dict(bundle=str(output), manifestSHA256=snapshot.sha256,
                 logicalBytes=sum(v['size'] for v in manifest['files']), files=len(manifest['files']),

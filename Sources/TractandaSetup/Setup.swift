@@ -45,6 +45,7 @@ public struct BundleManifest: Codable, Equatable, Sendable {
     public let version: String
     public let platform: String
     public let arch: String
+    public let linuxBuildOS: LinuxBuildBaseline?
     public let files: [File]
     public let embedding: EmbeddingPayload?
     public let documentExtraction: DocumentExtractionPayload?
@@ -55,12 +56,14 @@ public struct BundleManifest: Codable, Equatable, Sendable {
         profile: String = Self.profile, version: String, platform: String, arch: String, files: [File],
         embedding: EmbeddingPayload? = nil, documentExtraction: DocumentExtractionPayload? = nil,
         canonicalFormats: CanonicalFormatSupport? = nil,
-        modelProvisioningManifestPath: String? = nil, modelProvisioningManifestSHA256: String? = nil
+        modelProvisioningManifestPath: String? = nil, modelProvisioningManifestSHA256: String? = nil,
+        linuxBuildOS: LinuxBuildBaseline? = nil
     ) {
         self.profile = profile
         self.version = version
         self.platform = platform
         self.arch = arch
+        self.linuxBuildOS = linuxBuildOS
         self.files = files
         self.embedding = embedding
         self.documentExtraction = documentExtraction
@@ -105,6 +108,9 @@ public struct BundleManifest: Codable, Equatable, Sendable {
         guard ["macos", "linux"].contains(platform), ["arm64", "x86_64"].contains(arch), files.count <= 20_000
         else {
             throw SetupError("Bundle platform, architecture, or file count is invalid.")
+        }
+        guard platform == "linux" || linuxBuildOS == nil else {
+            throw SetupError("Only Linux bundles declare a Linux build baseline.")
         }
         var names = Set<String>()
         for file in files {
@@ -188,7 +194,9 @@ public struct BundleManifest: Codable, Equatable, Sendable {
                 else { throw SetupError("Historical installed document descriptor is invalid.") }
                 try Self.validateRelativePath(documentExtraction.modelDirectory)
             case .current:
-                try documentExtraction.validatePlatform(platform: platform, arch: arch)
+                // Historical Linux manifests omitted the baseline and were built on Debian 13.
+                try documentExtraction.validatePlatform(
+                    platform: platform, arch: arch, linuxBuildOS: linuxBuildOS ?? .debian13)
                 try documentExtraction.validate(
                     files: files, provisioned: modelProvisioningManifestPath != nil)
             }
@@ -483,12 +491,15 @@ public struct DocumentExtractionPayload: Codable, Equatable, Sendable {
             ])
     }
 
-    func validatePlatform(platform: String, arch: String) throws {
+    func validatePlatform(
+        platform: String, arch: String, linuxBuildOS: LinuxBuildBaseline = .debian13
+    ) throws {
         let expected: String?
         if platform == "macos", arch == "arm64" {
             expected = "tractanda.docling-native.v2-idefics3-gelu-f32"
         } else if platform == "linux" {
-            expected = DocumentConverterIdentity.approvedLinuxConverter(architecture: arch)
+            expected = DocumentConverterIdentity.approvedLinuxConverter(
+                architecture: arch, baseline: linuxBuildOS)
         } else {
             expected = nil
         }

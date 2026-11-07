@@ -25,7 +25,7 @@ def elf_bytes(machine=62):
 def input_spec():
     return dict(profile='tractanda.linux-bundle-input.v2', version='0.1.0-poc.14', arch='amd64',
                 buildOS=B.PRIMARY_BUILD_OS,
-                minimumCPU='x86-64', sourceInputsSHA256='a' * 64, buildFlags=['-march=x86-64'],
+                minimumCPU='x86-64', sourceInputsSHA256='a' * 64, buildFlags=['-march=x86-64', B.KALI_SWIFT_DEFINE],
                 semanticProfile=B.SEMANTIC_PROFILE, documentExtraction={}, dynamicLoads=[],
                 runtimeNotices=['licenses/runtime/NOTICE'])
 
@@ -256,6 +256,8 @@ class LinuxBundleTests(unittest.TestCase):
             calls = []
             def helper(args):
                 calls.append(list(map(str, args)))
+                if '--linux-build-os' in args:
+                    return B.PRIMARY_BUILD_OS
                 return json.dumps(formats) if '--canonical-format-support' in args else '{}'
             closure = dict(depends=['libc6 (>= 2.41-12)'], dynamicLoads=[])
             with patch.object(B, 'native_baseline', return_value=dict(os=B.PRIMARY_BUILD_OS, arch='amd64')), \
@@ -265,6 +267,7 @@ class LinuxBundleTests(unittest.TestCase):
                 self.assertTrue(result['complete'])
                 self.assertTrue(any('plan' in call and '--bundle' in call for call in calls))
                 manifest = json.loads((root / 'bundle/bundle-manifest.json').read_text())
+                self.assertEqual(manifest['linuxBuildOS'], B.PRIMARY_BUILD_OS)
                 self.assertEqual(manifest['files'], B.inventory(root / 'bundle', exclude=('bundle-manifest.json',)))
                 manifest.pop('documentExtraction'); (root / 'bundle/bundle-manifest.json').write_text(json.dumps(manifest))
                 with self.assertRaisesRegex(ValueError, 'incomplete'):

@@ -424,25 +424,28 @@ def descriptor_runner(work, environment, maximum, storage_guard=None):
     return describe
 
 
-def core_build_flags(arch):
+def core_build_flags(arch, build_os=B.DEBIAN_BUILD_OS):
     """Bind distributable ISA together with the selected build backend/thread budget."""
     isa = '-march=' + B.ARCH[arch][2]
     flags = [isa, '-target-cpu', 'generic', '--build-system', 'native',
              '-num-threads', str(COMPILER_THREADS)]
+    if build_os == B.PRIMARY_BUILD_OS:
+        flags.append(B.KALI_SWIFT_DEFINE)
     B.global_isa_flags(flags, arch)
     return flags
 
 
-def core_build_arguments(swift, common, arch, product):
+def core_build_arguments(swift, common, arch, product, build_os=B.DEBIAN_BUILD_OS):
     """Use the R5-probed native Swift driver and explicit bounded frontend threads."""
     isa = '-march=' + B.ARCH[arch][2]
-    core_build_flags(arch)
+    core_build_flags(arch, build_os)
+    baseline = ['-Xswiftc', B.KALI_SWIFT_DEFINE] if build_os == B.PRIMARY_BUILD_OS else []
     return [swift, 'build', *common, '--build-system', 'native',
             '--force-resolved-versions', '--skip-update', '--disable-dependency-cache',
             '--disable-build-manifest-caching', '--manifest-cache', 'local', '--disable-index-store',
             '-c', 'release', '-debug-info-format', 'none', '-j', '1',
             '-Xcc', isa, '-Xcxx', isa, '-Xswiftc', '-target-cpu', '-Xswiftc', 'generic',
-            '-Xswiftc', '-num-threads', '-Xswiftc', str(COMPILER_THREADS), '--product', product]
+            '-Xswiftc', '-num-threads', '-Xswiftc', str(COMPILER_THREADS), *baseline, '--product', product]
 
 
 def reported_bin_directory(output, work):
@@ -458,8 +461,8 @@ def reported_bin_directory(output, work):
 
 
 def build_core_product(swift, common, arch, product, work, environment, maximum,
-                       timeout=DEFAULT_BUILD_TIMEOUT_SECONDS):
-    command = core_build_arguments(swift, common, arch, product)
+                       timeout=DEFAULT_BUILD_TIMEOUT_SECONDS, build_os=B.DEBIAN_BUILD_OS):
+    command = core_build_arguments(swift, common, arch, product, build_os)
     child(command, work, environment, maximum, timeout=timeout, storage_guard=build_storage)
     # Use precisely the same driver arguments to ask SwiftPM for its output path.
     reported = child([*command, '--show-bin-path'], work, environment, maximum,
@@ -575,13 +578,14 @@ def produce(args):
                                runner=embedding_runner)
     merge_files(ROOT, work / 'source', original, work_limit)
     write_json(work / 'source/.swiftpm/configuration/mirrors.json', mirrored_pins(work / 'source', args.mirrors))
-    flags = core_build_flags(args.arch)
+    flags = core_build_flags(args.arch, build_os)
     common = ['--package-path', work / 'source', '--scratch-path', work / 'scratch',
               '--cache-path', work / 'cache', '--config-path', work / 'config', '--security-path', work / 'security']
     release = None
     selected_products = core_products((work / 'source/VERSION').read_text().strip())
     for product in selected_products:
         reported = build_core_product(swift, common, args.arch, product, work, environment, work_limit,
+                                      build_os=build_os,
                                       timeout=getattr(args, 'build_timeout_seconds', DEFAULT_BUILD_TIMEOUT_SECONDS))
         if release is not None and reported != release:
             raise ValueError('Swift reported inconsistent product directories within the frozen scratch root.')

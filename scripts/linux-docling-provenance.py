@@ -7,9 +7,9 @@ if not __debug__:
 CLIENT='Packages/TractandaClient/Sources/TractandaClient/GeneratedLinuxDocumentConverterDigests.swift'
 CONVERTER='Packages/TractandaDocuments/Sources/TractandaDocumentConverter/GeneratedLinuxDocumentClosure.swift'
 REGISTRY='debian/linux-runtime-inputs.json'
-PLACEHOLDERS={'amd64':'0'*64,'arm64':'1'*64}
+PLACEHOLDERS={'amd64':'0'*64,'arm64':'1'*64,'kali-amd64':'2'*64,'kali-arm64':'3'*64}
 EXCLUDED={REGISTRY:'Generated packaging output index binds resulting component manifests; not a converter compiler input.'}
-SELECTION_PROFILE='tractanda.linux-docling-compiler-inputs.v2'
+SELECTION_PROFILE='tractanda.linux-docling-compiler-inputs.v3'
 SOURCE_ROOTS=(
     'Packages/TractandaClient/Package.swift',
     'Packages/TractandaClient/Sources/TractandaClient',
@@ -47,7 +47,17 @@ def normalize(relative,data):
     for arch,pattern in patterns.items():
         matches=list(re.finditer(pattern,text));assert len(matches)==1,(relative,arch,len(matches));actual[arch]=matches[0].group(2)
         text=re.sub(pattern,lambda m:m.group(1)+PLACEHOLDERS[arch]+m.group(3),text,count=1)
-    assert not re.search(r'(?<![0-9a-f])[0-9a-f]{64}(?![0-9a-f])',text.replace(PLACEHOLDERS['amd64'],'').replace(PLACEHOLDERS['arm64'],''))
+    for arch, name in [('kali-amd64','kaliAMD64'), ('kali-arm64','kaliARM64')]:
+        pattern=rf'(static let {name}: String\? = )(nil|"[0-9a-f]{{64}}")(?=\n)'
+        matches=list(re.finditer(pattern,text));assert len(matches)==1,(relative,arch,len(matches))
+        value=matches[0].group(2)
+        actual[arch]=None if value=='nil' else value[1:-1]
+        text=re.sub(pattern,lambda m:m.group(1)+'"'+PLACEHOLDERS[arch]+'"',text,count=1)
+    text_without_digest=text
+    for digest in PLACEHOLDERS.values():
+        assert text.count(digest)==1,(relative,digest)
+        text_without_digest=text_without_digest.replace(digest,'')
+    assert not re.search(r'(?<![0-9a-f])[0-9a-f]{64}(?![0-9a-f])',text_without_digest)
     return text.encode(),actual
 
 def normalized_rows(P,C,source,expected_templates):

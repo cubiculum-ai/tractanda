@@ -26,7 +26,7 @@ final class DocumentNativeSession {
     /// dependency injection in explicit @testable fixtures replaces it.
     static func verifyRuntime(_ configuration: DocumentConverterConfiguration) throws {
         #if os(Linux)
-            try DocumentLinuxRuntimeClosure.preflightIfAdmitted(configuration)
+            try DocumentLinuxRuntimeClosure.preflight(configuration)
         #endif
     }
 

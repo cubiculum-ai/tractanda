@@ -24,13 +24,15 @@ public struct DocumentConverterIdentity: Codable, Equatable, Sendable {
 
     /// Finite current artifact profile for package metadata; never selects a historical runtime.
     public static func approvedLinuxConverter(architecture: String) -> String? {
-        let digest: String?
-        switch architecture {
-        case "amd64", "x86_64": digest = GeneratedLinuxDocumentConverterDigests.amd64
-        case "arm64": digest = GeneratedLinuxDocumentConverterDigests.arm64
-        default: return nil
-        }
-        return LinuxDocumentConverterProfiles.converterName(digest: digest)
+        approvedLinuxConverter(architecture: architecture, baseline: .debian13)
+    }
+
+    /// Package inspection selects the declared candidate baseline explicitly.
+    public static func approvedLinuxConverter(
+        architecture: String, baseline: LinuxBuildBaseline
+    ) -> String? {
+        LinuxDocumentConverterProfiles.converterName(
+            digest: LinuxDocumentConverterProfiles.digest(architecture: architecture, baseline: baseline))
     }
 
     /// Supported saved-page meaning, derived from existing wire fields. This is
