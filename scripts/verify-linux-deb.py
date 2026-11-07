@@ -7,6 +7,7 @@ This script never creates an account, guest, package, model or canonical migrati
 """
 import argparse
 from contextlib import contextmanager
+import errno
 import hashlib
 import json
 import os
@@ -172,12 +173,19 @@ def distinct_binary(first, second):
 def inventory(roots, hashes=True):
     """Record absence, bytes and directory custody, excluding inode/time/directory-size churn."""
     result, total = {}, 0
+    roots = tuple(Path(root) for root in roots)
+    monitored_roots = set(roots)
     def record(path):
         nonlocal total
         key = str(path)
         if key in result:
             return
-        info = path.lstat()
+        try:
+            info = path.lstat()
+        except FileNotFoundError as error:
+            if error.errno == errno.ENOENT and not hashes and path.name == '.tractanda-checkpoint-dirty' and path.parent in monitored_roots:
+                return
+            raise
         custody = {'mode': stat.S_IMODE(info.st_mode), 'uid': info.st_uid, 'gid': info.st_gid}
         require(len(result) < 20_000, 'Canonical/credential fixture cap exceeded')
         if stat.S_ISDIR(info.st_mode):

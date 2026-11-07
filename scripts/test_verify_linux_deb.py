@@ -176,6 +176,33 @@ class ValidationTests(unittest.TestCase):
         (self.root / 'link').unlink()
         with patch.object(V, 'FIXTURE_CAP', 4), self.assertRaisesRegex(ValueError, 'cap'): V.inventory([self.root])
 
+    def test_only_transient_checkpoint_marker_may_vanish_during_soft_monitor(self):
+        marker = self.root / '.tractanda-checkpoint-dirty'
+        other = self.root / 'other'
+        for target, hashes, allowed in ((marker, False, True), (marker, True, False), (other, False, False)):
+            target.write_bytes(b'x')
+            def disappearing_walk(root, **kwargs):
+                target.unlink()
+                yield str(root), [], [target.name]
+            with self.subTest(target=target.name, hashes=hashes), patch.object(V.os, 'walk', disappearing_walk):
+                if allowed:
+                    self.assertNotIn(str(target), V.inventory([self.root], hashes=hashes))
+                else:
+                    with self.assertRaises(FileNotFoundError):
+                        V.inventory([self.root], hashes=hashes)
+
+    def test_nested_checkpoint_marker_disappearance_is_not_suppressed(self):
+        nested = self.root / 'nested'
+        nested.mkdir()
+        marker = nested / '.tractanda-checkpoint-dirty'
+        marker.write_bytes(b'x')
+        def disappearing_walk(root, **kwargs):
+            yield str(root), ['nested'], []
+            marker.unlink()
+            yield str(nested), [], [marker.name]
+        with patch.object(V.os, 'walk', disappearing_walk), self.assertRaises(FileNotFoundError):
+            V.inventory((root for root in [self.root]), hashes=False)
+
     def test_regular_managed_leaf_has_presence_and_deletion_witness(self):
         leaf = self.root / 'd5-012345abcdef.json'
         absent = V.inventory([leaf]); self.assertEqual(absent[str(leaf)]['kind'], 'absent')
