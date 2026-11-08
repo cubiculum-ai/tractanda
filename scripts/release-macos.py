@@ -1129,7 +1129,7 @@ class Pipeline:
         build_os = producer.B.PRIMARY_BUILD_OS
         return {'files': producer.source_rows(), 'buildOS': build_os,
                 'components': {arch: producer.require_admitted(arch, build_os) for arch in delivery.ARCHES},
-                'flags': {arch: producer.core_build_flags(arch) for arch in delivery.ARCHES}}
+                'flags': {arch: producer.core_build_flags(arch, build_os) for arch in delivery.ARCHES}}
 
     def install_gate(self):
         self.state['activeStep'] = 'install-authorization'

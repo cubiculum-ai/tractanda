@@ -211,12 +211,14 @@ class DeliveryTests(unittest.TestCase):
         producer = SimpleNamespace(source_rows=lambda: self.context['files'],
                                    B=SimpleNamespace(PRIMARY_BUILD_OS=self.context['buildOS']),
                                    require_admitted=Mock(side_effect=lambda a, _: self.context['components'][a]),
-                                   core_build_flags=lambda a: self.context['flags'][a])
+                                   core_build_flags=Mock(side_effect=lambda a, _: self.context['flags'][a]))
         with patch.object(R, 'git', side_effect=[self.state['commit'], self.state['tree'], '']), \
              patch.object(R.importlib.util, 'spec_from_file_location', return_value=Mock()), \
              patch.object(R.importlib.util, 'module_from_spec', return_value=producer):
             self.assertEqual(R.Pipeline.linux_context(p), self.context)
         self.assertEqual(producer.require_admitted.call_args_list,
+                         [call(arch, self.context['buildOS']) for arch in D.ARCHES])
+        self.assertEqual(producer.core_build_flags.call_args_list,
                          [call(arch, self.context['buildOS']) for arch in D.ARCHES])
         for values in (['c' * 40], [self.state['commit'], 'c' * 40], [self.state['commit'], self.state['tree'], 'dirty']):
             with patch.object(R, 'git', side_effect=values), patch.object(R.importlib.util, 'spec_from_file_location') as load, self.assertRaises(RuntimeError):
