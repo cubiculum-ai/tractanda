@@ -30,7 +30,7 @@ class PublicReleaseTests(unittest.TestCase):
                 if state['status'] == 'complete':
                     observed.append('saved-complete')
             p.save = save
-            for name in ('build', 'assemble', 'build_package', 'notarize_package', 'build_apt',
+            for name in ('build', 'assemble', 'verify_promoted_bundle', 'build_package', 'notarize_package', 'build_apt',
                          'package_artifacts', 'push', 'publish', 'verify_published_source',
                          'published_pages', 'install', 'health', 'cleanup'):
                 setattr(p, name, lambda n=name: observed.append(n) or {})
@@ -41,6 +41,8 @@ class PublicReleaseTests(unittest.TestCase):
                     patch.object(R, 'record_release_retention', side_effect=lambda _: observed.append('retention')):
                 p.run()
             self.assertEqual(list(state['steps']), list(R.PUBLIC_STEPS))
+            self.assertLess(observed.index('assemble'), observed.index('verify_promoted_bundle'))
+            self.assertLess(observed.index('verify_promoted_bundle'), observed.index('build_package'))
             self.assertLess(observed.index('publish'), observed.index('install'))
             self.assertLess(observed.index('published_pages'), observed.index('install'))
             self.assertLess(observed.index('verify_published_source'), observed.index('install'))

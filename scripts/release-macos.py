@@ -1541,7 +1541,8 @@ class Pipeline:
 
     def run(self, ci_timeout=3600):
         if self.state['status'] == 'complete':
-            self.prepare_disposable()
+            self.retire_disposable()
+            self.reconcile_disposable()
             return
         if not delivery.active(self.state):
             raise RuntimeError('Revise the pending legacy candidate explicitly to the current Linux/cluster delivery contract.')

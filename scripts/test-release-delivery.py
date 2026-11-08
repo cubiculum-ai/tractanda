@@ -105,7 +105,9 @@ class DeliveryTests(unittest.TestCase):
         self.attach()
         p = R.Pipeline(self.state)
         p.bundle.mkdir()
-        self.write(p.bundle / 'bundle-manifest.json', {'fixture': 'mac manifest'})
+        payload = p.bundle / 'fixture'; payload.write_bytes(b'mac fixture'); payload.chmod(0o644)
+        self.write(p.bundle / 'bundle-manifest.json', {'fixture': 'mac manifest', 'files': [
+            {'path': 'fixture', 'size': payload.stat().st_size, 'mode': 0o644, 'sha256': R.sha(payload)}]})
         p.package.write_bytes(b'stapled mac package'); p.archive.write_bytes(b'mac archive')
         self.state['steps']['bundle'] = {'result': {'manifestSHA256': R.sha(p.bundle / 'bundle-manifest.json')}}
         hashes = {x.name: R.sha(x) for x in (p.package, p.archive)}
@@ -412,7 +414,23 @@ class DeliveryTests(unittest.TestCase):
 
     def test_completed_legacy_release_needs_no_new_options_and_stays_unchanged(self):
         state = {'directory': '/unused', 'version': '0.1.0-poc.14', 'status': 'complete', 'configuration': {}, 'steps': {}}
-        before = copy.deepcopy(state); R.Pipeline(state).run(); self.assertEqual(state, before)
+        before = copy.deepcopy(state)
+        p = R.Pipeline(state)
+        with patch.object(p, 'prepare_disposable') as prepare, patch.object(R.storage, 'select') as select:
+            p.run()
+        prepare.assert_not_called(); select.assert_not_called(); self.assertEqual(state, before)
+
+    def test_completed_release_reconciles_only_registered_scratch(self):
+        identity = {'path': str(self.root / 'known-run')}
+        state = {'directory': str(self.root), 'version': V, 'status': 'complete', 'configuration': {},
+                 'steps': {}, 'retiredDisposableStorage': [identity]}
+        p = R.Pipeline(state); p.save = Mock()
+        with patch.object(p, 'prepare_disposable') as prepare, patch.object(R.storage, 'select') as select, \
+                patch.object(R.storage, 'dispose') as dispose:
+            p.run()
+        prepare.assert_not_called(); select.assert_not_called()
+        dispose.assert_called_once_with(identity, self.root / 'disposable-fallback')
+        self.assertEqual(state['retiredDisposableStorage'], [])
 
     def test_new_published_receipt_requires_both_linux_assets_and_exact_used_acceptance(self):
         p = self.pipeline(); path, value = self.acceptance(); accepted = D.accept(self.state, path, value['candidateID'])
