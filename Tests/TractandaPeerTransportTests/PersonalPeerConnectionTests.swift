@@ -200,8 +200,8 @@ final class PersonalPeerConnectionTests: XCTestCase {
         async let outbound = left.request(.init("personal.sync.ready")).get()
         async let inbound = right.request(.init("personal.sync.ready")).get()
         let replies = try await (outbound, inbound)
-        XCTAssertEqual(replies.0, response)
-        XCTAssertEqual(replies.1, response)
+        XCTAssertEqual(try JSON.decode([String: Bool].self, replies.0), ["ready": true])
+        XCTAssertEqual(try JSON.decode([String: Bool].self, replies.1), ["ready": true])
     }
 
     func testPersonalOperationDeadlineIsOptInAndOtherBudgetsRemainConfigurable() throws {

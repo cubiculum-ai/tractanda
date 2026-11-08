@@ -26,6 +26,42 @@ packager = load('packager', 'package-macos.py')
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_metal_selection_uses_working_default_without_component_query(self):
+        with patch.object(release.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, 'metal v1', '')) as run:
+            env, receipt = release.select_metal_toolchain({'PATH': '/fixture'})
+        self.assertEqual(env, {'PATH': '/fixture'})
+        self.assertEqual(receipt['selection'], 'default')
+        self.assertEqual(run.call_count, 1)
+
+    def test_metal_selection_uses_installed_component_only_with_matching_tools(self):
+        def probe(args, env, **_):
+            if args[:2] == ['xcodebuild', '-showComponent']:
+                return subprocess.CompletedProcess(args, 0, json.dumps({'status': 'installed', 'toolchainIdentifier': 'metal.fixture'}), '')
+            if args == ['xcrun', 'metal', '--version']:
+                return subprocess.CompletedProcess(args, 0 if env.get('TOOLCHAINS') else 1, 'metal v1' if env.get('TOOLCHAINS') else '', 'missing')
+            return subprocess.CompletedProcess(args, 0, '/fixture/' + args[-1], '')
+        with patch.object(release.subprocess, 'run', side_effect=probe):
+            env, receipt = release.select_metal_toolchain({'PATH': '/fixture'})
+        self.assertEqual(env['TOOLCHAINS'], 'metal.fixture')
+        self.assertEqual(receipt['selection'], 'installed-component')
+        self.assertEqual(set(receipt['identities']), {'swift', 'clang', 'sdk'})
+
+    def test_metal_selection_rejects_invalid_component_and_changed_tools(self):
+        for defect in ('invalid', 'swift', 'clang', 'sdk', 'unusable'):
+            def probe(args, env, **_):
+                selected = bool(env.get('TOOLCHAINS'))
+                if args[:2] == ['xcodebuild', '-showComponent']:
+                    info = {'status': 'missing' if defect == 'invalid' else 'installed', 'toolchainIdentifier': 'metal.fixture'}
+                    return subprocess.CompletedProcess(args, 0, json.dumps(info), '')
+                if args == ['xcrun', 'metal', '--version']:
+                    ok = selected and defect != 'unusable'
+                    return subprocess.CompletedProcess(args, 0 if ok else 1, 'metal v1' if ok else '', 'missing')
+                name = 'sdk' if '--show-sdk-path' in args else args[-1]
+                return subprocess.CompletedProcess(args, 0, '/changed' if selected and defect == name else '/original', '')
+            with self.subTest(defect=defect), patch.object(release.subprocess, 'run', side_effect=probe):
+                with self.assertRaises(RuntimeError):
+                    release.select_metal_toolchain({'PATH': '/fixture'})
+
     def transport_fixture(self, root):
         state = {'directory': str(root), 'configuration': {'repository': 'owner/repo'},
                  'version': '0.1.0-poc.16', 'commit': 'a' * 40, 'notes': 'Fixture',
@@ -795,7 +831,10 @@ class ReleaseTests(unittest.TestCase):
     def test_release_builds_the_embedding_host_from_the_sealed_source(self):
         pipeline = release.Pipeline({'directory': '/unused', 'configuration': {'modelDirectory': '/model', 'documentModelDirectory': '/documents'},
                                     'version': 'test', 'steps': {}})
-        with patch.object(pipeline, 'run_command') as run, patch.object(release, 'command', return_value='/built'), patch.object(pipeline, 'verify_document_model'):
+        with patch.object(pipeline, 'run_command') as run, patch.object(release, 'command', return_value='/built'), \
+                patch.object(pipeline, 'verify_document_model'), \
+                patch.object(release, 'select_metal_toolchain', return_value=({}, {'selection': 'fixture'})), \
+                patch.object(release, 'write'):
             pipeline.build()
         self.assertEqual(run.call_count, 4)
         provider = run.call_args_list[1].args[1]

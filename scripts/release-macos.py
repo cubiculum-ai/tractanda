@@ -98,6 +98,51 @@ def command(args, cwd=ROOT, env=None):
     return subprocess.check_output([str(a) for a in args], cwd=cwd, env=env, text=True).strip()
 
 
+def select_metal_toolchain(environment):
+    """Select an installed Metal component only when the default compiler fails."""
+    def probe(args, env):
+        result = subprocess.run(args, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return result.returncode, result.stdout.strip(), result.stderr.strip()
+
+    selected = dict(environment)
+    code, version, error = probe(['xcrun', 'metal', '--version'], selected)
+    if code == 0 and version:
+        return selected, {'selection': 'default', 'metalVersion': version}
+    diagnostic = {'exitCode': code, 'stdout': version, 'stderr': error}
+    code, output, error = probe(['xcodebuild', '-showComponent', 'metalToolchain', '-json'], selected)
+    if code:
+        raise RuntimeError('Metal compiler unavailable; installed-component query failed: ' + error)
+    try:
+        component = json.loads(output)
+        identifier = component['toolchainIdentifier']
+        if (component['status'] != 'installed' or not isinstance(identifier, str)
+                or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.-]*', identifier)):
+            raise ValueError('invalid installed component')
+    except (ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError('Metal compiler unavailable; invalid installed component metadata') from exc
+
+    def identities(env):
+        values = {}
+        for name, args in {'swift': ['xcrun', '--find', 'swift'], 'clang': ['xcrun', '--find', 'clang'],
+                           'sdk': ['xcrun', '--sdk', 'macosx', '--show-sdk-path']}.items():
+            result, value, detail = probe(args, env)
+            if result or not value:
+                raise RuntimeError('Cannot verify ' + name + ' identity: ' + detail)
+            values[name] = value
+        return values
+
+    before = identities(selected)
+    selected['TOOLCHAINS'] = identifier
+    after = identities(selected)
+    if before != after:
+        raise RuntimeError('Metal toolchain selection changed Swift, clang, or SDK identity')
+    code, version, error = probe(['xcrun', 'metal', '--version'], selected)
+    if code or not version:
+        raise RuntimeError('Installed Metal compiler is unusable: ' + error)
+    return selected, {'selection': 'installed-component', 'toolchainIdentifier': identifier,
+                      'metalVersion': version, 'defaultProbe': diagnostic, 'identities': after}
+
+
 def git(*args, cwd=ROOT):
     return command(['git', *args], cwd=cwd)
 
@@ -1124,6 +1169,8 @@ class Pipeline:
         write(self.directory / evidence, proof)
 
     def build(self):
+        self.environment, metal_receipt = select_metal_toolchain(self.environment)
+        write(self.directory / 'metal-toolchain-selection.json', metal_receipt)
         self.run_command('release-build', ['swift', 'build', '-c', 'release', '--disable-sandbox',
                                         '--disable-automatic-resolution', *self.swift_scratch('swift-root')])
         # The provider is part of this source snapshot too. Reusing an installed

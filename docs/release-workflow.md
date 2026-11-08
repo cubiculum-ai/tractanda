@@ -79,6 +79,8 @@ The core executables, embedding host and native document converter are rebuilt f
 
 Select the full Xcode installation with `xcode-select`, sign into its Accounts settings, and make the team's valid Developer ID Application and Installer certificates available. The script checks those identities before preparing a release; Xcode manages account authentication during upload. No separate `notarytool` profile, app-specific password, or credential extraction is used. Account renewal and acceptance of changed Apple agreements remain account-holder actions in Xcode or Apple's developer site. See [Apple's notarization overview](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution).
 
+The build probes the Metal compiler. If Xcode's default shim fails but Xcode reports an installed Metal component, the script selects that component only in the build process's environment, after verifying that the Swift compiler, clang and macOS SDK paths remain unchanged. It records the choice in `metal-toolchain-selection.json`. This fallback neither downloads components nor changes global Xcode settings; missing or unusable tools still fail with diagnostics.
+
 ## Persistent Linux build resources on the signing Mac
 
 Linux artifact assembly runs separately from the Mac release controller. When the native builder creates a persistent Apple container, register it while it is stopped and before the first job. Use the same release-control directory as `release-macos.py`. The builder supplies a reviewed image by digest and may attach read-only bind mounts for inputs. Register project-built image tags only if the builder owns them and can retire them after the release.
