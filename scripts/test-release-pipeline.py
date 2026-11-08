@@ -3,10 +3,12 @@ import hashlib
 #!/usr/bin/env python3
 """Portable, side-effect-free checks for the release controller's safety gates."""
 import importlib.util
+import io
 import json
 import subprocess
 import shutil
 import sys
+import tarfile
 from contextlib import nullcontext
 from pathlib import Path
 import tempfile
@@ -24,6 +26,95 @@ def load(name, filename):
 release = load('release', 'release-macos.py')
 activate = load('activate', 'activate-release.py')
 packager = load('packager', 'package-macos.py')
+
+
+class PublishedPagesTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        directory = Path(self.tmp.name)
+        self.state = {'directory': str(directory), 'configuration': {'repository': 'owner/repo', 'branch': 'main'},
+                      'version': '0.1.0-poc.18', 'commit': 'a' * 40,
+                      'steps': {'publish': {'result': {'sha256': {}}}}}
+        self.pipeline = release.Pipeline(self.state); self.pipeline.save = lambda: None
+        self.content = {'index.html': b'manual', 'apt/dists/preview/InRelease': b'signed-release',
+                        'apt/dists/preview/main/binary-amd64/Packages.xz': b'amd64',
+                        'apt/dists/preview/main/binary-arm64/Packages.xz': b'arm64',
+                        'apt/tractanda-archive-keyring.asc': b'public-key'}
+        for name, data in self.content.items():
+            local = (self.pipeline.source / 'docs/index.html' if name == 'index.html'
+                     else directory / 'apt-site' / name)
+            local.parent.mkdir(parents=True, exist_ok=True); local.write_bytes(data)
+        with tarfile.open(directory / 'apt-site.tar.gz', 'w:gz') as archive:
+            for name, data in self.content.items():
+                if name != 'index.html':
+                    info = tarfile.TarInfo(name); info.size = len(data); archive.addfile(info, io.BytesIO(data))
+        digest = release.sha(directory / 'apt-site.tar.gz')
+        self.state['steps']['publish']['result']['sha256']['apt-site.tar.gz'] = digest
+        self.published = {'id': 438031031, 'tag_name': 'v0.1.0-poc.18', 'draft': False,
+                          'published_at': '2026-11-08T04:37:43Z',
+                          'assets': [{'name': 'apt-site.tar.gz', 'digest': 'sha256:' + digest}]}
+        self.pages_run = {'databaseId': 42448103745, 'event': 'workflow_dispatch', 'headBranch': 'main',
+                    'headSha': 'a' * 40, 'createdAt': '2026-11-08T04:45:47Z',
+                    'status': 'completed', 'conclusion': 'success'}
+
+    def invoke(self, runs, releases=None, wrong_site=None):
+        def api(args, **_):
+            return json.dumps([releases or [self.published]] if args[1] == 'api' else runs)
+        def get(args, **_):
+            name = args[-1].split('/repo/', 1)[1]
+            return b'wrong' if name == wrong_site else self.content[name]
+        with patch.object(release, 'release_info', return_value=self.published), \
+                patch.object(release, 'command', side_effect=api), patch.object(release.subprocess, 'check_output', side_effect=get), \
+                patch.object(self.pipeline, 'run_command') as watch:
+            result = self.pipeline.published_pages()
+        return result, watch
+
+    def test_actual_postpublication_dispatch_selects_current_site(self):
+        failed = {**self.pages_run, 'databaseId': 42447584388, 'event': 'release',
+                  'headBranch': 'v0.1.0-poc.18', 'createdAt': '2026-11-08T04:37:45Z', 'conclusion': 'failure'}
+        result, watch = self.invoke([failed, self.pages_run])
+        self.assertEqual((result['runID'], result['event'], result['releaseTag']),
+                         (42448103745, 'workflow_dispatch', 'v0.1.0-poc.18'))
+        self.assertIn('42448103745', watch.call_args.args[1])
+
+    def test_stale_wrong_source_or_newer_failed_run_waits(self):
+        cases = [[], [{**self.pages_run, 'createdAt': '2026-11-08T04:37:42Z'}],
+                 [{**self.pages_run, 'headSha': 'b' * 40}], [{**self.pages_run, 'headBranch': 'other'}],
+                 [self.pages_run, {**self.pages_run, 'databaseId': 42448103746, 'createdAt': '2026-11-08T04:46:00Z',
+                             'conclusion': 'failure'}]]
+        for runs in cases:
+            with self.subTest(runs=runs):
+                self.assertIsNone(self.invoke(runs)[0]); self.assertEqual(self.state['status'], 'waitingForPages')
+
+    def test_latest_release_and_live_site_bytes_are_required(self):
+        newer = {**self.published, 'id': 2, 'published_at': '2026-11-09T00:00:00Z'}
+        self.assertIsNone(self.invoke([self.pages_run], releases=[self.published, newer])[0])
+        self.assertIsNone(self.invoke([self.pages_run], wrong_site='apt/dists/preview/InRelease')[0])
+
+    def test_postpublication_release_event_is_accepted(self):
+        run = {**self.pages_run, 'event': 'release', 'headBranch': 'v0.1.0-poc.18'}
+        self.assertEqual(self.invoke([run])[0]['event'], 'release')
+        same_second = {**run, 'createdAt': self.published['published_at']}
+        self.assertEqual(self.invoke([same_second])[0]['runID'], same_second['databaseId'])
+
+    def test_run_order_uses_instants_not_timestamp_strings(self):
+        earlier = {**self.pages_run, 'createdAt': '2026-11-08T06:45:47+02:00'}
+        later = {**self.pages_run, 'databaseId': 42448103746, 'createdAt': '2026-11-08T04:46:00Z'}
+        self.assertEqual(self.invoke([earlier, later])[0]['runID'], later['databaseId'])
+
+    def test_missing_pages_run_pauses_before_install(self):
+        for name in ('verify', 'release-build', 'bundle', 'package', 'notarization', 'apt',
+                     'artifacts', 'push', 'ci', 'published-source'):
+            self.state['steps'][name] = {'result': {}}
+        self.pipeline.prepare_disposable = lambda: None
+        self.pipeline.verify_promoted_bundle = lambda: None
+        self.pipeline.verify_artifacts = lambda: None
+        self.pipeline.published_pages = lambda: None
+        with patch.object(release, 'git', side_effect=['a' * 40, '']), \
+                patch.object(self.pipeline, 'install') as install:
+            self.pipeline.run_public(0)
+        install.assert_not_called()
+        self.assertNotIn('pages', self.state['steps'])
 
 
 class ReleaseTests(unittest.TestCase):

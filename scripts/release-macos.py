@@ -1543,16 +1543,74 @@ class Pipeline:
                 'skills': 'actual public tag equals sealed source tree'}
 
     def published_pages(self):
-        # A release-published workflow run deploys one combined site, preserving
-        # the manual and the authenticated APT metadata in the same Pages artifact.
-        runs = json.loads(command(['gh', 'run', 'list', '--repo', self.settings['repository'],
-            '--workflow', 'manual.yml', '--event', 'release', '--json', 'databaseId,status,conclusion,headSha']))
-        runs = [r for r in runs if r['headSha'] == self.state['commit']]
-        if not runs:
-            raise RuntimeError('Published Pages run is not visible yet; resume without rebuilding.')
-        self.run_command('pages', ['gh', 'run', 'watch', str(runs[0]['databaseId']), '--repo',
-                                  self.settings['repository'], '--exit-status'], ROOT)
-        return {'runID': runs[0]['databaseId'], 'url': 'https://cubiculum-ai.github.io/tractanda/apt/'}
+        repo = self.settings['repository']; tag = 'v' + self.state['version']
+        published = release_info(repo, tag)
+        published_at = published.get('published_at')
+        expected = self.state['steps']['publish']['result']['sha256'].get('apt-site.tar.gz')
+        assets = [a for a in published.get('assets', []) if a.get('name') == 'apt-site.tar.gz']
+        if (published.get('draft') or published.get('tag_name') != tag or not published_at
+                or not isinstance(expected, str) or not re.fullmatch(r'[0-9a-f]{64}', expected)
+                or len(assets) != 1 or assets[0].get('digest') != 'sha256:' + expected
+                or sha(self.directory / 'apt-site.tar.gz') != expected):
+            raise RuntimeError('Published release or its APT asset differs from the sealed release.')
+        # workflow_dispatch assembles the newest published APT-bearing release;
+        # require that selection to be this release before accepting such a run.
+        pages = json.loads(command(['gh', 'api', '--paginate', '--slurp',
+                                    'repos/' + repo + '/releases?per_page=100']))
+        releases = [r for page in pages for r in page if not r.get('draft') and r.get('published_at')
+                    and any(a.get('name') == 'apt-site.tar.gz' for a in r.get('assets', []))]
+        latest = max(releases, key=lambda r: r['published_at']) if releases else None
+        runs = json.loads(command(['gh', 'run', 'list', '--repo', repo, '--workflow', 'manual.yml',
+            '--limit', '100', '--json', 'databaseId,status,conclusion,headSha,headBranch,event,createdAt']))
+        def instant(value):
+            try:
+                parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                return parsed if parsed.utcoffset() is not None else None
+            except (AttributeError, ValueError):
+                return None
+        published_time = instant(published_at)
+        if published_time is None:
+            raise RuntimeError('Published release timestamp is invalid.')
+        runs = [r for r in runs if r.get('headSha') == self.state['commit']
+                and instant(r.get('createdAt')) is not None and instant(r['createdAt']) >= published_time
+                and ((r.get('event') == 'release' and r.get('headBranch') == tag)
+                     or (r.get('event') == 'workflow_dispatch' and r.get('headBranch') == self.settings['branch']
+                         and latest and latest.get('id') == published.get('id')))]
+        runs.sort(key=lambda r: (instant(r['createdAt']), r['databaseId']), reverse=True)
+        selected = runs[0] if runs else None
+        if selected is None or (selected.get('status') == 'completed' and selected.get('conclusion') != 'success'):
+            self.state.update(status='waitingForPages', activeStep='pages',
+                              pauseReason='Waiting for a successful post-publication Pages run for this source.')
+            self.save()
+            return None
+        self.run_command('pages', ['gh', 'run', 'watch', str(selected['databaseId']), '--repo', repo, '--exit-status'], ROOT)
+        site = 'https://' + repo.split('/')[0].lower() + '.github.io/' + repo.split('/')[1] + '/'
+        wanted = {'apt/dists/preview/InRelease', 'apt/dists/preview/main/binary-amd64/Packages.xz',
+                  'apt/dists/preview/main/binary-arm64/Packages.xz', 'apt/tractanda-archive-keyring.asc'}
+        paths = {'index.html': (self.source / 'docs/index.html').read_bytes()}
+        with tarfile.open(self.directory / 'apt-site.tar.gz', 'r:gz') as archive:
+            for member in archive:
+                name = member.name.removeprefix('./')
+                if name in wanted:
+                    if name in paths or not member.isfile() or member.size > 32 * 1024 * 1024:
+                        raise RuntimeError('Published APT archive contains invalid or duplicate site metadata.')
+                    paths[name] = archive.extractfile(member).read()
+        if set(paths) != wanted | {'index.html'}:
+            raise RuntimeError('Published APT archive lacks required site metadata.')
+        try:
+            for name, local in paths.items():
+                data = subprocess.check_output(['/usr/bin/curl', '--fail', '--silent', '--show-error', '--location',
+                                                '--max-filesize', str(len(local) + 1),
+                                                '--header', 'Cache-Control: no-cache', site + name])
+                if data != local:
+                    raise ValueError('Published Pages bytes differ: ' + name)
+        except (OSError, ValueError, subprocess.CalledProcessError) as error:
+            self.state.update(status='waitingForPages', activeStep='pages', pauseReason=str(error))
+            self.save()
+            return None
+        return {'runID': selected['databaseId'], 'event': selected['event'], 'headSha': selected['headSha'],
+                'headBranch': selected['headBranch'], 'createdAt': selected['createdAt'],
+                'releaseTag': tag, 'aptAssetSHA256': expected, 'url': site + 'apt/'}
 
     def verify_published_package(self):
         published = self.state['steps'].get('publish', {}).get('result', {})
@@ -1654,7 +1712,12 @@ class Pipeline:
         if 'ci' not in self.state['steps']: self.wait_for_ci(ci_timeout)
         self.step('publish', self.publish)
         self.step('published-source', self.verify_published_source)
-        self.step('pages', self.published_pages)
+        if 'pages' not in self.state['steps']:
+            result = self.published_pages()
+            if result is None:
+                return
+            self.state['steps']['pages'] = {'completedAt': now(), 'result': result}
+            self.save()
         self.step('install', self.install)
         self.state['steps']['health'] = {'completedAt': now(), 'result': self.health()}
         self.save()
