@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 // Exercise the shipped board loader against a deterministic native API fixture.
-const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
+const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),crypto=require('node:crypto');
 const live=fs.readFileSync('Sources/TractandaWeb/Resources/LiveClient.js','utf8');
 const text=value=>({type:'text',value}), ref=itemID=>({type:'reference',value:{itemID}});
 const refs=ids=>({type:'list',value:ids.map(ref)});
+// Native clock-sensitive queries carry an opaque token derived from item state
+// and evaluatedAt, not the item state returned by Store/info and Item/get.
+const queryToken=(state,at)=>crypto.createHash('sha256').update(JSON.stringify([state,at])).digest('hex');
 function category(id,parents=[],extras={}) {return {id,revisionId:id+'-revision',resolution:{itemID:id,status:'ready'},fields:{itemID:text(id),revisionID:text(id+'-revision'),subject:text(id),selection:text('TRUEPREDICATE'),categoryParents:refs(parents),requestIdentity:text('large replay receipt'),...extras}};}
 const categories=[category('projects'),category('project',['projects'],{filterCategories:refs(['filter'])}),category('status'),category('ready',['status']),category('done',['status']),category('filter')];
 const task={id:'task',revisionId:'task-revision',resolution:{itemID:'task',status:'ready'},fields:{itemID:text('task'),revisionID:text('task-revision'),subject:text('Task'),modifiedAt:{type:'date',value:'2026-09-26T00:00:00Z'},body:text('Complete body'),workingNotes:text('Keep these notes'),requestIdentity:text('large replay receipt'),foreign:{type:'integer',value:'42'},categoryOverrides:{type:'object',value:{unrelated:text('exclude')}}}};
@@ -11,15 +14,17 @@ const taskB={id:'taskB',revisionId:'taskB-revision',resolution:{itemID:'taskB',s
 const records=new Map([...categories,task].map(r=>[r.fields.itemID.value,r]));
 function fixture(options={}) {
  if(options.multipleTasks)records.set('taskB',taskB);
- let state='one';const calls=[],batches=[];
+ let state='one',changes=0;const calls=[],batches=[];
  const nativeCall=async(method,args={})=>{
   calls.push({method,args});
   if(method==='TractandaStore/info')return {state};
   if(method==='TractandaItem/query') {
+   if(options.changeOnMembership&&args.filter.categoryPath?.at(-1)==='ready')state='changed-'+(++changes);
    const ids=args.filter.expression?categories.map(c=>c.fields.itemID.value):args.filter.categoryPath.at(-1)==='done'?[]:options.conflictsAvailable?[]:options.multipleTasks?['task','taskB']:['task'];
-   return {ids:ids.slice(args.position,args.position+args.limit),position:args.position,total:ids.length,queryState:state,conflictsAvailable:!!options.conflictsAvailable};
+   return {ids:ids.slice(args.position,args.position+args.limit),position:args.position,total:ids.length,queryState:args.filter.categoryPath?queryToken(state,args.filter.at):state,conflictsAvailable:!!options.conflictsAvailable};
   }
   assert.ok(['TractandaItem/get','TractandaItem/getBounded'].includes(method));
+  if(options.changeOnGet)state='changed-'+(++changes);
   const list=args.ids.filter(id=>!(options.unresolvedTask&&id==='task')&&!(options.remaining||[]).includes(id)&&!(options.oversized||[]).includes(id)).map(id=>{
    const original=records.get(id);assert.ok(original);
    const r=structuredClone(original);
@@ -48,13 +53,14 @@ function savedFixture(options={}) {
  const calls=[],batches=[],view={id:'view',resolution:{itemID:'view',status:'ready'},fields:{itemID:text('view'),revisionID:text('view-revision'),subject:text('Saved board'),
   viewDefinition:{type:'object',value:{presentation:{type:'object',value:{sections:refs(['ready','done'])}}}},
   filterCategories:refs(['filter'])}};
- const records=new Map([...categories,task,view].map(record=>[record.fields.itemID.value,record]));
+ const records=new Map([...categories,task,taskB,view].map(record=>[record.fields.itemID.value,record]));
  const nativeCall=async(method,args={})=>{
   calls.push({method,args});
   if(method==='TractandaStore/info')return {state:'one'};
   if(method==='TractandaItem/query') {
-   const ids=args.filter.sectionID==='done'?[]:['task'];
-   return {ids:ids.slice(args.position,args.position+args.limit),position:args.position,total:ids.length,queryState:'one'};
+   const ids=args.filter.sectionID==='done'?[]:options.paged&&args.filter.viewID&&!args.filter.sectionID?['task','taskB']:['task'];
+   return {ids:ids.slice(args.position,args.position+(options.paged?1:args.limit)),position:args.position,total:ids.length,
+    queryState:queryToken('one',args.filter.at)+(options.changeQueryOnSecondPage&&args.position>0?'changed':'')};
   }
   assert.ok(['TractandaItem/get','TractandaItem/getBounded'].includes(method));
   const list=args.ids.filter(id=>!(options.unresolved||[]).includes(id)&&!(options.remaining||[]).includes(id)&&!(options.oversized||[]).includes(id)&&!(options.missing||[]).includes(id)).map(id=>structuredClone(records.get(id)));
@@ -74,6 +80,20 @@ function savedFixture(options={}) {
  vm.runInContext(live.slice(live.indexOf('  function plain('),live.indexOf('  async function refreshProjectViews(')),context);
  return {context,calls,batches};
 }
+function invalidTokenFixture(path,token,laterPage=false) {
+ const f=path==='saved'?savedFixture({paged:true}):fixture({multipleTasks:true});
+ const nativeCalls=f.context.nativeCalls;
+ f.context.nativeCalls=async entries=>{
+  const pages=await nativeCalls(entries.map(([method,args])=>[method,method==='TractandaItem/query'?{...args,limit:1}:args]));
+  entries.forEach(([method,args],index)=>{
+   if(method==='TractandaItem/query'&&(!laterPage||args.position>0)) {
+    if(token===undefined)delete pages[index].queryState;else pages[index].queryState=token;
+   }
+  });
+  return pages;
+ };
+ return f;
+}
 (async()=>{
  const protocolCalls=[];
  const protocol=vm.createContext({nativeCapability:'test-capability',accessToken:'token',AbortSignal,apiError:(code,message)=>Object.assign(new Error(message),{code}),showServerVersion:()=>{},forgetAccessToken:()=>{},showSignIn:()=>{},pendingWrite:null,
@@ -88,18 +108,43 @@ function savedFixture(options={}) {
  assert.equal(paired.length,2);
  assert.deepEqual(protocolCalls[0].map(call=>call[2]),['web-0','web-1'],'Each call has a unique matching ID.');
  await assert.rejects(protocol.nativeCalls(Array.from({length:9},()=>['TractandaStore/info',{}])),error=>error.code==='invalidRequest');
+ for(const path of ['revisions','groups','saved'])for(const laterPage of [false,true])for(const token of [undefined,null,'',0,{},[]]) {
+  const malformed=invalidTokenFixture(path,token,laterPage);
+  const read=path==='revisions'?()=>malformed.context.queryRevisions({categoryPath:['project','ready']},'one'):
+   path==='groups'?()=>malformed.context.queryIDGroups([{categoryPath:['project','ready']}],'one'):
+    ()=>malformed.context.readLiveBoard('view');
+  await assert.rejects(read,error=>error.code==='invalidResponse',
+   'Malformed query tokens must fail closed in '+path+' on the '+(laterPage?'later':'first')+' page.');
+ }
  const groupedBatches=[];
  const grouped=vm.createContext({currentDate:()=> '2026-09-26T12:00:00Z',apiError:(code,message)=>Object.assign(new Error(message),{code}),nativeCalls:async entries=>{
   groupedBatches.push(entries.length);
-  return entries.map(([_method,args])=>{
+  return entries.map(([method,args])=>{
+   if(method==='TractandaStore/info')return {state:'one'};
    const total=args.filter.categoryPath[0]==='long'?70:1;
-   return {ids:Array.from({length:Math.min(64,total-args.position)},(_,index)=>args.filter.categoryPath[0]+'-'+(args.position+index)),total,queryState:'one'};
+   return {ids:Array.from({length:Math.min(64,total-args.position)},(_,index)=>args.filter.categoryPath[0]+'-'+(args.position+index)),total,queryState:queryToken('one',args.filter.at)+args.filter.categoryPath[0]};
   });
  }});
  vm.runInContext(live.slice(live.indexOf('  function queryArguments('),live.indexOf('  async function queryRevisions(')),grouped);
  const groups=await grouped.queryIDGroups(['long',...Array.from({length:9},(_,index)=>'short-'+index)].map(id=>({categoryPath:[id]})),'one');
+ assert.ok(groups,'Clock-sensitive query tokens must not be compared to item state.');
  assert.equal(groups[0].length,70);
- assert.deepEqual(groupedBatches,[8,3],'Large membership sets page in a later bounded envelope.');
+ assert.deepEqual(groupedBatches,[8,5],'Large membership sets page in bounded envelopes that also prove item state.');
+ const groupGuard=(changedItemState,changedQueryState)=>{
+  let queryCalls=0;
+  const context=vm.createContext({currentDate:()=> '2026-09-26T12:00:00Z',apiError:(code,message)=>Object.assign(new Error(message),{code}),nativeCalls:async entries=>entries.map(([method,args])=>{
+   if(method==='TractandaStore/info')return {state:changedItemState?'two':'one'};
+   queryCalls++;
+   return {ids:changedItemState?[]:[queryCalls===1?'first':'second'],total:changedItemState?0:2,
+    queryState:queryToken('one',args.filter.at)+(changedQueryState&&queryCalls>1?'changed':'')};
+  })});
+  vm.runInContext(live.slice(live.indexOf('  function queryArguments('),live.indexOf('  async function queryRevisions(')),context);
+  return context;
+ };
+ assert.equal(await groupGuard(true,false).queryIDGroups([{categoryPath:['empty']}],'one'),null,
+  'An empty ID-only result still rejects a changed item state.');
+ assert.equal(await groupGuard(false,true).queryIDGroups([{categoryPath:['paged']}],'one'),null,
+  'Membership pages must retain their own query token even when item state is stable.');
  const pageLimits=[];
  const paged=vm.createContext({nativeCalls:async entries=>{
   const limit=entries[0][1].limit;pageLimits.push(limit);
@@ -126,11 +171,11 @@ const continuationCalls=[];
 const safeContinuation=vm.createContext({
  currentDate:()=> '2026-09-26T12:00:00Z',
  apiError:(code,message)=>Object.assign(new Error(message),{code}),
- queryPageWithRevisions:async(_args,position,_projection,cursor)=>{
-  continuationCalls.push({position,cursor});
+ queryPageWithRevisions:async(args,position,_projection,cursor)=>{
+  continuationCalls.push({position,cursor,at:args.at});
   if(cursor)throw Object.assign(new Error('expired'),{code:'invalidCursor'});
   const ids=[position===0?'first':'second'];
-  return [{ids,position,total:2,queryState:'same-state',nextCursor:position===0?'next':null},
+  return [{ids,position,total:2,queryState:queryToken('same-state',args.at),nextCursor:position===0?'next':null},
     {list:ids.map(itemID=>({id:itemID,resolution:{status:'ready'}})),state:'same-state',notFound:[]}];
  }
 });
@@ -138,8 +183,19 @@ vm.runInContext(live.slice(live.indexOf('  function queryArguments('),live.index
 const safelyLoaded=await safeContinuation.queryRevisions({expression:'classID == "Item"'},'same-state',null);
 assert.equal(safelyLoaded.revisions.length,2);
 assert.deepEqual(continuationCalls,[
- {position:0,cursor:null},{position:1,cursor:'next'},{position:1,cursor:null}
+ {position:0,cursor:null,at:'2026-09-26T12:00:00Z'},{position:1,cursor:'next',at:'2026-09-26T12:00:00Z'},{position:1,cursor:null,at:'2026-09-26T12:00:00Z'}
 ],'An invalid cursor retries at the same absolute position and still uses the caller state guard.');
+for(const change of ['query','item']) {
+ const guarded=vm.createContext({currentDate:()=> '2026-09-26T12:00:00Z',apiError:(code,message)=>Object.assign(new Error(message),{code}),
+  queryPageWithRevisions:async(args,position)=>{
+   const id=position===0?'first':'second';
+   return [{ids:[id],position,total:2,queryState:queryToken('one',args.at)+(change==='query'&&position>0?'changed':'')},
+    {list:[{id,resolution:{status:'ready'}}],notFound:[],state:change==='item'&&position>0?'two':'one'}];
+  }});
+ vm.runInContext(live.slice(live.indexOf('  function unresolvedReadItems('),live.indexOf('  async function queryIDGroups('))+live.slice(live.indexOf('  async function queryRevisions('),live.indexOf('  async function projectGraph(')),guarded);
+ assert.equal(await guarded.queryRevisions({categoryPath:['project','status']},'one'),null,
+  'A later page changing '+change+' state must discard the whole board read.');
+}
 const f=fixture(),snapshot={};
  const projects=await f.context.discoverProjectViews('project',0,snapshot);
  assert.deepEqual(Array.from(projects,p=>p.id),['projects','project']);
@@ -152,7 +208,8 @@ const f=fixture(),snapshot={};
  assert.equal(loaded.revisions.get('task').fields.categoryOverrides.value.unrelated.value,'exclude');
  assert.equal(loaded.revisions.get('task').fields.requestIdentity,undefined);
  assert.equal(f.calls.filter(c=>c.args.filter?.expression).length,1,'Reuse the checked category graph within one refresh.');
- assert.deepEqual(f.batches,[2,2,3],'Query and get share a request; membership and filter lookups share another.');
+ assert.deepEqual(f.batches,[2,2,4],'Query and get share a request; membership and filter lookups share a guarded envelope.');
+ assert.ok(f.calls.filter(c=>c.args.filter?.categoryPath).every(c=>c.args.filter.at==='2026-09-26T12:00:00Z'),'Board and membership queries pin one evaluation clock.');
  const gets=f.calls.filter(c=>c.method==='TractandaItem/getBounded');
  assert.equal(gets.length,2,'Fetch categories and card content once; membership lookups need IDs only.');
  assert.ok(gets[0].args.fieldProperties.includes('viewDefinition'));
@@ -195,7 +252,11 @@ const f=fixture(),snapshot={};
  const saved=savedFixture(),savedBoard=await saved.context.readLiveBoard('view');
  assert.equal(savedBoard.data.tasks.length,1);
  assert.deepEqual(Array.from(savedBoard.data.tasks[0].categoryIDs),['ready']);
- assert.deepEqual(saved.batches,[2,3],'Saved view query/get and section/filter membership calls are batched.');
+ assert.deepEqual(saved.batches,[2,4],'Saved view query/get and guarded section/filter membership calls are batched.');
+ assert.equal((await savedFixture({paged:true}).context.readLiveBoard('view')).data.tasks.length,2,
+  'A saved board accepts a stable clock-sensitive token across multiple pages.');
+ await assert.rejects(savedFixture({paged:true,changeQueryOnSecondPage:true}).context.readLiveBoard('view'),error=>error.code==='stateChanged',
+  'A saved board still rejects a query token changing between pages.');
  for(const [options,code] of [[{unresolved:['done']},'itemUnresolved'],[{remaining:['done']},'categoryUnavailable'],[{oversized:['done']},'categoryUnavailable'],[{missing:['done']},'categoryUnavailable']]) {
   const invalid=savedFixture(options);
   await assert.rejects(invalid.context.readLiveBoard('view'),error=>error.code===code,'A two-section board must validate both categories before retaining rows.');
@@ -229,6 +290,33 @@ const f=fixture(),snapshot={};
  assert.equal(controls.get('project-counts').hidden,true,'A failed read must not claim zero items or columns.');
  assert.equal(controls.get('filter-count').textContent,'Board unavailable');
  assert.equal(failed.context.isConnected,false);
+ for(const option of ['changeOnGet','changeOnMembership']) {
+  const racing=fixture({[option]:true});
+  const retainedEdit={request:{operationID:'original-operation',expectedRevisionID:'original-revision'},candidate:{title:'Unsaved title'}};
+  failed.context.pendingWrite=retainedEdit;failed.context.draft=retainedEdit.candidate;
+  controls.set('task-dialog',{open:true});controls.set('edit-title',{value:'Unsaved title'});
+  failed.context.readLiveBoard=racing.context.readLiveBoard;
+  assert.equal(await failed.context.refreshLiveBoard(),false,'A genuinely changing board still exhausts the bounded retry.');
+  assert.equal(racing.calls.filter(c=>c.method==='TractandaStore/info').length,option==='changeOnGet'?3:6,
+   'Exactly three attempts run, each with the applicable store-state proof.');
+  assert.equal(failed.context.pendingWrite,retainedEdit,'A failed refresh retains the exact original edit request.');
+  assert.equal(controls.get('task-dialog').open,true,'A failed refresh keeps the draft dialog open.');
+  assert.equal(controls.get('edit-title').value,'Unsaved title','A failed refresh preserves draft input.');
+  assert.equal(failed.context.draft,retainedEdit.candidate,'A failed refresh preserves the open draft object.');
+  assert.equal(failed.context.revisionsByID.size,0,'A changed board cannot leave stale editable revisions.');
+  assert.match(controls.get('board-load-error').textContent,/project board changed during refresh/);
+ }
+ const retainedEdit=failed.context.pendingWrite;
+ const malformedBoard=invalidTokenFixture('saved',undefined);
+ failed.context.readLiveBoard=()=>malformedBoard.context.readLiveBoard('view');
+ assert.equal(await failed.context.refreshLiveBoard(),false,'A missing query token cannot publish a board.');
+ assert.equal(failed.context.pendingWrite,retainedEdit,'Malformed reads retain the original pending request.');
+ assert.equal(failed.context.draft,retainedEdit.candidate,'Malformed reads retain the draft object.');
+ assert.equal(controls.get('task-dialog').open,true);
+ assert.equal(controls.get('edit-title').value,'Unsaved title');
+ assert.equal(failed.context.revisionsByID.size,0,'Malformed reads cannot restore stale editable revisions.');
+ assert.match(controls.get('board-load-error').textContent,/valid query state/);
+ failed.context.pendingWrite=null;
  failed.context.readLiveBoard=async()=>({data:{tasks:[],columns:[]},revisions:new Map(),projectionNotice:true,unresolved:[{itemID:'oldA',status:'conflicted'}]});
  failed.context.isConnected=true;failed.context.data={tasks:[{id:'oldA'},{id:'oldB'}],columns:[{id:'existing'}]};
  assert.equal(await failed.context.refreshLiveBoard(),true);

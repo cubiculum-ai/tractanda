@@ -330,17 +330,22 @@
   function readyReadItems(page) {return page.list.filter(item=>!item.resolution||item.resolution.status==='ready');}
 
   async function queryIDGroups(argumentsList,state) {
-    const positions=argumentsList.map(()=>0),groups=argumentsList.map(()=>[]),at=currentDate();
+    const positions=argumentsList.map(()=>0),groups=argumentsList.map(()=>[]),queryStates=argumentsList.map(()=>null),at=currentDate();
     let pending=argumentsList.map((_,index)=>index);
     while(pending.length) {
-      const current=pending.slice(0,8);
-      pending=pending.slice(8);
-      const pages=await nativeCalls(current.map(index=>['TractandaItem/query',queryArguments({
+      const current=pending.slice(0,7);
+      pending=pending.slice(7);
+      const pages=await nativeCalls([...current.map(index=>['TractandaItem/query',queryArguments({
         ...argumentsList[index],at:argumentsList[index].at||at,position:positions[index],limit:64
-      })]));
+      })]),['TractandaStore/info',{}]]);
+      // A query token includes its evaluation clock and is distinct from item state.
+      // ID-only queries need an explicit item-state read; keep the envelope bounded.
+      if(pages[current.length].state!==state)return null;
       for(let offset=0;offset<current.length;offset++) {
         const index=current[offset],page=pages[offset];
-        if(page.queryState!==state)return null;
+        if(typeof page.queryState!=='string'||!page.queryState.length)throw apiError('invalidResponse','The server omitted a valid query state.');
+        if(queryStates[index]!==null&&page.queryState!==queryStates[index])return null;
+        queryStates[index]=page.queryState;
         groups[index].push(...page.ids);positions[index]+=page.ids.length;
         if(positions[index]<page.total) {
           if(!page.ids.length)throw apiError('invalidResponse','An incomplete query page was empty.');
@@ -365,7 +370,7 @@
     }
   }
   async function queryRevisions(argumentsObject, state, properties) {
-    const at=argumentsObject.at||currentDate(),revisions=[],unresolved=[],unhydratedIDs=[];let cursor=null,conflictsAvailable=false,completeness='complete';
+    const at=argumentsObject.at||currentDate(),revisions=[],unresolved=[],unhydratedIDs=[];let cursor=null,queryState=null,conflictsAvailable=false,completeness='complete';
     for(let position=0;;) {
       // The get uses this request's query IDs, so each page is coherent and keeps
       // full editor content without the server's replay receipt.
@@ -378,7 +383,11 @@
         pair=await queryPageWithRevisions({...argumentsObject,at},position,projection,null);
       }
       const [query,page]=pair;
-      if(query.queryState!==state||page.state!==state||page.notFound.length)return null;
+      if(typeof query.queryState!=='string'||!query.queryState.length)throw apiError('invalidResponse','The server omitted a valid query state.');
+      // Compare query tokens only with pages of the same fixed-clock query.
+      // The get response separately proves that item state still matches the refresh.
+      if((queryState!==null&&query.queryState!==queryState)||page.state!==state||page.notFound.length)return null;
+      queryState=query.queryState;
       const pageUnresolved=unresolvedReadItems(page);
       const classified=[...page.list.map(item=>item.id),...(page.remainingIDs||[]),...(page.oversizedIDs||[])];
       if(new Set(classified).size!==classified.length||classified.length!==query.ids.length||query.ids.some(id=>!classified.includes(id)))
@@ -488,12 +497,14 @@
       if((categoryResult.notFound||[]).length)throw apiError('categoryUnavailable','A required saved-view category is unavailable.');
       const categories=new Map(readyReadItems(categoryResult).filter(r=>!r.fields.isDeleted?.value && r.fields.selection).map(r=>[fieldText(r.fields,'itemID'),r]));
       if(requiredCategories.some(id=>!categories.has(id)))throw apiError('categoryUnavailable','The complete saved-view category definition is unavailable.');
-      let hasChanged=false,projectionNotice=false;
+      let hasChanged=false,projectionNotice=false,queryState=null;
       const unhydratedIDs=[];
       const revisions=[];
       for(let position=0;;){
         const [query,page]=await queryPageWithRevisions({viewID,at},position,{projection:'content'});
-        if(query.queryState!==info.state||page.state!==info.state||page.notFound.length){hasChanged=true;break;}
+        if(typeof query.queryState!=='string'||!query.queryState.length)throw apiError('invalidResponse','The server omitted a valid query state.');
+        if((queryState!==null&&query.queryState!==queryState)||page.state!==info.state||page.notFound.length){hasChanged=true;break;}
+        queryState=query.queryState;
         const unresolved=unresolvedReadItems(page);
         const classified=[...page.list.map(item=>item.id),...(page.remainingIDs||[]),...(page.oversizedIDs||[])];
         if(new Set(classified).size!==classified.length||classified.length!==query.ids.length||query.ids.some(id=>!classified.includes(id)))
