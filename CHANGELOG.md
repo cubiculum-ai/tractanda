@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.0-poc.18 — collection edits and startup recovery
+
+- Add TRAC-131 guarded list append and map-key edits, plus bounded list-tail reads, to the native API, Swift client and MCP. Preserve strict revision guards, ordinary complete revisions, permissions and original-intent retries; update the served references and shared agent skill.
+- Recover an embedding listener from address-in-use in the same process without a startup deadline, and bind Linux helper reuse to the actual compiler source.
+- Use Kali Rolling as the Linux package baseline for amd64 and arm64, checking the official AMD64 Swift runtime's CX16 requirement.
+- Allow verified external disposable macOS build scratch with an internal fallback; retain release source and final artifacts internally.
+
 ## Unreleased
 
 - Add typed scalar/list and current-ACL indexed queries, live seek paging, lazy catalogue reads, streamed recovery, incremental saved-view/category candidates, depth-first canonical verification, and FULL-synchronous WAL with isolated concurrent read leases. Native get/query/history/category results recheck current permissions and state before delivery; unsupported shapes retain exact bounded fallbacks.

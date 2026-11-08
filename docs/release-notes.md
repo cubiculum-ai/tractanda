@@ -6,6 +6,16 @@ From **0.1.0-poc.6**, generic content uses the concrete `Item` class. Shipped te
 
 From **0.1.0-poc.10**, extracted-text diagnostics distinguish canonical text, FTS inputs, semantic source/chunk parameters and actual index freshness. Use the served query reference and the declared `tractanda.extracted-text.v1` feature.
 
+## 0.1.0-poc.18 — collection edits and startup recovery
+
+TRAC-131 adds guarded list appends, individual map-key edits and bounded list-tail reads to the native API, Swift client and MCP adapter. Partial edits still require the current revision ID and create an ordinary complete revision. Exact retries retain their original operation ID; concurrent edits still require reconciliation. Refresh the shared agent skill and reconnect the harness to discover `tractanda_list_tail` and the updated commit schema. The served item reference describes the arguments and feature checks.
+
+The rebuilt embedding host retains its loaded model and retries an occupied listening port in the same process, including legacy sockets in TIME_WAIT. It reports progress without a startup deadline; other startup failures remain errors. Linux helper reuse now requires the actual compiler-source receipt, rather than accepting an older executable based on a newer source label.
+
+The Linux package baseline is Kali Rolling on amd64 and arm64, using the official Swift 6.4 runtime. AMD64 requires CX16; the installer checks the kernel-reported feature on every online CPU. A `.deb` filename does not establish compatibility with other distributions. macOS disposable build scratch can use a verified external volume, with an internal fallback when that volume is absent.
+
+This release does not change the canonical format, reader floor, model selection or cluster merge rules. Completed `.17`/`.17.1` stores use the compatible package-upgrade path; older stores must first complete the `.17.1` bridge described below. Qualification applies to the exact artifacts and checks recorded with the release.
+
 ## 0.1.0-poc.17.1 — retain reviews backed by canonical history
 
 Pending and rejected reviews can refer to an exact revision already present in canonical history after peer synchronization has retired its private stage. The installer preserves the review ID, disposition and context. An explicit administrator resolution can use the verified canonical bytes while preserving the original revision. The review still requires the existing current-state and permissions checks. A missing or contradictory revision is refused.
