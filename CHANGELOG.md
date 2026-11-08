@@ -4,6 +4,7 @@
 
 - Add TRAC-131 guarded list append and map-key edits, plus bounded list-tail reads, to the native API, Swift client and MCP. Preserve strict revision guards, ordinary complete revisions, permissions and original-intent retries; update the served references and shared agent skill.
 - Recover an embedding listener from address-in-use in the same process without a startup deadline, and bind Linux helper reuse to the actual compiler source.
+- Avoid applying TCP-only keepalive options to Unix peer sockets; retain the same keepalive settings for both TCP directions, including pre-connect initialization.
 - Use Kali Rolling as the Linux package baseline for amd64 and arm64, checking the official AMD64 Swift runtime's CX16 requirement.
 - Allow verified external disposable macOS build scratch with an internal fallback; retain release source and final artifacts internally.
 

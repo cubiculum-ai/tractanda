@@ -268,6 +268,7 @@ def exercise(binary, adapter, root, checks):
                 'tractanda_learning_status',
                 'tractanda_learning_suggest',
                 'tractanda_learning_train',
+                'tractanda_list_tail',
                 'tractanda_memberships',
                 'tractanda_query',
                 'tractanda_resolve',

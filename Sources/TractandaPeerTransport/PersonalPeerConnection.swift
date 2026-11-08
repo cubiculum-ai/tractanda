@@ -126,21 +126,40 @@ package final class PersonalPeerConnection: Sendable {
         }
     }
     private static func configureKeepalive(on channel: any Channel) -> EventLoopFuture<Void> {
-        // Embedded channels have no kernel socket. Both native peer roles use TCP sockets.
+        // Embedded channels have no kernel socket. A Unix-domain SocketChannel is also an
+        // option provider, but rejects TCP options. Read the actual socket family because
+        // outgoing channels may not yet have cached local/remote addresses during installation.
         guard channel is any SocketOptionProvider else { return channel.eventLoop.makeSucceededVoidFuture() }
         #if canImport(Darwin)
             let idleOption = TCP_KEEPALIVE
         #else
             let idleOption = TCP_KEEPIDLE
         #endif
-        // Allow at least 240 seconds after the first unanswered probe. A responsive TCP peer
-        // can keep an operation in flight for as long as it needs.
-        return channel.setOption(.tcpOption(.init(rawValue: idleOption)), value: 60).flatMap {
-            channel.setOption(.tcpOption(.init(rawValue: TCP_KEEPINTVL)), value: 30)
-        }.flatMap {
-            channel.setOption(.tcpOption(.init(rawValue: TCP_KEEPCNT)), value: 9)
-        }.flatMap {
-            channel.setOption(.socketOption(.so_keepalive), value: 1)
+        return channel.eventLoop.submit {
+            try channel.pipeline.syncOperations.withUnsafeTransportIfAvailable(
+                of: NIOBSDSocket.Handle.self
+            ) { handle in
+                var address = sockaddr_storage()
+                var length = socklen_t(MemoryLayout<sockaddr_storage>.size)
+                let result = withUnsafeMutablePointer(to: &address) { storage in
+                    storage.withMemoryRebound(to: sockaddr.self, capacity: 1) { pointer in
+                        getsockname(handle, pointer, &length)
+                    }
+                }
+                guard result == 0 else { throw IOError(errnoCode: errno, reason: "getsockname") }
+                return Int32(address.ss_family) == AF_UNIX
+            } ?? false
+        }.flatMap { isUnixDomain in
+            if isUnixDomain { return channel.eventLoop.makeSucceededVoidFuture() }
+            // Allow at least 240 seconds after the first unanswered probe. A responsive TCP peer
+            // can keep an operation in flight for as long as it needs.
+            return channel.setOption(.tcpOption(.init(rawValue: idleOption)), value: 60).flatMap {
+                channel.setOption(.tcpOption(.init(rawValue: TCP_KEEPINTVL)), value: 30)
+            }.flatMap {
+                channel.setOption(.tcpOption(.init(rawValue: TCP_KEEPCNT)), value: 9)
+            }.flatMap {
+                channel.setOption(.socketOption(.so_keepalive), value: 1)
+            }
         }
     }
     package func request(_ request: PeerExchangeRequest) -> EventLoopFuture<Data> {

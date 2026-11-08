@@ -108,10 +108,13 @@ final class PersonalPeerConnectionTests: XCTestCase {
             for entry in installed.snapshot + accepted.snapshot { try? await entry.connection.close().get() }
         }
         let port = try XCTUnwrap(listener.localAddress?.port)
+        let initializedBeforeConnect = Mutex(false)
         _ = try await ClientBootstrap(group: group).channelInitializer { channel in
-            PersonalPeerConnection.install(on: channel, pairing: clientPairing, operations: operations)
+            initializedBeforeConnect.withLock { $0 = channel.remoteAddress == nil }
+            return PersonalPeerConnection.install(on: channel, pairing: clientPairing, operations: operations)
                 .map { installed.add($0, on: channel) }
         }.connect(host: "127.0.0.1", port: port).get()
+        XCTAssertTrue(initializedBeforeConnect.withLock { $0 })
         let (left, leftSocket) = try XCTUnwrap(installed.snapshot.first)
         let readyLeft = try await left.ready.get()
         XCTAssertEqual(readyLeft.remoteReplicaID, rightID)
@@ -144,6 +147,61 @@ final class PersonalPeerConnectionTests: XCTestCase {
         let reply = try? await pending.get()
         XCTAssertNil(reply, "A disconnected peer returned a successful pending reply.")
         try await left.closed.get()
+    }
+
+    func testActualUnixDomainTLSAndBidirectionalRequestsDoNotApplyTCPKeepalive() async throws {
+        let directory = URL(fileURLWithPath: "/tmp/trac-peer-uds-" + String(UUID().uuidString.prefix(8)))
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try UUID.makeVersion1().uuidString.lowercased()
+        let leftID = try UUID.makeVersion1().uuidString.lowercased()
+        let rightID = try UUID.makeVersion1().uuidString.lowercased()
+        let pairingID = try UUID.makeVersion1().uuidString.lowercased()
+        func pairing(local: String, remote: String, initiator: Bool) throws -> PeerPairing {
+            try PeerPairing(
+                credential: PeerCredential(
+                    binding: PeerExchangeBinding(
+                        peerID: initiator ? "right-out" : "left-in", storeID: store,
+                        localReplicaID: local, remoteReplicaID: remote, pairingID: pairingID,
+                        localIsInitiator: initiator, configurationDigest: String(repeating: "a", count: 64)),
+                    secret: Array(repeating: 0x67, count: 32)))
+        }
+        let clientPairing = try pairing(local: leftID, remote: rightID, initiator: true)
+        let responder = try PeerExchangeResponder(
+            pairings: [pairing(local: rightID, remote: leftID, initiator: false)])
+        let response = Data("{\"ready\":true}".utf8)
+        let operations = PersonalPeerOperations(validate: { _ in }, handle: { _, _ in response })
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { try? await group.shutdownGracefully() }
+        let accepted = PersonalTestConnections()
+        let installed = PersonalTestConnections()
+        let socket = directory.appendingPathComponent("peer.sock").path
+        let listener = try await ServerBootstrap(group: group).childChannelInitializer { channel in
+            PersonalPeerConnection.install(on: channel, responder: responder, operations: operations)
+                .map { accepted.add($0, on: channel) }
+        }.bind(unixDomainSocketPath: socket).get()
+        defer {
+            try? await listener.close().get()
+            for entry in installed.snapshot + accepted.snapshot { try? await entry.connection.close().get() }
+        }
+        _ = try await ClientBootstrap(group: group).channelInitializer { channel in
+            PersonalPeerConnection.install(on: channel, pairing: clientPairing, operations: operations)
+                .map { installed.add($0, on: channel) }
+        }.connect(unixDomainSocketPath: socket).get()
+        let (left, leftSocket) = try XCTUnwrap(installed.snapshot.first)
+        let readyLeft = try await left.ready.get()
+        XCTAssertEqual(readyLeft.remoteReplicaID, rightID)
+        let (right, rightSocket) = try XCTUnwrap(accepted.snapshot.first)
+        let readyRight = try await right.ready.get()
+        XCTAssertEqual(readyRight.remoteReplicaID, leftID)
+        XCTAssertEqual(leftSocket.remoteAddress?.protocol, .unix)
+        XCTAssertEqual(rightSocket.localAddress?.protocol, .unix)
+        async let outbound = left.request(.init("personal.sync.ready")).get()
+        async let inbound = right.request(.init("personal.sync.ready")).get()
+        let replies = try await (outbound, inbound)
+        XCTAssertEqual(replies.0, response)
+        XCTAssertEqual(replies.1, response)
     }
 
     func testPersonalOperationDeadlineIsOptInAndOtherBudgetsRemainConfigurable() throws {

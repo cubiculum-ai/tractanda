@@ -387,9 +387,14 @@ final class PersonalEnrollmentRuntimeTests: XCTestCase {
             var channels: [any Channel] = []
             defer { for channel in channels { try? await channel.close().get() } }
             for count in 1...64 {
-                channels.append(
-                    try await ClientBootstrap(group: group).connect(unixDomainSocketPath: socket).get())
+                let channel = try await ClientBootstrap(group: group).connect(unixDomainSocketPath: socket)
+                    .get()
+                channels.append(channel)
                 while await runtime.enrollmentCountsForTesting().slots < count {
+                    guard channel.isActive else {
+                        XCTFail("The owned fixture channel closed before admission to slot \(count).")
+                        return
+                    }
                     try Task.checkCancellation()
                     try await Task.sleep(for: .milliseconds(1))
                 }
