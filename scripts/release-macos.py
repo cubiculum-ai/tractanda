@@ -1578,12 +1578,64 @@ class Pipeline:
                          and latest and latest.get('id') == published.get('id')))]
         runs.sort(key=lambda r: (instant(r['createdAt']), r['databaseId']), reverse=True)
         selected = runs[0] if runs else None
+        intent = self.state.get('pagesDispatchIntent')
+        if intent is not None:
+            if (intent.get('commit') != self.state['commit'] or intent.get('tag') != tag
+                    or intent.get('branch') != self.settings['branch'] or instant(intent.get('requestedAt')) is None):
+                raise RuntimeError('Saved Pages dispatch intent differs from this candidate.')
+            if (not latest or latest.get('id') != published.get('id') or self.settings['branch'] != 'main'
+                    or command(['gh', 'api', 'repos/' + repo + '/git/ref/heads/main', '--jq', '.object.sha']) != self.state['commit']):
+                raise RuntimeError('Release or remote main changed while Pages dispatch was pending.')
+            # GitHub exposes run creation at one-second resolution.
+            started = instant(intent['requestedAt']).replace(microsecond=0)
+            matches = [r for r in runs if r['event'] == 'workflow_dispatch'
+                       and instant(r['createdAt']) >= started
+                       and (intent.get('runID') is None or r['databaseId'] == intent['runID'])]
+            if len(matches) > 1:
+                raise RuntimeError('Multiple Pages runs match an uncertain dispatch; inspect before continuing.')
+            selected = matches[0] if matches else None
+            if selected is not None and intent.get('runID') is None:
+                intent['runID'] = selected['databaseId']
+                self.save()
+        if selected and selected.get('event') == 'workflow_dispatch' and selected.get('status') == 'completed' and selected.get('conclusion') != 'success':
+            raise RuntimeError('The Pages manual dispatch failed: ' + str(selected['databaseId']))
         if selected is None or (selected.get('status') == 'completed' and selected.get('conclusion') != 'success'):
+            if intent is None and any(r['event'] == 'workflow_dispatch' and r.get('status') == 'completed'
+                                      and r.get('conclusion') != 'success' for r in runs):
+                raise RuntimeError('A post-publication Pages manual dispatch failed; inspect before retry.')
+            if not latest or latest.get('id') != published.get('id'):
+                raise RuntimeError('A newer APT-bearing release prevents Pages fallback for this candidate.')
+            branch = self.settings['branch']
+            if branch != 'main' or command(['gh', 'api', 'repos/' + repo + '/git/ref/heads/' + branch,
+                                            '--jq', '.object.sha']) != self.state['commit']:
+                raise RuntimeError('Remote main differs from the release commit; refusing Pages dispatch.')
+            if intent is None:
+                intent = {'commit': self.state['commit'], 'tag': tag, 'branch': branch, 'requestedAt': now()}
+                self.state['pagesDispatchIntent'] = intent
+                self.save()  # A crash or uncertain response must never trigger a second dispatch.
+                try:
+                    dispatched = subprocess.run(['gh', 'workflow', 'run', 'manual.yml', '--repo', repo, '--ref', branch],
+                                                text=True, capture_output=True)
+                    intent['exitCode'] = dispatched.returncode
+                    match = re.search(r'https://github\.com/' + re.escape(repo) + r'/actions/runs/(\d+)(?:\s|$)', dispatched.stdout)
+                    if match:
+                        intent['runID'] = int(match.group(1)); intent['runURL'] = match.group(0).strip()
+                    if dispatched.returncode:
+                        intent['diagnostic'] = dispatched.stderr.strip()
+                except OSError as error:
+                    intent['diagnostic'] = str(error)
+                self.save()
             self.state.update(status='waitingForPages', activeStep='pages',
-                              pauseReason='Waiting for a successful post-publication Pages run for this source.')
+                              pauseReason='Waiting for the recorded Pages dispatch; no duplicate dispatch will be sent.')
             self.save()
             return None
-        self.run_command('pages', ['gh', 'run', 'watch', str(selected['databaseId']), '--repo', repo, '--exit-status'], ROOT)
+        try:
+            self.run_command('pages', ['gh', 'run', 'watch', str(selected['databaseId']), '--repo', repo, '--exit-status'], ROOT)
+        except subprocess.CalledProcessError:
+            self.state.update(status='waitingForPages', activeStep='pages',
+                              pauseReason='Waiting to recheck the Pages run after watch did not succeed.')
+            self.save()
+            return None
         site = 'https://' + repo.split('/')[0].lower() + '.github.io/' + repo.split('/')[1] + '/'
         wanted = {'apt/dists/preview/InRelease', 'apt/dists/preview/main/binary-amd64/Packages.xz',
                   'apt/dists/preview/main/binary-arm64/Packages.xz', 'apt/tractanda-archive-keyring.asc'}
@@ -1714,8 +1766,9 @@ class Pipeline:
         self.step('published-source', self.verify_published_source)
         if 'pages' not in self.state['steps']:
             result = self.published_pages()
-            if result is None:
-                return
+            while result is None:
+                time.sleep(30)
+                result = self.published_pages()
             self.state['steps']['pages'] = {'completedAt': now(), 'result': result}
             self.save()
         self.step('install', self.install)

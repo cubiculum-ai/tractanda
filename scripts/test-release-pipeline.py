@@ -57,16 +57,22 @@ class PublishedPagesTests(unittest.TestCase):
                     'headSha': 'a' * 40, 'createdAt': '2026-11-08T04:45:47Z',
                     'status': 'completed', 'conclusion': 'success'}
 
-    def invoke(self, runs, releases=None, wrong_site=None):
+    def invoke(self, runs, releases=None, wrong_site=None, branch_sha=None, dispatch_stdout='', dispatch_code=0,
+               watch_error=None):
         def api(args, **_):
+            if any('/git/ref/heads/' in arg for arg in args):
+                return branch_sha if branch_sha is not None else self.state['commit']
             return json.dumps([releases or [self.published]] if args[1] == 'api' else runs)
         def get(args, **_):
             name = args[-1].split('/repo/', 1)[1]
             return b'wrong' if name == wrong_site else self.content[name]
         with patch.object(release, 'release_info', return_value=self.published), \
                 patch.object(release, 'command', side_effect=api), patch.object(release.subprocess, 'check_output', side_effect=get), \
-                patch.object(self.pipeline, 'run_command') as watch:
+                patch.object(release, 'now', return_value='2026-11-08T04:40:00+00:00'), \
+                patch.object(release.subprocess, 'run', return_value=subprocess.CompletedProcess([], dispatch_code, dispatch_stdout, 'uncertain')) as dispatch, \
+                patch.object(self.pipeline, 'run_command', side_effect=watch_error) as watch:
             result = self.pipeline.published_pages()
+        self.dispatch = dispatch
         return result, watch
 
     def test_actual_postpublication_dispatch_selects_current_site(self):
@@ -77,18 +83,24 @@ class PublishedPagesTests(unittest.TestCase):
                          (42448103745, 'workflow_dispatch', 'v0.1.0-poc.18'))
         self.assertIn('42448103745', watch.call_args.args[1])
 
-    def test_stale_wrong_source_or_newer_failed_run_waits(self):
+    def test_stale_or_wrong_source_dispatches_once(self):
         cases = [[], [{**self.pages_run, 'createdAt': '2026-11-08T04:37:42Z'}],
-                 [{**self.pages_run, 'headSha': 'b' * 40}], [{**self.pages_run, 'headBranch': 'other'}],
-                 [self.pages_run, {**self.pages_run, 'databaseId': 42448103746, 'createdAt': '2026-11-08T04:46:00Z',
-                             'conclusion': 'failure'}]]
+                 [{**self.pages_run, 'headSha': 'b' * 40}], [{**self.pages_run, 'headBranch': 'other'}]]
         for runs in cases:
             with self.subTest(runs=runs):
+                self.state.pop('pagesDispatchIntent', None)
                 self.assertIsNone(self.invoke(runs)[0]); self.assertEqual(self.state['status'], 'waitingForPages')
+                self.dispatch.assert_called_once()
+
+    def test_manual_failure_is_terminal_without_retry(self):
+        failed = {**self.pages_run, 'conclusion': 'failure'}
+        with self.assertRaisesRegex(RuntimeError, 'manual dispatch failed'):
+            self.invoke([failed])
 
     def test_latest_release_and_live_site_bytes_are_required(self):
         newer = {**self.published, 'id': 2, 'published_at': '2026-11-09T00:00:00Z'}
-        self.assertIsNone(self.invoke([self.pages_run], releases=[self.published, newer])[0])
+        with self.assertRaisesRegex(RuntimeError, 'newer APT-bearing release'):
+            self.invoke([self.pages_run], releases=[self.published, newer])
         self.assertIsNone(self.invoke([self.pages_run], wrong_site='apt/dists/preview/InRelease')[0])
 
     def test_postpublication_release_event_is_accepted(self):
@@ -111,10 +123,63 @@ class PublishedPagesTests(unittest.TestCase):
         self.pipeline.verify_artifacts = lambda: None
         self.pipeline.published_pages = lambda: None
         with patch.object(release, 'git', side_effect=['a' * 40, '']), \
-                patch.object(self.pipeline, 'install') as install:
-            self.pipeline.run_public(0)
+                patch.object(self.pipeline, 'install') as install, \
+                patch.object(release.time, 'sleep', side_effect=InterruptedError):
+            with self.assertRaises(InterruptedError): self.pipeline.run_public(0)
         install.assert_not_called()
         self.assertNotIn('pages', self.state['steps'])
+
+    def test_uncertain_dispatch_persists_intent_and_never_duplicates(self):
+        self.assertIsNone(self.invoke([])[0]); self.dispatch.assert_called_once()
+        intent = self.state['pagesDispatchIntent']; self.assertNotIn('runID', intent)
+        self.assertIsNone(self.invoke([])[0]); self.dispatch.assert_not_called()
+        result, _ = self.invoke([self.pages_run])
+        self.assertEqual(result['runID'], self.pages_run['databaseId'])
+        self.assertEqual(intent['runID'], self.pages_run['databaseId']); self.dispatch.assert_not_called()
+
+    def test_returned_run_url_binds_exact_id_and_no_duplicate(self):
+        url = 'https://github.com/owner/repo/actions/runs/42448103745\n'
+        self.assertIsNone(self.invoke([], dispatch_stdout=url)[0]); self.dispatch.assert_called_once()
+        self.assertEqual(self.state['pagesDispatchIntent']['runID'], 42448103745)
+        other = {**self.pages_run, 'databaseId': 42448103746}
+        self.assertIsNone(self.invoke([other])[0]); self.dispatch.assert_not_called()
+        self.assertEqual(self.invoke([self.pages_run])[0]['runID'], 42448103745)
+
+    def test_branch_drift_prevents_dispatch(self):
+        with self.assertRaisesRegex(RuntimeError, 'Remote main differs'):
+            self.invoke([], branch_sha='b' * 40)
+        self.assertNotIn('pagesDispatchIntent', self.state)
+
+    def test_intent_saved_before_dispatch_and_failure_is_not_retried(self):
+        saved = []
+        self.pipeline.save = lambda: saved.append(json.loads(json.dumps(self.state)))
+        self.assertIsNone(self.invoke([], dispatch_code=1)[0]); self.dispatch.assert_called_once()
+        self.assertIn('pagesDispatchIntent', saved[0])
+        self.assertNotIn('exitCode', saved[0]['pagesDispatchIntent'])
+        self.assertEqual(self.state['pagesDispatchIntent']['exitCode'], 1)
+        self.assertIsNone(self.invoke([])[0]); self.dispatch.assert_not_called()
+
+    def test_ambiguous_unknown_intent_and_later_branch_drift_refuse(self):
+        self.assertIsNone(self.invoke([])[0])
+        other = {**self.pages_run, 'databaseId': 42448103746}
+        with self.assertRaisesRegex(RuntimeError, 'Multiple Pages runs'):
+            self.invoke([self.pages_run, other])
+        with self.assertRaisesRegex(RuntimeError, 'remote main changed'):
+            self.invoke([], branch_sha='b' * 40)
+
+    def test_mismatched_saved_intent_refuses(self):
+        self.state['pagesDispatchIntent'] = {'commit': 'b' * 40, 'tag': 'v0.1.0-poc.18',
+                                             'branch': 'main', 'requestedAt': '2026-11-08T04:40:00Z'}
+        with self.assertRaisesRegex(RuntimeError, 'intent differs'):
+            self.invoke([])
+
+    def test_release_run_watch_failure_rechecks_before_fallback(self):
+        pending = {**self.pages_run, 'event': 'release', 'headBranch': 'v0.1.0-poc.18',
+                   'status': 'in_progress', 'conclusion': None}
+        self.assertIsNone(self.invoke([pending], watch_error=subprocess.CalledProcessError(1, 'watch'))[0])
+        self.assertNotIn('pagesDispatchIntent', self.state)
+        failed = {**pending, 'status': 'completed', 'conclusion': 'failure'}
+        self.assertIsNone(self.invoke([failed])[0]); self.dispatch.assert_called_once()
 
 
 class ReleaseTests(unittest.TestCase):
