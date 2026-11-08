@@ -580,17 +580,54 @@ final class SemanticServiceTests: XCTestCase {
     func testBackgroundEmbeddingDoesNotBlockCommitAndMetadataRevisionReusesVectors() throws {
         try fixture { store, _ in
             let counter = Counter()
+            let gate = EmbeddingGate()
+            let embeddingStarted = DispatchSemaphore(value: 0)
             let service = SemanticService(store: store) { _, inputs, query in
                 counter.increment()
-                if !query { try await Task.sleep(for: .milliseconds(100)) }
+                if !query {
+                    gate.begin()
+                    embeddingStarted.signal()
+                    while !gate.isReleased() { try await Task.sleep(for: .milliseconds(5)) }
+                }
                 return inputs.map { _ in query ? [0.9, 0.1] : [1, 0] }
+            }
+            defer {
+                gate.release()
+                if service.hasPendingDocumentWork {
+                    _ = service.cancelDocumentWork()
+                    drain(service)
+                }
+                XCTAssertFalse(
+                    service.hasPendingDocumentWork, "Fake embedding work must drain before cleanup.")
             }
             let original = try note(store, subject: "Alpha", body: "Body", operation: "note")
             try store.withAccess(forUID: store.ownerUID) {
                 _ = try service.configure(configuration(), expectedConfigurationID: nil)
             }
             service.maintain()
-            let started = Date()
+            guard embeddingStarted.wait(timeout: .now() + 30) == .success else {
+                XCTFail("The fake document embedder never reached the controlled gate.")
+                return
+            }
+            XCTAssertTrue(gate.hasStarted())
+            let commitFinished = DispatchSemaphore(value: 0)
+            let watchdog = DispatchGroup()
+            let rescued = Counter()
+            watchdog.enter()
+            DispatchQueue.global().async {
+                defer { watchdog.leave() }
+                // Rescue only this artificial gate if a regressed commit waits for embedding.
+                // Causality, not elapsed commit speed, is the contract under test.
+                if commitFinished.wait(timeout: .now() + 30) == .timedOut {
+                    rescued.increment()
+                    gate.release()
+                }
+            }
+            defer {
+                commitFinished.signal()
+                watchdog.wait()
+                XCTAssertEqual(rescued.read(), 0, "The artificial embedding deadlock rescue was used.")
+            }
             let changed = try store.commit(
                 CommitRequest(
                     action: .revise,
@@ -599,9 +636,14 @@ final class SemanticServiceTests: XCTestCase {
                     changes: ["priority": .integer(1)],
                     operationID: "metadata-only")
             ).revision
-            XCTAssertLessThan(Date().timeIntervalSince(started), 0.05)
+            commitFinished.signal()
+            watchdog.wait()
+            XCTAssertFalse(
+                gate.isReleased(), "The commit must finish while document embedding remains gated.")
+            gate.release()
             drain(service)
             let callsAfterIndex = counter.read()
+            XCTAssertEqual(callsAfterIndex, 1, "The metadata-only revision must reuse the in-flight vectors.")
             service.maintain()
             drain(service)
             XCTAssertEqual(counter.read(), callsAfterIndex)
