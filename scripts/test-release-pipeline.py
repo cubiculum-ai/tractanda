@@ -7,6 +7,7 @@ import json
 import subprocess
 import shutil
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 import tempfile
 import unittest
@@ -803,10 +804,23 @@ class ReleaseTests(unittest.TestCase):
             pipeline.disposable.mkdir()
             source = pipeline.disposable / pipeline.bundle.name
             source.mkdir()
-            (source / 'payload').write_bytes(b'signed candidate')
-            with patch.object(pipeline, 'verify_disposable'), patch.object(release.storage, 'RESERVE', 0):
+            payload = source / 'payload'
+            payload.write_bytes(b'signed candidate'); payload.chmod(0o751)
+            (source / 'payload-link').symlink_to('payload')
+            staging = pipeline.bundle.with_name(pipeline.bundle.name + '.incomplete-123456')
+            def fixture_copy(name, args, cwd):
+                self.assertEqual(name, 'bundle-promote')
+                self.assertEqual(args, ['/usr/bin/ditto', str(source), str(staging)])
+                self.assertEqual(cwd, directory)
+                shutil.copytree(source, staging, symlinks=True, copy_function=shutil.copy2)
+            linux = sys.platform.startswith('linux')
+            with patch.object(pipeline, 'verify_disposable'), patch.object(release.storage, 'RESERVE', 0), \
+                    (patch.object(release.time, 'time_ns', return_value=123456) if linux else nullcontext()), \
+                    (patch.object(pipeline, 'run_command', side_effect=fixture_copy) if linux else nullcontext()):
                 pipeline.promote_bundle(source)
             self.assertEqual((pipeline.bundle / 'payload').read_bytes(), b'signed candidate')
+            self.assertEqual((pipeline.bundle / 'payload').stat().st_mode & 0o777, 0o751)
+            self.assertEqual((pipeline.bundle / 'payload-link').readlink(), Path('payload'))
             self.assertTrue((source / 'payload').exists())
 
     def test_release_configuration_does_not_require_a_notary_profile(self):
