@@ -4,7 +4,7 @@ import TractandaCore
 func handleConnectionCommand(_ arguments: [String]) throws -> Bool {
     guard let command = arguments.first, ["connections", "service"].contains(command) else { return false }
     let usage = """
-        tractanda connections list
+        tractanda connections list [--json]
         tractanda connections add NAME SOCKET [--server-user USER] [--default]
         tractanda connections default|remove NAME
         tractanda service prepare|install NAME STORE [--socket PATH] [--default]
@@ -18,8 +18,9 @@ func handleConnectionCommand(_ arguments: [String]) throws -> Bool {
     let operation = arguments[1]
     let preferences = ConnectionPreferences()
     if command == "connections" {
-        if operation == "list", arguments.count == 2 {
-            output(try JSON.encode(preferences.loadEffective()))
+        if operation == "list", arguments.count == 2 || arguments == ["connections", "list", "--json"] {
+            let document = try preferences.loadEffective()
+            output(arguments.count == 3 ? try JSON.encode(document) : Data(connectionListText(document).utf8))
             return true
         }
         guard arguments.count >= 3 else { throw TractandaError("usage", usage) }
@@ -167,4 +168,27 @@ func handleConnectionCommand(_ arguments: [String]) throws -> Bool {
     default: throw TractandaError("usage", usage)
     }
     return true
+}
+
+/// Profiles are configuration only; listing them does not probe or start services.
+func connectionListText(_ document: ConnectionPreferences.Document) -> String {
+    func safe(_ text: String) -> String {
+        String(
+            String.UnicodeScalarView(
+                text.unicodeScalars.map {
+                    CharacterSet.controlCharacters.contains($0) ? UnicodeScalar(0xfffd)! : $0
+                }))
+    }
+    var lines = ["Configured connection profiles (service state not checked):"]
+    for name in document.profiles.keys.sorted() {
+        guard let connection = document.profiles[name] else { continue }
+        let marker = name == document.defaultProfile ? "*" : " "
+        var line = "\(marker) \(safe(name))  Unix socket: \(safe(connection.socketPath))"
+        if let user = connection.serverUser { line += "  server user: \(safe(user))" }
+        if let service = connection.managedService { line += "  managed service: \(safe(service))" }
+        lines.append(line)
+    }
+    if document.profiles.isEmpty { lines.append("  (none)") }
+    lines.append("* default profile")
+    return lines.joined(separator: "\n") + "\n"
 }

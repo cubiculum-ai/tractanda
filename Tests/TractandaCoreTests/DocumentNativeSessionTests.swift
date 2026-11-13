@@ -49,8 +49,8 @@ final class DocumentNativeSessionTests: XCTestCase {
                 if '\(mode)'=='unexpected-build':
                     result['identity']=dict(binding['identity']);result['identity']['runtimeRevision']='d'*40
                 print(json.dumps(result,separators=(',',':')),flush=True)
-            emit({'type':'hello','pageCount':129,'modelLoaded':False,'modelForwardCalls':0})
             open('\(root.appendingPathComponent("worker-pid").path)','w').write(str(__import__('os').getpid()))
+            emit({'type':'hello','pageCount':129,'modelLoaded':False,'modelForwardCalls':0})
             loaded=False
             for line in sys.stdin:
                 request=json.loads(line)
@@ -62,6 +62,7 @@ final class DocumentNativeSessionTests: XCTestCase {
                 if '\(mode)'=='load-timeout':
                     emit(dict(base,type='progress',phase='modelLoad',completed=0,total=0));time.sleep(10)
                 if not loaded:
+                    with open('\(root.appendingPathComponent("model-loads").path)','a') as trace:trace.write('load\\n')
                     emit(dict(base,type='progress',phase='modelReady',completed=0,total=0));loaded=True
                 emit(dict(base,type='progress',phase='render',completed=0,total=0))
                 if '\(mode)'=='page-timeout':time.sleep(10)
@@ -162,6 +163,93 @@ final class DocumentNativeSessionTests: XCTestCase {
         XCTAssertFalse(session.ended)
         try session.close()
         XCTAssertTrue(session.ended)
+    }
+    private func producer(
+        _ fixture: (
+            URL, ItemStore, DocumentJobMaterialWork, DocumentConverterConfiguration, DocumentContentFiles
+        ), work: DocumentJobMaterialWork? = nil,
+        cancellation: DocumentConversionCancellation = .init()
+    ) throws -> DocumentJobProducer {
+        DocumentJobProducer(
+            work: work ?? fixture.2,
+            runtime: DocumentJobRuntime(
+                configuration: fixture.3,
+                executableSHA256: try DocumentProcess.executableSHA256(fixture.3.executablePath),
+                configurationSHA256: configID),
+            budgets: try DocumentWorkerBudgets(terminationGrace: 0.05), cancellation: cancellation,
+            runtimeVerifier: { _ in })
+    }
+    private func assertWorkerReaped(_ root: URL, file: StaticString = #filePath, line: UInt = #line) throws {
+        let pid = try XCTUnwrap(
+            Int32(String(contentsOf: root.appendingPathComponent("worker-pid"), encoding: .utf8)),
+            file: file, line: line)
+        var status: Int32 = 0
+        XCTAssertEqual(waitpid(pid, &status, WNOHANG), -1, file: file, line: line)
+        XCTAssertEqual(
+            errno, ECHILD, "Producer must reap its worker before returning", file: file, line: line)
+    }
+    func testProducerStaysUnlaunchedUntilInspectionAndReleasesBatchBeforePublication() async throws {
+        let fixture = try fixture(mode: "normal")
+        defer { try? FileManager.default.removeItem(at: fixture.0) }
+        let producer = try producer(fixture)
+        let pidPath = fixture.0.appendingPathComponent("worker-pid").path
+        let loads = fixture.0.appendingPathComponent("model-loads")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: pidPath))
+        let recovered = try await producer.perform { try $0.recover() }
+        XCTAssertEqual(recovered.acceptedPages, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: pidPath))
+        let count = try await producer.perform { try $0.inspect() }
+        XCTAssertEqual(count, 129)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: loads.path), "Inspection must stay weight-free")
+        for number in 1...count {
+            _ = try await producer.perform {
+                let page = try $0.convert(number)
+                return try $0.append(page, pageCount: count)
+            }
+        }
+        XCTAssertEqual(try String(contentsOf: loads, encoding: .utf8), "load\n")
+        let prepared = try await producer.perform { try $0.prepare(pageCount: count) }
+        XCTAssertNotNil(prepared.prepared)
+        try assertWorkerReaped(fixture.0)
+        // Keep the producer alive: model release precedes corpus publication and object destruction.
+        try await producer.perform { $0.close() }
+        try assertWorkerReaped(fixture.0)
+    }
+    func testProducerCancellationReapsAndFreshProducerRetainsAcceptedPage() async throws {
+        let fixture = try fixture(mode: "normal")
+        defer { try? FileManager.default.removeItem(at: fixture.0) }
+        let cancellation = DocumentConversionCancellation()
+        let first = try producer(fixture, cancellation: cancellation)
+        _ = try await first.perform { try $0.recover() }
+        let count = try await first.perform { try $0.inspect() }
+        let id = fixture.2.intent.jobID
+        let generation = fixture.2.checkpoint.generation
+        try fixture.1.inspectDocumentJob(id, generation: generation, pageCount: count)
+        let seal = try await first.perform {
+            try $0.append($0.convert(1), pageCount: count)
+        }
+        _ = try fixture.1.acknowledgeDocumentStage(seal)
+        cancellation.cancel()
+        do {
+            _ = try await first.perform { try $0.convert(2) }
+            XCTFail("Expected producer cancellation")
+        } catch { XCTAssertTrue(error is CancellationError) }
+        try await first.perform { $0.close() }
+        try assertWorkerReaped(fixture.0)
+        let work = try fixture.1.documentJobMaterialWork(
+            id, generation: generation, configurationSHA256: configID)
+        let fresh = try producer(fixture, work: work)
+        let recovered = try await fresh.perform { try $0.recover() }
+        XCTAssertEqual(recovered.acceptedPages, 1)
+        XCTAssertEqual(try fixture.1.documentJobStatus(id).acceptedPages, 1)
+        _ = try await fresh.perform { try $0.inspect() }
+        let next = try await fresh.perform { try $0.convert(2) }
+        XCTAssertEqual(next.pageNumber, 2)
+        XCTAssertEqual(
+            try String(contentsOf: fixture.0.appendingPathComponent("model-loads"), encoding: .utf8),
+            "load\nload\n")
+        try await fresh.perform { $0.close() }
+        try assertWorkerReaped(fixture.0)
     }
     func testFailedTerminalRequiresEndedContextAndFreshSession() throws {
         let fixture = try fixture(mode: "failed")

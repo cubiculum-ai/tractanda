@@ -35,3 +35,9 @@ tractanda --profile NAME document-job discard JOB_ID
 ```
 
 Each document-job command makes one request. List returns one window (default 32, maximum 64). Page accepts a positive Int64 ordinal and returns exactly one provisional stage page. Provisional output has no canonical saved revision/content identity or citation. Successful document processing coverage establishes terminal outcomes across inspected pages; it is not an OCR accuracy claim. Rebase changes publication expectation while retaining original source revision and accepted pages; cancel retains work and discard explicitly disposes only authorized uncommitted stages.
+
+## Native Docling worker lifetime
+
+Existing document-job behavior uses a short-lived native worker for a conversion run; the server does not keep a Docling model loaded just because it is running. Recovering an empty stage does not launch the worker. When processing begins, the worker first inspects the original and page count without loading model weights. The first page conversion verifies the configured pinned model and loads it. That worker keeps one model context for subsequent pages in the same run, rather than loading the model again for each page.
+
+After the page pass is prepared, the daemon sends the worker a close request and waits for the worker process to exit before publishing canonical content. Cancellation, timeout, or terminal worker failure also ends and reaps that process. If the job is resumed after interruption, a new worker process and model context are created; already accepted page outcomes remain in the durable job stage, and the new run processes the remaining pages. A terminal worker failure during a page can require a fresh session and another model load. This existing behavior is now documented and regression-tested. Converter configuration/readiness and current permission checks still apply independently to each job.

@@ -1378,6 +1378,11 @@ final class MCPTests: XCTestCase {
         XCTAssertTrue(documentJobs.text.contains("provisional"))
         XCTAssertTrue(documentJobs.text.contains("tractanda_attachment_document_page"))
         XCTAssertTrue(ResourceCatalog.requiredServerFeatures.contains("tractanda.document-jobs.v1"))
+        let items = try XCTUnwrap(ResourceCatalog.references.first { $0.key == "items" })
+        XCTAssertTrue(items.text.contains("Saved canonical document pages are included in the item-text.v8"))
+        XCTAssertTrue(items.text.contains("peer export carries canonical document content"))
+        XCTAssertFalse(items.text.contains("page FTS and normal export integration remain pending"))
+        XCTAssertFalse(items.text.contains("v2 page projection remains pending"))
     }
 
     func testResourceReferencesRejectNoncanonicalAndArbitraryPaths() throws {

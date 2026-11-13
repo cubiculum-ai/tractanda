@@ -382,8 +382,19 @@ public final class TerminalApplication {
     private var navigationHistory = NavigationHistory()
     private var isBatchMenuOpen = false
     private var batchAction: BatchOperation.Action?
-    private var panel: (title: String, text: String)?
+    private var panel: (title: String, text: String)? {
+        didSet {
+            // Any other reader replaces the status panel, including global menu actions.
+            if statusPanelOpen && panel?.title != "Server and cluster status" {
+                statusPanelOpen = false
+                statusLoader?.cancel()
+            }
+        }
+    }
     private var panelOffset = 0
+    private var statusPanelOpen = false
+    private let statusLoader: ServerStatusLoader?
+    private var statusGeneration = 0
     private var menu: CommandMenu?
     private var childMenu: CategoryChildrenMenu?
     private var isMenuOpen: Bool { menu != nil || childMenu != nil }
@@ -521,12 +532,13 @@ public final class TerminalApplication {
         client: ItemClient, journal: RecoveryJournal, viewID: String? = nil, itemsOnly: Bool = false,
         viewPreferencesURL: URL? = nil, appearanceURL: URL? = nil, keymap: Keymap = .standard,
         previewConnection: ServerConnection? = nil, itemSearchLoader: ItemSearchLoader? = nil,
-        captureActionLoader: CaptureActionLoader? = nil,
+        captureActionLoader: CaptureActionLoader? = nil, statusLoader: ServerStatusLoader? = nil,
         functionKeys: FunctionKeyDisplay = .automatic, mouseEnabled: Bool = true
     )
         throws
     {
         workspace = Workspace(client: client)
+        self.statusLoader = statusLoader ?? previewConnection.map(ServerStatusLoader.init(connection:))
         self.itemSearchLoader = itemSearchLoader ?? previewConnection.map(ItemSearchLoader.init(connection:))
         self.journal = journal
         self.keymap = keymap
@@ -622,7 +634,7 @@ public final class TerminalApplication {
             columns = newColumns
             rows = newRows
             if categoryPreviewLoader?.hasDelivery() == true || itemSearchLoader?.hasDelivery() == true
-                || captureActionLoader?.hasDelivery() == true
+                || captureActionLoader?.hasDelivery() == true || statusLoader?.hasDelivery() == true
             {
                 needsRender = true
             }
@@ -2189,7 +2201,15 @@ public final class TerminalApplication {
             }
             return
         }
+        if command == .serverStatus {
+            showServerStatus()
+            return
+        }
         if command == .help {
+            if statusPanelOpen {
+                statusLoader?.cancel()
+                statusPanelOpen = false
+            }
             showHelp(context: context == .menu ? menuContext : context)
             return
         }
@@ -2214,7 +2234,10 @@ public final class TerminalApplication {
             switch command {
             case .cancel:
                 panel = nil
+                statusPanelOpen = false
+                statusLoader?.cancel()
                 panelOffset = 0
+            case .refresh where statusPanelOpen: showServerStatus()
             case .moveDown: panelOffset += 1
             case .moveUp: panelOffset = max(0, panelOffset - 1)
             case .pageDown: panelOffset += max(1, rows - 6)
@@ -2301,6 +2324,7 @@ public final class TerminalApplication {
         }
         switch command {
         case .about: return true
+        case .serverStatus: return panel == nil && context != .pending && context != .smallScreen
         case .appearance, .categoryPreferences:
             return !(form?.purpose.isSettings ?? false)
         case .switchWorkspace, .workspaceViews, .workspaceCategories, .togglePreview, .growPreview,
@@ -5499,6 +5523,24 @@ public final class TerminalApplication {
         panelOffset = 0
     }
 
+    func showServerStatus() {
+        statusPanelOpen = true
+        panelOffset = 0
+        guard let statusLoader else {
+            panel = ("Server and cluster status", "Status client unavailable.\n\nR refreshes; Esc closes.")
+            return
+        }
+        panel = ("Server and cluster status", "Loading status…\n\nR refreshes; Esc closes.")
+        statusGeneration = statusLoader.start()
+    }
+
+    private func collectServerStatus() {
+        guard let delivery = statusLoader?.take(), statusPanelOpen,
+            delivery.0 == statusGeneration, panel?.title == "Server and cluster status"
+        else { return }
+        panel = ("Server and cluster status", delivery.1)
+    }
+
     private func showHelp(context: KeyContext) {
         panel = (
             "Tractanda help",
@@ -6660,6 +6702,7 @@ public final class TerminalApplication {
         consumeCaptureDelivery()
         collectCategoryPreview()
         collectItemSearch()
+        collectServerStatus()
         if mouseFrameSize.columns != columns || mouseFrameSize.rows != rows {
             mouse.cancel()
             // A smaller item panel must reveal its caret, rather than keep the old body's

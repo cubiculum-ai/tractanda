@@ -196,7 +196,7 @@ def main():
             checks.append('OS manager restarts a killed daemon; managed startup reclaims only its dead socket; canonical history remains intact and a second writer is rejected')
 
             command('service','uninstall',name); activated = False
-            profiles = command('connections','list')['profiles']; assert name not in profiles and 'manual' in profiles
+            profiles = command('connections','list','--json')['profiles']; assert name not in profiles and 'manual' in profiles
             assert list((root/'store/items').rglob('*.tractanda'))
             assert not Path(record['definitionPath']).exists()
             checks.append('Uninstall removes the service registration and its profile while preserving unrelated connections and every canonical revision')
