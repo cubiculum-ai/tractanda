@@ -41,7 +41,14 @@ final class SetupPackageCompatibilityTests: XCTestCase {
         XCTAssertEqual(decoded.semanticProfile, semanticProfile)
         XCTAssertEqual(decoded.canonicalFormats, .current)
         XCTAssertEqual(decoded.embedding, .granite)
-        XCTAssertEqual(decoded.documentExtraction, .pinned)
+        XCTAssertEqual(decoded.documentExtraction, .legacyPinned)
+        let document = try XCTUnwrap(try jsonObject(encoded)["documentExtraction"] as? [String: Any])
+        XCTAssertNil(document["workerPoolProtocol"])
+        var unsupported = try jsonObject(encoded)
+        var altered = document
+        altered["workerPoolProtocol"] = "tractanda.native-document-pool.v1"
+        unsupported["documentExtraction"] = altered
+        XCTAssertThrowsError(try SetupPackageCompatibility.decode(encodedObject(unsupported)))
         XCTAssertThrowsError(try SetupPackageCompatibility.decode(Data()))
         XCTAssertThrowsError(
             try SetupPackageCompatibility.decode(
@@ -91,7 +98,7 @@ final class SetupPackageCompatibilityTests: XCTestCase {
         let incoming = declaration(version: "0.1.0-poc.17")
         XCTAssertEqual(old.semanticProfile, incoming.semanticProfile)
         XCTAssertEqual(old.embedding, .granite)
-        XCTAssertEqual(old.documentExtraction, .pinned)
+        XCTAssertEqual(old.documentExtraction, .legacyPinned)
         XCTAssertNoThrow(try incoming.requireRollingUpgrade(from: old))
 
         XCTAssertNoThrow(try CanonicalFormatSupport.current.requireWriter(.legacy))
@@ -201,6 +208,34 @@ final class SetupPackageCompatibilityTests: XCTestCase {
             embedding: value.embedding, documentExtraction: value.documentExtraction,
             canonicalFormats: .legacy)
         XCTAssertThrowsError(try value.requirePayload(wrongSupport, digest: value.manifestSHA256))
+    }
+
+    func testFullCurrentPayloadIsBoundWhileV1TransportRemainsLegacy() throws {
+        let declaration = declaration()
+        let current = BundleManifest(
+            version: declaration.version, platform: "linux", arch: declaration.arch, files: [],
+            embedding: declaration.embedding, documentExtraction: .pinned,
+            canonicalFormats: declaration.canonicalFormats)
+        XCTAssertNoThrow(try declaration.requirePayload(current, digest: declaration.manifestSHA256))
+        XCTAssertThrowsError(
+            try declaration.requirePayload(current, digest: String(repeating: "b", count: 64)))
+        var payload = try jsonObject(JSONEncoder().encode(DocumentExtractionPayload.pinned))
+        payload["workerPoolProtocol"] = "unsupported"
+        let invalid = try JSONDecoder().decode(DocumentExtractionPayload.self, from: encodedObject(payload))
+        let tampered = BundleManifest(
+            version: declaration.version, platform: "linux", arch: declaration.arch, files: [],
+            embedding: declaration.embedding, documentExtraction: invalid,
+            canonicalFormats: declaration.canonicalFormats)
+        XCTAssertThrowsError(try declaration.requirePayload(tampered, digest: declaration.manifestSHA256))
+        payload["workerPoolProtocol"] = "tractanda.native-document-pool.v1"
+        payload["workerProtocol"] = "unsupported"
+        let wrongWorker = try JSONDecoder().decode(
+            DocumentExtractionPayload.self, from: encodedObject(payload))
+        let mismatch = BundleManifest(
+            version: declaration.version, platform: "linux", arch: declaration.arch, files: [],
+            embedding: declaration.embedding, documentExtraction: wrongWorker,
+            canonicalFormats: declaration.canonicalFormats)
+        XCTAssertThrowsError(try declaration.requirePayload(mismatch, digest: declaration.manifestSHA256))
     }
 
     func testOlderDebCannotOpenCurrentCanonicalRequirement() throws {

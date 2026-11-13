@@ -604,7 +604,34 @@ final class SetupPackageLifecycleTests: XCTestCase {
         receipt.documentExtraction = document
         try f.engine.writeReceipt(receipt)
         XCTAssertThrowsError(try f.engine.verifyBundle(at: f.engine.packagePayload))
+        XCTAssertEqual(receipt.documentExtraction?.workerPoolProtocol, "tractanda.native-document-pool.v1")
+        XCTAssertNil(descriptor.documentExtraction?.workerPoolProtocol)
         XCTAssertEqual(try f.engine.compatibilityOfInstalledUpgradeSource(), descriptor)
+        // An upgrade/reinstall and its failed or abort recovery retain a projected v1
+        // transaction alongside the full receipt. The protected actual bundle stays bound.
+        state.instances = [
+            .init(
+                name: "a", originalManifestSHA256: descriptor.manifestSHA256,
+                wasRunning: true, wasEnabled: true, embeddingWasRunning: false,
+                authenticationWasRunning: false)
+        ]
+        for phase in [SetupPackageState.Phase.awaitingUnpack, .failed] {
+            state.phase = phase
+            try f.engine.writePackageState(state)
+            XCTAssertEqual(try f.engine.compatibilityOfInstalledUpgradeSource(), descriptor)
+        }
+        state.phase = .committed
+        try f.engine.writePackageState(state)
+        // The projection must never mask a full receipt that differs from these exact bytes.
+        var tampered = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(document)) as? [String: Any])
+        tampered.removeValue(forKey: "workerPoolProtocol")
+        receipt.documentExtraction = try JSONDecoder().decode(
+            DocumentExtractionPayload.self, from: JSONSerialization.data(withJSONObject: tampered))
+        try f.engine.writeReceipt(receipt)
+        XCTAssertThrowsError(try f.engine.compatibilityOfInstalledUpgradeSource())
+        receipt.documentExtraction = document
+        try f.engine.writeReceipt(receipt)
         receipt.manifestSHA256 = String(repeating: "b", count: 64)
         try f.engine.writeReceipt(receipt)
         XCTAssertThrowsError(try f.engine.compatibilityOfInstalledUpgradeSource())

@@ -29,7 +29,10 @@ extension SetupEngine {
                     || receipt.release == packagePayload.path
                         && receiptCommitments.contains(where: {
                             receipt.manifestSHA256 == $0.manifestSHA256 && receipt.embedding == $0.embedding
-                                && receipt.documentExtraction == $0.documentExtraction
+                                && receipt.documentExtraction?.compatibilityTransport == $0.documentExtraction
+                                && (receipt.documentExtraction?.workerPoolProtocol == nil
+                                    || receipt.documentExtraction?.workerPoolProtocol
+                                        == "tractanda.native-document-pool.v1")
                         })
             }),
             try sha256(packagePayload.appendingPathComponent("bundle-manifest.json"))
@@ -39,6 +42,12 @@ extension SetupEngine {
         if trustedOwnership { try requireTrustedAncestry(of: packagePayload) }
         let manifest = try verifyBundleContents(at: packagePayload, validation: .historicalInstalled)
         try committed.requirePayload(manifest, digest: committed.manifestSHA256)
+        guard
+            receipts.allSatisfy({ receipt in
+                receipt.state == .removed || receipt.manifestSHA256 != committed.manifestSHA256
+                    || receipt.documentExtraction == manifest.documentExtraction
+            })
+        else { throw SetupError("Historical installed manifest differs from its full receipt.") }
         return manifest
     }
 

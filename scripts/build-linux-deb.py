@@ -67,10 +67,18 @@ def package_descriptor(manifest, digest, upgrade):
                 or not capabilities.issubset(formats.get('capabilities', []))
                 or not capabilities.issubset(formats.get('writeCapabilities', []))):
             raise ValueError('The .17 bridge family requires truthful floor20 metadata and its reviewed upgrade classification.')
+    document = manifest['documentExtraction']
+    if document is not None:
+        if not isinstance(document, dict):
+            raise ValueError('Invalid document extraction descriptor.')
+        pool = document.get('workerPoolProtocol')
+        if 'workerPoolProtocol' in document and pool != 'tractanda.native-document-pool.v1':
+            raise ValueError('Unsupported document pool protocol.')
+        document = {key: value for key, value in document.items() if key != 'workerPoolProtocol'}
     result = dict(profile='tractanda.linux-package.v1', manifestSHA256=digest,
                   version=manifest['version'], arch=manifest['arch'],
                   canonicalFormats=manifest['canonicalFormats'], semanticProfile=B.SEMANTIC_PROFILE,
-                  upgrade=upgrade, embedding=manifest['embedding'], documentExtraction=manifest['documentExtraction'])
+                  upgrade=upgrade, embedding=manifest['embedding'], documentExtraction=document)
     encoded = B.canonical(result)
     if len(encoded) > 65_536 or b'\n' in encoded:
         raise ValueError('Compatibility descriptor must be bounded one-line canonical JSON.')

@@ -31,6 +31,26 @@ class LinuxDebTests(unittest.TestCase):
         self.native = baseline.start()
         self.addCleanup(baseline.stop)
 
+    def test_legacy_v1_descriptor_projects_only_pool_capability_without_mutation(self):
+        original = {'version': '0.1.0-poc.19', 'arch': 'arm64', 'embedding': None,
+                    'canonicalFormats': {}, 'documentExtraction': {
+                        'workerProtocol': 'tractanda.native-document-worker.v1',
+                        'workerPoolProtocol': 'tractanda.native-document-pool.v1',
+                        'identity': {'converter': 'same'}, 'modelDirectory': 'models/fixed'}}
+        saved = json.loads(json.dumps(original))
+        result = json.loads(D.package_descriptor(original, 'a' * 64, 'compatible'))
+        self.assertEqual(result['manifestSHA256'], 'a' * 64)
+        self.assertEqual(result['documentExtraction'], {
+            k: v for k, v in original['documentExtraction'].items() if k != 'workerPoolProtocol'})
+        self.assertEqual(original, saved)
+        for bad in ('unknown', None):
+            original['documentExtraction']['workerPoolProtocol'] = bad
+            with self.assertRaises(ValueError):
+                D.package_descriptor(original, 'a' * 64, 'compatible')
+        del original['documentExtraction']['workerPoolProtocol']
+        self.assertNotIn('workerPoolProtocol', json.loads(
+            D.package_descriptor(original, 'a' * 64, 'compatible'))['documentExtraction'])
+
     def test_layout17_descriptor_cannot_claim_rolling_or_hide_physical_floor(self):
         manifest = {'version': '0.1.0-poc.17', 'arch': 'x86_64', 'embedding': None, 'documentExtraction': None,
                     'canonicalFormats': {'readerLevel': 20, 'writerLevel': 20,

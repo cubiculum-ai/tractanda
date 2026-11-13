@@ -1,6 +1,21 @@
 import Foundation
 import TractandaCore
 
+/// The v1 pre-unpack transport must remain decodable by the installed predecessor.
+/// Execution capabilities stay in the separately hash-bound full bundle manifest.
+extension DocumentExtractionPayload {
+    var compatibilityTransport: Self {
+        Self(
+            converterPath: converterPath, identity: identity, workerProtocol: workerProtocol,
+            workerPoolProtocol: nil, modelDirectory: modelDirectory, modelManifestPath: modelManifestPath,
+            modelManifestSHA256: modelManifestSHA256, runtimeRepository: runtimeRepository,
+            runtimePatchManifestPath: runtimePatchManifestPath,
+            runtimePatchManifestSHA256: runtimePatchManifestSHA256,
+            runtimePatchIdentifier: runtimePatchIdentifier, runtimePatchPath: runtimePatchPath,
+            runtimePatchSHA256: runtimePatchSHA256, noticePaths: noticePaths)
+    }
+}
+
 /// Public, data-only control metadata generated with a Linux package. It is not cluster authority
 /// and cannot declare that coordinated maintenance has happened.
 struct SetupPackageCompatibility: Codable, Equatable {
@@ -34,7 +49,7 @@ struct SetupPackageCompatibility: Codable, Equatable {
         self.semanticProfile = semanticProfile
         self.upgrade = upgrade
         self.embedding = embedding
-        self.documentExtraction = documentExtraction
+        self.documentExtraction = documentExtraction?.compatibilityTransport
     }
 
     func validate() throws {
@@ -43,7 +58,8 @@ struct SetupPackageCompatibility: Codable, Equatable {
             version.utf8.allSatisfy({ Self.asciiIdentifier($0) || $0 == 43 || $0 == 95 }),
             ["arm64", "x86_64"].contains(arch),
             !semanticProfile.isEmpty, semanticProfile.utf8.count <= 128,
-            semanticProfile.utf8.allSatisfy(Self.asciiIdentifier)
+            semanticProfile.utf8.allSatisfy(Self.asciiIdentifier),
+            documentExtraction?.workerPoolProtocol == nil
         else {
             throw SetupError("Unknown or invalid Linux package compatibility declaration.")
         }
@@ -72,7 +88,9 @@ struct SetupPackageCompatibility: Codable, Equatable {
         guard manifest.platform == "linux", digest == manifestSHA256,
             manifest.version == version, manifest.arch == arch,
             manifest.canonicalFormats == canonicalFormats, manifest.embedding == embedding,
-            manifest.documentExtraction == documentExtraction,
+            manifest.documentExtraction?.compatibilityTransport == documentExtraction,
+            manifest.documentExtraction?.workerPoolProtocol == nil
+                || manifest.documentExtraction?.workerPoolProtocol == "tractanda.native-document-pool.v1",
             semanticProfile == PeerCompatibilityDeclaration.semanticProfile
         else {
             throw SetupError(
