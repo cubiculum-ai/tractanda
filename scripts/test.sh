@@ -24,6 +24,7 @@ python3 scripts/test-assemble-pages.py
 python3 scripts/test-activate-release.py
 python3 scripts/test-notarize-macos.py
 python3 scripts/test-release-status.py
+python3 scripts/test-validate-granite-runtime.py
 python3 scripts/test-docling-packaging.py
 python3 scripts/test-docling-model-validator.py
 python3 scripts/test-linux-docling-provenance.py
