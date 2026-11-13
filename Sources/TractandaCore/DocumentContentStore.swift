@@ -1255,13 +1255,14 @@ extension DocumentContentStore {
         configuration: DocumentConverterConfiguration, executableSHA256: String,
         budgets: DocumentWorkerBudgets, cancellation: DocumentConversionCancellation,
         expectedPageCount: Int64?,
-        runtimeVerifier: DocumentRuntimeVerifier = DocumentNativeSession.verifyRuntime
+        runtimeVerifier: DocumentRuntimeVerifier = DocumentNativeSession.verifyRuntime,
+        pool: DocumentWorkerPool? = nil
     ) throws -> DocumentNativeSession {
         try DocumentNativeSession(
             intent: intent, original: original, configuration: configuration,
             expectedExecutableSHA256: executableSHA256, files: files, root: root, budgets: budgets,
             cancellation: cancellation, expectedPageCount: expectedPageCount,
-            runtimeVerifier: runtimeVerifier)
+            runtimeVerifier: runtimeVerifier, pool: pool)
     }
 }
 

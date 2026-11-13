@@ -19,7 +19,7 @@ final class DocumentOwnedProcess {
     private var pending = Data()
     private(set) var stderrTail = Data()
     private(set) var terminationStatus: Int32?
-    private let cancellation: DocumentConversionCancellation
+    private var cancellation: DocumentConversionCancellation
     private let graceSeconds: Double
 
     init(
@@ -58,6 +58,11 @@ final class DocumentOwnedProcess {
         error = stderr
     }
     deinit { terminateAndWait() }
+    /// Only the exclusive pool lease owner may change cancellation between documents.
+    func beginLease(cancellation: DocumentConversionCancellation) {
+        self.cancellation = cancellation
+        stderrTail.removeAll(keepingCapacity: true)
+    }
     func duplicateOutputForTesting() throws -> Int32 {
         let copy = fcntl(output, F_DUPFD_CLOEXEC, 3)
         guard copy >= 0 else { throw failure("Cannot duplicate owned test output.") }
@@ -185,6 +190,17 @@ final class DocumentOwnedProcess {
         if requireSuccessful {
             guard terminationStatus == 0 else { throw failure("Native worker exited unsuccessfully.") }
         }
+    }
+    /// Idle liveness uses waitid(WNOWAIT), never kill(pid, 0) or an I/O request. Only an
+    /// observed exit permits cleanup/reaping; a still-running worker is untouched.
+    @discardableResult
+    func reapIfExited() -> Bool {
+        if terminationStatus != nil { return true }
+        var result: Int32
+        repeat { result = tractanda_document_exited(pid) } while result < 0 && errno == EINTR
+        guard result == 1 else { return false }
+        terminateAndWait()
+        return true
     }
     /// Keep child PID waitable until group cleanup, preventing PID/group reuse before the final kill.
     func terminateAndWait() {

@@ -176,6 +176,8 @@ public struct BundleManifest: Codable, Equatable, Sendable {
                 for path in paths { try Self.validateRelativePath(path) }
                 guard !documentExtraction.workerProtocol.isEmpty,
                     documentExtraction.workerProtocol.utf8.count <= 128,
+                    documentExtraction.workerPoolProtocol.map({ !$0.isEmpty && $0.utf8.count <= 128 })
+                        ?? true,
                     !documentExtraction.runtimeRepository.isEmpty,
                     documentExtraction.runtimeRepository.utf8.count <= 256,
                     !documentExtraction.runtimePatchIdentifier.isEmpty,
@@ -457,6 +459,8 @@ public struct DocumentExtractionPayload: Codable, Equatable, Sendable {
     public let converterPath: String
     public let identity: DocumentConverterIdentity
     public let workerProtocol: String
+    /// Absent only in historical receipt-bound packages.
+    public let workerPoolProtocol: String?
     public let modelDirectory: String
     public let modelManifestPath: String
     public let modelManifestSHA256: String
@@ -469,11 +473,16 @@ public struct DocumentExtractionPayload: Codable, Equatable, Sendable {
     public let noticePaths: [String]
 
     public static let pinned = descriptor(identity: DocumentConverterIdentity())
+    static let legacyPinned = descriptor(identity: DocumentConverterIdentity(), workerPoolProtocol: nil)
+    var supportedReceipt: Bool { self == .pinned || self == .legacyPinned }
 
-    private static func descriptor(identity: DocumentConverterIdentity) -> Self {
+    private static func descriptor(
+        identity: DocumentConverterIdentity,
+        workerPoolProtocol: String? = "tractanda.native-document-pool.v1"
+    ) -> Self {
         Self(
             converterPath: "bin/tractanda-document-converter", identity: identity,
-            workerProtocol: "tractanda.native-document-worker.v1",
+            workerProtocol: "tractanda.native-document-worker.v1", workerPoolProtocol: workerPoolProtocol,
             modelDirectory: "models/granite-docling-258m-mlx",
             modelManifestPath: "licenses/Docling/ModelAssets.json",
             modelManifestSHA256: "64894c93726b0b76d2eb5c20f001c61d6fc2eea1ef848b23773ba60cae9e00ef",

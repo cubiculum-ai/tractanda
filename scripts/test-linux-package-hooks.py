@@ -605,6 +605,8 @@ class Layout17PreStopTests(unittest.TestCase):
                                    modelRevision="e" * 64, runtimeRevision="f" * 40)
         snapshot = copy.deepcopy(changed)
         self.assertEqual(m.layout17_document_semantics(original), m.layout17_document_semantics(changed))
+        pooled = dict(changed, workerPoolProtocol="tractanda.native-document-pool.v1")
+        self.assertEqual(m.layout17_document_semantics(original), m.layout17_document_semantics(pooled))
         self.assertEqual(changed, snapshot)
         for key, value in (("parser", "unknown-parser"), ("preprocessing", "unknown-profile"),
                            ("converter", "bad\nidentifier"), ("modelRevision", "A" * 40),
@@ -613,7 +615,8 @@ class Layout17PreStopTests(unittest.TestCase):
             with self.subTest(key=key), self.assertRaises(SystemExit): m.layout17_document_semantics(bad)
         legacy = copy.deepcopy(changed); legacy["identity"]["preprocessing"] = "opaque-rgb2048-17tiles-v1"
         self.assertNotEqual(m.layout17_document_semantics(original), m.layout17_document_semantics(legacy))
-        for bad in (dict(changed, unknown="schema"), dict(changed, workerProtocol="unknown.v2")):
+        for bad in (dict(changed, unknown="schema"), dict(changed, workerProtocol="unknown.v2"),
+                    dict(changed, workerPoolProtocol="unknown.v1")):
             with self.assertRaises(SystemExit): m.layout17_document_semantics(bad)
 
     def test_unprepared_changed_or_pending_cluster_refuses_before_any_stop(self):

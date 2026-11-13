@@ -66,6 +66,7 @@ public actor ServiceCoordinator {
     private var semanticLifecyclePending = false
     private var semanticReaderDrainHookForTesting: (@Sendable (Int, Int64) -> Void)?
     private let documentJobBudgets: DocumentWorkerBudgets
+    private let documentWorkerPool: DocumentWorkerPool
     private let documentRuntimeVerifier: DocumentRuntimeVerifier
     private var documentJobAdmissions: [DocumentJobAdmission] = []
     private var documentJobTask: Task<Void, Never>?
@@ -131,6 +132,7 @@ public actor ServiceCoordinator {
                 "invalidConfiguration", "Rebuild no-progress timeout must be positive and finite.")
         }
         self.documentJobBudgets = try documentJobResources.budgets()
+        self.documentWorkerPool = try DocumentWorkerPool(idleSeconds: documentJobResources.workerIdleSeconds)
         self.documentRuntimeVerifier =
             documentRuntimeVerifierForTesting ?? DocumentNativeSession.verifyRuntime
         self.rebuildNoProgressSeconds = rebuildNoProgressTimeoutSeconds
@@ -542,6 +544,51 @@ public actor ServiceCoordinator {
         documentJobAdmissions.append(admission)
         launchNextDocumentJob()
     }
+    /// OS-authenticated local resource observation; never starts a converter.
+    package func documentWorkerStatus(forUID uid: UInt32, principal: NativePrincipalPin? = nil)
+        async throws -> DocumentWorkerPoolStatus
+    {
+        guard principal == nil || principal?.uid == uid else {
+            throw TractandaError("forbidden", "Caller identity differs from the authenticated principal.")
+        }
+        try beginWork()
+        defer { finishWork() }
+        try await submit(principal: principal) { service in
+            try service.store.withAccess(forUID: uid, recoverPublication: false) {}
+        }
+        let status = await documentWorkerPool.status()
+        try await submit(principal: principal) { service in
+            try service.store.withAccess(forUID: uid, recoverPublication: false) {}
+        }
+        return status
+    }
+    /// Administrators request release without cancelling active document work.
+    package func unloadDocumentWorker(forUID uid: UInt32, principal: NativePrincipalPin? = nil)
+        async throws -> DocumentWorkerPoolStatus
+    {
+        try beginWork()
+        defer { finishWork() }
+        guard principal == nil || principal?.uid == uid else {
+            throw TractandaError("forbidden", "Caller identity differs from the authenticated principal.")
+        }
+        let owner = core
+        return try await documentWorkerPool.unload {
+            try owner.synchronously { service in
+                func authorize() throws {
+                    try service.store.withAccess(forUID: uid, recoverPublication: false) {
+                        try service.store.requireAdministrator()
+                    }
+                }
+                if let principal {
+                    try service.store.withExpectedPrincipal(forUID: principal.uid, name: principal.name) {
+                        try authorize()
+                    }
+                } else {
+                    try authorize()
+                }
+            }
+        }
+    }
     private func launchNextDocumentJob() {
         guard accepting, !exclusiveRebuildPending, !documentJobDraining,
             documentJobTask == nil, !documentJobAdmissions.isEmpty
@@ -648,7 +695,7 @@ public actor ServiceCoordinator {
             let worker = DocumentJobProducer(
                 work: admitted.0, runtime: admitted.1,
                 budgets: documentJobBudgets, cancellation: cancellation,
-                runtimeVerifier: documentRuntimeVerifier)
+                runtimeVerifier: documentRuntimeVerifier, pool: documentWorkerPool)
             producer = worker
             let token = admitted.0.checkpoint.generation
             generation = token
@@ -1634,6 +1681,7 @@ public actor ServiceCoordinator {
         documentJobCancellation?.cancel()
         await documentJobStartupRecovery?.value
         await drainDocumentJobs(reasonCode: "serverShutdown")
+        await documentWorkerPool.shutdown()
         do {
             try await drainSemanticDocumentWork(retireMetadata: false)
         } catch {

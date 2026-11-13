@@ -17,7 +17,10 @@ enum ServerStatusPresentation {
             else { throw TractandaError("invalidResponse", "Invalid status response") }
             return result
         }
-        var lines = ["Read-only local observations · R refreshes · Esc closes", ""]
+        let capturedAt = ISO8601DateFormatter().string(from: Date())
+        var lines = [
+            "Read-only local observations · R refreshes · Esc closes", "Requested at: \(capturedAt)", "",
+        ]
         do {
             let info = try object("TractandaStore/info")
             let server = info["server"] as? [String: Any]
@@ -65,7 +68,10 @@ enum ServerStatusPresentation {
                             )
                         }
                         lines.append(
-                            "    Last outcome: \(observation.lastOutcome?.rawValue ?? "unknown"); finished: \(safe(observation.lastPullFinishedAt)); error: \(safe(observation.lastErrorCode))"
+                            "    Last outcome: \(observation.lastOutcome?.rawValue ?? "unknown"); finished: \(safe(observation.lastPullFinishedAt))"
+                        )
+                        lines.append(
+                            "    Last recorded error: \(safe(observation.lastErrorCode)); at: \(safe(observation.lastErrorAt))"
                         )
                     }
                 }

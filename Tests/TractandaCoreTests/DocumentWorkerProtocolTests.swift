@@ -128,6 +128,57 @@ final class DocumentWorkerProtocolTests: XCTestCase {
         XCTAssertThrowsError(try NativeWorkerProtocol.binding(Data(historical.utf8)))
     }
 
+    func testPoolControlsAreBoundedAndLoadedHelloRequiresExplicitOptIn() throws {
+        let greeting: [String: Any] = [
+            "workerProtocol": NativeWorkerProtocol.name,
+            "workerPoolProtocol": NativeWorkerProtocol.poolName,
+        ]
+        XCTAssertNoThrow(
+            try NativeWorkerProtocol.poolGreeting(JSONSerialization.data(withJSONObject: greeting)))
+        for (key, value) in [
+            ("workerProtocol", "unknown"), ("workerPoolProtocol", "unknown"), ("extra", "forbidden"),
+        ] {
+            var invalid = greeting
+            invalid[key] = value
+            XCTAssertThrowsError(
+                try NativeWorkerProtocol.poolGreeting(JSONSerialization.data(withJSONObject: invalid)))
+        }
+        let binding = try NativeWorkerProtocol.binding(bytes("binding.json"))
+        var hello = try NativeWorkerProtocol.object(
+            bytes("response-hello.json"), limit: NativeWorkerProtocol.controlBytes)
+        hello["modelLoaded"] = true
+        let warm = try JSONSerialization.data(withJSONObject: hello)
+        XCTAssertThrowsError(
+            try NativeWorkerProtocol.validateResponse(
+                warm, binding: binding, outstanding: nil, pageCount: 0))
+        XCTAssertNoThrow(
+            try NativeWorkerProtocol.validateResponse(
+                warm, binding: binding, outstanding: nil, pageCount: 0, allowLoadedModel: true))
+        let valid: [String: Any] = [
+            "protocol": NativeWorkerProtocol.poolName, "method": "open",
+            "sourcePath": "/owned/original", "bindingPath": "/owned/binding.json",
+        ]
+        let decoded = try NativeWorkerProtocol.poolOpen(JSONSerialization.data(withJSONObject: valid))
+        XCTAssertEqual(decoded.sourcePath, "/owned/original")
+        for (key, value) in [
+            ("protocol", "unknown"), ("method", "convertPage"),
+            ("sourcePath", "relative"), ("bindingPath", "/" + String(repeating: "x", count: 4096)),
+            ("sourcePath", "/bad\0path"), ("extra", "forbidden"),
+        ] {
+            var invalid = valid
+            invalid[key] = value
+            XCTAssertThrowsError(
+                try NativeWorkerProtocol.poolOpen(JSONSerialization.data(withJSONObject: invalid)))
+        }
+        let legacy = try JSON.encode(DocumentJobResources())
+        var resources = try XCTUnwrap(JSONSerialization.jsonObject(with: legacy) as? [String: Any])
+        resources.removeValue(forKey: "workerIdleSeconds")
+        let old = try JSON.decode(
+            DocumentJobResources.self, JSONSerialization.data(withJSONObject: resources))
+        XCTAssertEqual(old.workerIdleSeconds, 60)
+        XCTAssertNoThrow(try DocumentJobResources(workerIdleSeconds: 0).validate())
+        XCTAssertThrowsError(try DocumentJobResources(workerIdleSeconds: -1).validate())
+    }
     func testOnlyRealCountersAndPhaseTransitionsAdvanceLiveness() throws {
         var progress = DocumentMeaningfulProgress()
         XCTAssertTrue(try progress.observe(phase: "modelVerify", completed: 0, total: 100))

@@ -56,6 +56,7 @@ struct NativeWorkerRequest: Codable, Sendable {
 /// stay authoritative; process I/O and liveness are owned by the Core supervisor.
 enum NativeWorkerProtocol {
     static let name = "tractanda.native-document-worker.v1"
+    static let poolName = "tractanda.native-document-pool.v1"
     static let requestBytes = 65_536
     static let controlBytes = 4_096
     static let pageBytes = 2_097_152
@@ -63,6 +64,22 @@ enum NativeWorkerProtocol {
         "protocol", "jobID", "sessionID", "source", "identity", "file",
     ]
 
+    static func poolGreeting(_ data: Data) throws {
+        let greeting = try object(data, limit: controlBytes)
+        try keys(greeting, ["workerProtocol", "workerPoolProtocol"])
+        guard greeting["workerProtocol"] as? String == name,
+            greeting["workerPoolProtocol"] as? String == poolName
+        else { throw invalid() }
+    }
+    static func poolOpen(_ data: Data) throws -> (sourcePath: String, bindingPath: String) {
+        let open = try object(data, limit: requestBytes)
+        try keys(open, ["protocol", "method", "sourcePath", "bindingPath"])
+        guard open["protocol"] as? String == poolName, open["method"] as? String == "open",
+            let source = open["sourcePath"] as? String, let binding = open["bindingPath"] as? String,
+            [source, binding].allSatisfy({ $0.hasPrefix("/") && $0.utf8.count <= 4096 && !$0.contains("\0") })
+        else { throw invalid() }
+        return (source, binding)
+    }
     static func invalid() -> TractandaError {
         TractandaError("invalidNativeProtocol", "Native document protocol validation failed.")
     }
@@ -142,7 +159,7 @@ enum NativeWorkerProtocol {
     }
     static func validateResponse(
         _ data: Data, binding expectedBinding: NativeDocumentBinding,
-        outstanding: NativeWorkerRequest?, pageCount: Int64
+        outstanding: NativeWorkerRequest?, pageCount: Int64, allowLoadedModel: Bool = false
     ) throws {
         let value = try object(data, limit: pageBytes)
         guard let type = value["type"] as? String else { throw invalid() }
@@ -155,7 +172,7 @@ enum NativeWorkerProtocol {
             expected.formUnion(["pageCount", "modelLoaded", "modelForwardCalls"])
             guard outstanding == nil, try integer(value["pageCount"] as Any) > 0,
                 let loaded = value["modelLoaded"] as? NSNumber,
-                CFGetTypeID(loaded) == CFBooleanGetTypeID(), !loaded.boolValue,
+                CFGetTypeID(loaded) == CFBooleanGetTypeID(), allowLoadedModel || !loaded.boolValue,
                 try integer(value["modelForwardCalls"] as Any) == 0
             else { throw invalid() }
         case "error":

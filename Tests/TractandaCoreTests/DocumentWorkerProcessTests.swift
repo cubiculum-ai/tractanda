@@ -66,6 +66,16 @@ final class DocumentWorkerProcessTests: XCTestCase {
         XCTAssertEqual(process.stderrTail.count, 65536)
         reaped(process)
     }
+    func testNewLeaseClearsDiagnosticsWithoutDiscardingBufferedStdout() throws {
+        let process = try python("import os; os.write(2,b'prior-document'); os.write(1,b'first\\nsecond\\n')")
+        XCTAssertEqual(try process.nextLine(limit: 4096, deadline: deadline()), Data("first".utf8))
+        XCTAssertEqual(process.stderrTail, Data("prior-document".utf8))
+        process.beginLease(cancellation: .init())
+        XCTAssertTrue(process.stderrTail.isEmpty)
+        XCTAssertEqual(try process.nextLine(limit: 4096, deadline: deadline()), Data("second".utf8))
+        try process.finish(deadline: deadline())
+        reaped(process)
+    }
     func testTimeoutCancellationMissingLFAndOversizeAllReap() throws {
         for script in [
             "import time; time.sleep(10)", "import os; os.write(1,b'partial')",

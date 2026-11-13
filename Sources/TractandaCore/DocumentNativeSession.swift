@@ -13,9 +13,13 @@ typealias DocumentRuntimeVerifier = @Sendable (DocumentConverterConfiguration) t
 final class DocumentNativeSession {
     let binding: NativeDocumentBinding
     let pageCount: Int64
+    let modelWasLoadedAtInspection: Bool
+    var workerPID: Int32 { process.pid }
     private let original: DocumentVerifiedOriginal
     private let files: DocumentContentFiles
     private let process: DocumentOwnedProcess
+    private let pool: DocumentWorkerPool?
+    private var leaseReturned = false
     private let budgets: DocumentWorkerBudgets
     private let bindingBytes: Int
     private var requestID: Int64 = 0
@@ -36,7 +40,8 @@ final class DocumentNativeSession {
         expectedExecutableSHA256: String, files: DocumentContentFiles, root: URL,
         budgets: DocumentWorkerBudgets, cancellation: DocumentConversionCancellation,
         expectedPageCount: Int64? = nil,
-        runtimeVerifier: DocumentRuntimeVerifier = DocumentNativeSession.verifyRuntime
+        runtimeVerifier: DocumentRuntimeVerifier = DocumentNativeSession.verifyRuntime,
+        pool: DocumentWorkerPool? = nil
     ) throws {
         try original.check()
         try cancellation.check()
@@ -60,21 +65,37 @@ final class DocumentNativeSession {
         do {
             try files.writeImmutable(data, path: path, maximumBytes: NativeWorkerProtocol.requestBytes)
             try runtimeVerifier(configuration)
-            let child = try DocumentOwnedProcess(
-                executable: configuration.executablePath,
-                arguments: [
-                    "worker-v1", configuration.modelDirectory, original.path, intent.source.mediaType,
-                    bindingPath,
-                ],
-                cancellation: cancellation, graceSeconds: budgets.terminationGrace)
+            let child: DocumentOwnedProcess
+            if let pool {
+                child = try pool.acquire(
+                    configuration: configuration, executableSHA256: expectedExecutableSHA256,
+                    cancellation: cancellation, graceSeconds: budgets.terminationGrace,
+                    deadline: inspection.deadline)
+            } else {
+                child = try DocumentOwnedProcess(
+                    executable: configuration.executablePath,
+                    arguments: [
+                        "worker-v1", configuration.modelDirectory, original.path, intent.source.mediaType,
+                        bindingPath,
+                    ], cancellation: cancellation, graceSeconds: budgets.terminationGrace)
+            }
             launched = child
             let deadline = inspection.deadline
+            if pool != nil {
+                let open = try JSONSerialization.data(
+                    withJSONObject: [
+                        "protocol": NativeWorkerProtocol.poolName, "method": "open",
+                        "sourcePath": original.path, "bindingPath": bindingPath,
+                    ], options: [.sortedKeys])
+                try child.writeLine(open, deadline: deadline)
+            }
             guard let hello = try child.nextLine(limit: NativeWorkerProtocol.controlBytes, deadline: deadline)
             else {
                 throw TractandaError(
                     "nativeWorkerFailed", "Native worker ended before weight-free inspection.")
             }
-            try NativeWorkerProtocol.validateResponse(hello, binding: binding, outstanding: nil, pageCount: 0)
+            try NativeWorkerProtocol.validateResponse(
+                hello, binding: binding, outstanding: nil, pageCount: 0, allowLoadedModel: pool != nil)
             let object = try NativeWorkerProtocol.object(hello, limit: NativeWorkerProtocol.controlBytes)
             if object["type"] as? String == "error" {
                 throw TractandaError(object["failureCode"] as! String, "Native worker inspection failed.")
@@ -88,9 +109,11 @@ final class DocumentNativeSession {
             try original.check()
             self.binding = binding
             self.pageCount = count
+            self.modelWasLoadedAtInspection = object["modelLoaded"] as! Bool
             self.original = original
             self.files = files
             self.process = child
+            self.pool = pool
             self.budgets = budgets
             self.bindingBytes = data.count
         } catch {
@@ -102,13 +125,17 @@ final class DocumentNativeSession {
                     DocumentNativeSessionFailure(
                         failure: $0, requestedPage: nil, pageStarted: false, timeoutMessage: $0.message)
                 } ?? error
-            launched?.terminateAndWait()
+            if let launched {
+                if let pool { pool.release(launched, healthy: false) } else { launched.terminateAndWait() }
+            }
             try? files.removeJobSession(jobID: intent.jobID, sessionID: sessionID, chargedBytes: data.count)
             throw failure
         }
     }
     deinit {
-        process.terminateAndWait()
+        if !leaseReturned {
+            if let pool { pool.release(process, healthy: false) } else { process.terminateAndWait() }
+        }
         try? files.removeJobSession(
             jobID: binding.jobID, sessionID: binding.sessionID, chargedBytes: bindingBytes)
     }
@@ -196,6 +223,10 @@ final class DocumentNativeSession {
                             deadline: deadline.deadline,
                             requireSuccessful: false)
                         ended = true
+                        if let pool {
+                            pool.release(process, healthy: false)
+                            leaseReturned = true
+                        }
                     }
                     return outcome
                 default: throw NativeWorkerProtocol.invalid()
@@ -206,7 +237,12 @@ final class DocumentNativeSession {
                 error is DocumentWorkerDeadlineExpired
                 ? deadline.timeoutFailure(lastPhase: progress.phase) : nil
             let failure = timeout ?? error as? TractandaError ?? NativeWorkerProtocol.invalid()
-            process.terminateAndWait()
+            if let pool {
+                pool.release(process, healthy: false)
+                leaseReturned = true
+            } else {
+                process.terminateAndWait()
+            }
             ended = true
             if error is CancellationError { throw error }
             throw DocumentNativeSessionFailure(
@@ -234,14 +270,23 @@ final class DocumentNativeSession {
             else {
                 throw NativeWorkerProtocol.invalid()
             }
-            try process.finish(deadline: deadline.deadline)
+            if pool == nil { try process.finish(deadline: deadline.deadline) }
             try original.check()
             ended = true
+            if let pool {
+                pool.release(process, healthy: true)
+                leaseReturned = true
+            }
         } catch {
             let timeout =
                 error is DocumentWorkerDeadlineExpired
                 ? deadline.timeoutFailure(lastPhase: progress.phase) : nil
-            process.terminateAndWait()
+            if let pool {
+                pool.release(process, healthy: false)
+                leaseReturned = true
+            } else {
+                process.terminateAndWait()
+            }
             ended = true
             if let timeout {
                 throw DocumentNativeSessionFailure(

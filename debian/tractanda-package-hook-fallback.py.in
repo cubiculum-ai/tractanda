@@ -657,8 +657,11 @@ def layout17_document_semantics(document):
     """
     if document is None:
         return None
-    if (type(document) is not dict or set(document) != _LAYOUT17_DOCUMENT_KEYS
-            or document.get("workerProtocol") != "tractanda.native-document-worker.v1"):
+    if (type(document) is not dict
+            or set(document) not in (_LAYOUT17_DOCUMENT_KEYS, _LAYOUT17_DOCUMENT_KEYS | {"workerPoolProtocol"})
+            or document.get("workerProtocol") != "tractanda.native-document-worker.v1"
+            or ("workerPoolProtocol" in document
+                and document["workerPoolProtocol"] != "tractanda.native-document-pool.v1")):
         refuse("unknown layout17 document payload schema or worker protocol")
     def relative_path(value):
         return (type(value) is str and 0 < len(value.encode("utf-8")) <= 4096

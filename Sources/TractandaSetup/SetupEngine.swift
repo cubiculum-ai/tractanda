@@ -959,7 +959,7 @@ public final class SetupEngine {
             }
         }
         if let document = receipt.documentExtraction {
-            guard document == .pinned else { throw SetupError("Unsupported document receipt.") }
+            guard document.supportedReceipt else { throw SetupError("Unsupported document receipt.") }
             let scratch = try documentStatePaths(receipt)
             let release = URL(fileURLWithPath: receipt.release)
             arguments += [
@@ -1025,13 +1025,16 @@ public final class SetupEngine {
             extraction?["executableSHA256"] as? String
                 == (try sha256(release.appendingPathComponent(document.converterPath))),
             extraction?["requiresPreparedInput"] as? Bool == false,
-            (info["documentJobs"] as? [String: Any])?["protocol"] as? String == document.workerProtocol
+            (info["documentJobs"] as? [String: Any])?["protocol"] as? String == document.workerProtocol,
+            document.workerPoolProtocol.map({
+                (info["documentJobs"] as? [String: Any])?["workerPoolProtocol"] as? String == $0
+            }) ?? true
         else { throw SetupError("Running document configuration differs from the owned release.") }
     }
 
     func waitUntilReady(_ receipt: InstallationReceipt) throws {
         if let document = receipt.documentExtraction {
-            guard document == .pinned else { throw SetupError("Unsupported document receipt.") }
+            guard document.supportedReceipt else { throw SetupError("Unsupported document receipt.") }
             _ = try documentStatePaths(receipt)
         }
         if let readinessCheck {

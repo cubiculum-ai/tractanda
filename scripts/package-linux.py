@@ -514,6 +514,7 @@ def full_components(root, spec, rows, embedding_runner=None):
     document = spec['documentExtraction']
     if (not isinstance(document, dict) or document.get('converterPath') != 'bin/tractanda-document-converter'
             or document.get('modelDirectory') != 'models/granite-docling-258m-mlx'
+            or document.get('workerPoolProtocol') != 'tractanda.native-document-pool.v1'
             or document.get('modelManifestSHA256') != MAC.MODEL_MANIFEST_SHA
             or document.get('runtimePatchManifestSHA256') != MAC.PATCH_MANIFEST_SHA):
         raise ValueError('Complete pinned local document descriptor is mandatory.')

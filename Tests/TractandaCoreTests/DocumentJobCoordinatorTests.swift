@@ -853,22 +853,30 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         let script = """
             #!/usr/bin/python3
             import sys,json,time,pathlib
-            binding=json.load(open(sys.argv[5]))
+            pooled=sys.argv[1]=='pool-v1'
+            binding=None if pooled else json.load(open(sys.argv[5]))
             def emit(value):
                 result=dict(binding);result.update(value)
                 print(json.dumps(result,separators=(',',':')),flush=True)
-            emit({'type':'hello','pageCount':\(pages),'modelLoaded':False,'modelForwardCalls':0})
+            if not pooled:emit({'type':'hello','pageCount':\(pages),'modelLoaded':False,'modelForwardCalls':0})
             open(\(String(reflecting: root.appendingPathComponent("worker-pid").path)), 'w').write(str(__import__('os').getpid()))
             loaded=False
+            ready=False
+            if pooled:print(json.dumps({'workerProtocol':'tractanda.native-document-worker.v1','workerPoolProtocol':'tractanda.native-document-pool.v1'}),flush=True)
             for line in sys.stdin:
                 request=json.loads(line)
+                if request['method']=='open':
+                    binding=json.load(open(request['bindingPath']));ready=False
+                    emit({'type':'hello','pageCount':\(pages),'modelLoaded':loaded,'modelForwardCalls':0});continue
                 if request['method']=='close':
-                    emit({'type':'closed','requestID':request['requestID']});break
+                    emit({'type':'closed','requestID':request['requestID']})
+                    if pooled:binding=None;continue
+                    break
                 with open(\(String(reflecting: root.appendingPathComponent("page-calls").path)), 'a') as calls:
                     calls.write(str(request['pageNumber'])+'\\n')
                 base={'requestID':request['requestID'],'pageNumber':request['pageNumber']}
-                if not loaded:
-                    emit(dict(base,type='progress',phase='modelReady',completed=0,total=0));loaded=True
+                if not ready:
+                    emit(dict(base,type='progress',phase='modelReady',completed=0,total=0));loaded=True;ready=True
                 emit(dict(base,type='progress',phase='render',completed=0,total=0))
                 if request['pageNumber']==\(heldPage ?? -1):
                     pathlib.Path(\(String(reflecting: root.appendingPathComponent("held-page").path))).write_text(str(request['pageNumber']))
@@ -1462,6 +1470,44 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         await coordinator.close()
     }
 
+    func testDocumentPoolStatusIsNonsecretAndUnloadRequiresCurrentAdministrator() async throws {
+        let accounts = Accounts()
+        let fixture = try fixture(pages: 1, accounts: accounts)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let coordinator = try await ServiceCoordinator(
+            opening: fixture.store, embeddingProviderForTesting: nil, requireInitializedStore: true,
+            documentRuntimeVerifierForTesting: { _ in }, documentConverter: fixture.configuration,
+            makeAccountDirectory: { accounts })
+        do {
+            let status = try await coordinator.documentWorkerStatus(forUID: accounts.alice)
+            let object = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: JSON.encode(status)) as? [String: Any])
+            XCTAssertEqual(Set(object.keys), ["workerRunning", "documentActive", "unloadPending"])
+            XCTAssertFalse(status.workerRunning)
+            do {
+                _ = try await coordinator.unloadDocumentWorker(forUID: accounts.alice)
+                XCTFail("Ordinary admitted user cannot unload shared document resources")
+            } catch { XCTAssertEqual((error as? TractandaError)?.code, "forbidden") }
+            let unloaded = try await coordinator.unloadDocumentWorker(forUID: UInt32(getuid()))
+            XCTAssertFalse(unloaded.workerRunning)
+            accounts.revokeGroup()
+            do {
+                _ = try await coordinator.documentWorkerStatus(forUID: accounts.alice)
+                XCTFail("Status must resolve current admission")
+            } catch { XCTAssertNotNil(error as? TractandaError) }
+            accounts.removeAlice()
+            do {
+                _ = try await coordinator.unloadDocumentWorker(forUID: accounts.alice)
+                XCTFail("Removed identity cannot request unloading")
+            } catch { XCTAssertNotNil(error as? TractandaError) }
+        } catch {
+            await coordinator.close()
+            throw error
+        }
+        await coordinator.close()
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: fixture.root.appendingPathComponent("worker-pid").path))
+    }
     private final class Accounts: AccountDirectory, @unchecked Sendable {
         let alice: UInt32 = 61313
         private let lock = NSLock()

@@ -43,19 +43,32 @@ final class DocumentNativeSessionTests: XCTestCase {
         let script = """
             #!/usr/bin/python3
             import sys,json,time
-            binding=json.load(open(sys.argv[5]))
+            pooled=sys.argv[1]=='pool-v1'
+            binding=None if pooled else json.load(open(sys.argv[5]))
             def emit(value):
                 result=dict(binding);result.update(value)
                 if '\(mode)'=='unexpected-build':
                     result['identity']=dict(binding['identity']);result['identity']['runtimeRevision']='d'*40
                 print(json.dumps(result,separators=(',',':')),flush=True)
             open('\(root.appendingPathComponent("worker-pid").path)','w').write(str(__import__('os').getpid()))
-            emit({'type':'hello','pageCount':129,'modelLoaded':False,'modelForwardCalls':0})
             loaded=False
+            ready=False
+            if pooled:
+                if '\(mode)'=='missing-pool-greeting':raise SystemExit(0)
+                greeting={'workerProtocol':'tractanda.native-document-worker.v1','workerPoolProtocol':'tractanda.native-document-pool.v1'}
+                if '\(mode)'=='malformed-pool-greeting':greeting['workerPoolProtocol']='unsupported'
+                with open('\(root.appendingPathComponent("pool-greetings").path)','a') as trace:trace.write('greeting\\n')
+                print(json.dumps(greeting,separators=(',',':')),flush=True)
+            if not pooled:emit({'type':'hello','pageCount':129,'modelLoaded':False,'modelForwardCalls':0})
             for line in sys.stdin:
                 request=json.loads(line)
+                if request['method']=='open':
+                    binding=json.load(open(request['bindingPath']));ready=False
+                    emit({'type':'hello','pageCount':129,'modelLoaded':loaded,'modelForwardCalls':0});continue
                 if request['method']=='close':
-                    emit({'type':'closed','requestID':request['requestID']});break
+                    emit({'type':'closed','requestID':request['requestID']})
+                    if pooled:binding=None;continue
+                    break
                 base={'requestID':request['requestID'],'pageNumber':request['pageNumber']}
                 if '\(mode)'=='reported-timeout':
                     emit({'type':'error','failureCode':'documentTimeout'});continue
@@ -63,7 +76,9 @@ final class DocumentNativeSessionTests: XCTestCase {
                     emit(dict(base,type='progress',phase='modelLoad',completed=0,total=0));time.sleep(10)
                 if not loaded:
                     with open('\(root.appendingPathComponent("model-loads").path)','a') as trace:trace.write('load\\n')
-                    emit(dict(base,type='progress',phase='modelReady',completed=0,total=0));loaded=True
+                    loaded=True
+                if not ready:
+                    emit(dict(base,type='progress',phase='modelReady',completed=0,total=0));ready=True
                 emit(dict(base,type='progress',phase='render',completed=0,total=0))
                 if '\(mode)'=='page-timeout':time.sleep(10)
                 if '\(mode)'=='failed':
@@ -88,15 +103,16 @@ final class DocumentNativeSessionTests: XCTestCase {
     private func session(
         _ fixture: (
             URL, ItemStore, DocumentJobMaterialWork, DocumentConverterConfiguration, DocumentContentFiles
-        ), budgets: DocumentWorkerBudgets? = nil
+        ), budgets: DocumentWorkerBudgets? = nil, pool: DocumentWorkerPool? = nil,
+        cancellation: DocumentConversionCancellation = .init()
     ) throws -> DocumentNativeSession {
         let original = try fixture.2.verifyOriginal(cancellation: .init())
         return try DocumentNativeSession(
             intent: fixture.2.intent, original: original, configuration: fixture.3,
             expectedExecutableSHA256: DocumentProcess.executableSHA256(fixture.3.executablePath),
             files: fixture.4,
-            root: fixture.1.root, budgets: budgets ?? DocumentWorkerBudgets(), cancellation: .init(),
-            runtimeVerifier: { _ in })
+            root: fixture.1.root, budgets: budgets ?? DocumentWorkerBudgets(), cancellation: cancellation,
+            runtimeVerifier: { _ in }, pool: pool)
     }
     func testReadableWorkerBuildProvenanceCannotReplaceRequestedResultIdentity() throws {
         let f = try fixture(mode: "unexpected-build")
@@ -168,7 +184,7 @@ final class DocumentNativeSessionTests: XCTestCase {
         _ fixture: (
             URL, ItemStore, DocumentJobMaterialWork, DocumentConverterConfiguration, DocumentContentFiles
         ), work: DocumentJobMaterialWork? = nil,
-        cancellation: DocumentConversionCancellation = .init()
+        cancellation: DocumentConversionCancellation = .init(), pool: DocumentWorkerPool? = nil
     ) throws -> DocumentJobProducer {
         DocumentJobProducer(
             work: work ?? fixture.2,
@@ -177,7 +193,7 @@ final class DocumentNativeSessionTests: XCTestCase {
                 executableSHA256: try DocumentProcess.executableSHA256(fixture.3.executablePath),
                 configurationSHA256: configID),
             budgets: try DocumentWorkerBudgets(terminationGrace: 0.05), cancellation: cancellation,
-            runtimeVerifier: { _ in })
+            runtimeVerifier: { _ in }, pool: pool)
     }
     private func assertWorkerReaped(_ root: URL, file: StaticString = #filePath, line: UInt = #line) throws {
         let pid = try XCTUnwrap(
@@ -250,6 +266,202 @@ final class DocumentNativeSessionTests: XCTestCase {
             "load\nload\n")
         try await fresh.perform { $0.close() }
         try assertWorkerReaped(fixture.0)
+    }
+    private func alternateDocument(_ store: ItemStore) throws -> DocumentJobMaterialWork {
+        let item = try store.commit(CommitRequest(classID: "Item", operationID: "second-item")).revision
+        let data = Data([4, 5, 6])
+        let upload = try store.beginAttachment(
+            AttachmentUploadRequest(
+                itemID: item.itemID, expectedRevisionID: item.revisionID,
+                operationID: "second-original", filename: "other.pdf", mediaType: "application/pdf",
+                byteCount: 3, sha256: PageCorpusInput.digest(data)))
+        let uploadID = try XCTUnwrap(upload.uploadID)
+        _ = try store.appendAttachment(uploadID: uploadID, offset: 0, data: data)
+        let attached = try store.finishAttachment(uploadID: uploadID).revision
+        let job = try store.startDocumentJob(
+            DocumentJobStart(
+                itemID: attached.itemID, expectedRevisionID: attached.revisionID,
+                attachmentID: upload.attachment.attachmentID, operationID: "second-job"),
+            identity: .init(), configurationSHA256: configID)
+        let claim = try store.claimDocumentJob(job.jobID, configurationSHA256: configID)
+        return try store.documentJobMaterialWork(
+            job.jobID, generation: claim.checkpoint.generation, configurationSHA256: configID)
+    }
+    private func workerPID(_ root: URL) throws -> Int32 {
+        try XCTUnwrap(Int32(String(contentsOf: root.appendingPathComponent("worker-pid"), encoding: .utf8)))
+    }
+    func testPoolRejectsMissingOrMalformedColdGreetingBeforeOpeningDocument() async throws {
+        for mode in ["missing-pool-greeting", "malformed-pool-greeting"] {
+            let f = try fixture(mode: mode)
+            defer { try? FileManager.default.removeItem(at: f.0) }
+            let pool = try DocumentWorkerPool(idleSeconds: 60)
+            XCTAssertThrowsError(try session(f, pool: pool)) {
+                XCTAssertEqual(($0 as? TractandaError)?.code, "documentWorkerPoolUnsupported")
+            }
+            let state = await pool.status()
+            XCTAssertFalse(state.workerRunning)
+            XCTAssertFalse(state.documentActive)
+            XCTAssertFalse(
+                FileManager.default.fileExists(atPath: f.0.appendingPathComponent("model-loads").path))
+            try assertWorkerReaped(f.0)
+            await pool.shutdown()
+        }
+    }
+    func testPoolReusesAcrossDifferentDocumentsAndExplicitUnloadReloads() async throws {
+        let f = try fixture(mode: "normal")
+        defer { try? FileManager.default.removeItem(at: f.0) }
+        let pool = try DocumentWorkerPool(idleSeconds: 60)
+        let initial = await pool.status()
+        XCTAssertFalse(initial.workerRunning)
+        let a = try session(f, pool: pool)
+        let pid = try workerPID(f.0)
+        _ = try a.convert(1)
+        try a.close()
+        let idle = await pool.status()
+        XCTAssertTrue(idle.workerRunning)
+        XCTAssertFalse(idle.documentActive)
+        let second = (f.0, f.1, try alternateDocument(f.1), f.3, f.4)
+        let b = try session(second, pool: pool)
+        XCTAssertEqual(try workerPID(f.0), pid)
+        XCTAssertNotEqual(a.binding.jobID, b.binding.jobID)
+        XCTAssertNotEqual(a.binding.sessionID, b.binding.sessionID)
+        XCTAssertNotEqual(a.binding.source.sha256, b.binding.source.sha256)
+        XCTAssertThrowsError(
+            try pool.acquire(
+                configuration: f.3, executableSHA256: DocumentProcess.executableSHA256(f.3.executablePath),
+                cancellation: .init(), graceSeconds: 0.05,
+                deadline: .now.advanced(by: .seconds(5))))
+        XCTAssertEqual(try b.convert(2).sourceSHA256, second.2.intent.source.sha256)
+        try b.close()
+        let again = try session(f, pool: pool)
+        XCTAssertEqual(try again.convert(1).sourceSHA256, f.2.intent.source.sha256)
+        try again.close()
+        XCTAssertEqual(
+            try String(contentsOf: f.0.appendingPathComponent("model-loads"), encoding: .utf8), "load\n")
+        XCTAssertEqual(
+            try String(contentsOf: f.0.appendingPathComponent("pool-greetings"), encoding: .utf8),
+            "greeting\n")
+        let unloaded = try await pool.unload()
+        XCTAssertFalse(unloaded.workerRunning)
+        try assertWorkerReaped(f.0)
+        let fresh = try session(second, pool: pool)
+        _ = try fresh.convert(2)
+        try fresh.close()
+        XCTAssertEqual(
+            try String(contentsOf: f.0.appendingPathComponent("model-loads"), encoding: .utf8), "load\nload\n"
+        )
+        await pool.shutdown()
+        try assertWorkerReaped(f.0)
+    }
+    func testPoolIdleExpiryNeverInterruptsActiveDocumentAndUnloadWaitsForRelease() async throws {
+        let f = try fixture(mode: "normal")
+        defer { try? FileManager.default.removeItem(at: f.0) }
+        let pool = try DocumentWorkerPool(idleSeconds: 0.02)
+        let active = try session(f, pool: pool)
+        _ = try active.convert(1)
+        try await Task.sleep(for: .milliseconds(80))
+        let running = await pool.status()
+        XCTAssertTrue(running.workerRunning)
+        XCTAssertTrue(running.documentActive)
+        let pending = try await pool.unload()
+        XCTAssertTrue(pending.workerRunning)
+        XCTAssertTrue(pending.unloadPending)
+        _ = try active.convert(2)
+        try active.close()
+        let released = await pool.status()
+        XCTAssertFalse(released.workerRunning)
+        try assertWorkerReaped(f.0)
+        let fresh = try session(f, pool: pool)
+        _ = try fresh.convert(1)
+        try fresh.close()
+        for _ in 0..<200 {
+            if !(await pool.status()).workerRunning { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let expired = await pool.status()
+        XCTAssertFalse(expired.workerRunning)
+        try assertWorkerReaped(f.0)
+        await pool.shutdown()
+    }
+    func testPoolCancellationFailureImmediatePolicyAndShutdownAllReap() async throws {
+        for mode in ["normal", "failed"] {
+            let f = try fixture(mode: mode)
+            defer { try? FileManager.default.removeItem(at: f.0) }
+            let pool = try DocumentWorkerPool(idleSeconds: 60)
+            let cancellation = DocumentConversionCancellation()
+            let active = try session(f, pool: pool, cancellation: cancellation)
+            if mode == "normal" {
+                _ = try active.convert(1)
+                cancellation.cancel()
+                XCTAssertThrowsError(try active.convert(2)) { XCTAssertTrue($0 is CancellationError) }
+            } else {
+                XCTAssertEqual(try active.convert(1).status, "failed")
+            }
+            let stopped = await pool.status()
+            XCTAssertFalse(stopped.workerRunning)
+            try assertWorkerReaped(f.0)
+            let fresh = try session(f, pool: pool)
+            _ = try fresh.convert(1)
+            try fresh.close()
+            await pool.shutdown()
+            try assertWorkerReaped(f.0)
+        }
+        let f = try fixture(mode: "normal")
+        defer { try? FileManager.default.removeItem(at: f.0) }
+        let immediate = try DocumentWorkerPool(idleSeconds: 0)
+        let active = try session(f, pool: immediate)
+        _ = try active.convert(1)
+        try active.close()
+        let stopped = await immediate.status()
+        XCTAssertFalse(stopped.workerRunning)
+        try assertWorkerReaped(f.0)
+    }
+    func testIdleWorkerCrashIsReapedAndNextDocumentStartsFresh() async throws {
+        let f = try fixture(mode: "normal")
+        defer { try? FileManager.default.removeItem(at: f.0) }
+        let pool = try DocumentWorkerPool(idleSeconds: 60)
+        let first = try session(f, pool: pool)
+        _ = try first.convert(1)
+        try first.close()
+        let pid = try workerPID(f.0)
+        XCTAssertEqual(kill(pid, SIGKILL), 0)
+        // Status uses the owned non-consuming exit observation and retires the dead worker.
+        for _ in 0..<200 {
+            if !(await pool.status()).workerRunning { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let dead = await pool.status()
+        XCTAssertFalse(dead.workerRunning)
+        try assertWorkerReaped(f.0)
+        let fresh = try session(f, pool: pool)
+        _ = try fresh.convert(1)
+        try fresh.close()
+        XCTAssertEqual(
+            try String(contentsOf: f.0.appendingPathComponent("model-loads"), encoding: .utf8), "load\nload\n"
+        )
+        await pool.shutdown()
+    }
+    func testPoolDoesNotReuseWorkerForDifferentModelDirectory() async throws {
+        let f = try fixture(mode: "normal")
+        defer { try? FileManager.default.removeItem(at: f.0) }
+        let pool = try DocumentWorkerPool(idleSeconds: 60)
+        let first = try session(f, pool: pool)
+        _ = try first.convert(1)
+        try first.close()
+        let oldPID = try workerPID(f.0)
+        let otherModel = f.0.appendingPathComponent("other-model")
+        try FileManager.default.createDirectory(at: otherModel, withIntermediateDirectories: true)
+        let config = DocumentConverterConfiguration(
+            executablePath: f.3.executablePath, modelDirectory: otherModel.path,
+            scratchDirectory: f.3.scratchDirectory)
+        let other = (f.0, f.1, f.2, config, f.4)
+        let next = try session(other, pool: pool)
+        var status: Int32 = 0
+        XCTAssertEqual(waitpid(oldPID, &status, WNOHANG), -1)
+        XCTAssertEqual(errno, ECHILD)
+        _ = try next.convert(1)
+        try next.close()
+        await pool.shutdown()
     }
     func testFailedTerminalRequiresEndedContextAndFreshSession() throws {
         let fixture = try fixture(mode: "failed")

@@ -95,7 +95,8 @@ func daemonConfiguration(from arguments: [String]) throws -> DaemonConfiguration
         case "--http-port", "--view", "--project-root", "--status-root", "--project", "--index-directory",
             "--document-converter", "--document-model-directory", "--document-scratch-directory",
             "--document-inspect-seconds", "--document-model-load-seconds", "--document-page-seconds",
-            "--document-no-progress-seconds", "--document-termination-grace-seconds",
+            "--document-worker-idle-seconds", "--document-no-progress-seconds",
+            "--document-termination-grace-seconds",
             "--attachment-upload-idle-seconds", "--attachment-staged-byte-quota",
             "--attachment-minimum-free-bytes", "--rebuild-no-progress-seconds", "--peer-runtime-config",
             "--public-jmap-config", "--model-provisioning-manifest", "--model-storage-directory",
@@ -135,6 +136,11 @@ func daemonConfiguration(from arguments: [String]) throws -> DaemonConfiguration
             case "--document-scratch-directory":
                 guard documentScratch == nil else { throw TractandaError("usage", usage) }
                 documentScratch = value
+            case "--document-worker-idle-seconds":
+                guard documentResourceValues[flag] == nil, let seconds = Double(value),
+                    seconds.isFinite, seconds >= 0
+                else { throw TractandaError("usage", usage) }
+                documentResourceValues[flag] = seconds
             case "--document-inspect-seconds", "--document-model-load-seconds", "--document-page-seconds",
                 "--document-no-progress-seconds", "--document-termination-grace-seconds":
                 guard documentResourceValues[flag] == nil, let seconds = Double(value),
@@ -206,6 +212,8 @@ func daemonConfiguration(from arguments: [String]) throws -> DaemonConfiguration
         documentResourceValues.isEmpty
         ? nil
         : .init(
+            workerIdleSeconds: documentResourceValues["--document-worker-idle-seconds"]
+                ?? DocumentJobResources.defaultWorkerIdleSeconds,
             inspectSeconds: documentResourceValues["--document-inspect-seconds"]
                 ?? DocumentJobResources.defaultInspectSeconds,
             modelLoadSeconds: documentResourceValues["--document-model-load-seconds"]

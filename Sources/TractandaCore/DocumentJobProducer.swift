@@ -5,30 +5,52 @@ import Foundation
 public struct DocumentJobResources: Codable, Sendable {
     // Operational limits are configurable for much slower CPU hardware. A silent
     // prefill retains its absolute page limit rather than a counter watchdog.
+    public static let defaultWorkerIdleSeconds: Double = 60
     public static let defaultInspectSeconds: Double = 1800
     public static let defaultModelLoadSeconds: Double = 3600
     public static let defaultPageSeconds: Double = 21600
     public static let defaultNoProgressSeconds: Double = 1800
     public static let defaultTerminationGraceSeconds: Double = 15
+    public let workerIdleSeconds: Double
     public let inspectSeconds: Double
     public let modelLoadSeconds: Double
     public let pageSeconds: Double
     public let noProgressSeconds: Double
     public let terminationGraceSeconds: Double
     public init(
+        workerIdleSeconds: Double = DocumentJobResources.defaultWorkerIdleSeconds,
         inspectSeconds: Double = DocumentJobResources.defaultInspectSeconds,
         modelLoadSeconds: Double = DocumentJobResources.defaultModelLoadSeconds,
         pageSeconds: Double = DocumentJobResources.defaultPageSeconds,
         noProgressSeconds: Double = DocumentJobResources.defaultNoProgressSeconds,
         terminationGraceSeconds: Double = DocumentJobResources.defaultTerminationGraceSeconds
     ) {
+        self.workerIdleSeconds = workerIdleSeconds
         self.inspectSeconds = inspectSeconds
         self.modelLoadSeconds = modelLoadSeconds
         self.pageSeconds = pageSeconds
         self.noProgressSeconds = noProgressSeconds
         self.terminationGraceSeconds = terminationGraceSeconds
     }
-    public func validate() throws { _ = try budgets() }
+    private enum CodingKeys: String, CodingKey {
+        case workerIdleSeconds, inspectSeconds, modelLoadSeconds, pageSeconds, noProgressSeconds,
+            terminationGraceSeconds
+    }
+    public init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            workerIdleSeconds: try values.decodeIfPresent(Double.self, forKey: .workerIdleSeconds)
+                ?? Self.defaultWorkerIdleSeconds,
+            inspectSeconds: try values.decode(Double.self, forKey: .inspectSeconds),
+            modelLoadSeconds: try values.decode(Double.self, forKey: .modelLoadSeconds),
+            pageSeconds: try values.decode(Double.self, forKey: .pageSeconds),
+            noProgressSeconds: try values.decode(Double.self, forKey: .noProgressSeconds),
+            terminationGraceSeconds: try values.decode(Double.self, forKey: .terminationGraceSeconds))
+    }
+    public func validate() throws {
+        _ = try budgets()
+        try DocumentWorkerPool.validateIdleSeconds(workerIdleSeconds)
+    }
     func budgets() throws -> DocumentWorkerBudgets {
         try DocumentWorkerBudgets(
             inspect: inspectSeconds, modelLoad: modelLoadSeconds,
@@ -65,6 +87,7 @@ final class DocumentJobProducer: @unchecked Sendable {
     private let runtime: DocumentJobRuntime?
     private let budgets: DocumentWorkerBudgets
     private let runtimeVerifier: DocumentRuntimeVerifier
+    private let pool: DocumentWorkerPool?
     private var original: DocumentVerifiedOriginal?
     private var stage: DocumentPageStageWorker?
     private var session: DocumentNativeSession?
@@ -72,13 +95,15 @@ final class DocumentJobProducer: @unchecked Sendable {
     init(
         work: DocumentJobMaterialWork, runtime: DocumentJobRuntime?,
         budgets: DocumentWorkerBudgets, cancellation: DocumentConversionCancellation,
-        runtimeVerifier: @escaping DocumentRuntimeVerifier = DocumentNativeSession.verifyRuntime
+        runtimeVerifier: @escaping DocumentRuntimeVerifier = DocumentNativeSession.verifyRuntime,
+        pool: DocumentWorkerPool? = nil
     ) {
         self.work = work
         self.runtime = runtime
         self.budgets = budgets
         self.cancellation = cancellation
         self.runtimeVerifier = runtimeVerifier
+        self.pool = pool
     }
     func perform<T: Sendable>(_ body: @escaping @Sendable (DocumentJobProducer) throws -> T) async throws -> T
     {
@@ -116,7 +141,7 @@ final class DocumentJobProducer: @unchecked Sendable {
             configuration: runtime.configuration, executableSHA256: runtime.executableSHA256,
             budgets: budgets, cancellation: cancellation,
             expectedPageCount: inspectedPageCount ?? work.checkpoint.pageCount,
-            runtimeVerifier: runtimeVerifier)
+            runtimeVerifier: runtimeVerifier, pool: pool)
     }
     func convert(_ number: Int64) throws -> DocumentStoredPage {
         try cancellation.check()

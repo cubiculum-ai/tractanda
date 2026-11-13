@@ -107,7 +107,18 @@ func expectedWeights(_ directory: URL) throws -> [String: [Int]] {
             }
         #endif
         let args = Array(CommandLine.arguments.dropFirst())
-        if let mode = args.first, ["inspect-v1", "worker-v1"].contains(mode) {
+        if args == ["protocols-v1"] {
+            do {
+                let metadata = try JSONSerialization.data(
+                    withJSONObject: [
+                        "workerProtocol": NativeWorkerProtocol.name,
+                        "workerPoolProtocol": NativeWorkerProtocol.poolName,
+                    ], options: [.sortedKeys])
+                try FileHandle.standardOutput.write(contentsOf: metadata + Data([10]))
+            } catch { exit(1) }
+            return
+        }
+        if let mode = args.first, ["inspect-v1", "worker-v1", "pool-v1"].contains(mode) {
             await NativeDocumentWorker.main(args)
             return
         }

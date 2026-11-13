@@ -36,8 +36,17 @@ tractanda --profile NAME document-job discard JOB_ID
 
 Each document-job command makes one request. List returns one window (default 32, maximum 64). Page accepts a positive Int64 ordinal and returns exactly one provisional stage page. Provisional output has no canonical saved revision/content identity or citation. Successful document processing coverage establishes terminal outcomes across inspected pages; it is not an OCR accuracy claim. Rebase changes publication expectation while retaining original source revision and accepted pages; cancel retains work and discard explicitly disposes only authorized uncommitted stages.
 
-## Native Docling worker lifetime
+## Native Docling worker lifetime and controls
 
-Existing document-job behavior uses a short-lived native worker for a conversion run; the server does not keep a Docling model loaded just because it is running. Recovering an empty stage does not launch the worker. When processing begins, the worker first inspects the original and page count without loading model weights. The first page conversion verifies the configured pinned model and loads it. That worker keeps one model context for subsequent pages in the same run, rather than loading the model again for each page.
+As in poc.18, the native worker starts on demand when document work is inspected, and model weights load lazily on the first page conversion. Poc.19 adds a daemon-local pool with one serialized worker process. Across documents handled by the same warm process, the pinned model and tokenizer context are reused. Source binding, raster/decoder state, page/request IDs, processor input and generation/KV-cache state are fresh for each document. No worker or model process starts merely because the daemon starts.
 
-After the page pass is prepared, the daemon sends the worker a close request and waits for the worker process to exit before publishing canonical content. Cancellation, timeout, or terminal worker failure also ends and reaps that process. If the job is resumed after interruption, a new worker process and model context are created; already accepted page outcomes remain in the durable job stage, and the new run processes the remaining pages. A terminal worker failure during a page can require a fresh session and another model load. This existing behavior is now documented and regression-tested. Converter configuration/readiness and current permission checks still apply independently to each job.
+A healthy worker remains idle for 60 seconds after a document by default. Set `--document-worker-idle-seconds N` on `tractanda daemon` to change that idle retention; `0` retires the worker as soon as its active document finishes. The option controls idle retention only: it does not add or change an active-job deadline. Existing inspection, model-load, page, no-progress and shutdown-grace budgets still govern active work. Cancellation, timeout, worker failure, or configuration mismatch retires the process. Ordinary idle expiry waits for process exit before reporting it stopped.
+
+Use these local CLI controls to inspect or release the worker:
+
+```text
+tractanda [--profile NAME | --socket PATH] document-runtime status [--json]
+tractanda [--profile NAME | --socket PATH] document-runtime unload [--json]
+```
+
+`status` reports only `workerRunning`, `documentActive` and `unloadPending`; it does not reveal document/job content, and a running process does not prove model weights are loaded. It never starts a stopped managed daemon. `unload` is administrator-only: an idle worker is stopped immediately; if a document is active, the request marks it for retirement after that document completes, without cancelling the job or adding a deadline. These controls are local CLI/native operations, not MCP tools.

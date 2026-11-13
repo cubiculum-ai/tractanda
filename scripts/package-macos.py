@@ -21,6 +21,8 @@ MODEL_MANIFEST = "Packages/TractandaDocuments/Sources/TractandaDocumentConverter
 MAX_CMLX_METALLIB_BYTES = 64 * 1024 * 1024
 MODEL_MANIFEST_SHA = "64894c93726b0b76d2eb5c20f001c61d6fc2eea1ef848b23773ba60cae9e00ef"
 PATCH_MANIFEST_SHA = "732b8d020e258b8ab5de5875f53bc3756143b089d9a1d7619f311ccbe4674635"
+DOCUMENT_PROTOCOLS = {'workerProtocol': 'tractanda.native-document-worker.v1',
+                      'workerPoolProtocol': 'tractanda.native-document-pool.v1'}
 MODEL_ARTIFACT_MANIFEST = 'config/model-artifacts.json'
 MODEL_ARTIFACT_MANIFEST_SHA = '88b3029047c98e7593ccb2cc0f2aae32795d4fe50c43f4b8897199dcf0a81297'
 MODEL_ARTIFACT_EXTENSIONS = {'.json', '.safetensors', '.txt', '.model', '.tiktoken', '.md', '.jinja'}
@@ -235,11 +237,22 @@ def validate_artifact_directory(directory, artifact):
     return True
 
 
+def verify_document_protocols(converter):
+    try:
+        value = json.loads(run(str(converter), 'protocols-v1'))
+    except (ValueError, RuntimeError) as error:
+        raise ValueError('Document converter capability probe failed.') from error
+    if value != DOCUMENT_PROTOCOLS:
+        raise ValueError('Document converter lacks the required native pool protocol.')
+    return value
+
+
 def document_descriptor(converter, model_directory):
     if converter.is_symlink() or not stat.S_ISREG(converter.stat().st_mode) or not os.access(converter, os.X_OK):
         raise ValueError('Document converter must be a regular executable.')
     if run('/usr/bin/lipo', '-archs', str(converter)).strip() != 'arm64':
         raise ValueError('Document converter must target macOS arm64.')
+    verify_document_protocols(converter)
     manifest = ROOT / MODEL_MANIFEST
     patches = ROOT / 'Packages/TractandaDocuments/RuntimePatches/manifest.json'
     if digest(manifest) != MODEL_MANIFEST_SHA or digest(patches) != PATCH_MANIFEST_SHA:
@@ -259,6 +272,7 @@ def document_descriptor(converter, model_directory):
                      'preprocessing': 'opaque-rgb-content-crop-hf4561-pillow123-grid-v2',
                      'parser': 'doctags-strict-v1'},
         'workerProtocol': 'tractanda.native-document-worker.v1',
+        'workerPoolProtocol': 'tractanda.native-document-pool.v1',
         'modelDirectory': 'models/granite-docling-258m-mlx',
         'modelManifestPath': 'licenses/Docling/ModelAssets.json',
         'modelManifestSHA256': MODEL_MANIFEST_SHA,

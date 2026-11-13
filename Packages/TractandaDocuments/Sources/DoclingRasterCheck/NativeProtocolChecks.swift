@@ -24,6 +24,28 @@ func checkNativeProtocol(_ directory: URL, scratch: URL) throws {
     largeBinding["source"] = largeSource
     largeBinding["file"] = largeFile
     _ = try NativeWorkerProtocol.binding(JSONSerialization.data(withJSONObject: largeBinding))
+    var warmHello =
+        try JSONSerialization.jsonObject(
+            with: Data(contentsOf: directory.appendingPathComponent("response-hello.json"))) as! [String: Any]
+    warmHello["modelLoaded"] = true
+    let warmData = try JSONSerialization.data(withJSONObject: warmHello)
+    try rejectProtocol {
+        try NativeWorkerProtocol.validateResponse(
+            warmData, binding: binding, outstanding: nil, pageCount: 128)
+    }
+    try NativeWorkerProtocol.validateResponse(
+        warmData, binding: binding, outstanding: nil, pageCount: 128, allowLoadedModel: true)
+    let poolOpen: [String: Any] = [
+        "protocol": NativeWorkerProtocol.poolName, "method": "open",
+        "sourcePath": "/owned/original", "bindingPath": "/owned/binding",
+    ]
+    let decodedOpen = try NativeWorkerProtocol.poolOpen(JSONSerialization.data(withJSONObject: poolOpen))
+    try assertProtocol(decodedOpen.sourcePath == "/owned/original")
+    var invalidOpen = poolOpen
+    invalidOpen["sourcePath"] = "relative"
+    try rejectProtocol {
+        _ = try NativeWorkerProtocol.poolOpen(JSONSerialization.data(withJSONObject: invalidOpen))
+    }
     let convertData = try Data(contentsOf: directory.appendingPathComponent("request-convert.json"))
     let convert = try NativeWorkerProtocol.request(
         convertData, binding: binding, previousID: 0, pageCount: 128)

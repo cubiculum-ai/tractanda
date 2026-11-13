@@ -19,6 +19,7 @@ let usage = """
       tractanda [--profile NAME | --socket PATH] cluster join --hostname TARGET_DNS [--replace-expired] [--code-file PRIVATE_FILE] [--no-wait] [--json]
       tractanda [--profile NAME | --socket PATH] cluster join-status|resume [--operation-id UUID] [--json]
       tractanda [--profile NAME | --socket PATH] cluster status [--json]
+      tractanda [--profile NAME | --socket PATH] document-runtime status|unload [--json]
       tractanda init STORE [--index-directory PATH]
       tractanda personal-peer ...                 (low-level personal peer repair; run without arguments for syntax)
       tractanda inspect-content STORE [--owner OS_USER] [--output PRIVATE_JSON]
@@ -26,7 +27,7 @@ let usage = """
       tractanda seed STORE [--index-directory PATH]
       tractanda configure-access STORE TAGGED_CONFIG_JSON OPERATION_ID [--index-directory PATH]
       tractanda serve STORE SOCKET [--max-requests N] [--index-directory PATH]
-      tractanda daemon STORE SOCKET [--index-directory PATH] [--http-port PORT|--no-http] [--public-jmap-config ABSOLUTE_JSON_PATH] [--managed] [--document-converter PATH --document-model-directory PATH --document-scratch-directory PATH] [--document-inspect-seconds N] [--document-model-load-seconds N] [--document-page-seconds N] [--document-no-progress-seconds N] [--document-termination-grace-seconds N] [--attachment-upload-idle-seconds N] [--attachment-staged-byte-quota N] [--attachment-minimum-free-bytes N] [--rebuild-no-progress-seconds N] [--view ID | --project-root ID --status-root ID [--project ID]]
+      tractanda daemon STORE SOCKET [--index-directory PATH] [--http-port PORT|--no-http] [--public-jmap-config ABSOLUTE_JSON_PATH] [--managed] [--document-converter PATH --document-model-directory PATH --document-scratch-directory PATH] [--document-worker-idle-seconds N] [--document-inspect-seconds N] [--document-model-load-seconds N] [--document-page-seconds N] [--document-no-progress-seconds N] [--document-termination-grace-seconds N] [--attachment-upload-idle-seconds N] [--attachment-staged-byte-quota N] [--attachment-minimum-free-bytes N] [--rebuild-no-progress-seconds N] [--view ID | --project-root ID --status-root ID [--project ID]]
       tractanda connections list|add|default|remove ...
       tractanda service prepare|install|activate|start|stop|status|uninstall ...
       tractanda models prefetch|status|import|run --manifest PATH --storage PATH [--artifact ID] [--from DIRECTORY] [-- EXECUTABLE ARGS...]
@@ -214,6 +215,7 @@ func run() throws {
     }
     if try clusterEnrollmentCommand(arguments: args, options: options) { return }
     if try clusterStatusCommand(arguments: args, options: options) { return }
+    if try documentRuntimeCommand(arguments: args, options: options) { return }
     if let statusOptions = try peerStatusOptions(arguments: args, options: options) {
         output(try call(statusOptions.resolve(), PeerOperatorStatus.nativeMethod, [:]))
         return

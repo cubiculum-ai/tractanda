@@ -17,7 +17,9 @@ import VMLXTokenizers
 private final class ProtocolWriter {
     private let file: FileHandle
     let binding: NativeDocumentBinding
-    init(binding: NativeDocumentBinding, descriptor: Int32) {
+    let pooled: Bool
+    init(binding: NativeDocumentBinding, descriptor: Int32, pooled: Bool = false) {
+        self.pooled = pooled
         self.binding = binding
         file = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
     }
@@ -26,7 +28,7 @@ private final class ProtocolWriter {
         for (key, field) in fields { value[key] = field }
         let data = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
         try NativeWorkerProtocol.validateResponse(
-            data, binding: binding, outstanding: request, pageCount: pageCount)
+            data, binding: binding, outstanding: request, pageCount: pageCount, allowLoadedModel: pooled)
         try file.write(contentsOf: data + Data([10]))
     }
     func progress(
@@ -56,153 +58,191 @@ enum NativeDocumentWorker {
         guard protocolFD >= 0, fcntl(protocolFD, F_SETFD, FD_CLOEXEC) == 0,
             dup2(STDERR_FILENO, STDOUT_FILENO) >= 0
         else { exit(1) }
+        defer { close(protocolFD) }
         var writer: ProtocolWriter?
         var inspectOutput: URL?
-        do {
-            guard args.count == 5 else { throw NativeWorkerProtocol.invalid() }
-            let inspect = args[0] == "inspect-v1"
-            let sourcePath = args[inspect ? 1 : 2]
-            let mediaType = args[inspect ? 2 : 3]
-            let bindingPath = args[inspect ? 3 : 4]
-            for path in [sourcePath, bindingPath, args[1], args[4]] {
-                guard path.hasPrefix("/"), path.utf8.count <= 4096, !path.contains("\0")
-                else { throw NativeWorkerProtocol.invalid() }
-            }
-            if inspect { inspectOutput = URL(fileURLWithPath: args[4]) }
-            let binding = try NativeWorkerProtocol.binding(try boundedBinding(bindingPath))
-            guard binding.source.mediaType == mediaType else { throw NativeWorkerProtocol.invalid() }
-            writer = ProtocolWriter(binding: binding, descriptor: protocolFD)
-            let session = try DoclingFileRasterSession.open(
-                at: URL(fileURLWithPath: sourcePath), mediaType: mediaType, expected: binding.file)
-            defer { session.close() }
-            let hello: [String: Any] = [
-                "type": "hello", "pageCount": session.pageCount,
-                "modelLoaded": false, "modelForwardCalls": 0,
-            ]
-            if let inspectOutput {
-                try saveInspection(
-                    hello, writer: writer!, pageCount: session.pageCount, output: inspectOutput)
-                return
-            }
-            try writer!.frame(hello, pageCount: session.pageCount)
-            let reader = NativeWorkerLineReader(file: .standardInput)
-            var previousID: Int64 = 0
-            var context: ModelContext?
-            while let data = try reader.next(limit: NativeWorkerProtocol.requestBytes) {
-                let request = try NativeWorkerProtocol.request(
-                    data, binding: binding, previousID: previousID, pageCount: session.pageCount)
-                previousID = request.requestID
-                if request.method == "close" {
-                    try session.validateSource()
-                    try writer!.frame(
-                        ["type": "closed", "requestID": request.requestID], request: request,
-                        pageCount: session.pageCount)
+        let pooled = args.first == "pool-v1"
+        let reader = NativeWorkerLineReader(file: .standardInput)
+        var context: ModelContext?
+        if pooled {
+            do {
+                let greeting = try JSONSerialization.data(
+                    withJSONObject: [
+                        "workerProtocol": NativeWorkerProtocol.name,
+                        "workerPoolProtocol": NativeWorkerProtocol.poolName,
+                    ], options: [.sortedKeys])
+                try NativeWorkerProtocol.poolGreeting(greeting)
+                try FileHandle(fileDescriptor: protocolFD, closeOnDealloc: false)
+                    .write(contentsOf: greeting + Data([10]))
+            } catch { exit(1) }
+        }
+        repeat {
+            writer = nil
+            do {
+                guard pooled ? args.count == 2 : args.count == 5 else { throw NativeWorkerProtocol.invalid() }
+                let inspect = args[0] == "inspect-v1"
+                let sourcePath: String
+                let bindingPath: String
+                if pooled {
+                    guard let data = try reader.next(limit: NativeWorkerProtocol.requestBytes) else { return }
+                    let open = try NativeWorkerProtocol.poolOpen(data)
+                    sourcePath = open.sourcePath
+                    bindingPath = open.bindingPath
+                } else {
+                    sourcePath = args[inspect ? 1 : 2]
+                    bindingPath = args[inspect ? 3 : 4]
+                }
+                for path in [sourcePath, bindingPath, args[1]] {
+                    guard path.hasPrefix("/"), path.utf8.count <= 4096, !path.contains("\0")
+                    else { throw NativeWorkerProtocol.invalid() }
+                }
+                if inspect { inspectOutput = URL(fileURLWithPath: args[4]) }
+                let binding = try NativeWorkerProtocol.binding(try boundedBinding(bindingPath))
+                let mediaType = binding.source.mediaType
+                guard pooled || mediaType == args[inspect ? 2 : 3] else {
+                    throw NativeWorkerProtocol.invalid()
+                }
+                let responseFD = fcntl(protocolFD, F_DUPFD_CLOEXEC, 3)
+                guard responseFD >= 0 else { throw NativeWorkerProtocol.invalid() }
+                writer = ProtocolWriter(binding: binding, descriptor: responseFD, pooled: pooled)
+                let session = try DoclingFileRasterSession.open(
+                    at: URL(fileURLWithPath: sourcePath), mediaType: mediaType, expected: binding.file)
+                defer { session.close() }
+                let hello: [String: Any] = [
+                    "type": "hello", "pageCount": session.pageCount,
+                    "modelLoaded": context != nil, "modelForwardCalls": 0,
+                ]
+                if let inspectOutput {
+                    try saveInspection(
+                        hello, writer: writer!, pageCount: session.pageCount, output: inspectOutput)
                     return
                 }
-                try session.validateSource()
-                if context == nil {
-                    try writer!.progress("modelVerify", request: request, pageCount: session.pageCount)
-                    do {
-                        let model = URL(fileURLWithPath: args[1], isDirectory: true)
-                        try verifyModel(model) { done, total in
-                            try writer!.progress(
-                                "modelVerify", completed: done, total: total, request: request,
-                                pageCount: session.pageCount)
+                try writer!.frame(hello, pageCount: session.pageCount)
+                var previousID: Int64 = 0
+                var verifiedForDocument = false
+                while let data = try reader.next(limit: NativeWorkerProtocol.requestBytes) {
+                    let request = try NativeWorkerProtocol.request(
+                        data, binding: binding, previousID: previousID, pageCount: session.pageCount)
+                    previousID = request.requestID
+                    if request.method == "close" {
+                        try session.validateSource()
+                        session.close()  // Release source/decoder state before acknowledging the pool lease.
+                        try writer!.frame(
+                            ["type": "closed", "requestID": request.requestID], request: request,
+                            pageCount: session.pageCount)
+                        break
+                    }
+                    try session.validateSource()
+                    if !verifiedForDocument {
+                        try writer!.progress("modelVerify", request: request, pageCount: session.pageCount)
+                        do {
+                            let model = URL(fileURLWithPath: args[1], isDirectory: true)
+                            try verifyModel(model) { done, total in
+                                try writer!.progress(
+                                    "modelVerify", completed: done, total: total, request: request,
+                                    pageCount: session.pageCount)
+                            }
+                            if context == nil {
+                                let expected = try expectedWeights(model)
+                                try writer!.progress(
+                                    "modelLoad", request: request, pageCount: session.pageCount)
+                                var loaded = try await VLMModelFactory.shared.load(
+                                    from: model, using: #huggingFaceTokenizerLoader())
+                                let actual = Dictionary(
+                                    uniqueKeysWithValues: loaded.model.parameters().flattened().map {
+                                        ($0.0, $0.1.shape)
+                                    })
+                                try require(actual == expected, "Loaded model weights differ.")
+                                let vision = loaded.model.parameters().flattened().first {
+                                    $0.0 == "vision_model.embeddings.patch_embedding.weight"
+                                }!.1
+                                try require(vision.dtype == .bfloat16, "Loaded vision weights are not BF16.")
+                                loaded.model.train(false)
+                                loaded.processor = NativeDocumentInput(
+                                    tokenizer: loaded.tokenizer, traceDirectory: nil, comparisonDirectory: nil
+                                )
+                                context = loaded
+                            }
+                            verifiedForDocument = true
+                            try writer!.progress("modelReady", request: request, pageCount: session.pageCount)
+                        } catch {
+                            // A model error is systemic; never invent unvisited page outcomes.
+                            throw TractandaError(
+                                "pinnedModelMismatch", "Pinned native model could not be loaded.")
                         }
-                        let expected = try expectedWeights(model)
-                        try writer!.progress("modelLoad", request: request, pageCount: session.pageCount)
-                        var loaded = try await VLMModelFactory.shared.load(
-                            from: model, using: #huggingFaceTokenizerLoader())
-                        let actual = Dictionary(
-                            uniqueKeysWithValues: loaded.model.parameters().flattened().map {
-                                ($0.0, $0.1.shape)
-                            })
-                        try require(actual == expected, "Loaded model weights differ.")
-                        let vision = loaded.model.parameters().flattened().first {
-                            $0.0 == "vision_model.embeddings.patch_embedding.weight"
-                        }!.1
-                        try require(vision.dtype == .bfloat16, "Loaded vision weights are not BF16.")
-                        loaded.model.train(false)
-                        loaded.processor = NativeDocumentInput(
-                            tokenizer: loaded.tokenizer, traceDirectory: nil, comparisonDirectory: nil)
-                        context = loaded
-                        try writer!.progress("modelReady", request: request, pageCount: session.pageCount)
+                    }
+                    let fields: [String: Any]
+                    do {
+                        try writer!.progress("render", request: request, pageCount: session.pageCount)
+                        let raster = try session.render(pageNumber: request.pageNumber!)
+                        var active = context!
+                        let result = try await convertPage(
+                            raster, context: &active, writer: writer!, request: request,
+                            pageCount: session.pageCount)
+                        context = active
+                        try session.validateSource()
+                        if let result {
+                            fields = [
+                                "type": "page", "requestID": request.requestID,
+                                "pageNumber": request.pageNumber!,
+                                "status": "converted",
+                                "page": try JSONSerialization.jsonObject(with: JSON.encode(result)),
+                            ]
+                        } else {
+                            fields = failure(request, status: "truncated", code: "truncatedDocumentOutput")
+                        }
+                    } catch let error as DoclingRasterError {
+                        if [.sourceChanged, .sourceReadFailed, .sourceIdentityMismatch].contains(error) {
+                            throw error
+                        }
+                        // A decoder error must not hide a concurrently changed/read-failed source.
+                        try session.validateSource()
+                        fields =
+                            error == .renderingFailed
+                            ? failure(request, status: "failed", code: "nativePageFailed")
+                            : failure(request, status: "unsupported", code: "unsupportedDocumentInput")
                     } catch {
-                        // A model error is systemic; never invent unvisited page outcomes.
-                        throw TractandaError(
-                            "pinnedModelMismatch", "Pinned native model could not be loaded.")
+                        // Preparation errors occur before generation; abnormal worker/runtime failure
+                        // outside this path exits the session and is supervised by Core.
+                        try session.validateSource()
+                        fields = failure(request, status: "failed", code: "nativePageFailed")
                     }
+                    try writer!.frame(fields, request: request, pageCount: session.pageCount)
+                    // Do not reuse a context after an unexpected preparation/runtime exception.
+                    // Core retains this explicit terminal outcome and may start a fresh worker.
+                    if fields["status"] as? String == "failed" { return }
                 }
-                let fields: [String: Any]
-                do {
-                    try writer!.progress("render", request: request, pageCount: session.pageCount)
-                    let raster = try session.render(pageNumber: request.pageNumber!)
-                    var active = context!
-                    let result = try await convertPage(
-                        raster, context: &active, writer: writer!, request: request,
-                        pageCount: session.pageCount)
-                    context = active
-                    try session.validateSource()
-                    if let result {
-                        fields = [
-                            "type": "page", "requestID": request.requestID, "pageNumber": request.pageNumber!,
-                            "status": "converted",
-                            "page": try JSONSerialization.jsonObject(with: JSON.encode(result)),
-                        ]
-                    } else {
-                        fields = failure(request, status: "truncated", code: "truncatedDocumentOutput")
+                // Only model/tokenizer context survives. Source/raster and request state are scoped
+                // to this iteration; every generation uses a fresh processor and nil KV cache.
+            } catch {
+                let code: String
+                if let error = error as? DoclingRasterError {
+                    switch error {
+                    case .sourceChanged: code = "sourceChanged"
+                    case .sourceReadFailed: code = "sourceReadFailed"
+                    case .sourceIdentityMismatch: code = "sourceIdentityMismatch"
+                    default: code = "unsupportedDocumentInput"
                     }
-                } catch let error as DoclingRasterError {
-                    if [.sourceChanged, .sourceReadFailed, .sourceIdentityMismatch].contains(error) {
-                        throw error
-                    }
-                    // A decoder error must not hide a concurrently changed/read-failed source.
-                    try session.validateSource()
-                    fields =
-                        error == .renderingFailed
-                        ? failure(request, status: "failed", code: "nativePageFailed")
-                        : failure(request, status: "unsupported", code: "unsupportedDocumentInput")
-                } catch {
-                    // Preparation errors occur before generation; abnormal worker/runtime failure
-                    // outside this path exits the session and is supervised by Core.
-                    try session.validateSource()
-                    fields = failure(request, status: "failed", code: "nativePageFailed")
-                }
-                try writer!.frame(fields, request: request, pageCount: session.pageCount)
-                // Do not reuse a context after an unexpected preparation/runtime exception.
-                // Core retains this explicit terminal outcome and may start a fresh worker.
-                if fields["status"] as? String == "failed" { return }
-            }
-        } catch {
-            let code: String
-            if let error = error as? DoclingRasterError {
-                switch error {
-                case .sourceChanged: code = "sourceChanged"
-                case .sourceReadFailed: code = "sourceReadFailed"
-                case .sourceIdentityMismatch: code = "sourceIdentityMismatch"
-                default: code = "unsupportedDocumentInput"
-                }
-            } else if let error = error as? TractandaError {
-                code =
-                    ["pinnedModelMismatch", "invalidNativeProtocol"].contains(error.code)
-                    ? error.code : "nativeWorkerFailed"
-            } else {
-                code = "nativeWorkerFailed"
-            }
-            if let writer {
-                let fields: [String: Any] = ["type": "error", "failureCode": code]
-                if let inspectOutput {
-                    try? saveInspection(fields, writer: writer, pageCount: 0, output: inspectOutput)
+                } else if let error = error as? TractandaError {
+                    code =
+                        ["pinnedModelMismatch", "invalidNativeProtocol"].contains(error.code)
+                        ? error.code : "nativeWorkerFailed"
                 } else {
-                    try? writer.frame(fields, pageCount: 0)
+                    code = "nativeWorkerFailed"
                 }
-            } else {
-                close(protocolFD)
+                if let writer {
+                    let fields: [String: Any] = ["type": "error", "failureCode": code]
+                    if let inspectOutput {
+                        try? saveInspection(fields, writer: writer, pageCount: 0, output: inspectOutput)
+                    } else {
+                        try? writer.frame(fields, pageCount: 0)
+                    }
+                }
+                // Binding parse failures cannot safely fabricate a fully bound error frame.
+                FileHandle.standardError.write(Data(("\(code): native worker failed.\n").utf8))
+                exit(1)
             }
-            // Binding parse failures cannot safely fabricate a fully bound error frame.
-            FileHandle.standardError.write(Data(("\(code): native worker failed.\n").utf8))
-            exit(1)
-        }
+        } while pooled
     }
     private static func failure(_ request: NativeWorkerRequest, status: String, code: String) -> [String: Any]
     {

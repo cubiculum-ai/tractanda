@@ -88,6 +88,7 @@ public actor DaemonApplication {
             }
             let names = [
                 "TractandaModel/status", PersonalPeerAdminCall.method, PeerOperatorStatus.nativeMethod,
+                "TractandaDocumentRuntime/status", "TractandaDocumentRuntime/unload",
                 "TractandaAuth/createSession", "TractandaPeerEnrollment/step",
                 "TractandaPeerEnrollment/status",
                 "TractandaPeerEnrollment/accept", "TractandaPeerEnrollment/register",
@@ -96,6 +97,7 @@ public actor DaemonApplication {
             for method in names {
                 let readOnly =
                     method == "TractandaModel/status" || method == PeerOperatorStatus.nativeMethod
+                    || method == "TractandaDocumentRuntime/status"
                     || method == "TractandaPeerEnrollment/status"
                     || method == "TractandaPeerEnrollment/read"
                 methods[method] = .init(
@@ -133,6 +135,30 @@ public actor DaemonApplication {
                     let statuses = try JSONSerialization.jsonObject(
                         with: JSONEncoder().encode(modelStatusProvider?() ?? []))
                     return try .nativeSuccess(invocation.method, ["artifacts": statuses])
+                }
+                if ["TractandaDocumentRuntime/status", "TractandaDocumentRuntime/unload"].contains(
+                    invocation.method)
+                {
+                    guard invocation.callCount == 1, invocation.arguments.members?.isEmpty == true else {
+                        throw TractandaError(
+                            "invalidArguments", "Use one document runtime invocation with empty arguments.")
+                    }
+                    let status: DocumentWorkerPoolStatus
+                    if invocation.method == "TractandaDocumentRuntime/unload" {
+                        let overhead =
+                            try JMAPInvocation(
+                                name: invocation.method, arguments: .object([]), callID: invocation.callID
+                            ).value.encoded().count - 2
+                        try invocation.replyBudget?.reserveMutationResponse(
+                            maximumResponseBytes: overhead + 1024)
+                        invocation.replyBudget?.markDomainOperationBegan()
+                        status = try await coordinator.unloadDocumentWorker(
+                            forUID: uid, principal: invocation.principal)
+                    } else {
+                        status = try await coordinator.documentWorkerStatus(
+                            forUID: uid, principal: invocation.principal)
+                    }
+                    return try .nativeEncodedSuccess(invocation.method, status)
                 }
                 if let call = try PeerOperatorStatusNativeCall.parse(invocation) {
                     do {

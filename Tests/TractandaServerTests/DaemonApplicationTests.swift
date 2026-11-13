@@ -47,6 +47,30 @@ final class DaemonApplicationTests: XCTestCase {
             method: method, arguments: args, accountID: XCTUnwrap(nativeAccountID), callID: id)
     }
 
+    func testDocumentRuntimeNativeControlAndArgumentValidation() async throws {
+        try await fixture { app, _, uid in
+            for method in ["TractandaDocumentRuntime/status", "TractandaDocumentRuntime/unload"] {
+                let reply = try await app.native(try native(method), forUID: uid)
+                let envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: reply) as? [String: Any])
+                let calls = try XCTUnwrap(envelope["methodResponses"] as? [[Any]])
+                XCTAssertEqual(calls[0][0] as? String, method)
+                let value = try XCTUnwrap(calls[0][1] as? [String: Any])
+                XCTAssertEqual(value["workerRunning"] as? Bool, false)
+                XCTAssertEqual(value["documentActive"] as? Bool, false)
+                XCTAssertEqual(value["unloadPending"] as? Bool, false)
+                XCTAssertEqual(
+                    Set(value.keys), ["workerRunning", "documentActive", "unloadPending"])
+                let invalid = try await app.native(try native(method, ["jobID": "private"]), forUID: uid)
+                let text = String(decoding: invalid, as: UTF8.self)
+                XCTAssertTrue(text.contains("invalidArguments"))
+                let foreign = try nativeFixtureRequest(
+                    method: method, arguments: [:], accountID: "foreign", callID: "wrong")
+                let denied = try await app.native(foreign, forUID: uid)
+                XCTAssertTrue(String(decoding: denied, as: UTF8.self).contains("accountNotFound"))
+            }
+        }
+    }
+
     func testNativeSessionIssuesOnlyForPeerAndHTTPUsesIt() async throws {
         try await fixture { app, _, uid in
             let issued = try await app.native(try native("TractandaAuth/createSession"), forUID: uid)

@@ -76,6 +76,7 @@ final class DocumentPackagingTests: XCTestCase {
         let bytes = try JSONEncoder().encode(DocumentExtractionPayload.pinned)
         for (field, value) in [
             ("workerProtocol", "invented-protocol"),
+            ("workerPoolProtocol", "invented-pool"),
             ("modelManifestSHA256", String(repeating: "0", count: 64)),
         ] {
             var json = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
@@ -85,6 +86,23 @@ final class DocumentPackagingTests: XCTestCase {
                 from: JSONSerialization.data(withJSONObject: json))
             XCTAssertThrowsError(try payload.validate(files: inventory()))
         }
+    }
+
+    func testLegacyPoolFieldIsReceiptOnly() throws {
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(DocumentExtractionPayload.pinned))
+                as? [String: Any])
+        object.removeValue(forKey: "workerPoolProtocol")
+        let legacy = try JSONDecoder().decode(
+            DocumentExtractionPayload.self, from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertEqual(legacy, .legacyPinned)
+        XCTAssertTrue(legacy.supportedReceipt)
+        XCTAssertThrowsError(try legacy.validate(files: inventory()))
+        object["workerPoolProtocol"] = "unknown"
+        let unknown = try JSONDecoder().decode(
+            DocumentExtractionPayload.self, from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertFalse(unknown.supportedReceipt)
+        XCTAssertThrowsError(try unknown.validate(files: inventory()))
     }
 
     func testFiniteLinuxDocumentPlatformAndResources() throws {
@@ -243,9 +261,20 @@ final class DocumentPackagingTests: XCTestCase {
             ]
             let info: [String: Any] = [
                 "documentExtraction": extraction,
-                "documentJobs": ["protocol": DocumentExtractionPayload.pinned.workerProtocol],
+                "documentJobs": [
+                    "protocol": DocumentExtractionPayload.pinned.workerProtocol,
+                    "workerPoolProtocol": DocumentExtractionPayload.pinned.workerPoolProtocol!,
+                ],
             ]
             XCTAssertNoThrow(try engine.verifyDocumentReadiness(receipt, info: info))
+            let oldInfo: [String: Any] = [
+                "documentExtraction": extraction,
+                "documentJobs": ["protocol": DocumentExtractionPayload.pinned.workerProtocol],
+            ]
+            XCTAssertThrowsError(try engine.verifyDocumentReadiness(receipt, info: oldInfo))
+            var historical = receipt
+            historical.documentExtraction = .legacyPinned
+            XCTAssertNoThrow(try engine.verifyDocumentReadiness(historical, info: oldInfo))
             for (key, value) in [
                 ("state", "unavailable" as Any), ("executableSHA256", "wrong" as Any),
                 ("requiresPreparedInput", true as Any),

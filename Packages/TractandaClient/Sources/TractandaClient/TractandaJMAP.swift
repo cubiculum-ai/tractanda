@@ -59,6 +59,7 @@ public enum TractandaJMAP {
         "TractandaLearning/status",
         "TractandaLearning/suggest",
         "TractandaLearning/train",
+        "TractandaDocumentRuntime/status", "TractandaDocumentRuntime/unload",
         "TractandaPeer/status",
         "TractandaPeerEnrollment/accept",
         "TractandaPeerEnrollment/read",
@@ -84,6 +85,7 @@ public enum TractandaJMAP {
         "TractandaSync/reviews",
     ]
     public static let localControlMethods: Set<String> = [
+        "TractandaDocumentRuntime/status", "TractandaDocumentRuntime/unload",
         "TractandaPeerPersonal/admin", "TractandaPeer/status", "TractandaPeerEnrollment/step",
         "TractandaPeerEnrollment/status", "TractandaPeerEnrollment/accept",
         "TractandaPeerEnrollment/register", "TractandaPeerEnrollment/read",

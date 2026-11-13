@@ -50,13 +50,24 @@ class PackageTests(unittest.TestCase):
             self.assertFalse(output.exists())
 
     def test_slim_descriptor_binds_current_identity_manifest_without_loading_weights(self):
-        with patch.object(packager, 'run', return_value='arm64'), patch.object(packager, 'validate_docling_model') as validate:
+        with patch.object(packager, 'run', return_value='arm64'), patch.object(packager, 'verify_document_protocols'), patch.object(packager, 'validate_docling_model') as validate:
             result = packager.document_descriptor(self.converter(), None)
         validate.assert_not_called()
         self.assertEqual(result['workerProtocol'], 'tractanda.native-document-worker.v1')
+        self.assertEqual(result['workerPoolProtocol'], 'tractanda.native-document-pool.v1')
         self.assertEqual(result['modelManifestSHA256'], packager.digest(ROOT / packager.MODEL_MANIFEST))
         self.assertEqual(result['runtimePatchManifestSHA256'], packager.digest(ROOT / 'Packages/TractandaDocuments/RuntimePatches/manifest.json'))
         self.assertEqual(result['identity']['converter'], 'tractanda.docling-native.v2-idefics3-gelu-f32')
+
+    def test_protocol_probe_requires_exact_pool_capability(self):
+        converter = self.converter()
+        for value in ({'workerProtocol': 'tractanda.native-document-worker.v1'},
+                      dict(packager.DOCUMENT_PROTOCOLS, workerPoolProtocol='wrong')):
+            with patch.object(packager, 'run', return_value=json.dumps(value)):
+                with self.assertRaisesRegex(ValueError, 'pool protocol'):
+                    packager.verify_document_protocols(converter)
+        with patch.object(packager, 'run', return_value=json.dumps(packager.DOCUMENT_PROTOCOLS)):
+            self.assertEqual(packager.verify_document_protocols(converter), packager.DOCUMENT_PROTOCOLS)
 
     def test_nonarm_or_nonexecutable_converter_rejected(self):
         converter = self.converter()
@@ -99,6 +110,7 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(artifact, pinned, 'Both validations must use the selected pinned catalog artifact')
             return actual_validator(directory, tiny)
         with patch.object(packager, 'run', return_value='arm64'), \
+                patch.object(packager, 'verify_document_protocols'), \
                 patch.object(packager, 'validate_artifact_directory', side_effect=verify_tiny) as inventory, \
                 patch.object(packager, 'validate_docling_model', return_value={'revision': pinned['revision']}) as validate:
             descriptor = packager.document_descriptor(converter, model)
@@ -230,6 +242,8 @@ class PackageTests(unittest.TestCase):
             if args[0] == '/usr/bin/install_name_tool' and args[1:3] == ('-add_rpath', '@executable_path/../lib'):
                 self.assertTrue(Path(args[3]).is_file())
                 return ''
+            if len(args) == 2 and args[1] == 'protocols-v1':
+                return json.dumps(packager.DOCUMENT_PROTOCOLS)
             if args[0] == '/usr/bin/codesign':
                 return ''
             if args[0] == 'git' and args[1:] == ('-C', str(packager.ROOT), 'rev-parse', 'HEAD'):

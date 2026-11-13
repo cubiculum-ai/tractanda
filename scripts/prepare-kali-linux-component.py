@@ -212,12 +212,15 @@ def prepare(args):
         P.write_json(output / DESCRIPTOR, descriptor)
         (output / DESCRIPTOR).chmod(0o644)
         descriptor_digest = B.digest(output / DESCRIPTOR)
+        document = {**document, 'identity': dict(document['identity']),
+                    'workerPoolProtocol': 'tractanda.native-document-pool.v1'}
         document['identity']['converter'] = document['identity']['converter'].rsplit('.', 1)[0] + '.' + descriptor_digest
         if args.expected_descriptor:
             require(descriptor_digest == args.expected_descriptor
                     and generated[N.CLIENT]['digests']['kali-' + arch] == descriptor_digest
                     and contains_digest(output / helper, descriptor_digest),
                     'Second-pass executable or stable descriptor differs from the reviewed commitment.')
+            B.MAC.verify_document_protocols(output / helper)
         source_sha = P.sha(B.canonical(provenance))
     else:
         source_sha = P.sha(B.canonical({'files': source['files'], 'baseline': baseline,

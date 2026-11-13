@@ -2206,7 +2206,8 @@ public final class ItemService {
                 "documentJobs": [
                     "state": documentConverter == nil
                         ? "unavailable" : (documentConverter!.modelIsReady ? "configured" : "awaitingModel"),
-                    "protocol": NativeWorkerProtocol.name, "maximumPendingJobs": 64,
+                    "protocol": NativeWorkerProtocol.name,
+                    "workerPoolProtocol": "tractanda.native-document-pool.v1", "maximumPendingJobs": 64,
                     "maximumPendingJobsPerActor": 8,
                     "pageCounts": "checked Int64; no whole-document page ceiling",
                 ],
