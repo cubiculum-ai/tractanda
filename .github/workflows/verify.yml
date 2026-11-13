@@ -92,6 +92,8 @@ jobs:
           actual = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
           if actual != expected:
               raise SystemExit('Checked-out HEAD differs from the exact requested source.')
+          subprocess.run(['git', 'diff', '--quiet', 'HEAD', '--'], check=True)
+          subprocess.run(['git', 'diff', '--cached', '--quiet', 'HEAD', '--'], check=True)
           PY
       - name: Verify the published source tree
         id: source_tests
@@ -127,6 +129,8 @@ jobs:
           actual, tree = git('HEAD'), git('HEAD^{tree}')
           if actual != expected:
               raise SystemExit('Source HEAD changed during verification.')
+          subprocess.run(['git', 'diff', '--quiet', 'HEAD', '--'], check=True)
+          subprocess.run(['git', 'diff', '--cached', '--quiet', 'HEAD', '--'], check=True)
           for value in (actual, tree, os.environ['WORKFLOW_HEAD_SHA'], os.environ['WORKFLOW_COMMIT']):
               if not re.fullmatch(r'[0-9a-f]{40}', value):
                   raise SystemExit('Invalid full Git identity in source attestation.')
@@ -135,6 +139,7 @@ jobs:
               'repository': os.environ['REPOSITORY'],
               'requestedSourceCommit': os.environ['REQUESTED_SOURCE_COMMIT'] or None,
               'sourceCommit': actual, 'sourceTree': tree,
+              'trackedCheckoutClean': True,
               'workflowHeadCommit': os.environ['WORKFLOW_HEAD_SHA'],
               'workflowCommit': os.environ['WORKFLOW_COMMIT'],
               'workflowRef': os.environ['WORKFLOW_REF'],
