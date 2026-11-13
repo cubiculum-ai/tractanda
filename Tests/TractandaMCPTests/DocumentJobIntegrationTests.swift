@@ -11,15 +11,22 @@ import XCTest
     import Glibc
 #endif
 
-// Kept identical in the three boundary-test targets; no product API or shared runtime state.
+// Boundary-test fixture ownership only; no product API or shared runtime state.
 private enum GuardedFixtureDirectory {
     struct Context {
         let root: URL
         let proof: URL
     }
+    static func physical(_ url: URL) throws -> URL {
+        guard url.path.hasPrefix("/"), !url.path.contains("\0"), let path = realpath(url.path, nil) else {
+            throw TractandaError("fixtureRoot", "Cannot resolve physical fixture path.")
+        }
+        defer { free(path) }
+        return URL(fileURLWithPath: String(cString: path), isDirectory: true)
+    }
     static func validate(_ url: URL) throws -> stat {
         var info = stat()
-        guard url.path.hasPrefix("/"), url.path == url.standardizedFileURL.resolvingSymlinksInPath().path,
+        guard url.path.hasPrefix("/"), try physical(url).path == url.path,
             lstat(url.path, &info) == 0, info.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR),
             info.st_uid == geteuid(), info.st_mode & 0o777 == 0o700
         else {
@@ -50,10 +57,12 @@ private enum GuardedFixtureDirectory {
         }
         return result
     }
-    static func parent() throws -> URL { try context()?.root ?? FileManager.default.temporaryDirectory }
+    static func parent() throws -> URL {
+        try context()?.root ?? physical(FileManager.default.temporaryDirectory)
+    }
     static func create(prefix: String, source: String, test: String, socket: String? = nil) throws -> URL {
         let context = try context()
-        let parent = context?.root ?? FileManager.default.temporaryDirectory
+        let parent = try context?.root ?? physical(FileManager.default.temporaryDirectory)
         var capacity = statvfs()
         guard statvfs(parent.path, &capacity) == 0, capacity.f_frsize > 0 else {
             throw TractandaError("resourceLimit", "Cannot inspect genuine fixture capacity.")
@@ -78,7 +87,7 @@ private enum GuardedFixtureDirectory {
             at: root, withIntermediateDirectories: false,
             attributes: [.posixPermissions: 0o700])
         if let context {
-            let actual = root.resolvingSymlinksInPath()
+            let actual = try physical(root)
             _ = try validate(actual)
             guard actual.path == root.path, actual.deletingLastPathComponent().path == context.root.path,
                 test.utf8.count <= 256
@@ -191,29 +200,75 @@ final class DocumentJobIntegrationTests: XCTestCase {
                 try capacityAttempt(at: url, beforeMetadata: beforeMetadata)
                 return
             } catch {
-                let failure = error as NSError
-                let underlying = failure.userInfo[NSUnderlyingErrorKey] as? NSError
-                let missing =
-                    (failure.domain == NSPOSIXErrorDomain && failure.code == ENOENT)
-                    || (failure.domain == NSCocoaErrorDomain && failure.code == NSFileReadNoSuchFileError
-                        && underlying.map { $0.domain == NSPOSIXErrorDomain && $0.code == Int(ENOENT) }
-                            == true)
-                guard attempt < 2, missing,
-                    let path = failure.userInfo[NSFilePathErrorKey] as? String,
-                    operationalInventoryPath(path, root: url)
+                guard attempt < 2,
+                    let path = inventoryMissingPath(error), operationalInventoryPath(path, root: url)
                 else { throw error }
             }
         }
     }
 
+    /// Foundation exposes ENOENT directly, wrapped in Cocoa260, or as Cocoa260/NSURL
+    /// without an underlying error. Only the named missing-file error is eligible.
+    private func inventoryMissingPath(_ error: any Error) -> String? {
+        let failure = error as NSError
+        if failure.domain == NSPOSIXErrorDomain {
+            guard failure.code == Int(ENOENT) else { return nil }
+        } else {
+            guard failure.domain == NSCocoaErrorDomain, failure.code == NSFileReadNoSuchFileError else {
+                return nil
+            }
+            if let value = failure.userInfo[NSUnderlyingErrorKey] {
+                let underlying: NSError
+                if let native = value as? NSError {
+                    underlying = native
+                } else if let swift = value as? any Error {
+                    underlying = swift as NSError
+                } else {
+                    return nil
+                }
+                guard underlying.domain == NSPOSIXErrorDomain, underlying.code == Int(ENOENT) else {
+                    return nil
+                }
+            }
+        }
+        let path = failure.userInfo[NSFilePathErrorKey] as? String
+        let fileURL = failure.userInfo[NSURLErrorKey] as? URL
+        if let fileURL, !fileURL.isFileURL { return nil }
+        if let path, let fileURL, path != fileURL.path { return nil }
+        return path ?? fileURL?.path
+    }
+
+    private func vanishedCheckpointByteBound(_ path: String, root: URL) -> UInt64? {
+        let file = URL(fileURLWithPath: path)
+        let name = file.lastPathComponent
+        guard path == file.path,
+            !path.split(separator: "/", omittingEmptySubsequences: false).contains(where: {
+                $0 == "." || $0 == ".."
+            }),
+            name.hasPrefix(".checkpoint-"), name.hasSuffix(".tmp"),
+            UUID(uuidString: String(name.dropFirst(12).dropLast(4))) != nil
+        else { return nil }
+        if file.deletingLastPathComponent().path == root.appendingPathComponent("store").path {
+            return 9  // StoreCheckpoint.markDirty writes nine bytes, including the newline.
+        }
+        let prefix = root.appendingPathComponent("store/document-jobs").path + "/"
+        guard path.hasPrefix(prefix) else { return nil }
+        let parts = path.dropFirst(prefix.count).split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count == 2, UUID(uuidString: String(parts[0]))?.version1Components != nil else {
+            return nil
+        }
+        // The root marker writes9bytes. replaceJobCheckpoint admits at most16KiB.
+        // Charge that entire bound for each observed vanished temporary, rather than
+        // restarting into another rename race or treating it as zero bytes.
+        return 16 * 1024
+    }
+
     private func operationalInventoryPath(_ path: String, root: URL) -> Bool {
+        if vanishedCheckpointByteBound(path, root: root) != nil { return true }
         let url = URL(fileURLWithPath: path)
         let name = url.lastPathComponent
-        let atomic =
-            name.hasPrefix(".checkpoint-") && name.hasSuffix(".tmp")
-            && UUID(uuidString: String(name.dropFirst(12).dropLast(4))) != nil
         if url.deletingLastPathComponent().path == root.appendingPathComponent("store").path {
-            return name == ".tractanda-checkpoint-dirty" || atomic
+            return name == ".tractanda-checkpoint-dirty"
         }
         let prefix = root.appendingPathComponent("store/document-jobs").path + "/"
         guard path.hasPrefix(prefix) else { return false }
@@ -251,9 +306,29 @@ final class DocumentJobIntegrationTests: XCTestCase {
                 at: url, includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey])
             {
                 for case let file as URL in files {
-                    try beforeMetadata?(file)
-                    let metadata = try file.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
-                    if metadata.isRegularFile == true { bytes += UInt64(metadata.fileSize ?? 0) }
+                    do {
+                        try beforeMetadata?(file)
+                        let metadata = try file.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+                        if metadata.isRegularFile == true { bytes += UInt64(metadata.fileSize ?? 0) }
+                    } catch {
+                        if let path = inventoryMissingPath(error), path != file.path {
+                            throw TractandaError(
+                                "fixtureInventoryMismatch",
+                                "Metadata failure named a different inventory entry.")
+                        }
+                        var status = stat()
+                        guard inventoryMissingPath(error) == file.path,
+                            let bound = vanishedCheckpointByteBound(file.path, root: url),
+                            lstat(file.path, &status) != 0, errno == ENOENT
+                        else { throw error }
+                        let unit = UInt64(values.f_frsize)
+                        let rounded = bound.addingReportingOverflow(unit - 1)
+                        guard !rounded.overflow else {
+                            throw TractandaError(
+                                "resourceLimit", "Invalid fixture allocation-unit reservation.")
+                        }
+                        bytes += rounded.partialValue / unit * unit
+                    }
                     guard bytes <= cap else {
                         throw TractandaError("resourceLimit", "Fixture exceeded its 16 MiB cap.")
                     }
@@ -273,12 +348,18 @@ final class DocumentJobIntegrationTests: XCTestCase {
         let binding = root.appendingPathComponent(
             "store/document-jobs/" + job + "/sessions/" + session + "/binding.json"
         ).path
+        try FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: binding).deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data([1]).write(to: URL(fileURLWithPath: binding))
         var attempts = 0
         XCTAssertThrowsError(
-            try checkCapacity(at: root) { _ in
-                attempts += 1
-                throw NSError(
-                    domain: NSPOSIXErrorDomain, code: Int(ENOENT), userInfo: [NSFilePathErrorKey: binding])
+            try checkCapacity(at: root) { file in
+                if file.path == binding {
+                    attempts += 1
+                    throw NSError(
+                        domain: NSPOSIXErrorDomain, code: Int(ENOENT), userInfo: [NSFilePathErrorKey: binding]
+                    )
+                }
             })
         XCTAssertEqual(attempts, 3)
         attempts = 0
@@ -292,6 +373,201 @@ final class DocumentJobIntegrationTests: XCTestCase {
                     ])
             })
         XCTAssertEqual(attempts, 1)
+    }
+
+    private func missingCheckpointError(
+        _ path: String, urlOnly: Bool = false, swiftUnderlying: Bool = false
+    ) -> NSError {
+        var info: [String: Any] = [NSURLErrorKey: URL(fileURLWithPath: path)]
+        if !urlOnly {
+            info[NSFilePathErrorKey] = path
+            if swiftUnderlying {
+                info[NSUnderlyingErrorKey] = POSIXError(.ENOENT)
+            } else {
+                info[NSUnderlyingErrorKey] = NSError(domain: NSPOSIXErrorDomain, code: Int(ENOENT))
+            }
+        }
+        return NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoSuchFileError, userInfo: info)
+    }
+
+    func testVanishedCheckpointTemporariesAtBothActualLocationsKeepOneBoundedInventory() throws {
+        let root = try GuardedFixtureDirectory.create(
+            prefix: "m", source: "DocumentJobIntegrationTests", test: name)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let job = try UUID.makeVersion1().uuidString.lowercased()
+        let parents = [
+            root.appendingPathComponent("store"),
+            root.appendingPathComponent("store/document-jobs/" + job),
+        ]
+        var targets: [String: (urlOnly: Bool, swiftUnderlying: Bool)] = [:]
+        for parent in parents {
+            try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+            for variant in [(false, false), (false, true), (true, false)] {
+                let file = parent.appendingPathComponent(".checkpoint-" + UUID().uuidString + ".tmp")
+                try Data([1]).write(to: file)
+                targets[file.path] = variant
+            }
+        }
+        let probe = root.appendingPathComponent("probe")
+        try Data([1]).write(to: probe)
+        var removed: Set<String> = []
+        var probeVisits = 0
+        try checkCapacity(at: root) { file in
+            if file.path == probe.path { probeVisits += 1 }
+            if let variant = targets[file.path] {
+                XCTAssertTrue(removed.insert(file.path).inserted)
+                try FileManager.default.removeItem(at: file)
+                // Foundation may prefetch metadata on Darwin. Force the observed Linux
+                // missing-file shape after an actual removal, making this deterministic.
+                throw self.missingCheckpointError(
+                    file.path, urlOnly: variant.urlOnly, swiftUnderlying: variant.swiftUnderlying)
+            }
+        }
+        XCTAssertEqual(removed.count, 6)
+        XCTAssertEqual(probeVisits, 1, "Checkpoint churn must not restart the complete inventory")
+    }
+
+    func testVanishedCheckpointReservationStillEnforcesSixteenMiBFixtureCap() throws {
+        let root = try GuardedFixtureDirectory.create(
+            prefix: "m", source: "DocumentJobIntegrationTests", test: name)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let parent = root.appendingPathComponent(
+            "store/document-jobs/" + (try UUID.makeVersion1().uuidString.lowercased()))
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        let temporary = parent.appendingPathComponent(".checkpoint-" + UUID().uuidString + ".tmp")
+        try Data([1]).write(to: temporary)
+        let stable = root.appendingPathComponent("stable-near-cap")
+        let fd = open(stable.path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+        guard fd >= 0 else { throw POSIXError(.EIO) }
+        defer { _ = close(fd) }
+        guard ftruncate(fd, 16 * 1024 * 1024 - 8192) == 0 else { throw POSIXError(.EIO) }
+        var vanished = false
+        XCTAssertThrowsError(
+            try checkCapacity(at: root) { file in
+                if file.path == temporary.path {
+                    try FileManager.default.removeItem(at: file)
+                    vanished = true
+                    throw self.missingCheckpointError(file.path)
+                }
+            }
+        ) { XCTAssertEqual(($0 as? TractandaError)?.code, "resourceLimit") }
+        XCTAssertTrue(vanished)
+    }
+
+    func testVanishedRootMarkerReservationRoundsToFilesystemAllocationUnit() throws {
+        let root = try GuardedFixtureDirectory.create(
+            prefix: "m", source: "DocumentJobIntegrationTests", test: name)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var volume = statvfs()
+        guard statvfs(root.path, &volume) == 0, volume.f_frsize >= 2 else { throw POSIXError(.EIO) }
+        let parent = root.appendingPathComponent("store")
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        let marker = parent.appendingPathComponent(".checkpoint-" + UUID().uuidString + ".tmp")
+        try Data("dirty-v1\n".utf8).write(to: marker)
+        let stable = root.appendingPathComponent("stable-near-cap")
+        let fd = open(stable.path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+        guard fd >= 0 else { throw POSIXError(.EIO) }
+        defer { _ = close(fd) }
+        guard ftruncate(fd, off_t(16 * 1024 * 1024 - UInt64(volume.f_frsize) / 2)) == 0 else {
+            throw POSIXError(.EIO)
+        }
+        var vanished = false
+        XCTAssertThrowsError(
+            try checkCapacity(at: root) { file in
+                if file.path == marker.path {
+                    try FileManager.default.removeItem(at: file)
+                    vanished = true
+                    throw self.missingCheckpointError(file.path, urlOnly: true)
+                }
+            }
+        ) { XCTAssertEqual(($0 as? TractandaError)?.code, "resourceLimit") }
+        XCTAssertTrue(vanished)
+    }
+
+    func testCanonicalUnknownAndPresentFilesCannotUseVanishedCheckpointAllowance() throws {
+        let root = try GuardedFixtureDirectory.create(
+            prefix: "m", source: "DocumentJobIntegrationTests", test: name)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let job = try UUID.makeVersion1().uuidString.lowercased()
+        for relative in [
+            "store/.tractanda/revision.json", "store/document-jobs/" + job + "/record.json",
+            "store/.checkpoint-not-a-uuid.tmp",
+            "store/document-jobs/" + UUID().uuidString + "/.checkpoint-" + UUID().uuidString + ".tmp",
+        ] {
+            let target = root.appendingPathComponent(relative)
+            try FileManager.default.createDirectory(
+                at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data([1]).write(to: target)
+            var calls = 0
+            XCTAssertThrowsError(
+                try checkCapacity(at: root) { file in
+                    if file.path == target.path {
+                        calls += 1
+                        try FileManager.default.removeItem(at: file)
+                        throw self.missingCheckpointError(file.path, urlOnly: true)
+                    }
+                })
+            XCTAssertEqual(calls, 1, "Canonical or unknown loss must fail without a retry")
+        }
+        let present = root.appendingPathComponent("store/.checkpoint-" + UUID().uuidString + ".tmp")
+        try Data([1]).write(to: present)
+        var calls = 0
+        XCTAssertThrowsError(
+            try checkCapacity(at: root) { file in
+                if file.path == present.path {
+                    calls += 1
+                    throw self.missingCheckpointError(file.path)
+                }
+            })
+        XCTAssertEqual(calls, 3, "An error cannot skip a checkpoint that lstat still finds")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: present.path))
+    }
+
+    func testWrappedCheckpointErrorsForPresentEntriesRetainThreeRescanLimit() throws {
+        let root = try GuardedFixtureDirectory.create(
+            prefix: "m", source: "DocumentJobIntegrationTests", test: name)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let job = try UUID.makeVersion1().uuidString.lowercased()
+        for path in [
+            "store/.checkpoint-" + UUID().uuidString + ".tmp",
+            "store/document-jobs/" + job + "/.checkpoint-" + UUID().uuidString + ".tmp",
+        ] {
+            let target = root.appendingPathComponent(path)
+            try FileManager.default.createDirectory(
+                at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data([1]).write(to: target)
+            var attempts = 0
+            XCTAssertThrowsError(
+                try checkCapacity(at: root) { file in
+                    if file.path == target.path {
+                        attempts += 1
+                        throw self.missingCheckpointError(file.path)
+                    }
+                })
+            XCTAssertEqual(attempts, 3)
+        }
+    }
+
+    func testMissingOperationalPathCannotMaskCanonicalEntryFailure() throws {
+        let root = try GuardedFixtureDirectory.create(
+            prefix: "m", source: "DocumentJobIntegrationTests", test: name)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let canonical = root.appendingPathComponent("store/.tractanda/revision.json")
+        try FileManager.default.createDirectory(
+            at: canonical.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data([1]).write(to: canonical)
+        let unrelated = root.appendingPathComponent("store/.checkpoint-" + UUID().uuidString + ".tmp")
+        var calls = 0
+        XCTAssertThrowsError(
+            try checkCapacity(at: root) { file in
+                if file.path == canonical.path {
+                    calls += 1
+                    try FileManager.default.removeItem(at: file)
+                    throw self.missingCheckpointError(unrelated.path)
+                }
+            }
+        ) { XCTAssertEqual(($0 as? TractandaError)?.code, "fixtureInventoryMismatch") }
+        XCTAssertEqual(calls, 1)
     }
 
     private func fixture() throws -> Fixture {
