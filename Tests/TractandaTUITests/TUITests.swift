@@ -482,10 +482,7 @@ final class TUITests: XCTestCase {
             journal: RecoveryJournal(
                 url: directory.appendingPathComponent("pending.json"), socket: "/fixture"),
             appearanceURL: directory.appendingPathComponent("appearance.json"))
-        app.handle(.function(10))
-        app.handle(.left)  // File -> Tractanda
-        app.handle(.down)  // About -> Appearance.
-        app.handle(.enter)  // Settings / Colors…
+        selectApplicationMenuCommand(.appearance, in: app)
         XCTAssertTrue(
             app.render(columns: 80, rows: 25).contains { $0.text.contains("Settings / Appearance") })
     }

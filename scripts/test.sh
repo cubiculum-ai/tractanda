@@ -30,6 +30,7 @@ python3 scripts/test-linux-docling-provenance.py
 python3 scripts/test_package_linux.py
 python3 scripts/test_produce_linux_payload.py
 python3 scripts/test_build_linux_ml_component.py
+python3 scripts/test-prepare-docling-bootstrap.py
 python3 scripts/test_build_linux_deb.py
 python3 scripts/test-release-delivery.py
 python3 scripts/test-swift-test-wrapper.py

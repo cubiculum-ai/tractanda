@@ -341,19 +341,29 @@ final class DocumentJobIntegrationTests: XCTestCase {
             #!/usr/bin/python3
             import json,sys
             open(__file__+'.started','w').write('started')
-            binding=json.load(open(sys.argv[5]))
+            pooled=sys.argv[1]=='pool-v1'
+            binding=None if pooled else json.load(open(sys.argv[5]))
             def emit(value):
                 result=dict(binding);result.update(value)
                 print(json.dumps(result,separators=(',',':')),flush=True)
-            emit({'type':'hello','pageCount':1,'modelLoaded':False,'modelForwardCalls':0})
             loaded=False
+            ready=False
+            if pooled:
+                print(json.dumps({'workerProtocol':'tractanda.native-document-worker.v1','workerPoolProtocol':'tractanda.native-document-pool.v1'}),flush=True)
+            else:
+                emit({'type':'hello','pageCount':1,'modelLoaded':False,'modelForwardCalls':0})
             for line in sys.stdin:
                 request=json.loads(line)
+                if request['method']=='open':
+                    binding=json.load(open(request['bindingPath']));ready=False
+                    emit({'type':'hello','pageCount':1,'modelLoaded':loaded,'modelForwardCalls':0});continue
                 if request['method']=='close':
-                    emit({'type':'closed','requestID':request['requestID']});break
+                    emit({'type':'closed','requestID':request['requestID']})
+                    if pooled:binding=None;continue
+                    break
                 base={'requestID':request['requestID'],'pageNumber':request['pageNumber']}
-                if not loaded:
-                    emit(dict(base,type='progress',phase='modelReady',completed=0,total=0));loaded=True
+                if not ready:
+                    emit(dict(base,type='progress',phase='modelReady',completed=0,total=0));loaded=True;ready=True
                 emit(dict(base,type='progress',phase='render',completed=0,total=0))
                 emit(dict(base,type='page',status='unsupported',failureCode='unsupportedDocumentInput'))
             """
