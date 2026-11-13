@@ -20,7 +20,7 @@ class DeliveryTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='tractanda-release-delivery-')
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
         self.context = {'files': [{'path': 'Sources/Core.swift', 'size': 1, 'mode': 0o644, 'sha256': 'a' * 64}],
                         'buildOS': 'kali-rolling',
                         'components': {a: {'embeddings': 'e' * 64, 'documents': 'd' * 64} for a in D.ARCHES},
@@ -209,13 +209,16 @@ class DeliveryTests(unittest.TestCase):
     def test_linux_context_uses_candidate_algorithm_only_after_exact_git_seal_check(self):
         p = self.pipeline()
         producer = SimpleNamespace(source_rows=lambda: self.context['files'],
-                                   B=SimpleNamespace(PRIMARY_BUILD_OS=self.context['buildOS']),
+                                   B=SimpleNamespace(PRIMARY_BUILD_OS=self.context['buildOS'], PUBLIC=('docs',)),
+                                   SOURCE_ROOTS=('Sources', 'Tests', 'scripts'), SOURCE_FILES=('Package.swift',), SKIP={'.git'},
                                    require_admitted=Mock(side_effect=lambda a, _: self.context['components'][a]),
                                    core_build_flags=Mock(side_effect=lambda a, _: self.context['flags'][a]))
         with patch.object(R, 'git', side_effect=[self.state['commit'], self.state['tree'], '']), \
              patch.object(R.importlib.util, 'spec_from_file_location', return_value=Mock()), \
              patch.object(R.importlib.util, 'module_from_spec', return_value=producer):
-            self.assertEqual(R.Pipeline.linux_context(p), self.context)
+            self.assertEqual(R.Pipeline.linux_context(p), dict(self.context, sourceRoot=str(p.source),
+                sourceRoots=producer.SOURCE_ROOTS, sourceFiles=producer.SOURCE_FILES,
+                publicRoots=producer.B.PUBLIC, sourceSkip=sorted(producer.SKIP)))
         self.assertEqual(producer.require_admitted.call_args_list,
                          [call(arch, self.context['buildOS']) for arch in D.ARCHES])
         self.assertEqual(producer.core_build_flags.call_args_list,
@@ -449,5 +452,158 @@ class DeliveryTests(unittest.TestCase):
         hashes.pop(self.transport_names({first_linux_name: 'unused'})[first_linux_name])
         self.assertFalse(R.is_verified_published(self.state))
 
+
+
+class SourceEquivalenceTests(unittest.TestCase):
+    """Actual tiny Git histories, synthetic immutable packages; no compiler."""
+    write = DeliveryTests.write
+    asset = DeliveryTests.asset
+
+    def setUp(self):
+        DeliveryTests.setUp(self)
+        self.repo = self.root / 'git-source'; self.repo.mkdir()
+        self.git('init', '-q')
+        files = {'Package.swift': '.testTarget(name: "FixtureTests", dependencies: [])\n',
+                 'Sources/Core.swift': 'shipping source',
+                 'Tests/FixtureTests/Case.swift': 'original test',
+                 'Package.resolved': 'locked dependency',
+                 '.github/workflows/test.yml': 'original workflow'}
+        files.update({p: 'original development tool' for p in D.DEVELOPMENT_ONLY})
+        for path, value in files.items():
+            target = self.repo / path; target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(value)
+        policy = patch.object(D, 'REVIEWED_PACKAGE_SHA256', {D.digest(files['Package.swift'].encode())})
+        policy.start(); self.addCleanup(policy.stop)
+        self.commit()
+        self.origin = self.git('rev-parse', 'HEAD').strip()
+        self.context.update(sourceRoot=str(self.repo), sourceRoots=('Sources', 'Tests', 'scripts'),
+                            sourceFiles=('Package.swift', 'Package.resolved'),
+                            publicRoots=('docs',), sourceSkip=('.git', '.build', '.swiftpm', '__pycache__'))
+        self.capture()
+        self.entries = [self.asset(a) for a in D.ARCHES]
+        (self.repo / 'Tests/FixtureTests/Case.swift').write_text('corrected test')
+        self.commit(); self.capture()
+        self.proof, _ = D.source_equivalence(self.state, self.context, self.origin,
+                                            [D.asset_binding(e) for e in self.entries])
+
+    def git(self, *args):
+        return D.git_bytes(self.repo, '-c', 'user.name=Release fixture', '-c',
+                           'user.email=fixture@example.invalid', *args).decode()
+
+    def commit(self):
+        self.git('add', '-A'); self.git('commit', '-qm', 'fixture revision')
+
+    def capture(self):
+        self.state.update(commit=self.git('rev-parse', 'HEAD').strip(),
+                          tree=self.git('rev-parse', 'HEAD^{tree}').strip())
+        inventory = D.git_inventory(self.repo, self.state['commit'])
+        self.context['files'] = D.git_rows(self.repo, inventory, D.selected_source_paths(inventory, self.context))
+
+    def attach(self, proof=None, profile='tractanda.release-linux-input.v2'):
+        value = {'profile': profile, 'assets': self.entries}
+        if profile.endswith('.v2'): value['sourceEquivalence'] = self.proof if proof is None else proof
+        D.attach(self.state, self.write(self.root / 'reuse.json', value), self.context)
+
+    def regenerate(self):
+        return D.source_equivalence(self.state, self.context, self.origin,
+                                    [D.asset_binding(e) for e in self.entries])[0]
+
+    def test_explicit_proof_retains_exact_origin_receipts_and_reverifies_after_resume(self):
+        original = {p: Path(p).read_bytes() for e in self.entries for k, p in e.items() if k != 'arch'}
+        with self.assertRaises(RuntimeError): self.attach(profile='tractanda.release-linux-input.v1')
+        self.attach()
+        resumed = json.loads(json.dumps(self.state))
+        self.assertEqual(len(D.verify_linux(resumed, self.context)), 2)
+        for row in resumed['delivery']['linuxAssets']:
+            self.assertEqual(row['artifactOrigin']['commit'], self.origin)
+            self.assertNotEqual(row['artifactOrigin']['commit'], resumed['commit'])
+            self.assertEqual(row['sourceEquivalenceSHA256'], D.digest(D.canonical(self.proof)))
+        self.assertTrue(all(Path(p).read_bytes() == raw for p, raw in original.items()))
+
+    def test_changed_shipping_dependency_recipe_or_unmapped_test_is_rejected(self):
+        for path in ('Sources/Core.swift', 'Package.resolved', 'Package.swift',
+                     'scripts/produce-linux-payload.py', 'Tests/UnknownTests/New.swift',
+                     'Tests/FixtureTests/fixture.json'):
+            with self.subTest(path=path):
+                target = self.repo / path; target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text('ineligible correction'); self.commit(); self.capture()
+                with self.assertRaises(RuntimeError): self.regenerate()
+                self.git('reset', '--hard', self.proof['candidate']['commit']); self.capture()
+
+    def test_mode_add_delete_symlink_and_explicit_tests_mapping_fail_closed(self):
+        target = self.repo / 'Tests/FixtureTests/Case.swift'
+        actions = (lambda: target.chmod(0o755), lambda: target.unlink(),
+                   lambda: (self.repo / 'Tests/FixtureTests/Added.swift').write_text('added'),
+                   lambda: (target.unlink(), target.symlink_to('../../Sources/Core.swift')),
+                   lambda: (self.repo / 'Package.swift').write_text('.target(name: "Core", path: "Tests/FixtureTests")'))
+        for action in actions:
+            action(); self.commit()
+            with self.assertRaises(RuntimeError):
+                self.capture(); self.regenerate()
+            self.git('reset', '--hard', self.proof['candidate']['commit']); self.capture()
+
+    def test_omitted_diff_forged_origin_final_identity_and_nonancestor_are_rejected(self):
+        for key in ('changes', 'origin', 'candidate'):
+            proof = copy.deepcopy(self.proof)
+            if key == 'changes': proof[key] = []
+            else: proof[key]['tree'] = 'f' * 40
+            with self.subTest(key=key), self.assertRaises(RuntimeError): self.attach(proof)
+        unrelated = self.git('commit-tree', self.state['tree'], '-m', 'unrelated root').strip()
+        with self.assertRaises(RuntimeError):
+            D.source_equivalence(self.state, self.context, unrelated, [])
+
+    def test_dirty_final_checkout_rejected_at_attachment_and_resume(self):
+        self.attach()
+        (self.repo / 'Tests/FixtureTests/Case.swift').write_text('dirty source')
+        with self.assertRaises(RuntimeError): self.attach()
+        with self.assertRaises(RuntimeError): D.verify_linux(self.state, self.context)
+
+    def test_every_package_and_receipt_hash_is_bound_and_origin_rows_are_not_overridable(self):
+        for e in self.entries:
+            paths = [Path(v) for k, v in e.items() if k != 'arch'] + [Path(e['package'] + '.inventory.json')]
+            for path in paths:
+                raw = path.read_bytes(); path.write_bytes(raw + b' ')
+                with self.subTest(path=path), self.assertRaises(RuntimeError): self.attach()
+                path.write_bytes(raw)
+        path = Path(self.entries[0]['producerSourceInputs'])
+        value = json.loads(path.read_text()); value['files'][0]['sha256'] = 'f' * 64
+        self.write(path, value)
+        # Even an operator regenerating fingerprints cannot forge Git source rows.
+        self.proof = self.regenerate()
+        with self.assertRaises(RuntimeError): self.attach()
+
+    def test_resume_rejects_missing_proof_origin_metadata_and_tampered_evidence(self):
+        self.attach()
+        missing = copy.deepcopy(self.state); del missing['delivery']['sourceEquivalence']
+        with self.assertRaises(RuntimeError): D.verify_linux(missing, self.context)
+        changed = copy.deepcopy(self.state); changed['delivery']['linuxAssets'][0]['artifactOrigin']['commit'] = 'f' * 40
+        with self.assertRaises(RuntimeError): D.verify_linux(changed, self.context)
+        row = self.state['delivery']['linuxAssets'][0]
+        evidence = Path(self.state['directory']) / 'linux-evidence' / row['evidence']['producer-result']['name']
+        evidence.write_bytes(evidence.read_bytes() + b' ')
+        with self.assertRaises(RuntimeError): D.verify_linux(self.state, self.context)
+
+    def test_malformed_proof_shapes_and_asset_entries_fail_explicitly(self):
+        for proof in (None, {}, [], dict(self.proof, origin='invalid'), dict(self.proof, origin={'commit': [], 'tree': ''})):
+            with self.subTest(proof=proof), self.assertRaises(RuntimeError):
+                D.equivalent_context(self.state, self.context, proof, [])
+        for entry in ({}, [], dict(self.entries[0], arch='unknown')):
+            with self.assertRaises(RuntimeError): D.asset_binding(entry)
+
+    def test_artifacts_changed_between_fingerprint_and_inspection_cannot_be_admitted(self):
+        actual = D.inspect_asset
+        def changed(entry, version, context):
+            row, package, metadata = actual(entry, version, context)
+            metadata['producer-result'] += b' '
+            return row, package, metadata
+        with patch.object(D, 'inspect_asset', side_effect=changed), self.assertRaisesRegex(RuntimeError, 'changed during'):
+            self.attach()
+
+    def test_existing_workflow_and_fixed_development_tools_can_be_reviewed(self):
+        for path in ('.github/workflows/test.yml', *sorted(D.DEVELOPMENT_ONLY)):
+            (self.repo / path).write_text('corrected development source')
+        self.commit(); self.capture(); self.proof = self.regenerate()
+        self.attach()
+        self.assertEqual(len(D.verify_linux(self.state, self.context)), 2)
 
 if __name__ == '__main__': unittest.main(verbosity=2)

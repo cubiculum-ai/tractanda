@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import shutil
 import stat
+import subprocess
 import tempfile
 import uuid
 from datetime import datetime, timezone
@@ -83,6 +84,144 @@ def public(state):
 
 def active(state):
     return isinstance(state.get('delivery'), dict) and state['delivery'].get('profile') in (PROFILE, PUBLIC_PROFILE)
+
+
+# This is deliberately narrower than the producer's capture. Tests are captured
+# for reproducibility but default SwiftPM test sources do not enter release
+# products. Changing a recipe, resource, dependency, or target mapping requires a
+# normal producer run. The original producer receipts always remain untouched.
+EQUIVALENCE_PROFILE = 'tractanda.release-linux-source-equivalence.v1'
+# Reviewed G manifest: release targets use Sources/Tools, Tests contains only
+# default test targets. A different manifest requires a normal producer run or
+# separate review of this admission policy; arbitrary Swift is never evaluated.
+REVIEWED_PACKAGE_SHA256 = {'58971af17f8c0b6871f7d42da6bb6c4dbc109cc589eb5aac67bcff96e1908176'}
+DEVELOPMENT_ONLY = {'scripts/release-delivery.py', 'scripts/release-macos.py',
+                    'scripts/test-release-delivery.py'}
+EVIDENCE_INPUTS = {'inventory': None, 'bundle-manifest': 'bundleManifest',
+                   'bundle-build': 'bundleBuildReceipt',
+                   'producer-source-inputs': 'producerSourceInputs',
+                   'producer-result': 'producerResult'}
+
+
+def git_bytes(root, *args, input=None):
+    result = subprocess.run(['git', '-C', str(root), *args], input=input,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    require(result.returncode == 0, 'Source equivalence Git verification failed')
+    return result.stdout
+
+
+def git_inventory(root, commit):
+    result = {}
+    for raw in git_bytes(root, 'ls-tree', '-rlz', commit).split(b'\0'):
+        if not raw: continue
+        metadata, name = raw.split(b'\t', 1)
+        mode, kind, oid, size = metadata.split()
+        path = name.decode('utf-8')
+        require(not Path(path).is_absolute() and '..' not in Path(path).parts,
+                'Unsafe source equivalence Git path')
+        result[path] = {'mode': mode.decode(), 'kind': kind.decode(),
+                        'oid': oid.decode(), 'size': int(size) if size != b'-' else None}
+    return result
+
+
+def git_rows(root, inventory, paths):
+    paths = sorted(paths)
+    require(len(paths) <= 20000 and all(inventory[p]['kind'] == 'blob'
+            and inventory[p]['mode'] in ('100644', '100755') for p in paths),
+            'Source equivalence requires bounded regular Git files')
+    require(sum(inventory[p]['size'] for p in paths) <= 128 * 1024**2,
+            'Source equivalence Git byte bound exceeded')
+    raw = git_bytes(root, 'cat-file', '--batch',
+                    input=''.join(inventory[p]['oid'] + '\n' for p in paths).encode()) if paths else b''
+    result, offset = [], 0
+    for path in paths:
+        end = raw.index(b'\n', offset)
+        oid, kind, size = raw[offset:end].split()
+        size = int(size); offset = end + 1
+        require(oid.decode() == inventory[path]['oid'] and kind == b'blob'
+                and size == inventory[path]['size'] and raw[offset+size:offset+size+1] == b'\n',
+                'Source equivalence Git blob framing differs')
+        result.append({'path': path, 'mode': int(inventory[path]['mode'], 8) & 0o777,
+                       'size': size, 'sha256': digest(raw[offset:offset+size])})
+        offset += size + 1
+    require(offset == len(raw), 'Extra source equivalence Git blob data')
+    return result
+
+
+def selected_source_paths(inventory, context):
+    selectors = (*context['sourceRoots'], *context['sourceFiles'], *context['publicRoots'])
+    return {p for p in inventory if not set(Path(p).parts) & set(context['sourceSkip'])
+            and any(p == selector or p.startswith(selector + '/') for selector in selectors)}
+
+
+def asset_binding(entry):
+    require(isinstance(entry, dict) and set(entry) == {'arch', 'package', 'bundleManifest',
+            'bundleBuildReceipt', 'producerSourceInputs', 'producerResult'} and entry['arch'] in ARCHES,
+            'Complete original Linux artifact evidence required for source equivalence')
+    return {'arch': entry['arch'], 'package': fingerprint(entry['package']),
+            'evidence': {key: fingerprint(str(entry['package']) + '.inventory.json' if field is None
+                                         else entry[field]) for key, field in EVIDENCE_INPUTS.items()}}
+
+
+def source_equivalence(state, context, origin_commit, assets):
+    """Generate the exact reviewable opt-in proof from Git and existing bytes.
+
+    Callers supply artifact fingerprints, never source rows or changed paths.
+    Attachment and every later verification independently recompute this proof.
+    """
+    root = context['sourceRoot']
+    require(isinstance(origin_commit, str) and re.fullmatch(r'[0-9a-f]{40}', origin_commit) is not None,
+            'Full original producer source commit required')
+    final = {'commit': state['commit'], 'tree': state['tree']}
+    require(git_bytes(root, 'rev-parse', 'HEAD').decode().strip() == final['commit']
+            and git_bytes(root, 'rev-parse', 'HEAD^{tree}').decode().strip() == final['tree']
+            and not git_bytes(root, 'status', '--porcelain', '--untracked-files=all'),
+            'Source equivalence requires the clean sealed candidate checkout')
+    git_bytes(root, 'merge-base', '--is-ancestor', origin_commit, final['commit'])
+    origin = {'commit': origin_commit,
+              'tree': git_bytes(root, 'rev-parse', origin_commit + '^{tree}').decode().strip()}
+    old = git_inventory(root, origin_commit); new = git_inventory(root, final['commit'])
+    changed = sorted(p for p in old.keys() | new.keys() if old.get(p) != new.get(p))
+    require(changed, 'Source equivalence requires an explicit nonempty correction')
+    # A reviewed immutable manifest, not a general Swift/regex interpretation,
+    # establishes that these default test paths are outside release products.
+    require('Package.swift' in new, 'Reviewed root package manifest required')
+    package_raw = git_bytes(root, 'cat-file', 'blob', new['Package.swift']['oid'])
+    require(digest(package_raw) in REVIEWED_PACKAGE_SHA256,
+            'Root package manifest is not reviewed for source equivalence')
+    package = package_raw.decode()
+    require(not re.search(r'"(?:\./)?Tests(?:/|")', package),
+            'Explicit Tests target/resource mapping is not eligible for source equivalence')
+    targets = set(re.findall(r'\.testTarget\s*\(\s*name:\s*"([^"\n]+)"', package))
+    for path in changed:
+        test = re.fullmatch(r'Tests/([^/]+Tests)/[^/]+\.swift', path)
+        allowed = path in DEVELOPMENT_ONLY or path.startswith('.github/workflows/') and path.endswith(('.yml', '.yaml'))
+        allowed = allowed or bool(test and test.group(1) in targets)
+        require(allowed and path in old and path in new
+                and old[path]['mode'] == new[path]['mode'] and new[path]['mode'] in ('100644', '100755')
+                and old[path]['kind'] == new[path]['kind'] == 'blob',
+                'Only existing unshipped test/workflow/development source edits with unchanged modes are eligible')
+        require(not any(path == p or path.startswith(p + '/') for p in context['publicRoots']),
+                'Public shipping input cannot use source equivalence')
+    original_rows = git_rows(root, old, selected_source_paths(old, context))
+    final_rows = git_rows(root, new, selected_source_paths(new, context))
+    require(final_rows == context['files'], 'Current producer capture differs from sealed Git source')
+    before = {r['path']: r for r in git_rows(root, old, changed)}
+    after = {r['path']: r for r in git_rows(root, new, changed)}
+    proof = {'profile': EQUIVALENCE_PROFILE, 'origin': origin, 'candidate': final,
+             'changes': [{'path': p, 'origin': before[p], 'candidate': after[p]} for p in changed],
+             'assets': sorted(assets, key=lambda a: a['arch'])}
+    return proof, dict(context, files=original_rows)
+
+
+def equivalent_context(state, context, proof, assets):
+    require(isinstance(proof, dict) and set(proof) == {'profile', 'origin', 'candidate', 'changes', 'assets'}
+            and isinstance(proof.get('origin'), dict) and set(proof['origin']) == {'commit', 'tree'}
+            and isinstance(proof.get('candidate'), dict) and proof.get('profile') == EQUIVALENCE_PROFILE,
+            'Invalid explicit Linux source equivalence proof')
+    expected, original_context = source_equivalence(state, context, proof.get('origin', {}).get('commit'), assets)
+    require(proof == expected, 'Linux source equivalence proof differs from Git/artifact evidence')
+    return original_context
 
 
 def inspect_asset(entry, version, context):
@@ -174,9 +313,24 @@ def attach(state, input_path, context):
     require(active(state) and state['status'] != 'complete' and not any(k in state['steps'] for k in ('artifacts', 'install', 'push', 'publish')),
             'Attach both Linux packages before artifact sealing; revised candidates require fresh attachment')
     value, _, _ = json_input(input_path)
-    require(set(value) == {'profile', 'assets'} and value['profile'] == 'tractanda.release-linux-input.v1'
-            and isinstance(value['assets'], list) and len(value['assets']) == 2, 'Exactly two Linux package inputs required')
-    rows = [inspect_asset(entry, state['version'], context) for entry in value['assets']]
+    strict = set(value) == {'profile', 'assets'} and value['profile'] == 'tractanda.release-linux-input.v1'
+    reuse = set(value) == {'profile', 'assets', 'sourceEquivalence'} and value['profile'] == 'tractanda.release-linux-input.v2'
+    require((strict or reuse) and isinstance(value['assets'], list) and len(value['assets']) == 2,
+            'Exactly two Linux package inputs and a supported explicit admission contract required')
+    effective = equivalent_context(state, context, value['sourceEquivalence'],
+                                   [asset_binding(e) for e in value['assets']]) if reuse else context
+    rows = [inspect_asset(entry, state['version'], effective) for entry in value['assets']]
+    if reuse:
+        # Bind the exact bytes inspected below, not merely an earlier fingerprint
+        # of input paths which could have changed before admission completed.
+        inspected = [{'arch': r['arch'], 'package': {'sha256': r['sha256'], 'bytes': r['bytes']},
+                      'evidence': {key: {'sha256': digest(raw), 'bytes': len(raw)} for key, raw in metadata.items()}}
+                     for r, _, metadata in rows]
+        require(sorted(inspected, key=lambda a: a['arch']) == value['sourceEquivalence']['assets'],
+                'Original Linux artifact inputs changed during source equivalence admission')
+        for record, _, _ in rows:
+            record['artifactOrigin'] = value['sourceEquivalence']['origin']
+            record['sourceEquivalenceSHA256'] = digest(canonical(value['sourceEquivalence']))
     require({r[0]['arch'] for r in rows} == set(ARCHES)
             and len({r[0]['sha256'] for r in rows}) == 2, 'Missing/duplicate Linux architecture or package')
     directory = Path(state['directory']); evidence = directory / 'linux-evidence'
@@ -191,6 +345,8 @@ def attach(state, input_path, context):
             if target.exists() or target.is_symlink():require(fingerprint(target)['sha256'] == digest(raw), 'Existing candidate Linux evidence differs')
             else:
                 with target.open('xb') as f:f.write(raw)
+    if reuse: state['delivery']['sourceEquivalence'] = value['sourceEquivalence']
+    else: state['delivery'].pop('sourceEquivalence', None)
     state['delivery']['linuxAssets'] = sorted((r[0] for r in rows), key=lambda r: r['arch'])
     state['delivery'].pop('acceptance', None)
     state['delivery'].pop('installAuthorization', None)
@@ -201,6 +357,18 @@ def verify_linux(state, context):
     rows = state['delivery'].get('linuxAssets', [])
     require(len(rows) == 2 and {r['arch'] for r in rows} == set(ARCHES), 'Both admitted Linux release packages are required')
     directory = Path(state['directory']); evidence = directory / 'linux-evidence'
+    proof = state['delivery'].get('sourceEquivalence')
+    if proof is not None:
+        assets = [{'arch': r['arch'], 'package': fingerprint(directory / r['name']),
+                   'evidence': {key: fingerprint(evidence / r['evidence'][key]['name']) for key in EVIDENCE_INPUTS}}
+                  for r in rows]
+        context = equivalent_context(state, context, proof, assets)
+        require(all(r.get('artifactOrigin') == proof['origin']
+                    and r.get('sourceEquivalenceSHA256') == digest(canonical(proof)) for r in rows),
+                'Original Linux artifact provenance binding changed')
+    else:
+        require(all('artifactOrigin' not in r and 'sourceEquivalenceSHA256' not in r for r in rows),
+                'Linux source equivalence proof is missing')
     for record in rows:
         package = directory / record['name']
         require(fingerprint(package) == {'sha256': record['sha256'], 'bytes': record['bytes']}, 'Candidate Linux package changed')

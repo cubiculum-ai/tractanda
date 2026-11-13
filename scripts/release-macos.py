@@ -1128,6 +1128,9 @@ class Pipeline:
         spec.loader.exec_module(producer)
         build_os = producer.B.PRIMARY_BUILD_OS
         return {'files': producer.source_rows(), 'buildOS': build_os,
+                'sourceRoot': str(self.source), 'sourceRoots': producer.SOURCE_ROOTS,
+                'sourceFiles': producer.SOURCE_FILES, 'publicRoots': producer.B.PUBLIC,
+                'sourceSkip': sorted(producer.SKIP),
                 'components': {arch: producer.require_admitted(arch, build_os) for arch in delivery.ARCHES},
                 'flags': {arch: producer.core_build_flags(arch, build_os) for arch in delivery.ARCHES}}
 

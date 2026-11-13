@@ -158,6 +158,7 @@ enum GuardedFixtureDirectory {
 
 final class DocumentJobCoordinatorTests: XCTestCase {
     private var publicationContentionForTesting: (() -> Void)?
+    private var beforeDirectoryOpenForTesting: ((URL) throws -> Void)?
     private struct Transport: TractandaClient.ItemTransport {
         let coordinator: ServiceCoordinator
         var uid: UInt32 = UInt32(getuid())
@@ -198,7 +199,56 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         return uuid.uuidString == id
     }
 
+    /// A terminal job archive is synchronized before the entire private active tree
+    /// is removed. Reinventory that retirement; never zero-charge a missing subtree.
+    private func archivedJobRetirement(_ path: String, root: URL) -> Bool {
+        let prefix = root.appendingPathComponent("store/document-jobs").path + "/"
+        guard path.hasPrefix(prefix),
+            !path.split(separator: "/", omittingEmptySubsequences: false).contains(where: {
+                $0 == "." || $0 == ".."
+            })
+        else { return false }
+        let parts = path.dropFirst(prefix.count).split(separator: "/").map(String.init)
+        guard let id = parts.first, UUID(uuidString: id)?.version1Components != nil else { return false }
+        let tail = Array(parts.dropFirst())
+        let known: Bool
+        if tail.isEmpty || tail == ["record.json"] || tail == ["sessions"] || tail == ["corpus"] {
+            known = true
+        } else if tail.first == "sessions", tail.count >= 2,
+            UUID(uuidString: tail[1])?.version1Components != nil
+        {
+            let name = tail.last!
+            let dependency =
+                name.hasPrefix(".dependency-") && name.hasSuffix(".tmp")
+                && UUID(uuidString: String(name.dropFirst(12).dropLast(4))) != nil
+            known = tail.count == 2 || (tail.count == 3 && (name == "binding.json" || dependency))
+        } else if tail.first == "corpus", tail.count >= 2, tail[1].hasPrefix("page-corpus-"),
+            UUID(uuidString: String(tail[1].dropFirst("page-corpus-".count)))?.version1Components != nil
+        {
+            known =
+                tail.count == 2
+                || (tail.count == 3
+                    && [
+                        "projection.sqlite", "projection.sqlite-journal",
+                        "projection.sqlite-wal", "projection.sqlite-shm",
+                    ].contains(tail[2]))
+        } else {
+            known = false
+        }
+        guard known else { return false }
+        let store = root.appendingPathComponent("store")
+        var metadata = stat()
+        guard lstat(store.appendingPathComponent("document-jobs/" + id).path, &metadata) != 0,
+            errno == ENOENT
+        else { return false }
+        let files = DocumentContentFiles(root: store, ownerUID: getuid(), minimumFreeBytes: 0)
+        // This existing reader is bounded to16KiB, no-follow, read-only and checks
+        // terminality plus matching identity. No competing semantic validator here.
+        return (try? DocumentJobRecords(root: store, files: files).archived(id)) != nil
+    }
+
     private func operationalInventoryPath(_ path: String, root: URL) -> Bool {
+        if archivedJobRetirement(path, root: root) { return true }
         let url = URL(fileURLWithPath: path)
         let name = url.lastPathComponent
         if readerRequirementStage(url, root: root) {
@@ -254,6 +304,7 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         var bytes: UInt64 = 0
         func scan(_ directory: URL) throws {
             func visit(_ directory: URL) throws {
+                try beforeDirectoryOpenForTesting?(directory)
                 try POSIXDirectory.withEntries(at: directory) { name in
                     let url = directory.appendingPathComponent(name)
                     try beforeMetadata?(url)
@@ -811,6 +862,136 @@ final class DocumentJobCoordinatorTests: XCTestCase {
         try FileManager.default.removeItem(at: corpus.appendingPathComponent("projection.sqlite"))
         XCTAssertThrowsError(try accountedBytes(journal, root: root))
     }
+    private func retiredJobInventoryFixture() throws -> (Fixture, String, Data) {
+        let fixture = try fixture(pages: 1)
+        let store = try ItemStore.openInitialized(root: fixture.store)
+        let runtime = try XCTUnwrap(
+            ItemService(store: store, documentConverter: fixture.configuration).documentJobRuntime())
+        let started = try store.startDocumentJob(
+            fixture.request, identity: .init(), configurationSHA256: runtime.configurationSHA256)
+        let path = fixture.store.appendingPathComponent("document-jobs/" + started.jobID + "/record.json")
+        let active = try Data(contentsOf: path)
+        var record = try JSON.decode(DocumentJobRecord.self, active)
+        record.checkpoint.state = "cancelled"
+        record.checkpoint.discarded = true
+        let files = DocumentContentFiles(root: fixture.store, ownerUID: getuid(), minimumFreeBytes: 0)
+        try DocumentJobRecords(root: fixture.store, files: files).archive(record)
+        return (fixture, started.jobID, active)
+    }
+
+    func testCapacityReinventoriesArchivedJobRemovedAfterLstatBeforeDirectoryOpen() throws {
+        let (fixture, id, active) = try retiredJobInventoryFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let directory = fixture.store.appendingPathComponent("document-jobs/" + id)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try active.write(to: directory.appendingPathComponent("record.json"))
+        var rootVisits = 0
+        var removed = false
+        beforeDirectoryOpenForTesting = { path in
+            if path.path == fixture.root.path { rootVisits += 1 }
+            if path.path == directory.path, !removed {
+                try FileManager.default.removeItem(at: directory)
+                removed = true
+            }
+        }
+        defer { beforeDirectoryOpenForTesting = nil }
+        try capacity(fixture.root)
+        XCTAssertTrue(removed)
+        XCTAssertEqual(
+            rootVisits, 2, "A retirement must trigger a whole inventory, not zero-charge its subtree")
+    }
+
+    func testArchivedJobRetirementRescanRecountsNewFilesAndPreservesCap() throws {
+        let (fixture, id, active) = try retiredJobInventoryFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let directory = fixture.store.appendingPathComponent("document-jobs/" + id)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try active.write(to: directory.appendingPathComponent("record.json"))
+        var removed = false
+        beforeDirectoryOpenForTesting = { path in
+            if path.path == directory.path, !removed {
+                try FileManager.default.removeItem(at: directory)
+                removed = true
+                let file = fixture.root.appendingPathComponent("new-file-after-retirement")
+                let fd = open(file.path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+                guard fd >= 0 else { throw POSIXError(.EIO) }
+                defer { _ = close(fd) }
+                guard ftruncate(fd, 16 * 1024 * 1024 + 1) == 0 else { throw POSIXError(.EIO) }
+            }
+        }
+        defer { beforeDirectoryOpenForTesting = nil }
+        XCTAssertThrowsError(try capacity(fixture.root)) {
+            XCTAssertEqual(($0 as? TractandaError)?.code, "resourceLimit")
+        }
+        XCTAssertTrue(removed)
+    }
+
+    func testMissingJobRootRequiresMatchingBoundedTerminalArchive() throws {
+        for variant in ["absent", "wrong-id", "nonterminal", "oversized", "canonical"] {
+            let (fixture, id, active) = try retiredJobInventoryFixture()
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            let archive = fixture.store.appendingPathComponent(
+                "document-job-history/" + String(id.prefix(2)) + "/" + id + ".json")
+            if variant != "canonical" {
+                try FileManager.default.removeItem(at: archive)
+                if variant != "absent" {
+                    let data: Data
+                    if variant == "nonterminal" {
+                        data = active
+                    } else if variant == "oversized" {
+                        data = Data(repeating: 32, count: 16 * 1024 + 1)
+                    } else {
+                        var value = try XCTUnwrap(
+                            JSONSerialization.jsonObject(with: active) as? [String: Any])
+                        var intent = try XCTUnwrap(value["intent"] as? [String: Any])
+                        intent["jobID"] = try UUID.makeVersion1().uuidString.lowercased()
+                        value["intent"] = intent
+                        var checkpoint = try XCTUnwrap(value["checkpoint"] as? [String: Any])
+                        checkpoint["state"] = "cancelled"
+                        checkpoint["discarded"] = true
+                        value["checkpoint"] = checkpoint
+                        data = try JSONSerialization.data(withJSONObject: value)
+                    }
+                    try data.write(to: archive)
+                    try FileManager.default.setAttributes(
+                        [.posixPermissions: 0o400], ofItemAtPath: archive.path)
+                }
+            }
+            let directory = fixture.store.appendingPathComponent(
+                variant == "canonical" ? "canonical-private-records" : "document-jobs/" + id)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try Data([1]).write(to: directory.appendingPathComponent("record"))
+            var visits = 0
+            beforeDirectoryOpenForTesting = { path in
+                if path.path == directory.path {
+                    visits += 1
+                    try FileManager.default.removeItem(at: directory)
+                }
+            }
+            XCTAssertThrowsError(try capacity(fixture.root), variant)
+            beforeDirectoryOpenForTesting = nil
+            XCTAssertEqual(visits, 1, "Unconfirmed or canonical loss must not be retried: " + variant)
+        }
+    }
+
+    func testArchivedJobRetirementStillHasThreeWholeInventoryAttempts() throws {
+        let (fixture, id, active) = try retiredJobInventoryFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let directory = fixture.store.appendingPathComponent("document-jobs/" + id)
+        var rootVisits = 0
+        beforeDirectoryOpenForTesting = { path in
+            if path.path == fixture.root.path {
+                rootVisits += 1
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                try active.write(to: directory.appendingPathComponent("record.json"))
+            }
+            if path.path == directory.path { try FileManager.default.removeItem(at: directory) }
+        }
+        defer { beforeDirectoryOpenForTesting = nil }
+        XCTAssertThrowsError(try capacity(fixture.root))
+        XCTAssertEqual(rootVisits, 3)
+    }
+
     private func fixture(
         delay: Double = 0, pages: Int = 129, heldPage: Int? = nil, accounts: Accounts? = nil
     ) throws -> Fixture {

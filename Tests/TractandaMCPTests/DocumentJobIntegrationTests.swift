@@ -263,7 +263,56 @@ final class DocumentJobIntegrationTests: XCTestCase {
         return 16 * 1024
     }
 
+    /// A terminal job archive is synchronized before the entire private active tree
+    /// is removed. Reinventory that retirement; never zero-charge a missing subtree.
+    private func archivedJobRetirement(_ path: String, root: URL) -> Bool {
+        let prefix = root.appendingPathComponent("store/document-jobs").path + "/"
+        guard path.hasPrefix(prefix),
+            !path.split(separator: "/", omittingEmptySubsequences: false).contains(where: {
+                $0 == "." || $0 == ".."
+            })
+        else { return false }
+        let parts = path.dropFirst(prefix.count).split(separator: "/").map(String.init)
+        guard let id = parts.first, UUID(uuidString: id)?.version1Components != nil else { return false }
+        let tail = Array(parts.dropFirst())
+        let known: Bool
+        if tail.isEmpty || tail == ["record.json"] || tail == ["sessions"] || tail == ["corpus"] {
+            known = true
+        } else if tail.first == "sessions", tail.count >= 2,
+            UUID(uuidString: tail[1])?.version1Components != nil
+        {
+            let name = tail.last!
+            let dependency =
+                name.hasPrefix(".dependency-") && name.hasSuffix(".tmp")
+                && UUID(uuidString: String(name.dropFirst(12).dropLast(4))) != nil
+            known = tail.count == 2 || (tail.count == 3 && (name == "binding.json" || dependency))
+        } else if tail.first == "corpus", tail.count >= 2, tail[1].hasPrefix("page-corpus-"),
+            UUID(uuidString: String(tail[1].dropFirst("page-corpus-".count)))?.version1Components != nil
+        {
+            known =
+                tail.count == 2
+                || (tail.count == 3
+                    && [
+                        "projection.sqlite", "projection.sqlite-journal",
+                        "projection.sqlite-wal", "projection.sqlite-shm",
+                    ].contains(tail[2]))
+        } else {
+            known = false
+        }
+        guard known else { return false }
+        let store = root.appendingPathComponent("store")
+        var metadata = stat()
+        guard lstat(store.appendingPathComponent("document-jobs/" + id).path, &metadata) != 0,
+            errno == ENOENT
+        else { return false }
+        let files = DocumentContentFiles(root: store, ownerUID: getuid(), minimumFreeBytes: 0)
+        // This existing reader is bounded to16KiB, no-follow, read-only and checks
+        // terminality plus matching identity. No competing semantic validator here.
+        return (try? DocumentJobRecords(root: store, files: files).archived(id)) != nil
+    }
+
     private func operationalInventoryPath(_ path: String, root: URL) -> Bool {
+        if archivedJobRetirement(path, root: root) { return true }
         if vanishedCheckpointByteBound(path, root: root) != nil { return true }
         let url = URL(fileURLWithPath: path)
         let name = url.lastPathComponent
@@ -655,6 +704,94 @@ final class DocumentJobIntegrationTests: XCTestCase {
                 executablePath: worker.path, modelDirectory: model.path,
                 scratchDirectory: root.appendingPathComponent("scratch").path),
             itemID: itemID, revisionID: revisionID, attachmentID: attachmentID, accounts: accounts)
+    }
+
+    func testInventoryRecountsOnlyConfirmedArchivedJobRetirement() throws {
+        let fixture = try fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let store = try ItemStore.openInitialized(root: fixture.store, accounts: fixture.accounts)
+        let runtime = try XCTUnwrap(
+            ItemService(store: store, documentConverter: fixture.converter).documentJobRuntime())
+        let started = try store.startDocumentJob(
+            DocumentJobStart(
+                itemID: fixture.itemID, expectedRevisionID: fixture.revisionID,
+                attachmentID: fixture.attachmentID, operationID: "inventory-retirement"),
+            identity: .init(), configurationSHA256: runtime.configurationSHA256)
+        let directory = fixture.store.appendingPathComponent("document-jobs/" + started.jobID)
+        let active = try Data(contentsOf: directory.appendingPathComponent("record.json"))
+        var record = try JSON.decode(DocumentJobRecord.self, active)
+        record.checkpoint.state = "cancelled"
+        record.checkpoint.discarded = true
+        let files = DocumentContentFiles(root: fixture.store, ownerUID: getuid(), minimumFreeBytes: 0)
+        try DocumentJobRecords(root: fixture.store, files: files).archive(record)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try active.write(to: directory.appendingPathComponent("record.json"))
+        XCTAssertFalse(
+            archivedJobRetirement(directory.path, root: fixture.root), "A present tree is not retired")
+        let probe = fixture.root.appendingPathComponent("inventory-probe")
+        try Data([1]).write(to: probe)
+        var visits = 0
+        var removed = false
+        try checkCapacity(at: fixture.root) { path in
+            if path.path == probe.path { visits += 1 }
+            if path.path == directory.path, !removed {
+                try FileManager.default.removeItem(at: directory)
+                removed = true
+                throw self.missingCheckpointError(path.path, swiftUnderlying: true)
+            }
+        }
+        XCTAssertTrue(removed)
+        XCTAssertGreaterThanOrEqual(visits, 1)
+        XCTAssertTrue(archivedJobRetirement(directory.path, root: fixture.root))
+        XCTAssertFalse(
+            archivedJobRetirement(directory.appendingPathComponent("canonical.json").path, root: fixture.root)
+        )
+        let archive = fixture.store.appendingPathComponent(
+            "document-job-history/" + String(started.jobID.prefix(2)) + "/" + started.jobID + ".json")
+        try FileManager.default.removeItem(at: archive)
+        XCTAssertFalse(
+            archivedJobRetirement(directory.path, root: fixture.root), "No archive cannot authorize a rescan")
+    }
+
+    func testArchivedJobRetirementRescanStillEnforcesFixtureCap() throws {
+        let fixture = try fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let store = try ItemStore.openInitialized(root: fixture.store, accounts: fixture.accounts)
+        let runtime = try XCTUnwrap(
+            ItemService(store: store, documentConverter: fixture.converter).documentJobRuntime())
+        let started = try store.startDocumentJob(
+            DocumentJobStart(
+                itemID: fixture.itemID, expectedRevisionID: fixture.revisionID,
+                attachmentID: fixture.attachmentID, operationID: "inventory-cap"),
+            identity: .init(), configurationSHA256: runtime.configurationSHA256)
+        let directory = fixture.store.appendingPathComponent("document-jobs/" + started.jobID)
+        var record = try JSON.decode(
+            DocumentJobRecord.self, Data(contentsOf: directory.appendingPathComponent("record.json")))
+        record.checkpoint.state = "cancelled"
+        record.checkpoint.discarded = true
+        try DocumentJobRecords(
+            root: fixture.store,
+            files: DocumentContentFiles(
+                root: fixture.store, ownerUID: getuid(), minimumFreeBytes: 0)
+        ).archive(record)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        var removed = false
+        XCTAssertThrowsError(
+            try checkCapacity(at: fixture.root) { path in
+                if path.path == directory.path, !removed {
+                    try FileManager.default.removeItem(at: directory)
+                    removed = true
+                    let fd = open(
+                        fixture.root.appendingPathComponent("added-after-job-retirement").path,
+                        O_WRONLY | O_CREAT | O_EXCL, 0o600)
+                    guard fd >= 0 else { throw POSIXError(.EIO) }
+                    defer { _ = close(fd) }
+                    guard ftruncate(fd, 16 * 1024 * 1024 + 1) == 0 else { throw POSIXError(.EIO) }
+                    throw self.missingCheckpointError(path.path)
+                }
+            }
+        ) { XCTAssertEqual(($0 as? TractandaError)?.code, "resourceLimit") }
+        XCTAssertTrue(removed)
     }
 
     // The fixture owner removes its directory only after this scope has awaited shutdown.
