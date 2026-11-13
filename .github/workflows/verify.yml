@@ -4,6 +4,12 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Optional exact source commit to test (full lowercase 40-character SHA)
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -25,9 +31,25 @@ jobs:
       - name: Install platform and test dependencies
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl gnupg gpgv git \
+          apt-get install -y --no-install-recommends ca-certificates curl gnupg gpgv git lsof jq \
             build-essential binutils libcurl4-openssl-dev libedit-dev libicu-dev libncurses-dev \
             libsqlite3-dev libxml2-dev libpam0g-dev uuid-dev pkgconf python3 acl tzdata zlib1g-dev
+      - name: Validate requested source commit
+        id: source_request
+        env:
+          REQUESTED_SOURCE_COMMIT: ${{ inputs.source_commit || '' }}
+          WORKFLOW_HEAD_SHA: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          requested = os.environ['REQUESTED_SOURCE_COMMIT']
+          head = os.environ['WORKFLOW_HEAD_SHA']
+          if requested and os.environ['EVENT_NAME'] != 'workflow_dispatch':
+              raise SystemExit('An explicit source commit requires workflow_dispatch.')
+          if not re.fullmatch(r'[0-9a-f]{40}', requested or head):
+              raise SystemExit('Source commit must be an exact lowercase 40-character SHA.')
+          PY
       - name: Install signed Swift 6.4.2 toolchain
         run: |
           set -eu
@@ -53,11 +75,27 @@ jobs:
           tar -xzf "$stage/$archive" --strip-components=1 -C /opt/swift
           echo /opt/swift/usr/bin >> "$GITHUB_PATH"
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        id: checkout
         with:
           persist-credentials: false
-      - name: Verify the published source tree
+          ref: ${{ inputs.source_commit || github.sha }}
+      - name: Verify exact checkout before tests
+        id: source_identity
+        env:
+          REQUESTED_SOURCE_COMMIT: ${{ inputs.source_commit || '' }}
+          WORKFLOW_HEAD_SHA: ${{ github.sha }}
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          python3 - <<'PY'
+          import os, subprocess
+          expected = os.environ['REQUESTED_SOURCE_COMMIT'] or os.environ['WORKFLOW_HEAD_SHA']
+          actual = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          if actual != expected:
+              raise SystemExit('Checked-out HEAD differs from the exact requested source.')
+          PY
+      - name: Verify the published source tree
+        id: source_tests
+        run: |
           python3 scripts/audit-release.py --staged
           python3 -c 'import json, runpy, sys; print(json.dumps(runpy.run_path("scripts/package-linux.py")["native_baseline"](sys.argv[1])))' "$(dpkg --print-architecture)"
           swift --version
@@ -65,3 +103,56 @@ jobs:
           chown -R tractanda-ci:tractanda-ci "$GITHUB_WORKSPACE"
           runuser -u tractanda-ci -- env PATH="$PATH" TRACTANDA_UUID_NODE=00:00:00:00:00:01 \
             sh -c 'cd "$1" && sh scripts/test.sh' sh "$GITHUB_WORKSPACE"
+      - name: Record tested source and workflow identities
+        if: ${{ always() && steps.source_identity.outcome == 'success' }}
+        id: source_attestation
+        env:
+          REQUESTED_SOURCE_COMMIT: ${{ inputs.source_commit || '' }}
+          WORKFLOW_HEAD_SHA: ${{ github.sha }}
+          WORKFLOW_COMMIT: ${{ github.workflow_sha }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          WORKFLOW_NAME: ${{ github.workflow }}
+          REPOSITORY: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          TEST_OUTCOME: ${{ steps.source_tests.outcome }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess
+          from pathlib import Path
+          def git(value):
+              return subprocess.check_output(['git', 'rev-parse', value], text=True).strip()
+          expected = os.environ['REQUESTED_SOURCE_COMMIT'] or os.environ['WORKFLOW_HEAD_SHA']
+          actual, tree = git('HEAD'), git('HEAD^{tree}')
+          if actual != expected:
+              raise SystemExit('Source HEAD changed during verification.')
+          for value in (actual, tree, os.environ['WORKFLOW_HEAD_SHA'], os.environ['WORKFLOW_COMMIT']):
+              if not re.fullmatch(r'[0-9a-f]{40}', value):
+                  raise SystemExit('Invalid full Git identity in source attestation.')
+          proof = {
+              'profile': 'tractanda.ci-source-identity.v1',
+              'repository': os.environ['REPOSITORY'],
+              'requestedSourceCommit': os.environ['REQUESTED_SOURCE_COMMIT'] or None,
+              'sourceCommit': actual, 'sourceTree': tree,
+              'workflowHeadCommit': os.environ['WORKFLOW_HEAD_SHA'],
+              'workflowCommit': os.environ['WORKFLOW_COMMIT'],
+              'workflowRef': os.environ['WORKFLOW_REF'],
+              'workflowName': os.environ['WORKFLOW_NAME'],
+              'event': os.environ['EVENT_NAME'],
+              'runID': int(os.environ['RUN_ID']),
+              'runAttempt': int(os.environ['RUN_ATTEMPT']),
+              'testStepOutcome': os.environ['TEST_OUTCOME'],
+          }
+          path = Path(os.environ['RUNNER_TEMP']) / 'tractanda-source-identity.json'
+          path.write_text(json.dumps(proof, sort_keys=True, indent=2) + '\n')
+          print(json.dumps(proof, sort_keys=True))
+          PY
+      - name: Upload source identity
+        if: ${{ always() && steps.source_attestation.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: source-identity-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/tractanda-source-identity.json
+          if-no-files-found: error
+          retention-days: 30
