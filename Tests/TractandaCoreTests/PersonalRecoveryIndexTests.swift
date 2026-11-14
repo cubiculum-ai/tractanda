@@ -535,6 +535,68 @@ final class PersonalRecoveryIndexTests: XCTestCase {
         }
     }
 
+    func testPersonalCheckpointRejectsMissingReferencedOriginal() throws {
+        try fixture { root, _, accounts in
+            let descriptor = try attachment(root, text: "checkpoint original", mediaType: "text/plain")
+            let value = try revision(extra: ["attachments": .list([descriptor.itemValue])])
+            try save(value, root)
+            let policy = ItemValue.object([
+                "profile": .text(AccessConfiguration.profile),
+                "users": .list([.text("alice"), .text("bob")]),
+            ])
+            var limits = PersonalRecoveryIndex.Limits()
+            limits.maximumDerivedBytes = AttachmentFixtureCapacity.fixtureCapBytes
+            var store: ItemStore? = try ItemStore(
+                personalRoot: root, opening: .selectedContent(policy), accounts: accounts,
+                recoveryLimits: limits)
+            let initial = store!.state
+            store = nil
+            store = try ItemStore(
+                personalRoot: root, opening: .existing, accounts: accounts, recoveryLimits: limits)
+            XCTAssertEqual(store!.startupRecovery["reason"], "validatedCheckpoint")
+            XCTAssertEqual(store!.state, initial)
+            store = nil
+            let path = "attachments/payloads/2026/10/24/11/01/" + descriptor.attachmentID + ".payload"
+            try FileManager.default.removeItem(at: root.appendingPathComponent(path))
+            XCTAssertThrowsError(
+                try ItemStore(
+                    personalRoot: root, opening: .existing, accounts: accounts, recoveryLimits: limits))
+        }
+    }
+
+    func testPersonalCheckpointRejectsMissingReferencedSavedPage() throws {
+        try fixture { root, _, accounts in
+            let document = try savedDocument(root, pages: 3, token: "checkpoint page fixture")
+            // The raw selected-content fixture must carry no operational reader fence left
+            // by DocumentContentStore's standalone publication. Activation creates its own.
+            let readerFence = root.appendingPathComponent("canonical-reader.json")
+            if FileManager.default.fileExists(atPath: readerFence.path) {
+                try FileManager.default.removeItem(at: readerFence)
+            }
+            let policy = ItemValue.object([
+                "profile": .text(AccessConfiguration.profile),
+                "users": .list([.text("alice"), .text("bob")]),
+            ])
+            var limits = PersonalRecoveryIndex.Limits()
+            limits.maximumDerivedBytes = AttachmentFixtureCapacity.fixtureCapBytes
+            var store: ItemStore? = try ItemStore(
+                personalRoot: root, opening: .selectedContent(policy), accounts: accounts,
+                recoveryLimits: limits)
+            let initial = store!.state
+            store = nil
+            store = try ItemStore(
+                personalRoot: root, opening: .existing, accounts: accounts, recoveryLimits: limits)
+            XCTAssertEqual(store!.startupRecovery["reason"], "validatedCheckpoint")
+            XCTAssertEqual(store!.state, initial)
+            store = nil
+            let base = try XCTUnwrap(document.documentPath)
+            try FileManager.default.removeItem(at: root.appendingPathComponent(base + "/pages/0/3.json"))
+            XCTAssertThrowsError(
+                try ItemStore(
+                    personalRoot: root, opening: .existing, accounts: accounts, recoveryLimits: limits))
+        }
+    }
+
     func testMissingSavedPageFailsFactoryWithoutPublishingOrChangingSelectedFiles() throws {
         try fixture { root, output, accounts in
             let document = try savedDocument(root, pages: 3, token: "missing page fixture")

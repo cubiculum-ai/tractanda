@@ -187,6 +187,7 @@ tractanda --profile production cluster status</code></pre>
 <tr><td>Logs and transient runtime files</td><td><code>/Library/Logs/Tractanda</code> and <code>/private/var/run/tractanda</code></td></tr>
 </tbody></table></div>
 <p>Back up the complete canonical store and its ownership/permissions, not just the SQLite index. If an index is lost, the server can rebuild it from canonical records. Normal access is through clients; direct file editing is an administrative repair operation.</p>
+<p>Normal startup verifies and reuses an intact index, preserving its dates and incremental-change checkpoints. Verification checks canonical items and referenced content without rerunning extraction or rebuilding the index. An interrupted, incompatible or damaged index requires recovery from the canonical files; clients then refresh any invalidated change checkpoints.</p>
 <p>Current permissions govern the item’s entire history. Revoking access also revokes access to old revisions through the server. To share current content without earlier history, make a separately shared copy. Categories never replace those permissions.</p>
 <p>Only one process should write each physical replica. Configured personal peers exchange the common canonical history through the peer protocol; copying the store directory with a generic sync service is unsupported. Uninstalling through the supplied setup tool preserves canonical data; review the <a href="https://github.com/cubiculum-ai/tractanda/blob/main/docs/install.md">installation guide</a> before administrative changes.</p>
 </section>

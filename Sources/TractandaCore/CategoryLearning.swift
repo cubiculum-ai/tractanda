@@ -63,6 +63,9 @@ public final class CategoryLearning {
     private let cacheProfile = "tractanda.category-cache.v1"
     private var generation = Identifier.make()
     public var queryState: String { store.state + "." + generation }
+    public func requireQueryState() throws -> String {
+        try store.requireProtocolState() + "." + generation
+    }
 
     private struct Source: Codable, Equatable {
         let itemID: String
@@ -243,7 +246,7 @@ public final class CategoryLearning {
     }
 
     private func state(_ input: Input, status: CategoryLearningState.Status, saved: LoadedModel?)
-        -> CategoryLearningState
+        throws -> CategoryLearningState
     {
         CategoryLearningState(
             categoryID: input.category.itemID, categoryRevisionID: input.category.revisionID,
@@ -253,13 +256,13 @@ public final class CategoryLearning {
             omittedExamples: input.omitted,
             unknownItems: input.unknown, emptyExamples: input.empty,
             vocabularySize: saved?.model?.vocabulary.count,
-            retainedDimensions: saved?.model?.singularValues.count, queryState: queryState)
+            retainedDimensions: saved?.model?.singularValues.count, queryState: try requireQueryState())
     }
 
     public func status(for categoryID: String, at date: Date = Date()) throws -> CategoryLearningState {
         let input = try input(for: categoryID, at: date)
         let (status, saved) = try load(input)
-        return state(input, status: status, saved: saved)
+        return try state(input, status: status, saved: saved)
     }
 
     /// Explicit training never commits an item. Identical inputs reuse the existing model identity.
@@ -267,7 +270,7 @@ public final class CategoryLearning {
         let input = try input(for: categoryID, at: date)
         let (status, previous) = try load(input)
         if [.off, .insufficientEvidence, .ready, .noSignal].contains(status) {
-            return state(input, status: status, saved: previous)
+            return try state(input, status: status, saved: previous)
         }
         let map = try makeMap(input)
         let model = try compile(map)
@@ -285,7 +288,7 @@ public final class CategoryLearning {
         generation = Identifier.make()
         let saved = LoadedModel(cache: cache, model: model)
         remember(saved, for: categoryID)
-        return state(input, status: model == nil ? .noSignal : .ready, saved: saved)
+        return try state(input, status: model == nil ? .noSignal : .ready, saved: saved)
     }
 
     /// Reset discards only this category's derived model, preserving assignments, feedback and settings.
@@ -345,7 +348,7 @@ public final class CategoryLearning {
         }
         list.sort { $0.score == $1.score ? $0.itemID < $1.itemID : $0.score > $1.score }
         return CategorySuggestions(
-            learning: state(input, status: status, saved: saved),
+            learning: try state(input, status: status, saved: saved),
             list: Array(list.dropFirst(position).prefix(limit)), position: position,
             total: list.count, unavailableItems: unavailable)
     }
@@ -374,7 +377,7 @@ public final class CategoryLearning {
         for id in ids.dropFirst(position).prefix(limit) {
             let input = try input(for: id, at: date)
             let (status, saved) = try load(input)
-            states.append(state(input, status: status, saved: saved))
+            states.append(try state(input, status: status, saved: saved))
             if status == .ready, let saved,
                 let suggestion = try suggestion(for: item, input: input, saved: saved, at: date).0
             {
@@ -384,7 +387,7 @@ public final class CategoryLearning {
         list.sort { $0.score == $1.score ? $0.categoryID < $1.categoryID : $0.score > $1.score }
         return SuggestedCategories(
             itemID: itemID, revisionID: item.revisionID, list: list, learning: states,
-            position: position, totalCategories: ids.count, queryState: queryState)
+            position: position, totalCategories: ids.count, queryState: try requireQueryState())
     }
 
     private func validatePage(_ position: Int, _ limit: Int) throws {

@@ -722,7 +722,7 @@ public final class ItemService {
             else { return NSNull() }
         }
         let storeID = try store.cursorStoreIdentity
-        let state = store.state
+        let state = (try store.requireProtocolState())
         let totalReference = LiveQueryCursor.retainTotal(
             total: total, storeID: storeID, actorUID: store.cursorActorUID, queryDigest: digest, state: state)
         return try LiveQueryCursor.encode(
@@ -856,7 +856,8 @@ public final class ItemService {
         var returned: [Revision] = []
         func response(_ remaining: [String]) throws -> [String: Any] {
             var value: [String: Any] = [
-                "accountId": try store.nativeProtocolSessionBasis.identity, "state": store.state,
+                "accountId": try store.nativeProtocolSessionBasis.identity,
+                "state": (try store.requireProtocolState()),
                 "list": list,
                 "notFound": missing,
             ]
@@ -905,7 +906,8 @@ public final class ItemService {
             returned = priorReturned
             if priorList.isEmpty, priorMissing.isEmpty, let candidate {
                 var alone: [String: Any] = [
-                    "accountId": try store.nativeProtocolSessionBasis.identity, "state": store.state,
+                    "accountId": try store.nativeProtocolSessionBasis.identity,
+                    "state": (try store.requireProtocolState()),
                     "list": [candidate],
                     "notFound": [], "remainingIDs": [], "oversizedIDs": [],
                 ]
@@ -1073,7 +1075,7 @@ public final class ItemService {
     }
 
     private func extractedText(ids: [String], projection: String, maxBytes: Int) throws -> [String: Any] {
-        let state = store.state
+        let state = (try store.requireProtocolState())
         var list: [[String: Any]] = []
         var notFound: [String] = []
         var oversized: [String] = []
@@ -1476,7 +1478,7 @@ public final class ItemService {
         if let cursor {
             guard cursor.storeID == (try store.cursorStoreIdentity),
                 cursor.actorUID == store.cursorActorUID, cursor.queryDigest == queryDigest,
-                cursor.state == store.state, cursor.evaluatedAt == evaluatedAtString,
+                cursor.state == (try store.requireProtocolState()), cursor.evaluatedAt == evaluatedAtString,
                 cursor.timeZone == timeZone
             else {
                 throw TractandaError(
@@ -1530,7 +1532,7 @@ public final class ItemService {
                     predicate?.matches(revision, at: evaluatedAt, calendar: queryCalendar)
                         ?? true
                 })
-            let currentState = store.state
+            let currentState = (try store.requireProtocolState())
             let pagePosition =
                 cursor.previous ? max(0, cursor.position - seek.ids.count) : cursor.position
             var next: String?
@@ -1588,7 +1590,8 @@ public final class ItemService {
                 sort: sort, position: position, limit: limit, at: evaluatedAt, timeZone: timeZone)
         }
         return [
-            "ids": page.ids, "position": position, "total": page.total, "queryState": store.state,
+            "ids": page.ids, "position": position, "total": page.total,
+            "queryState": (try store.requireProtocolState()),
             "evaluatedAt": evaluatedAtString,
             "nextCursor": try makeInitialCursor(
                 args: args, ids: page.ids, total: page.total, position: position,
@@ -1710,7 +1713,7 @@ public final class ItemService {
                 allowed: isCategoryQuery
                     ? ["itemID", "categoryIDs", "position", "limit", "ifInState"]
                     : ["categoryID", "expression", "position", "limit", "ifInState"])
-            if args["ifInState"] != nil, try string(args, "ifInState") != learning.queryState {
+            if args["ifInState"] != nil, try string(args, "ifInState") != (try learning.requireQueryState()) {
                 throw TractandaError(
                     "stateMismatch", "Items or learning models changed; restart suggestion pagination.")
             }
@@ -1779,11 +1782,12 @@ public final class ItemService {
                     let candidate = ItemStateResult(
                         list: states + [state], notFound: missing,
                         remainingIDs: Array(ids.dropFirst(position + 1)), oversizedIDs: oversized,
-                        state: store.state)
+                        state: (try store.requireProtocolState()))
                     if try JSON.encode(candidate).count <= maximum {
                         states.append(state)
                     } else if try JSON.encode(
-                        ItemStateResult(list: [state], notFound: [], state: store.state)
+                        ItemStateResult(
+                            list: [state], notFound: [], state: (try store.requireProtocolState()))
                     ).count > maximum {
                         oversized.append(ids[position])
                     } else {
@@ -1791,7 +1795,7 @@ public final class ItemService {
                             ItemStateResult(
                                 list: states, notFound: missing,
                                 remainingIDs: Array(ids.dropFirst(position)), oversizedIDs: oversized,
-                                state: store.state))
+                                state: (try store.requireProtocolState())))
                     }
                 } catch let error as TractandaError
                     where error.code == "notFound" || error.code == "forbidden"
@@ -1802,7 +1806,7 @@ public final class ItemService {
             return try dictionaryObject(
                 ItemStateResult(
                     list: states, notFound: missing,
-                    oversizedIDs: oversized, state: store.state))
+                    oversizedIDs: oversized, state: (try store.requireProtocolState())))
         case "TractandaItem/get", "TractandaItem/getBounded":
             return try readGet(args, bounded: method == "TractandaItem/getBounded")
         case "TractandaItem/listTail":
@@ -1830,7 +1834,8 @@ public final class ItemService {
             }
             let start = max(0, values.count - limit)
             let result: [String: Any] = [
-                "itemId": revision.itemID, "revisionId": revision.revisionID, "state": store.state,
+                "itemId": revision.itemID, "revisionId": revision.revisionID,
+                "state": (try store.requireProtocolState()),
                 "field": field, "fieldPresent": revision.fields[field] != nil,
                 "total": values.count, "start": start, "values": try object(Array(values[start...])),
             ]
@@ -1991,7 +1996,8 @@ public final class ItemService {
             var retained: [ItemState] = []
             for value in states {
                 let candidate = ItemConflictPage(
-                    list: retained + [value], nextCursor: value.itemID, state: store.state)
+                    list: retained + [value], nextCursor: value.itemID,
+                    state: (try store.requireProtocolState()))
                 guard try JSON.encode(candidate).count <= maximum else {
                     guard !retained.isEmpty else {
                         throw TractandaError(
@@ -2001,14 +2007,15 @@ public final class ItemService {
                     }
                     return try dictionaryObject(
                         ItemConflictPage(
-                            list: retained, nextCursor: retained.last!.itemID, state: store.state))
+                            list: retained, nextCursor: retained.last!.itemID,
+                            state: (try store.requireProtocolState())))
                 }
                 retained.append(value)
             }
             return try dictionaryObject(
                 ItemConflictPage(
                     list: retained, nextCursor: states.count == limit ? retained.last?.itemID : nil,
-                    state: store.state))
+                    state: (try store.requireProtocolState())))
         case "TractandaItem/sharing":
             try check(args, allowed: ["itemID"])
             return try dictionaryObject(store.personalSharingMetadata(string(args, "itemID"), actorUID: uid))
@@ -2084,7 +2091,8 @@ public final class ItemService {
             _ = try readProperties(args, record: .revision)
             let page = try store.historyPageBounded(string(args, "itemID"), position: position, limit: limit)
             var result: [String: Any] = [
-                "accountId": try store.nativeProtocolSessionBasis.identity, "state": store.state,
+                "accountId": try store.nativeProtocolSessionBasis.identity,
+                "state": (try store.requireProtocolState()),
                 "list": try page.list.map { try revisionRecord($0, args: args) }, "total": page.total,
             ]
             let dispositions = try store.historicalDispositions(for: page.list)
@@ -2136,7 +2144,11 @@ public final class ItemService {
             }
             try check(args, allowed: [])
             try store.rebuildIndex()
-            return ["state": store.state, "warnings": store.recoveryWarnings]
+            let observation = store.protocolStateObservation()
+            return [
+                "state": observation.state, "stateAvailable": observation.available,
+                "warnings": store.recoveryWarnings,
+            ]
         case "TractandaStore/configureAccess":
             try check(args, allowed: ["configuration"])
             guard let configuration = args["configuration"] as? [String: Any] else {
@@ -2145,16 +2157,21 @@ public final class ItemService {
             let policy = try JSON.decode(
                 ItemValue.self, JSONSerialization.data(withJSONObject: configuration))
             try store.configurePersonalAccess(policy)
-            return ["state": store.state, "configured": true, "persistenceProfile": store.persistenceProfile]
+            let observation = store.protocolStateObservation()
+            return [
+                "state": observation.state, "stateAvailable": observation.available,
+                "configured": true, "persistenceProfile": store.persistenceProfile,
+            ]
         case "TractandaStore/info":
             try check(args, allowed: [])
+            let stateObservation = store.protocolStateObservation()
             return [
                 "features": [
                     ServerFeature.revisionProjection.rawValue,
                     ServerFeature.personalItemState.rawValue,
                     ServerFeature.personalConflictResolution.rawValue, ServerFeature.personalSharing.rawValue,
                     ServerFeature.inlineCapture.rawValue, ServerFeature.itemFieldOperations.rawValue,
-                    ServerFeature.itemListTail.rawValue,
+                    ServerFeature.itemListTail.rawValue, ServerFeature.itemChanges.rawValue,
                     ServerFeature.runtimeIdentity.rawValue, ServerFeature.asynchronousStoreRebuild.rawValue,
                     ServerFeature.semanticJobTiming.rawValue,
                     ServerFeature.categoryMembershipSort.rawValue,
@@ -2168,6 +2185,7 @@ public final class ItemService {
                     ServerFeature.attachmentDocumentContent.rawValue,
                     ServerFeature.documentJobs.rawValue,
                 ].filter {
+                    if $0 == ServerFeature.itemChanges.rawValue { return store.supportsItemChanges }
                     if $0 == ServerFeature.revisionProjection.rawValue {
                         return store.revisionProjectionEnabled
                     }
@@ -2193,7 +2211,8 @@ public final class ItemService {
                 "persistenceProfile": store.persistenceProfile,
                 "clustering": try store.personalClusteringInfo(),
                 "server": try JSONSerialization.jsonObject(with: JSON.encode(RuntimeIdentity.current)),
-                "state": store.state, "ownerUID": store.ownerUID, "queryProfile": SpotlightQuery.profile,
+                "state": stateObservation.state, "stateAvailable": stateObservation.available,
+                "ownerUID": store.ownerUID, "queryProfile": SpotlightQuery.profile,
                 "binding": "local experimental; not JMAP conformant", "capability": Self.capability,
                 "warnings": store.isAdministrator ? store.recoveryWarnings : [],
                 "startupRecovery": store.isAdministrator ? store.startupRecovery : [:],
@@ -2235,15 +2254,16 @@ public final class ItemService {
             return try storeDescription(topic: topic, currentUID: uid)
         case "TractandaItem/changes":
             try check(args, allowed: ["sinceState", "maxChanges"])
-            guard args["sinceState"] is String else {
+            guard let sinceState = args["sinceState"] as? String else {
                 throw TractandaError("invalidArguments", "sinceState is required and must be a string.")
             }
-            if let maximum = args["maxChanges"], !(maximum is NSNull) {
-                _ = try integer(args, "maxChanges", default: 1, range: 1...9_007_199_254_740_991)
+            let maximum: Int?
+            if let value = args["maxChanges"], !(value is NSNull) {
+                maximum = try integer(args, "maxChanges", default: 1, range: 1...9_007_199_254_740_991)
+            } else {
+                maximum = nil
             }
-            throw TractandaError(
-                "cannotCalculateChanges",
-                "Synchronization deltas are not implemented; perform a full query/get refresh.")
+            return try dictionaryObject(store.itemChanges(sinceState: sinceState, maxChanges: maximum))
         default: throw TractandaError("unknownMethod", "Method is not available in the local prototype.")
         }
     }
@@ -2704,7 +2724,7 @@ public final class ItemService {
         try store.withAccess(forUID: peerUID) {
             do {
                 guard try store.verifyImmutableReadSnapshot(prepared.snapshot) else { return nil }
-                let currentState = store.state
+                let currentState = (try store.requireProtocolState())
                 guard currentState == page.state else { return nil }
                 var result: [String: Any] = [
                     "ids": page.ids, "position": prepared.query.position, "total": page.total,

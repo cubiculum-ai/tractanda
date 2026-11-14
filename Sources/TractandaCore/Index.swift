@@ -112,6 +112,15 @@ final class ItemIndex {
     var graphMaximumPageBytes = ItemIndex.cataloguePageByteWindow
     var revisionProjectionActive = false
     var currentProjectionSchemaReady = false
+    var itemChangesSchemaReady = false
+    var beforeItemChangesCommitForTesting: (() throws -> Void)?
+    var beforeItemChangesSchemaCommitForTesting: (() throws -> Void)?
+    var itemChangeCandidateRowsForTesting = 0
+    var itemChangeTokenSavesForTesting = 0
+    var itemChangeTokenRowsLimitForTesting: Int?
+    var itemChangeTokenBytesLimitForTesting: Int?
+    var itemChangePlanRowsLimitForTesting: Int?
+    var itemChangePlanBytesLimitForTesting: Int?
     var projectionAppendActive = false
     /// Raw personal content has no historical graph-admission proof. Canonical publication
     /// owns its Store dirty checkpoint and rederives each affected current projection.
@@ -249,7 +258,10 @@ final class ItemIndex {
         }
     }
     enum JournalMode: String { case wal, delete }
-    init(path: String, create: Bool, noFollow: Bool = false, journalMode: JournalMode = .wal) throws {
+    init(
+        path: String, create: Bool, noFollow: Bool = false, journalMode: JournalMode = .wal,
+        tempStoreOnDisk: Bool = false
+    ) throws {
         corpusIndexPath = path
         createdForConstruction = create
         let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | (noFollow ? SQLITE_OPEN_NOFOLLOW : 0)
@@ -269,6 +281,8 @@ final class ItemIndex {
                 throw error
             }
         }
+        // Must precede all request TEMP tables: changing temp_store afterwards deletes them.
+        if tempStoreOnDisk { try execute("PRAGMA temp_store=FILE") }
         if create {
             try execute(
                 """
@@ -574,6 +588,8 @@ final class ItemIndex {
             "recovery_ordinals", "recovery_heads", "recovery_graph_work", "recovery_ready",
             "recovery_roots", "recovery_item_progress", "recovery_forks", "recovery_reach_seen",
             "recovery_reach_ready",
+            "item_changes_meta", "item_changes_current", "item_changes_dirty", "item_changes_journal",
+            "item_changes_tokens", "item_changes_plans", "item_changes_plan_entries",
             "current_projection", "current_policy", "projection_acl", "projection_acl_named",
             "projection_principal_counts", "request_users", "request_groups", "request_actor",
             "checkpoint_meta", "corpus_index_identity", "page_text_index", "text_index",
@@ -827,6 +843,67 @@ final class ItemIndex {
         defer { sqlite3_finalize(statement) }
         let status = catalogueStep(statement)
         guard status == SQLITE_DONE || status == SQLITE_ROW else { throw error() }
+    }
+
+    func requireItemChangePublicationBoundary() throws {
+        guard let database, sqlite3_get_autocommit(database) != 0 else {
+            throw TractandaError(
+                "cannotCalculateChanges", "A type state requires a published transaction boundary.")
+        }
+    }
+    /// Fixed optional derived synchronization schema. DDL and any stale-history invalidation
+    /// share one transaction, so a partial repair can never make stale tokens trustworthy.
+    func installItemChangesSchema() throws {
+        guard !itemChangesSchemaReady else { return }
+        try requireItemChangePublicationBoundary()
+        guard let database else { throw graphSQLiteError() }
+        try execute("SAVEPOINT item_changes_schema")
+        do {
+            let expected = [
+                "item_changes_meta", "item_changes_current", "item_changes_dirty",
+                "item_changes_journal", "item_changes_tokens", "item_changes_plans",
+                "item_changes_plan_entries",
+            ]
+            let triggerNames = ["items", "head_summaries", "current_projection", "current_policy"].flatMap {
+                table in
+                ["insert", "update", "delete"].map { "item_changes_" + table + "_" + $0 }
+            }
+            let names = (expected + triggerNames).map { "'" + $0 + "'" }.joined(separator: ",")
+            var check: OpaquePointer?
+            guard
+                sqlite3_prepare_v2(
+                    database, "SELECT COUNT(*) FROM sqlite_master WHERE name IN(\(names))", -1, &check, nil)
+                    == SQLITE_OK,
+                let check
+            else { throw graphSQLiteError() }
+            let status = catalogueStep(check)
+            let complete = status == SQLITE_ROW && sqlite3_column_int(check, 0) == 19
+            sqlite3_finalize(check)
+            guard status == SQLITE_ROW else { throw graphSQLiteError() }
+            for sql in Self.itemChangesSchemaSQL {
+                try maintenanceCapacityCheck?()
+                try checkCatalogueScanProgress()
+                var statement: OpaquePointer?
+                guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
+                    let statement
+                else { throw graphSQLiteError() }
+                let status = catalogueStep(statement)
+                sqlite3_finalize(statement)
+                guard status == SQLITE_DONE else { throw graphSQLiteError() }
+            }
+            if !complete {
+                // Missing tracking tables/triggers cannot prove the prior boundary.
+                try execute("DELETE FROM item_changes_meta")
+            }
+            try beforeItemChangesSchemaCommitForTesting?()
+            try execute("RELEASE item_changes_schema")
+            itemChangesSchemaReady = true
+        } catch {
+            try? execute("ROLLBACK TO item_changes_schema")
+            try? execute("RELEASE item_changes_schema")
+            itemChangesSchemaReady = false
+            throw error
+        }
     }
 
     /// Only this fixed CREATE IF NOT EXISTS list bypasses data-write invalidation. Adding empty

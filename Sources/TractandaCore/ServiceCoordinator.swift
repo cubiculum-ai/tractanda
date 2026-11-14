@@ -1291,9 +1291,10 @@ public actor ServiceCoordinator {
         try await withJMAPAccess(
             authentication: authentication, recoverPublication: false, renewCredential: false
         ) { store in
-            [
+            let state = try store.requireProtocolState()
+            return [
                 try store.nativeProtocolSessionBasis.identity: [
-                    "TractandaItem": store.state, "TractandaRevision": store.state,
+                    "TractandaItem": state, "TractandaRevision": state,
                 ]
             ]
         }

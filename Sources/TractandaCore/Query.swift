@@ -1348,6 +1348,8 @@ public enum Categories {
             }
             if !itemMemberships.isEmpty { memberships[id] = itemMemberships }
         }
-        return .init(state: store.state, roots: roots, memberships: memberships, notFound: notFound)
+        return .init(
+            state: try store.requireProtocolState(), roots: roots, memberships: memberships,
+            notFound: notFound)
     }
 }

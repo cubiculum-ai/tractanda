@@ -307,6 +307,19 @@ public struct ItemClient: Sendable {
                 fieldProperties: fieldProperties, maxBytes: maxBytes), returning: JMAPItemGetResponse.self)
     }
 
+    /// Fetch one page; pass newState as sinceState while hasMoreChanges is true.
+    public func itemChanges(sinceState: String, maxChanges: Int? = nil) async throws -> ItemChangesResult {
+        guard maxChanges.map({ (1...9_007_199_254_740_991).contains($0) }) ?? true else {
+            throw TractandaError("invalidArguments", "maxChanges must be a positive JMAP integer.")
+        }
+        let result = try await call(
+            "TractandaItem/changes",
+            arguments: ChangesRequest(sinceState: sinceState, maxChanges: maxChanges),
+            returning: ItemChangesResult.self)
+        try result.validate(sinceState: sinceState, maxChanges: maxChanges)
+        return result
+    }
+
     public func history(itemID: String, position: Int = 0, limit: Int = 100) async throws -> ItemHistoryResult
     {
         let wire = try await historyRecords(itemID: itemID, position: position, limit: limit)
@@ -542,6 +555,11 @@ public struct ItemClient: Sendable {
                 operationID: operationID), returning: AttachmentCommitResult.self)
     }
 
+}
+
+private struct ChangesRequest: Encodable, Sendable {
+    let sinceState: String
+    let maxChanges: Int?
 }
 
 private struct GetRequest: Encodable, Sendable {

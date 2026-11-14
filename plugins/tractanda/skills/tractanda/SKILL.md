@@ -17,7 +17,7 @@ Use the server as the authority for the current schema, readable records and per
 
 Tool names may carry a harness prefix. The [connection guide](references/connection.md) defines feature compatibility and stale-process checks. Refresh info after a restart or behavior mismatch; reconnect an outdated adapter before relying on its references or making writes. Restarting an adapter does not necessarily refresh the harness’s tool list. Some harnesses discover tools once per session: reconnect using the harness, or start a fresh session if needed. Do not call an unlisted tool by guessing its name. Compiled references remain static until restart/reinitialization. The initialize version and `connection.referenceRevision` identify their cache. The same guide covers native-client fallback.
 
-For reusable agent memory, preferences, decisions, evidence or handoffs, read [memory workflows](references/memory.md). It describes ordinary item/category/view conventions and a lightweight timestamp-based catch-up heuristic; use the connected server's served references for exact query syntax and capabilities.
+For reusable agent memory, preferences, decisions, evidence or handoffs, read [memory workflows](references/memory.md). It describes ordinary item/category/view conventions and lightweight catch-up options. When the native server declares `tractanda.item-changes.v1`, use the served query reference for the incremental changes workflow; otherwise the timestamp-based heuristic remains available. Keep API shapes and limits in the served references.
 
 ## Work across personal and workgroup peers
 

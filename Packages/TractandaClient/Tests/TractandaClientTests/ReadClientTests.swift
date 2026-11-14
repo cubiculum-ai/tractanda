@@ -136,3 +136,57 @@ private let readAccount = "00112233-4455-6677-8899-aabbccddeeff"
     #expect(args["position"] == nil)
     #expect(args["anchorOffset"] == .number(try JMAPNumber("-1")))
 }
+
+@Test func itemChangesPreservesOpaqueContinuationAndOptionalLimit() async throws {
+    let transport = ReadTranscript { call in
+        let since = call.arguments["sinceState"]!.text!
+        return .object([
+            .init("accountId", .string(readAccount)), .init("oldState", .string(since)),
+            .init("newState", .string(since == "opaque / +" ? "next:≠" : "done")),
+            .init("hasMoreChanges", .bool(since == "opaque / +")),
+            .init("created", .array([.string("one")])), .init("updated", .array([])),
+            .init("destroyed", .array([])),
+        ])
+    }
+    let client = ItemClient(transport: transport)
+    let first = try await client.itemChanges(sinceState: "opaque / +", maxChanges: 1)
+    #expect(first.hasMoreChanges)
+    _ = try await client.itemChanges(sinceState: first.newState)
+    let calls = try await transport.calls().filter { $0.name == "TractandaItem/changes" }
+    #expect(calls.count == 2)
+    #expect(calls[0].arguments["maxChanges"] == .number(try JMAPNumber("1")))
+    #expect(calls[1].arguments["sinceState"]?.text == "next:≠")
+    #expect(calls[1].arguments["maxChanges"] == nil)
+    await #expect(throws: (any Error).self) { try await client.itemChanges(sinceState: "x", maxChanges: 0) }
+}
+
+@Test func itemChangesRejectsWrongAccountAndMalformedResults() async throws {
+    for payload in [
+        #"{"accountId":"wrong","oldState":"x","newState":"y","hasMoreChanges":false,"created":[],"updated":[],"destroyed":[]}"#,
+        #"{"accountId":"00112233-4455-6677-8899-aabbccddeeff","oldState":"x","newState":"y","hasMoreChanges":false,"created":[],"updated":[]}"#,
+        #"{"accountId":"00112233-4455-6677-8899-aabbccddeeff","oldState":"x","newState":"y","hasMoreChanges":false,"created":["a","a"],"updated":[],"destroyed":[]}"#,
+        #"{"accountId":"00112233-4455-6677-8899-aabbccddeeff","oldState":"other","newState":"y","hasMoreChanges":false,"created":[],"updated":[],"destroyed":[]}"#,
+    ] {
+        let transport = ReadTranscript { _ in try JMAPValue.decode(Data(payload.utf8)) }
+        await #expect(throws: (any Error).self) {
+            try await ItemClient(transport: transport).itemChanges(sinceState: "x")
+        }
+    }
+}
+
+@Test func itemChangesAllowsCrossListOverlapAndEnforcesRequestedLimit() async throws {
+    let transport = ReadTranscript { _ in
+        try JMAPValue.decode(
+            Data(
+                #"{"accountId":"00112233-4455-6677-8899-aabbccddeeff","oldState":"x","newState":"y","hasMoreChanges":false,"created":["a","b"],"updated":["a","c"],"destroyed":["b","c"]}"#
+                    .utf8))
+    }
+    let client = ItemClient(transport: transport)
+    let changes = try await client.itemChanges(sinceState: "x", maxChanges: 6)
+    #expect(changes.created == ["a", "b"])
+    #expect(changes.updated == ["a", "c"])
+    #expect(changes.destroyed == ["b", "c"])
+    await #expect(throws: (any Error).self) {
+        try await client.itemChanges(sinceState: "x", maxChanges: 5)
+    }
+}

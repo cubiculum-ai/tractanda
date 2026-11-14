@@ -7,6 +7,7 @@ import XCTest
 final class ReadGatewayContractTests: XCTestCase {
     private actor WireTranscript {
         var taggedIntegers: [String] = []
+        var changesArguments: [[String: Any]] = []
         func send(_ request: Data) throws -> Data {
             let envelope = try JSONSerialization.jsonObject(with: request) as! [String: Any]
             let call = (envelope["methodCalls"] as! [[Any]])[0]
@@ -22,6 +23,16 @@ final class ReadGatewayContractTests: XCTestCase {
                     "accounts": [account: ["accountCapabilities": [capability: [:]]]],
                     "primaryAccounts": [capability: account],
                 ]
+            } else if method == "TractandaStore/info" {
+                payload = ["features": ["tractanda.item-changes.v1"]]
+            } else if method == "TractandaItem/changes" {
+                changesArguments.append(args)
+                payload = [
+                    "accountId": account, "oldState": args["sinceState"]!,
+                    "newState": (args["sinceState"] as? String) == "initial" ? "continuation / +" : "done",
+                    "hasMoreChanges": (args["sinceState"] as? String) == "initial", "created": [],
+                    "updated": [], "destroyed": [],
+                ]
             } else if method == "TractandaItem/get" {
                 payload = ["accountId": account, "state": "items", "list": [["id": account]], "notFound": []]
             } else {
@@ -34,6 +45,7 @@ final class ReadGatewayContractTests: XCTestCase {
             ])
         }
         func values() -> [String] { taggedIntegers }
+        func changesStates() -> [String] { changesArguments.compactMap { $0["sinceState"] as? String } }
     }
 
     func testMCPAlreadyWireArgumentsAndSelectedDTOResponseRemainUntouched() async throws {
@@ -57,6 +69,44 @@ final class ReadGatewayContractTests: XCTestCase {
         XCTAssertEqual(Set(item.keys), ["id"])
         let integers = await transcript.values()
         XCTAssertEqual(integers, [String(Int64.min)])
+    }
+
+    func testItemChangesToolForwardsContinuation() async throws {
+        let transcript = WireTranscript()
+        let gateway = NativeGateway(backend: { try await transcript.send($0) })
+        let tool = try XCTUnwrap(ToolCatalog.definitions().first { $0.tool.name == "tractanda_changes" })
+        let first = try await MCPAdapter.callNativeTool(
+            definition: tool, supplied: ["sinceState": .string("initial"), "maxChanges": .int(1)],
+            gateway: gateway)
+        let result = try JSONSerialization.jsonObject(with: first) as! [String: Any]
+        let next = try XCTUnwrap(result["newState"] as? String)
+        _ = try await MCPAdapter.callNativeTool(
+            definition: tool, supplied: ["sinceState": .string(next)], gateway: gateway)
+        let states = await transcript.changesStates()
+        XCTAssertEqual(states, ["initial", "continuation / +"])
+    }
+
+    func testItemChangesToolContractAndFeatureGate() throws {
+        let tool = try XCTUnwrap(ToolCatalog.definitions().first { $0.tool.name == "tractanda_changes" })
+        XCTAssertEqual(tool.nativeMethod, "TractandaItem/changes")
+        XCTAssertEqual(tool.requiredFeature, "tractanda.item-changes.v1")
+        XCTAssertTrue(tool.readOnly)
+        let args = try tool.arguments(from: ["sinceState": .string("next:≠"), "maxChanges": .int(2)])
+        XCTAssertEqual(args["sinceState"], .string("next:≠"))
+        XCTAssertEqual(args["maxChanges"], .int(2))
+        XCTAssertNil(args["limit"])
+        XCTAssertThrowsError(try tool.arguments(from: [:]))
+        XCTAssertThrowsError(try tool.arguments(from: ["sinceState": .int(1)]))
+        XCTAssertThrowsError(try tool.arguments(from: ["sinceState": .string("x"), "maxChanges": .int(0)]))
+        XCTAssertThrowsError(
+            try tool.arguments(from: ["sinceState": .string("x"), "operationID": .string("x")]))
+        XCTAssertThrowsError(
+            try MCPAdapter.requireFeature(
+                "tractanda.item-changes.v1", serverInfoData: Data(#"{"features":[]}"#.utf8)))
+        XCTAssertNoThrow(
+            try MCPAdapter.requireFeature(
+                "tractanda.item-changes.v1",
+                serverInfoData: Data(#"{"features":["tractanda.item-changes.v1"]}"#.utf8)))
     }
 
     func testCatalogUsesStandardReadSelectorsAndCollectionRevisionIDs() throws {

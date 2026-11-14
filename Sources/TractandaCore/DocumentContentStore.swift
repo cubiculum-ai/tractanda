@@ -300,6 +300,70 @@ final class DocumentContentStore: @unchecked Sendable {
             identity: representation.identity, extractedAt: representation.extractedAt, base: stage)
     }
 
+    /// Startup checks the immutable proof nodes and page custody/length without reading page
+    /// bodies. Full page checksum/semantic validation remains part of normal reads and audits.
+    func validateCheckpointPresence(
+        _ representation: AttachmentDocumentRepresentation, boundary: () throws -> Void = {}
+    ) throws {
+        guard let reference = representation.content else { return }
+        let base = try directory(reference.contentID)
+        let manifest = try self.manifest(reference)
+        guard manifest.source == representation.source, manifest.identity == representation.identity,
+            manifest.extractedAt == representation.extractedAt
+        else { throw integrity("Document checkpoint provenance changed.") }
+        var parts: Int64 = 1
+        var pages: Int64 = 0
+        var total: Int64 = 0
+        func node(_ edge: DocumentHashEntry, level: Int) throws {
+            try Task.checkCancellation()
+            try boundary()
+            guard (0...8).contains(level), edge.byteCount > 0,
+                edge.byteCount <= Self.maximumNodeBytes
+            else { throw integrity("Document checkpoint node exceeds its bound.") }
+            let data = try files.read(
+                path: base + nodePath(level: level, ordinal: edge.ordinal),
+                maximumBytes: Self.maximumNodeBytes)
+            guard Int64(data.count) == edge.byteCount, digest(data) == edge.sha256 else {
+                throw integrity("Document checkpoint proof changed.")
+            }
+            let value = try DocumentValue.strictDecode(DocumentHashNode.self, data: data)
+            try value.validate()
+            guard value.level == level, value.ordinal == edge.ordinal,
+                value.entries.first?.firstPage == edge.firstPage,
+                value.entries.last?.lastPage == edge.lastPage
+            else { throw integrity("Document checkpoint range changed.") }
+            parts += 1
+            for entry in value.entries {
+                if level > 0 {
+                    try node(entry, level: level - 1)
+                } else {
+                    try Task.checkCancellation()
+                    try boundary()
+                    guard entry.ordinal == pages + 1, entry.byteCount > 0,
+                        entry.byteCount <= Self.maximumPageBytes,
+                        entry.byteCount <= reference.totalEncodedBytes - total
+                    else { throw integrity("Document checkpoint page range changed.") }
+                    let file = try files.peerDocumentPartFile(
+                        path: base + pagePath(entry.ordinal), maximumBytes: Self.maximumPageBytes)
+                    guard file.metadata.size == UInt64(entry.byteCount) else {
+                        throw integrity("Document checkpoint page length changed.")
+                    }
+                    try file.check()
+                    pages += 1
+                    total += entry.byteCount
+                    parts += 1
+                }
+            }
+        }
+        try node(
+            .init(
+                ordinal: 0, firstPage: 1, lastPage: manifest.pageCount,
+                byteCount: manifest.rootByteCount, sha256: manifest.rootSHA256), level: manifest.rootLevel)
+        guard pages == reference.pageCount, total == reference.totalEncodedBytes,
+            try files.inspectDocumentTree(base, synchronize: false) == parts
+        else { throw integrity("Document checkpoint closure is incomplete.") }
+    }
+
     private func validateStoredContent(
         _ reference: DocumentContentReference, source: AttachmentDocumentSource,
         identity: DocumentConverterIdentity, extractedAt: String, base: [String],

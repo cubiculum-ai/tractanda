@@ -696,7 +696,7 @@ final class SemanticService {
     private func reconcile(_ configuration: SemanticConfiguration, profileID: String) throws {
         try storage.cleanup()
         guard !documentWorkSuspended else { return }
-        let storeState = store.state
+        let storeState = try store.requireProtocolState()
         if reconciledStoreState != storeState {
             let starting = reconciledStoreState == nil
             reconciledStoreState = storeState

@@ -73,6 +73,16 @@ struct ToolDefinition: Sendable {
                 arguments["limit"] = .int(32)
             }
         }
+        if nativeMethod == "TractandaItem/changes" {
+            guard arguments["sinceState"]?.stringValue != nil else {
+                throw TractandaError("invalidArguments", "sinceState must be a string.")
+            }
+            if let value = arguments["maxChanges"] {
+                guard let count = value.intValue, (1...9_007_199_254_740_991).contains(count) else {
+                    throw TractandaError("invalidArguments", "maxChanges must be a positive JMAP integer.")
+                }
+            }
+        }
         if nativeMethod == "TractandaItem/state", arguments["maxBytes"] == nil {
             arguments["maxBytes"] = .int(65_536)
         }
@@ -439,6 +449,16 @@ enum ToolCatalog {
                 "limit": .object(["type": .string("integer"), "minimum": .int(0), "maximum": .int(256)]),
                 "calculateTotal": .object(["type": .string("boolean"), "default": .bool(false)]),
             ], isPaged: true),
+        .init(
+            "tractanda_changes", method: "TractandaItem/changes",
+            description:
+                "Read Item changes since an opaque Item state from the same account. Pass newState as sinceState while hasMoreChanges is true. On cannotCalculateChanges, refresh with query/get. Current permissions apply; queryState is separate. Requires tractanda.item-changes.v1.",
+            properties: [
+                "sinceState": text,
+                "maxChanges": .object([
+                    "type": .string("integer"), "minimum": .int(1), "maximum": .int(9_007_199_254_740_991),
+                ]),
+            ], required: ["sinceState"], requiredFeature: "tractanda.item-changes.v1"),
         .init(
             "tractanda_get", method: "TractandaItem/get",
             description:

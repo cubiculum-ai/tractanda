@@ -93,11 +93,52 @@ public struct JMAPHistoryResponse: Decodable, Sendable {
     }
 }
 
+/// One page of Item type changes. State values are opaque and scoped to the current account.
+public struct ItemChangesResult: Codable, Sendable, Equatable {
+    public let accountID: String
+    public let oldState: String
+    public let newState: String
+    public let hasMoreChanges: Bool
+    public let created: [String]
+    public let updated: [String]
+    public let destroyed: [String]
+
+    private enum CodingKeys: String, CodingKey {
+        case accountID = "accountId"
+        case oldState, newState, hasMoreChanges, created, updated, destroyed
+    }
+
+    public init(
+        accountID: String, oldState: String, newState: String, hasMoreChanges: Bool,
+        created: [String], updated: [String], destroyed: [String]
+    ) {
+        self.accountID = accountID
+        self.oldState = oldState
+        self.newState = newState
+        self.hasMoreChanges = hasMoreChanges
+        self.created = created
+        self.updated = updated
+        self.destroyed = destroyed
+    }
+
+    func validate(sinceState: String, maxChanges: Int? = nil) throws {
+        let count = created.count + updated.count + destroyed.count
+        guard oldState == sinceState,
+            Set(created).count == created.count, Set(updated).count == updated.count,
+            Set(destroyed).count == destroyed.count,
+            maxChanges.map({ count <= $0 }) ?? true,
+            !hasMoreChanges || newState != oldState
+        else {
+            throw TractandaError("protocolError", "Invalid Item changes response.")
+        }
+    }
+}
+
 /// Validate dataset selection without altering the returned wire data or its DTO codec.
 public enum JMAPReadResponseValidator {
     public static let methods: Set<String> = [
         "TractandaItem/get", "TractandaItem/getBounded", "TractandaRevision/get", "TractandaItem/history",
-        "TractandaItem/query",
+        "TractandaItem/query", "TractandaItem/changes",
     ]
     public static func validate(_ response: Data, calls: [JMAPInvocation], discoveredAccountID: String? = nil)
         throws
@@ -130,6 +171,24 @@ public enum JMAPReadResponseValidator {
                 else {
                     throw TractandaError("protocolError", "Read response omitted or repeated requested IDs.")
                 }
+            }
+            if call.name == "TractandaItem/changes" {
+                guard let sinceState = call.arguments["sinceState"]?.text else {
+                    throw TractandaError("protocolError", "Missing changes state.")
+                }
+                let changes: ItemChangesResult
+                do {
+                    changes = try JSONDecoder().decode(ItemChangesResult.self, from: result[1].encoded())
+                } catch {
+                    throw TractandaError("protocolError", "Malformed Item changes response.")
+                }
+                let maximum: Int?
+                if case .number(let value) = call.arguments["maxChanges"] {
+                    maximum = (try? value.protocolInt()).flatMap { Int(exactly: $0) }
+                } else {
+                    maximum = nil
+                }
+                try changes.validate(sinceState: sinceState, maxChanges: maximum)
             }
             guard let expected = call.arguments["accountId"]?.text ?? discoveredAccountID,
                 result[1]["accountId"]?.text == expected

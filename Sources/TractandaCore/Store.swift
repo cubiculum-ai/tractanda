@@ -249,7 +249,8 @@ public final class ItemStore {
         return try ContentActivationReport(
             profile: "tractanda.content-activation.v1", storePath: root.path,
             indexDirectory: indexDirectory.path, storeID: canonicalStoreIdentity(creatingIfMissing: false),
-            replicaID: replicaID, persistenceProfile: persistenceProfile, state: state, ready: true,
+            replicaID: replicaID, persistenceProfile: persistenceProfile, state: requireProtocolState(),
+            ready: true,
             items: index.currentHeadCount(), revisions: index.catalogueCount())
     }
     var cursorActorUID: UInt32 { accessContext?.uid ?? UInt32.max }
@@ -271,7 +272,7 @@ public final class ItemStore {
         return timestamp
     }
     func pooledReadAuthority() throws -> PooledReadAuthority? {
-        guard isCanonicalReady, let index else { return nil }
+        guard isCanonicalReady, let index, let state = try? requireProtocolState() else { return nil }
         let uid = accessContext?.uid ?? ownerUID
         if isAdministrator {
             return .init(
@@ -487,8 +488,56 @@ public final class ItemStore {
             try accessContext?.account?.name ?? accounts.user(forUID: accessContext?.uid ?? ownerUID).name
         return (basis, try basis.session(authenticationKey: savedViewAuthorizationKey, username: username))
     }
+    /// Opaque caller-bound type state. Failed or incomplete derived observations cannot
+    /// mint a usable cursor: callers can still read, but /changes requires a full refresh.
+    var itemChangeCandidateRowsForTesting: Int { index?.itemChangeCandidateRowsForTesting ?? 0 }
+    var itemChangeTokenSavesForTesting: Int { index?.itemChangeTokenSavesForTesting ?? 0 }
+    var itemChangeTokenRowsLimitForTesting: Int? {
+        get { index?.itemChangeTokenRowsLimitForTesting }
+        set { index?.itemChangeTokenRowsLimitForTesting = newValue }
+    }
+    var itemChangesClockForTesting: (() -> Date)?
+    private var itemChangesNow: Date { itemChangesClockForTesting?() ?? Date() }
+    var beforeItemChangesSchemaCommitForTesting: (() throws -> Void)? {
+        get { index?.beforeItemChangesSchemaCommitForTesting }
+        set { index?.beforeItemChangesSchemaCommitForTesting = newValue }
+    }
+    var beforeItemChangesCommitForTesting: (() throws -> Void)? {
+        get { index?.beforeItemChangesCommitForTesting }
+        set { index?.beforeItemChangesCommitForTesting = newValue }
+    }
+    var supportsItemChanges: Bool {
+        personalProfile != nil && !contentRecoveryQualification && isCanonicalReady
+            && !personalBaselineImportActive && index != nil
+            && !accessConfigurationAmbiguous && !accessConfigurationProofUnavailable
+    }
+    /// Compatibility observation only. This marker is never registered as a usable
+    /// synchronization state; protocol replies and concurrency proofs use the throwing accessor.
+    public static let unavailableProtocolState = "tractanda-state-unavailable"
+    public var state: String { protocolStateObservation().state }
+
+    public func requireProtocolState() throws -> String {
+        guard personalProfile != nil, !contentRecoveryQualification else { return legacyState }
+        do {
+            guard supportsItemChanges else {
+                throw changesUnavailable("Current personal state is not ready.")
+            }
+            return try itemChangeState()
+        } catch {
+            let reason = (error as? TractandaError)?.code ?? "derivedObservationFailed"
+            throw TractandaError(
+                "serverFail",
+                "Current Item state is unavailable (\(reason)); retry after local index/authority recovery.")
+        }
+    }
+    public func protocolStateObservation() -> (state: String, available: Bool) {
+        do { return (try requireProtocolState(), true) } catch {
+            return (Self.unavailableProtocolState, false)
+        }
+    }
+
     /// A private edit must not change another caller's synchronization token.
-    public var state: String {
+    private var legacyState: String {
         guard !isAdministrator, let context = accessContext else { return generation }
         if isMultiUser, let account = context.account, let index,
             let names = try? index.aclPrincipalNames(maximum: 1024),
@@ -561,6 +610,307 @@ public final class ItemStore {
         let token = Identifier.make()
         exactScopedStates[accessScope] = (fingerprint, token)
         return token
+    }
+
+    private struct ItemChangeScope {
+        let key: String
+        let users: [String: ItemIndex.ChangePrincipalBinding]
+        let groups: [String: ItemIndex.ChangePrincipalBinding]
+        let resolver: PrincipalResolver
+    }
+    private func changePrincipalBinding(_ resolve: () throws -> UInt32) throws
+        -> ItemIndex.ChangePrincipalBinding
+    {
+        do { return .init(id: try resolve()) } catch let error as TractandaError
+            where error.code == "unresolvedPrincipal"
+        {
+            // A missing unrelated OS principal is a stable binding observation, not a
+            // reason to break every other caller's readable Items or query cursors.
+            return .init(id: nil)
+        }
+    }
+    private func itemChangeScope() throws -> ItemChangeScope {
+        guard supportsItemChanges, let index
+        else { throw changesUnavailable("Current authority or projection is unavailable.") }
+        let resolver = PrincipalResolver(directory: accounts, configuration: accessConfiguration)
+        var users: [String: ItemIndex.ChangePrincipalBinding] = [:]
+        var groups: [String: ItemIndex.ChangePrincipalBinding] = [:]
+        if !isAdministrator {
+            guard let names = try index.aclPrincipalNames(maximum: 1024),
+                names.users.count + names.groups.count <= 1024
+            else { throw changesUnavailable("Principal bindings exceed the synchronization window.") }
+            for name in names.users { users[name] = try changePrincipalBinding { try resolver.userID(name) } }
+            for name in names.groups {
+                groups[name] = try changePrincipalBinding { try resolver.groupID(name) }
+            }
+        }
+        func configuration(_ value: AccessConfiguration) -> ItemValue {
+            .object([
+                "users": .list(value.users.sorted().map(ItemValue.text)),
+                "groups": .list(value.groups.sorted().map(ItemValue.text)),
+                "userAliases": .object(value.userAliases.mapValues(ItemValue.text)),
+                "groupAliases": .object(value.groupAliases.mapValues(ItemValue.text)),
+                "administration": .text(value.administration.rawValue),
+                "administratorGroup": .text(value.administratorGroup ?? ""),
+                "legacyUsers": .object(
+                    Dictionary(
+                        uniqueKeysWithValues: value.legacyUsers.map {
+                            (String($0.key), ItemValue.text($0.value))
+                        })),
+            ])
+        }
+        let account = accessContext?.account
+        let value: ItemValue = .object([
+            "uid": .integer(Int64(accessContext?.uid ?? ownerUID)),
+            "name": .text(account?.name ?? "internal"),
+            "groups": .list((account?.groupIDs.sorted() ?? []).map { .integer(Int64($0)) }),
+            "administrator": .boolean(isAdministrator),
+            "projection": .boolean(usesCurrentItemProjection),
+            "configuration": accessConfiguration.map(configuration) ?? .object([:]),
+        ])
+        return .init(
+            key: Data(SHA256.hash(data: try JSON.encode(value))).base64EncodedString(),
+            users: users, groups: groups, resolver: resolver)
+    }
+    private func changesUnavailable(_ message: String) -> TractandaError {
+        TractandaError("cannotCalculateChanges", message)
+    }
+    private func validateItemChangeToken(
+        _ token: ItemIndex.ChangeToken, bounds: ItemIndex.ChangeBounds, scope: ItemChangeScope
+    ) throws {
+        guard token.epoch == bounds.epoch, token.scope == scope.key,
+            token.sequence >= bounds.floor, token.sequence <= bounds.head,
+            token.issuedAt >= itemChangesNow.timeIntervalSince1970 - ItemIndex.itemChangesMaximumAge
+        else {
+            throw changesUnavailable("State is foreign, expired, evicted or invalidated; refresh query/get.")
+        }
+        do {
+            for (name, id) in token.users {
+                guard try changePrincipalBinding({ try scope.resolver.userID(name) }) == id else {
+                    throw changesUnavailable("A historical principal binding changed; refresh query/get.")
+                }
+            }
+            for (name, id) in token.groups {
+                guard try changePrincipalBinding({ try scope.resolver.groupID(name) }) == id else {
+                    throw changesUnavailable("A historical group binding changed; refresh query/get.")
+                }
+            }
+        } catch {
+            throw changesUnavailable(
+                "Historical principal bindings are no longer reliable; refresh query/get.")
+        }
+    }
+    private func checkedItemChangeScope() throws -> ItemChangeScope {
+        do { return try itemChangeScope() } catch {
+            throw changesUnavailable("Current caller authority cannot be established; refresh query/get.")
+        }
+    }
+    private func canReadChange(_ value: ItemIndex.ChangeRepresentation?, scope: ItemChangeScope) -> Bool {
+        guard let value else { return false }
+        if isAdministrator { return true }
+        guard value.policiesComplete, !value.policies.isEmpty, let account = accessContext?.account else {
+            return false
+        }
+        return value.policies.allSatisfy { policy in
+            guard policy.classID != AccessConfiguration.classID, let permissions = policy.permissions else {
+                return false
+            }
+            return (try? ItemPermissions(permissions).allows(4, for: account, using: scope.resolver)) == true
+        }
+    }
+    private func itemChangeKind(
+        old: ItemIndex.ChangeRepresentation?, new: ItemIndex.ChangeRepresentation?, scope: ItemChangeScope
+    ) throws -> String? {
+        let before = canReadChange(old, scope: scope)
+        let after = canReadChange(new, scope: scope)
+        if !before && after { return "created" }
+        if before && !after { return "destroyed" }
+        if before && after, try old?.signature != new?.signature { return "updated" }
+        return nil
+    }
+    private func itemChangeState() throws -> String {
+        guard supportsItemChanges, let index else {
+            throw changesUnavailable("Item changes requires the current ready personal/workgroup profile.")
+        }
+        let bounds = try index.reconcileItemChanges(
+            projection: usesCurrentItemProjection, now: itemChangesNow)
+        let scope = try itemChangeScope()
+        if var prior = try index.latestItemChangeToken(scope: scope.key),
+            (try? validateItemChangeToken(prior, bounds: bounds, scope: scope)) != nil
+        {
+            let candidates = try index.itemChangeCandidates(after: prior.sequence, through: bounds.head)
+            var visible = false
+            for candidate in candidates.values {
+                if try itemChangeKind(old: candidate.old, new: candidate.new, scope: scope) != nil {
+                    visible = true
+                    break
+                }
+            }
+            if !visible {
+                // Advancing this token across invisible edits preserves exactly the same
+                // caller-visible state and avoids disclosing private activity through tokens.
+                let users = prior.users.merging(scope.users) { _, new in new }
+                let groups = prior.groups.merging(scope.groups) { _, new in new }
+                if prior.sequence != bounds.head || prior.users != users || prior.groups != groups {
+                    prior.sequence = bounds.head
+                    prior.users = users
+                    prior.groups = groups
+                    try index.saveItemChangeToken(prior)
+                }
+                return prior.token
+            }
+        }
+        let token = ItemIndex.ChangeToken(
+            token: Identifier.make(), epoch: bounds.epoch, sequence: bounds.head, scope: scope.key,
+            users: scope.users, groups: scope.groups, planID: nil, position: 0,
+            issuedAt: itemChangesNow.timeIntervalSince1970)
+        try index.saveItemChangeToken(token)
+        return token.token
+    }
+
+    /// Incremental type changes, including readable soft-deleted and unresolved Items.
+    /// Static deltas are planned once and paged by indexed ordinal; tokens never retain
+    /// a full caller inventory or a growing prefix of previously delivered item bodies.
+    public func itemChanges(sinceState: String, maxChanges: Int? = nil) throws
+        -> TractandaClient.ItemChangesResult
+    {
+        if let maxChanges, maxChanges <= 0 {
+            throw TractandaError("invalidArguments", "maxChanges must be a positive integer.")
+        }
+        do { return try calculateItemChanges(sinceState: sinceState, maxChanges: maxChanges) } catch {
+            throw changesUnavailable("Synchronization state/history is unavailable; refresh query/get.")
+        }
+    }
+    private func calculateItemChanges(sinceState: String, maxChanges: Int?) throws
+        -> TractandaClient.ItemChangesResult
+    {
+        guard supportsItemChanges, let index else {
+            throw changesUnavailable("Item changes requires the current ready personal/workgroup profile.")
+        }
+        let bounds = try index.reconcileItemChanges(
+            projection: usesCurrentItemProjection, now: itemChangesNow)
+        let scope = try checkedItemChangeScope()
+        guard let prior = try index.itemChangeToken(sinceState) else {
+            throw changesUnavailable("State is unknown or evicted; refresh query/get.")
+        }
+        try validateItemChangeToken(prior, bounds: bounds, scope: scope)
+        let maximum = min(maxChanges ?? 256, 10_000)
+        if let planID = prior.planID {
+            guard let plan = try index.itemChangePlan(planID) else {
+                throw changesUnavailable("Continuation plan expired or was evicted; refresh query/get.")
+            }
+            return try deliverItemChangePlan(
+                plan, position: prior.position, oldState: sinceState, maximum: maximum,
+                bounds: bounds, scope: scope, index: index)
+        }
+        if let plan = try index.existingItemChangePlan(
+            scope: scope.key, base: prior.sequence, target: bounds.head)
+        {
+            return try deliverItemChangePlan(
+                plan, position: 0, oldState: sinceState, maximum: maximum,
+                bounds: bounds, scope: scope, index: index)
+        }
+        let candidates = try index.itemChangeCandidates(after: prior.sequence, through: bounds.head)
+        var delta: [ItemIndex.ChangePlanEntry] = []
+        for id in candidates.keys.sorted() {
+            let candidate = candidates[id]!
+            if let kind = try itemChangeKind(old: candidate.old, new: candidate.new, scope: scope) {
+                delta.append(.init(itemID: id, kind: kind))
+            }
+        }
+        if delta.isEmpty {
+            var next = prior
+            let users = prior.users.merging(scope.users) { _, new in new }
+            let groups = prior.groups.merging(scope.groups) { _, new in new }
+            if prior.sequence != bounds.head || prior.users != users || prior.groups != groups {
+                next.sequence = bounds.head
+                next.users = users
+                next.groups = groups
+                try index.saveItemChangeToken(next)
+            }
+            return try itemChangeResponse(
+                oldState: sinceState, newState: next.token, more: false, entries: [])
+        }
+        // This normal target token is reused by ordinary /get/info/events as well as all
+        // sibling/replayed pages of this immutable plan.
+        let targetToken = try itemChangeState()
+        if delta.count <= maximum {
+            return try itemChangeResponse(
+                oldState: sinceState, newState: targetToken, more: false, entries: delta)
+        }
+        let plan = ItemIndex.ChangePlan(
+            id: Identifier.make(), epoch: bounds.epoch, scope: scope.key, base: prior.sequence,
+            target: bounds.head, targetToken: targetToken, count: delta.count,
+            issuedAt: itemChangesNow.timeIntervalSince1970)
+        try index.saveItemChangePlan(plan, entries: delta)
+        return try deliverItemChangePlan(
+            plan, position: 0, oldState: sinceState, maximum: maximum,
+            bounds: bounds, scope: scope, index: index)
+    }
+    private func deliverItemChangePlan(
+        _ plan: ItemIndex.ChangePlan, position: Int, oldState: String, maximum: Int,
+        bounds: ItemIndex.ChangeBounds, scope: ItemChangeScope, index: ItemIndex
+    ) throws -> TractandaClient.ItemChangesResult {
+        guard plan.epoch == bounds.epoch, plan.scope == scope.key,
+            plan.base >= bounds.floor, plan.target <= bounds.head,
+            plan.issuedAt >= itemChangesNow.timeIntervalSince1970 - ItemIndex.itemChangesMaximumAge,
+            let target = try index.itemChangeToken(plan.targetToken),
+            let source = try index.itemChangeToken(oldState)
+        else { throw changesUnavailable("Continuation history or target state expired; refresh query/get.") }
+        try validateItemChangeToken(target, bounds: bounds, scope: scope)
+        try validateItemChangeToken(source, bounds: bounds, scope: scope)
+        let entries = try index.itemChangePlanPage(plan, position: position, limit: maximum)
+        guard entries.count == min(maximum, plan.count - position) else {
+            throw changesUnavailable("Continuation plan is incomplete; refresh query/get.")
+        }
+        for entry in entries where entry.kind != "destroyed" {
+            // Current get authority is re-evaluated for each delivered identifier. A lost
+            // grant cannot silently become a missing entry in an already issued plan.
+            guard (try? itemState(entry.itemID)) != nil else {
+                throw changesUnavailable("A pending changed item is no longer readable; refresh query/get.")
+            }
+        }
+        let nextPosition = position + entries.count
+        let newState: String
+        let more: Bool
+        if nextPosition < plan.count {
+            let token = ItemIndex.ChangeToken(
+                token: Identifier.make(), epoch: bounds.epoch, sequence: plan.base, scope: scope.key,
+                users: source.users.merging(target.users) { _, new in new },
+                groups: source.groups.merging(target.groups) { _, new in new },
+                planID: plan.id, position: nextPosition,
+                issuedAt: itemChangesNow.timeIntervalSince1970)
+            try index.saveItemChangeToken(token, protecting: [target.token])
+            guard try index.itemChangeToken(target.token) != nil else {
+                throw changesUnavailable("Required target state was evicted; refresh query/get.")
+            }
+            newState = token.token
+            more = true
+        } else {
+            newState = target.token
+            more = try hasVisibleItemChanges(
+                after: plan.target, through: bounds.head, scope: scope, index: index)
+        }
+        return try itemChangeResponse(oldState: oldState, newState: newState, more: more, entries: entries)
+    }
+    private func hasVisibleItemChanges(
+        after sequence: Int64, through head: Int64, scope: ItemChangeScope, index: ItemIndex
+    ) throws -> Bool {
+        guard head > sequence else { return false }
+        for candidate in try index.itemChangeCandidates(after: sequence, through: head).values {
+            if try itemChangeKind(old: candidate.old, new: candidate.new, scope: scope) != nil { return true }
+        }
+        return false
+    }
+    private func itemChangeResponse(
+        oldState: String, newState: String, more: Bool, entries: [ItemIndex.ChangePlanEntry]
+    ) throws -> TractandaClient.ItemChangesResult {
+        .init(
+            accountID: try nativeProtocolSessionBasis.identity, oldState: oldState, newState: newState,
+            hasMoreChanges: more,
+            created: entries.filter { $0.kind == "created" }.map(\.itemID),
+            updated: entries.filter { $0.kind == "updated" }.map(\.itemID),
+            destroyed: entries.filter { $0.kind == "destroyed" }.map(\.itemID))
     }
     private func updateVisibleStates(old: ResidentHead?, new: ResidentHead) {
         guard !visibleStates.isEmpty else { return }
@@ -1451,11 +1801,16 @@ public final class ItemStore {
             try rejectIndexInsideCanonicalSubtrees()
             if usesExternalIndexDirectory { try bindExternalIndexDirectory() }
             try initializeOrdinaryRuntime()
-            try rebuildPersonalIndex()
+            let dirty = StoreCheckpoint.isDirty(root: root)
+            let reused = try !dirty && !personalBaselineImportActive && loadPersonalCheckpoint()
+            if !reused { try rebuildPersonalIndex() }
             try restoreCorpusRecoveryCharges()
             try reclaimStartupCorpusReaders()
             try PersonalWorkgroupProfile.complete(record, root: root)
-            startupRecovery = ["mode": "personalWorkgroup", "reason": "ordinaryCanonicalRebuild"]
+            startupRecovery = [
+                "mode": "personalWorkgroup",
+                "reason": reused ? "validatedCheckpoint" : dirty ? "dirtyMarker" : "ordinaryCanonicalRebuild",
+            ]
         } catch {
             index?.close()
             index = nil
@@ -1533,6 +1888,127 @@ public final class ItemStore {
             record, path: path, root: root, ownerUID: ownerUID)
     }
 
+    /// Reuse only a clean, identity-bound and completely verified ordinary checkpoint.
+    /// Failed admission closes the candidate before the existing canonical recovery path runs.
+    private func loadPersonalCheckpoint() throws -> Bool {
+        guard let profile = personalProfile else { return false }
+        let database = indexDirectory.appendingPathComponent("items.sqlite")
+        guard FileManager.default.fileExists(atPath: database.path) else { return false }
+        let candidate: ItemIndex
+        do {
+            candidate = try ItemIndex(path: database.path, create: false, tempStoreOnDisk: true)
+        } catch let error as TractandaError
+            where ["resourceLimit", "indexResource", "indexTransient", "cancelled"].contains(error.code)
+        { throw error } catch { return false }
+        var admitted = false
+        defer { if !admitted { candidate.close() } }
+        do {
+            candidate.personalContentProjectionMode = true
+            candidate.graphReserveBytes = max(
+                personalIndexLimits.minimumAvailableBytes,
+                UInt64(max(0, attachmentUploadPolicy.minimumFreeBytes)))
+            candidate.graphMaximumTemporaryBytes = personalIndexLimits.maximumDerivedBytes
+            try requirePersonalWriteCapacity()
+            candidate.maintenanceCapacityCheck = { [weak self] in try self?.requirePersonalWriteCapacity() }
+            // TEMP pages spill to disk; historical revisions can retain the same large
+            // document many times without rechecking its entire closure or growing Swift RAM.
+            try candidate.execute("PRAGMA temp.cache_size=-1024")
+            let maximumPages = max(UInt64(1), personalIndexLimits.maximumDerivedBytes / 4096)
+            try candidate.execute("PRAGMA temp.max_page_count=" + String(maximumPages))
+            try candidate.execute(
+                "CREATE TEMP TABLE personal_checkpoint_references(kind TEXT NOT NULL,id TEXT NOT NULL,digest TEXT NOT NULL,PRIMARY KEY(kind,id))"
+            )
+            defer {
+                candidate.maintenanceCapacityCheck = nil
+                try? candidate.execute("DROP TABLE temp.personal_checkpoint_references")
+            }
+            func firstReference(kind: String, id: String, item: String, descriptor: Data) throws -> Bool {
+                try Task.checkCancellation()
+                try self.requirePersonalWriteCapacity()
+                let digest = try ItemIndex.graphValueDigest(
+                    .object([
+                        "item": .text(item), "descriptor": .text(descriptor.base64EncodedString()),
+                    ]))
+                let statement = try candidate.corpusPrepare(
+                    "SELECT digest FROM temp.personal_checkpoint_references WHERE kind=? AND id=?",
+                    [kind, id])
+                defer { sqlite3_finalize(statement) }
+                let status = candidate.catalogueStep(statement)
+                try candidate.checkCatalogueScanProgress()
+                let primaryStatus = status & 0xff
+                if [SQLITE_NOMEM, SQLITE_TOOBIG, SQLITE_FULL].contains(primaryStatus) {
+                    throw TractandaError("indexResource", "Checkpoint reference registry exceeded resources.")
+                }
+                if [SQLITE_BUSY, SQLITE_LOCKED, SQLITE_INTERRUPT].contains(primaryStatus) {
+                    throw TractandaError("indexTransient", "Checkpoint reference registry was interrupted.")
+                }
+                if status == SQLITE_ROW {
+                    guard let text = sqlite3_column_text(statement, 0), String(cString: text) == digest,
+                        candidate.catalogueStep(statement) == SQLITE_DONE
+                    else {
+                        throw TractandaError("checkpointInvalid", "Referenced content identity conflicts.")
+                    }
+                    return false
+                }
+                guard status == SQLITE_DONE else {
+                    throw TractandaError("checkpointInvalid", "Cannot validate referenced content identity.")
+                }
+                try candidate.execute(
+                    "INSERT INTO temp.personal_checkpoint_references VALUES(?,?,?)", [kind, id, digest])
+                return true
+            }
+            candidate.personalContentProjectionMode = true
+            guard try candidate.validatedCatalogue(identity: profile.storeID) != nil,
+                try PersonalIndexCheckpoint.hasCompleteProjection(candidate),
+                try PersonalIndexCheckpoint.validate(
+                    index: candidate, root: root, ownerUID: ownerUID,
+                    binding: PersonalIndexCheckpoint.binding(profile: profile),
+                    validateReferences: { revision in
+                        try self.requirePersonalWriteCapacity()
+                        for attachment in try AttachmentDescriptor.descriptors(in: revision.fields) {
+                            guard
+                                try firstReference(
+                                    kind: "original", id: attachment.attachmentID,
+                                    item: revision.itemID, descriptor: JSON.encode(attachment))
+                            else { continue }
+                            guard try self.attachmentPayloads.publishedMetadataMatches(attachment) else {
+                                throw TractandaError(
+                                    "attachmentIntegrity", "Referenced original is missing or unsafe.")
+                            }
+                        }
+                        for document in try AttachmentDocumentRepresentation.representations(
+                            in: revision.fields)
+                        {
+                            if let content = document.content,
+                                try firstReference(
+                                    kind: "document", id: content.contentID,
+                                    item: revision.itemID, descriptor: JSON.encode(document))
+                            {
+                                try self.documentContents.validateCheckpointPresence(
+                                    document, boundary: { try self.requirePersonalWriteCapacity() })
+                            }
+                        }
+                    })
+            else { return false }
+            candidate.graphReserveBytes = personalIndexLimits.minimumAvailableBytes
+            candidate.graphMaximumTemporaryBytes = personalIndexLimits.maximumDerivedBytes
+            clockDependentCategories = try candidate.hasClockDependentCategories()
+            index = candidate
+            installIndexFailureHandler(candidate)
+            isCanonicalReady = true
+            admitted = true
+            return true
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as TractandaError
+            where ["resourceLimit", "indexResource", "indexTransient", "cancelled"].contains(error.code)
+        {
+            throw error
+        } catch {
+            return false
+        }
+    }
+
     private func rebuildPersonalIndex() throws {
         guard let profile = personalProfile, let policy = accessConfiguration else {
             throw TractandaError(
@@ -1599,6 +2075,9 @@ public final class ItemStore {
             }, documentReadFailureForTesting: personalRecoveryDocumentReadFailureForTesting)
         try rebuildControl?.pulse(phase: "finalizingIndex")
         try fresh.sealCatalogue(identity: profile.storeID)
+        try fresh.execute(
+            "INSERT OR REPLACE INTO checkpoint_meta VALUES (?, ?)",
+            [PersonalIndexCheckpoint.key, try PersonalIndexCheckpoint.binding(profile: profile)])
         try syncCanonicalForCheckpoint(index: fresh)
         try fresh.execute("COMMIT")
         try capacity()
@@ -3818,6 +4297,23 @@ public final class ItemStore {
                 }
             }
             if let row = currentRow(for: finding.path) {
+                if personalProfile != nil {
+                    do {
+                        let verified = try PooledCanonicalRecord.read(
+                            row: row, root: root, ownerUID: ownerUID)
+                        // Reconcile stale findings against current secure bytes, including a file
+                        // restored with a different inode/mtime after the background snapshot.
+                        if verified.metadataDrifted { metadataIndicators += 1 }
+                    } catch let error as TractandaError
+                        where ["resourceLimit", "indexResource", "indexTransient", "cancelled"].contains(
+                            error.code)
+                    { throw error } catch {
+                        // Failed descriptor-chain/custody/identity proof must never fall through
+                        // to a less strict pathname-only hash check.
+                        confirmed.append(finding)
+                    }
+                    continue
+                }
                 let url = root.appendingPathComponent(row.path)
                 if finding.kind == .missing {
                     if let metadata = try? FileMetadata.read(at: url), metadata.type == .regular,
@@ -4475,6 +4971,13 @@ public final class ItemStore {
             historicalOrder.append(revisionID)
             return cached.revision
         }
+        if personalProfile != nil, let row = try index?.revision(revisionID) {
+            // Physical metadata can legitimately drift after restore/copy or an OS change.
+            // Accept only the same immutable digest and logical identity, through secure
+            // descriptor-chain validation; never rewrite the catalogue or logical dates.
+            let verified = try PooledCanonicalRecord.read(row: row, root: root, ownerUID: ownerUID)
+            return try rememberHistorical(verified.revision, byteCount: Int(verified.metadata.size))
+        }
         let metadata = try FileMetadata.read(at: url)
         let isArchived = tractanda_path_read_only(url.path) == 1
         guard metadata.type == .regular, metadata.size <= 8 * 1024 * 1024,
@@ -4499,19 +5002,24 @@ public final class ItemStore {
         else {
             throw TractandaError("recoveryError", "Historical record identity changed: \(url.path)")
         }
+        return try rememberHistorical(revision, byteCount: data.count)
+    }
+
+    private func rememberHistorical(_ revision: Revision, byteCount: Int) throws -> Revision {
+        let revisionID = revision.revisionID
         if let head = try currentHead(revision.itemID), head.revisionID == revisionID, let full = head.full {
             return full
         }
-        if data.count <= Self.historicalCacheLimit {
-            while historicalCacheBytes + data.count > Self.historicalCacheLimit,
+        if byteCount <= Self.historicalCacheLimit {
+            while historicalCacheBytes + byteCount > Self.historicalCacheLimit,
                 let oldest = historicalOrder.first
             {
                 historicalOrder.removeFirst()
                 historicalCacheBytes -= historicalCache.removeValue(forKey: oldest)?.bytes ?? 0
             }
-            historicalCache[revisionID] = (revision, data.count)
+            historicalCache[revisionID] = (revision, byteCount)
             historicalOrder.append(revisionID)
-            historicalCacheBytes += data.count
+            historicalCacheBytes += byteCount
         }
         return revision
     }
@@ -4874,17 +5382,24 @@ public final class ItemStore {
             revisions.append(revision)
         }
         return ImmutableReadSnapshot(
-            revisions: revisions, state: state, serializedBytes: serializedBytes)
+            revisions: revisions, state: try requireProtocolState(), serializedBytes: serializedBytes)
     }
 
     /// Rechecks a prepared read under fresh caller authority before its result is delivered.
     /// The bounded input also permits a canonical digest check for every captured candidate.
     func verifyImmutableReadSnapshot(_ snapshot: ImmutableReadSnapshot) throws -> Bool {
-        guard isCanonicalReady, state == snapshot.state else { return false }
+        guard isCanonicalReady, (try? requireProtocolState()) == snapshot.state else { return false }
         for revision in snapshot.revisions {
             guard let head = try currentHead(revision.itemID), head.revisionID == revision.revisionID,
                 canRead(head), let index, let row = try index.revision(revision.revisionID)
             else { return false }
+            if personalProfile != nil {
+                let verified = try PooledCanonicalRecord.read(row: row, root: root, ownerUID: ownerUID)
+                guard verified.revision == revision else {
+                    throw TractandaError("recoveryError", "Prepared read found changed canonical content.")
+                }
+                continue
+            }
             let location = RevisionLocation(row)
             let url = location.url(root: root)
             let metadata: FileMetadata

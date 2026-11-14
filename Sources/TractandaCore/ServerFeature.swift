@@ -8,6 +8,7 @@ public enum ServerFeature: String, Sendable {
     case revisionProjection = "tractanda.revision-projection.v1"
     case inlineCapture = "tractanda.inline-capture.v1"
     case itemFieldOperations = "tractanda.item-field-operations.v1"
+    case itemChanges = "tractanda.item-changes.v1"
     case itemListTail = "tractanda.item-list-tail.v1"
     case asynchronousStoreRebuild = "tractanda.store-rebuild.v2"
     case runtimeIdentity = "tractanda.runtime-identity.v1"
