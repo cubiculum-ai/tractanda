@@ -14,6 +14,7 @@ PUBLIC_MODEL_CATALOGS = {'config/model-artifacts.json'}
 PUBLIC_SKILL_REFERENCES = {
     'plugins/tractanda/skills/tractanda/references/connection.md',
     'plugins/tractanda/skills/tractanda/references/importing.md',
+    'plugins/tractanda/skills/tractanda/references/memory.md',
 }
 PRIVATE_DIRS = {'work', 'outputs', 'output', 'references', 'tmp', 'data', 'domain-research',
                 '.build', '.swiftpm', '.agents', '.codex', '__pycache__', 'node_modules'}

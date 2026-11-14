@@ -146,6 +146,28 @@ class ReleaseAuditTests(unittest.TestCase):
         self.assertIn(('config/local-settings.json', 'unexpected release path'),
                       {(row['path'], row['rule']) for row in report['findings']})
 
+    def test_public_memory_reference_is_exact_and_still_content_audited(self):
+        root = self.audit_fixture_repo()
+        public = 'plugins/tractanda/skills/tractanda/references/memory.md'
+        private_paths = ['plugins/tractanda/skills/tractanda/references/private-memory.md',
+                         'plugins/tractanda/.codex/memory.md', 'debian/work/memory.md']
+        for name in [public, *private_paths]:
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('ordinary documentation\n')
+        subprocess.run(['git', 'add', '--force', '--', public, *private_paths], cwd=root, check=True)
+        result, report = self.run_audit(root)
+        self.assertEqual(result.returncode, 1)
+        findings = {(row['path'], row['rule']) for row in report['findings']}
+        self.assertNotIn((public, 'private/development directory'), findings)
+        for name in private_paths:
+            self.assertIn((name, 'private/development directory'), findings)
+
+        (root / public).write_text('-----BEGIN ' + 'PRIVATE KEY-----\n')
+        _, report = self.run_audit(root)
+        self.assertIn((public, 'possible credential'),
+                      {(row['path'], row['rule']) for row in report['findings']})
+
 
 if __name__ == '__main__':
     unittest.main()
