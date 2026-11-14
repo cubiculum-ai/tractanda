@@ -58,6 +58,12 @@ Other Agent Skills-compatible harnesses can install the skill directory with its
 
 See [skill installation]({{TAG_URL}}/docs/agent-skill.md), [connection setup]({{TAG_URL}}/plugins/tractanda/skills/tractanda/references/connection.md) and [the API guide]({{TAG_URL}}/docs/api.md). After an upgrade, check the actual adapter/server versions and refresh the harness's tool catalog. Restarting an adapter alone may leave its old tool list cached. Use the server's current discovery and served references for API details.
 
+## Portable memory and migration
+
+This release adds explicit, client-side memory import/export and portable recall, deliberate memory writes and task checkpoints. Import reads a directory the operator selected; supported Codex and Claude inputs are selected Markdown/text notes or exports. It does not search native memory directories, understand framework databases/transcripts, configure harnesses or redirect automatic writers. Export provides readable notes, selected native revisions and verified original attachments; it is a portability aid, not a full-store backup or lossless OKF conversion. Imported authorship and verification remain source claims, and computation declarations remain inert.
+
+Read [the migration guide]({{TAG_URL}}/docs/memory-migration.md) before importing, and [the portable memory guide]({{TAG_URL}}/docs/portable-memory.md) for bindings and recall/checkpoint commands. Keep source files, native memories and existing settings through the real Raven-to-Starlet fresh-session handoff. Upgrading a v8 store rebuilds its derived text/vector index for text profile v9 on first open and invalidates prior Item-change cursors; canonical Items, IDs, model configuration and conversation history are preserved.
+
 ## Data, startup and recovery
 
 The installer registers boot-time system LaunchDaemons for the server and bundled embedding host, reusing the existing `daemon` account without creating users or groups. Installing an update repins and restarts the managed services, with rollback if startup fails. Dedicated service/agent accounts remain future work.

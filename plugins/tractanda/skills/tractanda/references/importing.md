@@ -1,8 +1,8 @@
 # Import existing records
 
-## Portable memory migration (unreleased source workflow)
+## Portable memory migration
 
-For a selected directory of memory notes, read [memory migration](https://github.com/cubiculum-ai/tractanda/blob/main/docs/memory-migration.md) before using the unreleased CLI workflow. Its command grammar is `tractanda import preview|inspect|apply|resume|report` and `tractanda export-memory`; the overview gives exact arguments and adapter limits. Use the explicit source directory and a stable namespace. The adapters do not scan native Codex or Claude home directories or redirect later writes from those harnesses.
+For a selected directory of memory notes, read [memory migration](https://github.com/cubiculum-ai/tractanda/blob/main/docs/memory-migration.md) before using the CLI workflow, and confirm that the installed client exposes the commands. The overview gives exact arguments and adapter limits. Use the explicit source directory and a stable namespace. The adapters do not scan native Codex or Claude home directories or redirect later writes from those harnesses.
 
 `preview` creates a bounded local plan without contacting the server. `inspect` checks its identities in the connected store, including tombstones, and reports the proposed outcomes without applying them. Apply only after reviewing that report. `apply` and `resume` use the current connected account's ordinary permissions. An imported author, verifier or agent label is data, not a Tractanda user or ACL.
 

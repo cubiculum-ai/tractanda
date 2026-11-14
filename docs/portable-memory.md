@@ -2,7 +2,7 @@
 
 This is a portable agent-memory workflow for using Tractanda as a continuing collaborator's durable memory. It uses ordinary Items, categories, saved views, the connected account and its current permissions. It adds no identity service, OAuth flow, enterprise authorization layer, or automatic harness writer integration.
 
-Check the selected executable's `--help` for the memory commands; older clients may not include them. The bootstrap files under `plugins/tractanda/skills/tractanda/assets/memory/` are examples only. They are not active `AGENTS.md` or `CLAUDE.md` files and do not change harness settings.
+Run the selected executable without arguments to review its usage and confirm it lists the memory commands; older clients may not include them. The bootstrap files under `plugins/tractanda/skills/tractanda/assets/memory/` are examples only. They are not active `AGENTS.md` or `CLAUDE.md` files and do not change harness settings.
 
 ## One collaborator, task-specific checkpoints
 
@@ -36,4 +36,4 @@ Each write stores its exact request in a new private journal before contacting t
 
 Copy only the non-secret binding configuration and the intended task checkpoint reference between authorized machines. Verify the same StoreID, profile/checkpoint IDs and ordinary permissions on the destination. Rebuild a task handoff from logical repository references and saved artifacts, not a machine-specific working directory or an old conversation process.
 
-Keep native Codex/Claude memories, instructions and settings until a selected migration pilot has verified source preservation, Item readback and the expected fresh-session workflow. This bootstrap does not redirect automatic native writers or establish a cutover. For OKF source imports, use the separate [memory migration guide](memory-migration.md); imported authorship and verification remain claims, computations remain inert, and Tractanda-to-OKF export can lose semantics.
+Keep native Codex/Claude memories, instructions and settings through the real Raven-to-Starlet fresh-session handoff. Verify the same StoreID, profile/checkpoint IDs, replicated revisions and a fresh Starlet recall/resume without Raven's memory directories before considering any future writer integration. A local import, export or fresh session alone does not establish that handoff. This bootstrap does not redirect automatic native writers or establish a cutover. For the staged Aisha, Codex and Claude trials, see [the memory trial runbook](aisha-memory-trial.md). For OKF source imports, use the separate [memory migration guide](memory-migration.md); imported authorship and verification remain claims, computations remain inert, and Tractanda-to-OKF export can lose semantics.

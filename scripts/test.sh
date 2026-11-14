@@ -64,6 +64,7 @@ run_tests work/verification/client-tests.log "$scratch_root/client-tests" --pack
 run_tests work/verification/listener-tests.log "$scratch_root/listener-tests" --package-path Packages/TractandaEmbeddings/ListenerRuntime
 binary_dir=$(swift build --show-bin-path --scratch-path "$scratch_root" --cache-path "$scratch_root/cache" \
     --config-path "$scratch_root/config" --security-path "$scratch_root/security" --disable-sandbox)
+python3 scripts/verify-memory-workflows.py "$binary_dir/tractanda"
 python3 scripts/verify-ipc.py "$binary_dir/tractanda"
 python3 scripts/verify-samples.py "$binary_dir/tractanda"
 python3 scripts/verify-agent-access-plan.py --binary "$binary_dir/tractanda" \
