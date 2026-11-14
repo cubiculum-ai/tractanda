@@ -15,6 +15,9 @@ Tractanda's first-party license does not replace dependency licenses. Package so
 | Swift System | 1.8.1 | [Apache-2.0 with Swift exception](LICENSES/swift-system/) |
 | MCP Swift SDK | 0.12.1 | [Upstream licensing-transition notice and terms](LICENSES/swift-sdk/); the pinned source describes Apache-2.0 and retained MIT contributions |
 | EventSource | 1.5.1 | [MIT](LICENSES/eventsource/) |
+| Yams / bundled libYAML | 6.2.2 | [MIT notices](LICENSES/Yams/) |
+| Swift Markdown | 0.9.0 | [Apache-2.0 with Swift exception and notices](LICENSES/swift-markdown/) |
+| Swift cmark | 0.9.0 | [Bundled BSD/component terms](LICENSES/swift-cmark/) |
 
 Exact revisions and repository URLs are in `Package.resolved`. The complete upstream license/notice texts copied from these dependency checkouts are retained under `LICENSES/`; the table is a navigation aid, not a replacement for those terms.
 

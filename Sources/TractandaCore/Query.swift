@@ -1217,10 +1217,16 @@ public enum Categories {
     public static func query(
         store: ItemStore, expression: String? = nil, text: String? = nil,
         categoryPath: [String] = [], excludedCategoryIDs: [String] = [], sort: [ItemSort] = [],
-        at date: Date = Date(), timeZone: String = "UTC"
+        at date: Date = Date(), timeZone: String = "UTC", includeDeleted: Bool = false
     ) throws -> [Revision] {
         guard categoryPath.count <= 32, excludedCategoryIDs.count <= 32 else {
             throw TractandaError("limit", "Category path exceeds 32 levels.")
+        }
+        if includeDeleted
+            && (text != nil || !categoryPath.isEmpty || !excludedCategoryIDs.isEmpty
+                || sort.contains(where: { $0.categoryRootID != nil }))
+        {
+            throw TractandaError("unsupportedFilter", "includeDeleted cannot use text or categories.")
         }
         let query = try expression.map(SpotlightQuery.init)
         let calendar = try QueryCalendar.make(timeZone: timeZone)
@@ -1240,7 +1246,7 @@ public enum Categories {
         var evaluated: [(Revision, [String: Membership])] = []
         var retainedBytes = 0
         try store.forEachReadableCandidate(
-            text: text,
+            text: text, includeDeleted: includeDeleted,
             candidatePlan: query?.boundedIndexCandidatePlan(at: date, calendar: calendar) ?? .all
         ) { item in
             if let query, !query.matches(item, at: date, calendar: calendar) { return }

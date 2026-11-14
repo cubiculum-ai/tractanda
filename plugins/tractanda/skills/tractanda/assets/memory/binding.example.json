@@ -1,0 +1,7 @@
+{
+  "storeID": "REPLACE_WITH_STORE_ID",
+  "profileItemID": "REPLACE_WITH_GLOBAL_PROFILE_ITEM_UUID",
+  "checkpointItemID": "REPLACE_WITH_TASK_CHECKPOINT_ITEM_UUID",
+  "viewID": "REPLACE_WITH_EXISTING_SAVED_VIEW_UUID",
+  "captureCategoryIDs": []
+}

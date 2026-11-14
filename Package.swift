@@ -24,6 +24,8 @@ let package = Package(
         .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", exact: "0.12.1"),
         .package(url: "https://github.com/apple/swift-log.git", exact: "1.15.1"),
         .package(url: "https://github.com/apple/swift-crypto.git", exact: "4.5.2"),
+        .package(url: "https://github.com/jpsim/Yams.git", exact: "6.2.2"),
+        .package(url: "https://github.com/swiftlang/swift-markdown.git", exact: "0.9.0"),
     ],
     targets: [
         .systemLibrary(
@@ -143,10 +145,20 @@ let package = Package(
                 .product(name: "MCP", package: "swift-sdk"),
                 .product(name: "Crypto", package: "swift-crypto"),
             ]),
+        .target(
+            name: "TractandaMemory",
+            dependencies: [
+                "TractandaCore", "CTractandaPlatform",
+                .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "Yams", package: "Yams"),
+                .product(name: "Markdown", package: "swift-markdown"),
+            ]),
+        .testTarget(name: "TractandaMemoryTests", dependencies: ["TractandaMemory", "TractandaCore"]),
         .executableTarget(
             name: "TractandaCLI",
             dependencies: [
                 "TractandaCore", "TractandaKanban", "TractandaWeb", "TractandaServer", "CTractandaPlatform",
+                "TractandaMemory",
             ]),
         .testTarget(name: "TractandaCLITests", dependencies: ["TractandaCLI", "TractandaCore"]),
         .testTarget(

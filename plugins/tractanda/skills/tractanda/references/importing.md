@@ -1,5 +1,17 @@
 # Import existing records
 
+## Portable memory migration (unreleased source workflow)
+
+For a selected directory of memory notes, read [memory migration](https://github.com/cubiculum-ai/tractanda/blob/main/docs/memory-migration.md) before using the unreleased CLI workflow. Its command grammar is `tractanda import preview|inspect|apply|resume|report` and `tractanda export-memory`; the overview gives exact arguments and adapter limits. Use the explicit source directory and a stable namespace. The adapters do not scan native Codex or Claude home directories or redirect later writes from those harnesses.
+
+`preview` creates a bounded local plan without contacting the server. `inspect` checks its identities in the connected store, including tombstones, and reports the proposed outcomes without applying them. Apply only after reviewing that report. `apply` and `resume` use the current connected account's ordinary permissions. An imported author, verifier or agent label is data, not a Tractanda user or ACL.
+
+Keep the original directory, saved plan and private journal until the report is complete and you have verified representative Items and original bytes. Apply attaches and reads back the original bytes before marking an Item complete. Resume the exact journal against the same store, endpoint and authenticated account after uncertainty; do not regenerate it as a retry. If the journal is lost, the Item's canonical source mapping can identify completed imports, but it cannot reconstruct an exact pending operation. Reconcile incomplete Items explicitly. Missing source records are reported; source removal never deletes imported Items. A matching tombstone is reported and never automatically restored.
+
+Reports distinguish created, updated, unchanged, local divergence, conflict, duplicate, missing, incomplete, tombstone and failed records. Stop on incomplete, duplicate or conflict outcomes and reconcile them before another write. A local success report does not establish that another peer has received the import. The exporter is a readable portability aid, not a guarantee of complete Tractanda-to-OKF round-trip semantics; inspect the exported fields and diagnostics before relying on it. Neither import nor export changes native memory settings or disables their writers.
+
+OKF v0.2 specifics and unsupported Markdown/YAML/computation semantics are documented in the linked migration overview. Computation declarations remain inert; do not execute them or treat imported trust claims as authenticated evidence.
+
 Use this workflow for an authorized import into an established store. Resolve material mapping questions before bulk writes; an already-approved mapping does not need another permission round for each sample or batch.
 
 1. Identify the source namespace and stable record identifier. Before creating, query for an existing source identifier within the caller's readable scope. Scoped `referenceLabels` can help: literal search finds candidates, then inspect the exact label and scope. Search hits alone do not prove identity, and absence does not prove that another user has no private copy. Operation IDs do not deduplicate a different import or actor.

@@ -1,0 +1,9 @@
+Tractanda memory bootstrap template. This is an example text file, not an active CLAUDE.md and not an automatic integration.
+
+Use the same ordinary collaborator profile across projects, threads, models and machines. Select a distinct task checkpoint for this project's current work. The local binding file contains StoreID and Item IDs only, not credentials. Tractanda access comes from the connected OS account or authenticated session and its ordinary permissions.
+
+When the selected Tractanda client exposes `memory recall`, retrieve the configured profile, checkpoint and bounded selected view/category scope. Check `truncated`; use ordinary query/get to complete context when needed. Recall is not a complete catch-up feed and does not mark items read.
+
+Use `memory remember` only for a deliberate durable note. Use `memory checkpoint` with the current expected revision for a handoff that records the repository, commit, branch and dirty state, portable references to needed patches/artifacts, completed work, next action and open questions. Do not create a transcript copy or a record on every turn.
+
+Keep existing native memories and settings until a selected migration pilot has verified the source, Item readback and a fresh-session handoff. This template does not disable native memory, configure hooks or redirect future automatic writes. Resume an uncertain Tractanda write from its exact private journal on the same destination account and endpoint.

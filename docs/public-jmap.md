@@ -82,3 +82,5 @@ Callbacks default to verified public HTTPS destinations. Private, LAN and tailne
 ## Qualification and deployment boundary
 
 Receipts under work/jmap-alignment-20261025/http bind the exact source and bounded private checks. Tests use an independent certificate-verifying TLS client and isolated endpoints, with injected OS-directory/password providers; they do not prove a deployed PAM/proxy/certificate-manager installation. No live identity or service was changed. Successful write receipts remain successful if later hydration is denied; retain original operation IDs after uncertain/lost replies. This source work does not introduce generic Item/set or hard destruction. Incremental Item changes are separately feature-gated; query still advertises `canCalculateChanges:false` because `/queryChanges` is unavailable.
+
+With `tractanda.query-include-deleted.v1`, `TractandaItem/query` accepts `filter.includeDeleted: true` to include readable current tombstones. The default remains false. This option uses bounded position paging and cannot be combined with text search, categories or saved views. It does not enumerate revision history.

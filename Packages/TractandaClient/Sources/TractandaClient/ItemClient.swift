@@ -13,6 +13,7 @@ extension ItemTransport {
 }
 
 public struct ItemQuery: Codable, Equatable, Sendable {
+    public var includeDeleted: Bool
     public var expression: String?
     public var text: String?
     public var categoryPath: [String]
@@ -30,8 +31,9 @@ public struct ItemQuery: Codable, Equatable, Sendable {
         expression: String? = nil, text: String? = nil, categoryPath: [String] = [],
         position: Int = 0, limit: Int = 64, sort: [ItemSort] = [], excludedCategoryIDs: [String] = [],
         cursor: String? = nil, at: String? = nil, timeZone: String? = nil,
-        anchor: String? = nil, anchorOffset: Int = 0
+        anchor: String? = nil, anchorOffset: Int = 0, includeDeleted: Bool = false
     ) {
+        self.includeDeleted = includeDeleted
         self.expression = expression
         self.text = text
         self.categoryPath = categoryPath
@@ -50,6 +52,7 @@ public struct ItemQuery: Codable, Equatable, Sendable {
         case filter, position, limit, sort, cursor, calculateTotal, anchor, anchorOffset
     }
     private struct Filter: Codable {
+        let includeDeleted: Bool?
         let expression: String?
         let text: String?
         let categoryPath: [String]?
@@ -71,13 +74,15 @@ public struct ItemQuery: Codable, Equatable, Sendable {
             cursor: c.decodeIfPresent(String.self, forKey: .cursor),
             at: filter?.at, timeZone: filter?.timeZone,
             anchor: c.decodeIfPresent(String.self, forKey: .anchor),
-            anchorOffset: c.decodeIfPresent(Int.self, forKey: .anchorOffset) ?? 0)
+            anchorOffset: c.decodeIfPresent(Int.self, forKey: .anchorOffset) ?? 0,
+            includeDeleted: filter?.includeDeleted ?? false)
     }
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(
             Filter(
-                expression: expression, text: text, categoryPath: categoryPath.isEmpty ? nil : categoryPath,
+                includeDeleted: includeDeleted ? true : nil, expression: expression, text: text,
+                categoryPath: categoryPath.isEmpty ? nil : categoryPath,
                 excludedCategoryIDs: excludedCategoryIDs.isEmpty ? nil : excludedCategoryIDs, at: at,
                 timeZone: timeZone), forKey: .filter)
         if cursor == nil && anchor == nil { try c.encode(position, forKey: .position) }

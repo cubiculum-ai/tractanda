@@ -11,7 +11,13 @@ import TractandaClient
 
 /// Selected current revision and its active dependencies; this is not a store backup/import format.
 public enum ItemDirectoryExport {
-    public static func export(client: ItemClient, itemID: String, destination: URL) throws -> Revision {
+    public static func export(
+        client: ItemClient, itemID: String, destination: URL,
+        minimumFreeBytes: Int64 = 1024 * 1024 * 1024
+    ) throws -> Revision {
+        guard minimumFreeBytes >= 0 else {
+            throw TractandaError("resourceLimit", "Invalid item-export reserve.")
+        }
         let revision = try client.revision(for: itemID)
         guard revision.itemID == itemID else {
             throw TractandaError("protocolError", "Export revision returned a different item.")
@@ -33,7 +39,7 @@ public enum ItemDirectoryExport {
         let staging = parent.appendingPathComponent(stageName, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: staging) }
         let files = DocumentContentFiles(
-            root: staging, ownerUID: getuid(), minimumFreeBytes: 1024 * 1024 * 1024)
+            root: staging, ownerUID: getuid(), minimumFreeBytes: minimumFreeBytes)
         // The selected revision stays pinned; current permission is checked by each server read.
         let pinned = client.checkedForwarding(transport: { request in
             try Task.checkCancellation()
@@ -61,7 +67,7 @@ public enum ItemDirectoryExport {
             let exported = try AttachmentFiles.export(
                 client: pinned, itemID: revision.itemID, attachmentID: descriptor.attachmentID,
                 destination: staging.appendingPathComponent(descriptor.attachmentID + ".original"),
-                revisionID: revision.revisionID)
+                revisionID: revision.revisionID, minimumFreeBytes: minimumFreeBytes)
             guard exported == descriptor else {
                 throw TractandaError("protocolError", "Export original differs from selected revision.")
             }

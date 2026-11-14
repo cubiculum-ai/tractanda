@@ -18,7 +18,7 @@ final class ItemTextContentTests: XCTestCase {
         let corpus = ItemTextContent.corpus(for: revision)
         XCTAssertTrue(corpus.metadata.isEmpty)
         XCTAssertTrue(corpus.sourceText.isEmpty)
-        XCTAssertEqual(ItemTextContent.profile, "tractanda.item-text.v8")
+        XCTAssertEqual(ItemTextContent.profile, "tractanda.item-text.v9")
     }
 
     func testOperationalExclusionDoesNotHideOrdinaryNestedText() throws {
@@ -54,6 +54,55 @@ final class ItemTextContentTests: XCTestCase {
                 XCTAssertTrue(try store.candidates(text: "internal-template-marker").isEmpty)
                 XCTAssertTrue(try store.candidates(text: "assignee").isEmpty)
                 XCTAssertEqual(try store.candidates(text: "Ordinary searchable content").count, 1)
+                try store.rebuildIndex()
+            }
+        }
+    }
+
+    func testImportBookkeepingIsExcludedAcrossExtractionAndFTSRebuild() throws {
+        let bookkeeping: [String: ItemValue] = [
+            "importSchema": .text("schemahidden"), "importNamespace": .text("namespacehidden"),
+            "importSourceID": .text("identityhidden"), "importSourceIDAliases": .list([.text("aliashidden")]),
+            "importAdapter": .text("adapterhidden"), "importState": .text("statehidden"),
+            "importSourceSHA256": .text("sourcehashhidden"), "importInputSHA256": .text("inputhashhidden"),
+            "importProjectionSHA256": .text("projectionhashhidden"),
+            "importManagedFields": .list([.text("managedhidden")]),
+            "importMetadata": .object(["raw": .text("metadatahidden")]),
+            "importLinks": .list([.object(["target": .text("linkhidden")])]),
+        ]
+        let content: [String: ItemValue] = [
+            "body": .text("memorybodyneedle"), "okfDescription": .text("okfdescriptionneedle"),
+            "custom": .object(["importMetadata": .text("nestedordinaryneedle")]),
+        ]
+        let base = try Revision(fields: fields(content))
+        let withBookkeeping = try Revision(fields: fields(content.merging(bookkeeping) { _, new in new }))
+        XCTAssertEqual(ItemTextContent.corpus(for: base), ItemTextContent.corpus(for: withBookkeeping))
+        XCTAssertEqual(
+            try IndexCorpusPlan.ordinaryFingerprint(base),
+            try IndexCorpusPlan.ordinaryFingerprint(withBookkeeping))
+        var projected: [String] = []
+        try IndexCorpusPlan.forEachField(withBookkeeping) { _, text in projected.append(text) }
+        XCTAssertTrue(projected.contains("memorybodyneedle"))
+        XCTAssertTrue(projected.contains("okfdescriptionneedle"))
+        XCTAssertTrue(projected.contains("nestedordinaryneedle"))
+        XCTAssertFalse(projected.contains("metadatahidden"))
+        try fixture { store in
+            let saved = try store.commit(
+                CommitRequest(
+                    classID: "Item", changes: content.merging(bookkeeping) { _, new in new },
+                    operationID: "import-bookkeeping"))
+            for _ in 0..<2 {
+                for term in ["memorybodyneedle", "okfdescriptionneedle", "nestedordinaryneedle"] {
+                    XCTAssertEqual(try store.candidates(text: term).map(\.itemID), [saved.revision.itemID])
+                }
+                for term in [
+                    "schemahidden", "namespacehidden", "identityhidden", "aliashidden", "adapterhidden",
+                    "statehidden", "sourcehashhidden", "inputhashhidden", "projectionhashhidden",
+                    "managedhidden",
+                    "metadatahidden", "linkhidden",
+                ] {
+                    XCTAssertTrue(try store.candidates(text: term).isEmpty, term)
+                }
                 try store.rebuildIndex()
             }
         }

@@ -20,6 +20,18 @@ let usage = """
       tractanda [--profile NAME | --socket PATH] cluster join-status|resume [--operation-id UUID] [--json]
       tractanda [--profile NAME | --socket PATH] cluster status [--json]
       tractanda [--profile NAME | --socket PATH] document-runtime status|unload [--json]
+      tractanda [--profile NAME | --socket PATH] memory recall --binding FILE [--limit N] [--json]
+      tractanda [--profile NAME | --socket PATH] memory remember --binding FILE --fields FILE --journal NEWDIR [--json]
+      tractanda [--profile NAME | --socket PATH] memory checkpoint --binding FILE --expected-revision UUID --fields FILE --journal NEWDIR [--json]
+      tractanda [--profile NAME | --socket PATH] memory resume JOURNAL [--json]
+      tractanda memory report JOURNAL [--json]
+      tractanda import limits
+      tractanda import preview --adapter directory|okf|codex|claude --source DIR --namespace TOKEN --out PLAN [--limits PRIVATE_JSON] [--json]
+      tractanda [--profile NAME | --socket PATH] import inspect PLAN [--json]
+      tractanda [--profile NAME | --socket PATH] import apply PLAN --journal NEWDIR [--json]
+      tractanda [--profile NAME | --socket PATH] import resume JOURNAL [--json]
+      tractanda import report JOURNAL [--json]
+      tractanda [--profile NAME | --socket PATH] export-memory --namespace TOKEN --out NEWDIR [--json]
       tractanda init STORE [--index-directory PATH]
       tractanda personal-peer ...                 (low-level personal peer repair; run without arguments for syntax)
       tractanda inspect-content STORE [--owner OS_USER] [--output PRIVATE_JSON]
@@ -149,6 +161,24 @@ func run() throws {
     }
     if ["help", "--help", "-h"].contains(command) {
         print(usage)
+        return
+    }
+    if try memoryWorkflowCommand(
+        args,
+        client: {
+            let connection = try options.resolve()
+            return (ItemClient(connection: connection), connection.socketPath)
+        }, emit: output)
+    {
+        return
+    }
+    if try memoryImportCommand(
+        args,
+        client: {
+            let connection = try options.resolve()
+            return (ItemClient(connection: connection), connection.socketPath)
+        }, emit: output)
+    {
         return
     }
     if try contentCommand(args, hasConnectionOptions: hasConnectionOptions) { return }

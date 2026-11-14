@@ -6,7 +6,7 @@ import Foundation
 /// never follows another item's history, attachment, or remote content. The exclusions apply
 /// only to root fields; an ordinary nested field with the same name remains owned content.
 enum ItemTextContent {
-    static let profile = "tractanda.item-text.v8"
+    static let profile = "tractanda.item-text.v9"
     static let excludedRootFields: Set<String> = [
         "itemID", "revisionID", "classID", "schemaVersion", "createdAt", "modifiedAt",
         "supersedes", "actor", "operationID", "requestIdentity", "revisionAncestry", "isDeleted",
@@ -15,6 +15,10 @@ enum ItemTextContent {
         "selection", "viewDefinition", "learningFeedback", "learningSettings",
         "developmentUUIDMigration", "templateKey", "attachments", "attachmentText", "attachmentDocument",
         "captureDate", "inlineCaptureBindings",
+        "importSchema", "importNamespace", "importSourceID", "importSourceIDAliases", "importAdapter",
+        "importState", "importSourceSHA256", "importInputSHA256", "importProjectionSHA256",
+        "importManagedFields",
+        "importMetadata", "importLinks",
     ]
 
     struct Corpus: Equatable, Sendable {

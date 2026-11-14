@@ -226,7 +226,7 @@ public enum AttachmentFiles {
         try input.verifyUnchanged()
         return try client.finishAttachment(uploadID: id)
     }
-    private static func requireCapacity(at directory: URL, bytes: Int) throws {
+    private static func requireCapacity(at directory: URL, bytes: Int, minimumFreeBytes: Int64) throws {
         var capacity = statvfs()
         guard statvfs(directory.path, &capacity) == 0 else {
             throw TractandaError("resourceLimit", "Cannot determine filesystem-available bytes.")
@@ -234,12 +234,18 @@ public enum AttachmentFiles {
         let block = UInt64(capacity.f_frsize)
         let blocks = UInt64(capacity.f_bavail)
         let available = blocks.multipliedReportingOverflow(by: block)
-        guard !available.overflow, available.partialValue >= 1024 * 1024 * 1024 + UInt64(bytes) else {
-            throw TractandaError("resourceLimit", "Export requires a 1 GiB filesystem-available reserve.")
+        guard minimumFreeBytes >= 0 else {
+            throw TractandaError("resourceLimit", "Invalid original-export reserve.")
+        }
+        let required = UInt64(minimumFreeBytes).addingReportingOverflow(UInt64(bytes))
+        guard !available.overflow, !required.overflow, available.partialValue >= required.partialValue else {
+            throw TractandaError(
+                "resourceLimit", "Original export would cross its configured filesystem-available reserve.")
         }
     }
     public static func export(
-        client: ItemClient, itemID: String, attachmentID: String, destination: URL, revisionID: String? = nil
+        client: ItemClient, itemID: String, attachmentID: String, destination: URL, revisionID: String? = nil,
+        minimumFreeBytes: Int64 = 1024 * 1024 * 1024
     ) throws -> AttachmentDescriptor {
         let list = try client.listAttachments(itemID: itemID, revisionID: revisionID)
         guard let descriptor = list.attachments.first(where: { $0.attachmentID == attachmentID }) else {
@@ -270,7 +276,7 @@ public enum AttachmentFiles {
             else {
                 throw TractandaError("protocolError", "Invalid original content continuation.")
             }
-            try requireCapacity(at: parent, bytes: result.data.count)
+            try requireCapacity(at: parent, bytes: result.data.count, minimumFreeBytes: minimumFreeBytes)
             try file.write(contentsOf: result.data)
             hash.update(data: result.data)
             offset = result.nextOffset

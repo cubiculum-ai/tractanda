@@ -1214,6 +1214,10 @@ public final class ItemService {
                     ["name": "subject", "kind": "text", "editing": "ordinary"],
                     ["name": "body", "kind": "text", "editing": "ordinary"],
                     ["name": "workingNotes", "kind": "text", "editing": "ordinary"],
+                    [
+                        "name": "collaborator", "kind": "reference",
+                        "editing": "ordinary collaborator attribution; grants no permissions",
+                    ],
                     ["name": "waitingOn", "kind": "reference or text", "editing": "ordinary"],
                     ["name": "originalCreatedAt", "kind": "date", "editing": "ordinary source provenance"],
                     ["name": "originalModifiedAt", "kind": "date", "editing": "ordinary source provenance"],
@@ -1226,6 +1230,30 @@ public final class ItemService {
                         "element": activityElement,
                     ],
                     ["name": "referenceLabels", "kind": "list", "editing": "ordinary"],
+                    ["name": "importSchema", "kind": "text", "editing": "ordinary source import schema"],
+                    ["name": "importNamespace", "kind": "text", "editing": "ordinary source namespace"],
+                    ["name": "importSourceID", "kind": "text", "editing": "ordinary source identity"],
+                    [
+                        "name": "importSourceIDAliases", "kind": "list of text",
+                        "editing": "ordinary source aliases",
+                    ],
+                    ["name": "importAdapter", "kind": "text", "editing": "ordinary source adapter identity"],
+                    ["name": "importState", "kind": "text", "editing": "ordinary import progress"],
+                    ["name": "importSourceSHA256", "kind": "text", "editing": "ordinary original digest"],
+                    [
+                        "name": "importInputSHA256", "kind": "text",
+                        "editing": "ordinary source mapping digest",
+                    ],
+                    [
+                        "name": "importProjectionSHA256", "kind": "text",
+                        "editing": "ordinary projection digest",
+                    ],
+                    [
+                        "name": "importManagedFields", "kind": "list of text",
+                        "editing": "ordinary source field list",
+                    ],
+                    ["name": "importMetadata", "kind": "object", "editing": "ordinary source metadata"],
+                    ["name": "importLinks", "kind": "list", "editing": "ordinary source link records"],
                     ["name": "categoryParents", "kind": "list of current references", "editing": "ordinary"],
                     [
                         "name": "categoryOrder", "kind": "integer",
@@ -1320,7 +1348,7 @@ public final class ItemService {
             }
             let allowed: Set<String> = [
                 "expression", "text", "categoryPath", "excludedCategoryIDs", "viewID", "sectionID", "at",
-                "timeZone",
+                "timeZone", "includeDeleted",
             ]
             guard Set(filter.keys).isSubset(of: allowed) else {
                 throw TractandaError("unsupportedFilter", "Unsupported filter condition.")
@@ -1452,8 +1480,21 @@ public final class ItemService {
             allowed: [
                 "expression", "text", "categoryPath", "excludedCategoryIDs", "position", "limit",
                 "viewID", "sort", "sectionID", "cursor",
-                "at", "timeZone",
+                "at", "timeZone", "includeDeleted",
             ])
+        var includeDeleted = false
+        if let flag = args["includeDeleted"] {
+            guard let flag = flag as? NSNumber, CFGetTypeID(flag) == CFBooleanGetTypeID() else {
+                throw TractandaError("invalidArguments", "includeDeleted must be boolean.")
+            }
+            includeDeleted = flag.boolValue
+        }
+        if includeDeleted
+            && ["text", "categoryPath", "excludedCategoryIDs"].contains(where: { args[$0] != nil })
+        {
+            throw TractandaError(
+                "unsupportedFilter", "includeDeleted cannot combine with text or category filters.")
+        }
         for key in ["expression", "text"] where args[key] != nil && !(args[key] is String) {
             throw TractandaError("invalidArguments", "\(key) must be text.")
         }
@@ -1568,6 +1609,9 @@ public final class ItemService {
         }
         let page: ItemIndex.Page
         if args["viewID"] != nil {
+            guard !includeDeleted else {
+                throw TractandaError("unsupportedFilter", "includeDeleted is not supported with saved views.")
+            }
             guard args["expression"] == nil, args["text"] == nil, args["categoryPath"] == nil,
                 args["sort"] == nil, args["excludedCategoryIDs"] == nil
             else {
@@ -1583,15 +1627,30 @@ public final class ItemService {
             }
             let sort = try args["sort"].map { try decode([ItemSort].self, $0) } ?? []
             try ItemSort.validate(sort)
-            page = try Categories.page(
-                store: store, expression: args["expression"] as? String,
-                text: args["text"] as? String, categoryPath: strings(args, "categoryPath", default: []),
-                excludedCategoryIDs: strings(args, "excludedCategoryIDs", default: []),
-                sort: sort, position: position, limit: limit, at: evaluatedAt, timeZone: timeZone)
+            if includeDeleted && sort.contains(where: { $0.categoryRootID != nil }) {
+                throw TractandaError("unsupportedFilter", "includeDeleted cannot use category sorting.")
+            }
+            if includeDeleted {
+                let items = try Categories.query(
+                    store: store, expression: args["expression"] as? String,
+                    text: args["text"] as? String, categoryPath: strings(args, "categoryPath", default: []),
+                    excludedCategoryIDs: strings(args, "excludedCategoryIDs", default: []),
+                    sort: sort, at: evaluatedAt, timeZone: timeZone, includeDeleted: true)
+                page = .init(
+                    ids: Array(items.dropFirst(position).prefix(limit).map(\.itemID)), total: items.count)
+            } else {
+                page = try Categories.page(
+                    store: store, expression: args["expression"] as? String,
+                    text: args["text"] as? String, categoryPath: strings(args, "categoryPath", default: []),
+                    excludedCategoryIDs: strings(args, "excludedCategoryIDs", default: []),
+                    sort: sort, position: position, limit: limit, at: evaluatedAt, timeZone: timeZone)
+            }
         }
         return [
             "ids": page.ids, "position": position, "total": page.total,
-            "queryState": (try store.requireProtocolState()),
+            "queryState": includeDeleted
+                ? PageCorpusInput.digest(try JSON.encode([store.requireProtocolState(), "includeDeleted"]))
+                : (try store.requireProtocolState()),
             "evaluatedAt": evaluatedAtString,
             "nextCursor": try makeInitialCursor(
                 args: args, ids: page.ids, total: page.total, position: position,
@@ -2172,6 +2231,7 @@ public final class ItemService {
                     ServerFeature.personalConflictResolution.rawValue, ServerFeature.personalSharing.rawValue,
                     ServerFeature.inlineCapture.rawValue, ServerFeature.itemFieldOperations.rawValue,
                     ServerFeature.itemListTail.rawValue, ServerFeature.itemChanges.rawValue,
+                    ServerFeature.queryIncludeDeleted.rawValue,
                     ServerFeature.runtimeIdentity.rawValue, ServerFeature.asynchronousStoreRebuild.rawValue,
                     ServerFeature.semanticJobTiming.rawValue,
                     ServerFeature.categoryMembershipSort.rawValue,
@@ -2309,7 +2369,9 @@ public final class ItemService {
     private func queryPreparedCall(_ call: NativeMethodInvocation) throws -> NativeMethodInvocation? {
         guard call.method == "TractandaItem/query" else { return nil }
         let plan = try readQueryPlan(call.dictionary())
-        guard plan.position >= 0, plan.anchor == nil, plan.limit > 0, plan.domain["cursor"] == nil else {
+        guard plan.position >= 0, plan.anchor == nil, plan.limit > 0, plan.domain["cursor"] == nil,
+            plan.domain["includeDeleted"] == nil
+        else {
             return nil
         }
         return call.replacingArguments(

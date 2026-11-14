@@ -5438,7 +5438,7 @@ public final class ItemStore {
     /// Streams readable live revisions one at a time. Optional exact-sort budgets are
     /// charged before a candidate reaches the caller's accumulator.
     func forEachReadableCandidate(
-        text: String?, restrictedTo ids: Set<String>? = nil,
+        text: String?, restrictedTo ids: Set<String>? = nil, includeDeleted: Bool = false,
         candidatePlan: SpotlightQuery.IndexCandidatePlan = .all,
         order: ItemIndex.IndexedOrder? = nil,
         savedViewID: String? = nil,
@@ -5454,12 +5454,14 @@ public final class ItemStore {
         lastIndexCandidateCountForTesting = 0
         lastSavedViewBaseAppliedForTesting = candidatePlan.containsSavedViewBase
         try index.forEachCandidateID(
-            lexicalText: text, restrictingTo: ids, candidatePlan: candidatePlan, order: order,
-            savedViewID: savedViewID
+            lexicalText: text, restrictingTo: ids, candidatePlan: candidatePlan,
+            includeDeleted: includeDeleted, order: order, savedViewID: savedViewID
         ) { id in
             if isCancelled?() == true { throw CancellationError() }
             lastIndexCandidateCountForTesting += 1
-            guard let head = try currentHead(id), !head.isDeleted, canRead(head) else { return }
+            guard let head = try currentHead(id), includeDeleted || !head.isDeleted, canRead(head) else {
+                return
+            }
             count += 1
             if let maximumCandidates, count > maximumCandidates {
                 throw TractandaError(

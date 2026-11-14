@@ -1,0 +1,9 @@
+Tractanda memory bootstrap template. This is an example text file, not an active AGENTS.md and not an automatic integration.
+
+Use the same ordinary collaborator profile across projects, threads, models and machines. Select a task-specific checkpoint for the current project or handoff. The local binding file contains StoreID and Item IDs only; it is not a credential. Use the connected OS account and its normal Tractanda permissions.
+
+When the selected Tractanda client exposes `memory recall`, retrieve the configured profile, checkpoint and bounded selected view/category scope. Check `truncated`; complete retrieval with ordinary query/get when needed. Recall is not a full changefeed and does not acknowledge items.
+
+Save durable context deliberately with `memory remember`; save task progress with `memory checkpoint` and its current expected revision. Include logical repository, commit, branch and dirty state; cite any needed patch or artifact by a portable reference; state the next action and unresolved questions. Do not record every turn or duplicate the whole conversation.
+
+Keep source memories and current native writer settings until a selected migration pilot is verified. This text does not reroute automatic memory writes or install hooks. Resume an uncertain write from its exact private journal on the same destination account and endpoint.

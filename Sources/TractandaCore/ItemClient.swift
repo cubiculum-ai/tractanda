@@ -55,7 +55,7 @@ public final class ItemClient {
     {
         let filterKeys: Set<String> = [
             "expression", "text", "categoryPath", "excludedCategoryIDs", "viewID", "sectionID", "at",
-            "timeZone",
+            "timeZone", "includeDeleted",
         ]
         var result: [String: Any] = [
             "filter": criteria.filter { filterKeys.contains($0.key) }, "calculateTotal": calculateTotal,

@@ -1,0 +1,1 @@
+Yams 6.2.2: a27b21e0c81c5bf42049b897a62aaf387e80f279. LICENSE copied from the resolved checkout. Yams README declares Yams and its bundled libYAML MIT licensed. LibYAML attribution/terms retained from https://raw.githubusercontent.com/yaml/libyaml/0.2.5/License; no assertion that Yams bundles an unmodified 0.2.5 source tree.

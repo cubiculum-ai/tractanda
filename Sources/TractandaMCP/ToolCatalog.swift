@@ -441,9 +441,14 @@ enum ToolCatalog {
         .init(
             "tractanda_query", method: "TractandaItem/query",
             description:
-                "Query readable IDs using filter criteria (expression/text/categoryPath/excludedCategoryIDs/viewID/sectionID/at/timeZone), standard comparators and position or anchor. calculateTotal defaults false; request it explicitly when needed. Advance by consumed IDs and fetch content separately. Query never calculates deltas.",
+                "Query readable IDs using filter criteria (expression/text/categoryPath/excludedCategoryIDs/viewID/sectionID/at/timeZone/includeDeleted), standard comparators and position or anchor. calculateTotal defaults false; request it explicitly when needed. Advance by consumed IDs and fetch content separately. With tractanda.query-include-deleted.v1, filter.includeDeleted=true includes readable current tombstones; it cannot combine with text, categories or saved views and uses position paging. Query never calculates deltas.",
             properties: [
-                "filter": .object(["type": .string("object")]), "sort": sort,
+                "filter": .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "includeDeleted": .object(["type": .string("boolean"), "default": .bool(false)])
+                    ]),
+                ]), "sort": sort,
                 "position": .object(["type": .string("integer")]), "anchor": identifier,
                 "anchorOffset": .object(["type": .string("integer")]), "cursor": text,
                 "limit": .object(["type": .string("integer"), "minimum": .int(0), "maximum": .int(256)]),
