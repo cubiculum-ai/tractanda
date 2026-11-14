@@ -1,28 +1,21 @@
 # Agent access
 
-An MCP label, model name or tool configuration is not an identity boundary. Native CLI/TUI/stdio MCP callers are identified by Unix peer credentials; HTTP callers receive an authenticated OS-account session. The service resolves identity and group membership on every request and applies current item permissions to current content and history.
+Agents use ordinary operating-system accounts and the same Tractanda tools, admission policy and item permissions as people. An MCP label, model name or tool configuration is not an identity boundary: a local agent acts as the OS account running its client. Provisioning accounts and groups is normal OS administration, outside Tractanda. An account may be used by a person or an agent according to the operator's needs.
 
-## Sharing and administration
+## Sharing work
 
-Category membership and saved views organize records; they do not grant access. Explicitly share the category definitions needed for navigation and the intended items. New items are private to their authenticated creator unless permissions say otherwise.
+Humans and agents can work together through the CLI, TUI, MCP and other normal clients. An account must be admitted by the local store policy, and current item permissions govern what it can read or change, including access to history. Identity and OS group membership are resolved again for requests. New items are private to their authenticated creator unless permissions say otherwise.
 
-For historical-development stores, a multi-user migration may use a canonical `AccessConfigurationItem` (`tractanda.access.v1`) and item permission changes; `administration: "system"` uses root plus the host administrator group (`admin` on macOS, `sudo` on Linux), or a configured `administratorGroup`. Old stores without an access configuration retain `serviceOwner` administration until migrated. `legacyUsers` is a receipt-compatibility bridge, not a substitute for identity verification.
+Categories and saved views organize records; they do not grant access. Share the intended items and any category definitions needed for navigation through the normal permissions. An agent using the same OS account as a person has that account's authority, not a separate agent identity or independent scope.
 
-The personal/workgroup profile uses a different current-policy source: its validated access configuration is local operational state in `.tractanda-personal-profile.json`, not a canonical item. `TractandaStore/configureAccess` is admin-gated, validates the new policy against current heads, and updates that local profile; historical `AccessConfigurationItem` content cannot reinstall current local admission during rebuild. Bounded Mac and Linux entrypoint suites passed in source; deployment and real-profile operation remain pending.
+Fresh stores use the personal/workgroup profile and admit the creating OS account. Its current access configuration is local operational state in `.tractanda-personal-profile.json`, not a canonical item. An administrator can change that policy with `configure-access` or `TractandaStore/configureAccess`; the policy is validated against current item permissions. Historical `AccessConfigurationItem` revisions do not reinstall local admission during rebuild.
 
-For historical-development stores, the existing offline planner can prepare guarded permission requests for an initially unconfigured store, but it neither creates accounts nor installs a shared service. Review every grant, include deleted heads in the inventory, preserve operation IDs, back up canonical data, and stop on conflicts. It does not configure the personal/workgroup profile's local policy. A plan or fake-identity test is not proof of production isolation.
+## Client authentication
 
-## Shared daemon and browser use
+Local CLI, TUI and stdio MCP clients connect to the Unix socket using OS peer credentials. The native `TractandaAuth/createSession` method with empty arguments can issue a bearer token only for that peer's own account; HTTP cannot use it to choose a UID. HTTP sessions authenticate an OS account and are revalidated against current identity and access. Browser password login uses OpenDirectory on macOS and PAM on Linux.
 
-The daemon's Unix endpoint still uses peer identity. Native `TractandaAuth/createSession` with empty arguments can issue only that peer's own bearer token; HTTP cannot choose a UID or mint one through that method. Browser login uses macOS OpenDirectory. Linux cross-user password verification needs a separately deployed privileged PAM helper; installation and real-account testing remain pending. Do not run the daemon as root merely to support PAM.
+On managed Linux installations, a separate privileged authentication helper performs PAM verification for the non-root daemon. Do not run the whole daemon as root to obtain PAM access. `/mcp` provides authenticated Streamable HTTP; stdio MCP remains available for locally launched clients. Hosted OAuth and independent agent-specific authorization scopes are not currently provided.
 
-`/mcp` is authenticated Streamable HTTP JSON with bounded per-user sessions, not SSE/replay. Stdio MCP remains available for clients that launch it locally.
-
-## Deployment checklist
-
-1. Use a dedicated, non-root OS account for the agent and run the agent host itself under that account or equivalent isolation.
-2. Verify the account can read/edit only intended current and historical records, cannot administer the store, and loses access after revocation.
-3. Verify ordinary human access, service restart, and current OS group membership behavior.
-4. Keep credentials, stores and agent homes outside the source checkout. Full managed agent accounts/homes are deferred; do not represent this guide as an installer.
+Separate OS accounts can be used where separate authority is desired. Verify the intended account's admission, current and historical item access, and revocation on the actual deployment; this guide does not claim a distinct agent account has been tested on your installation.
 
 See [security scope](../SECURITY.md) and [build guidance](build.md).

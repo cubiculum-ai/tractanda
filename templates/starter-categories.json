@@ -2906,6 +2906,956 @@
           "value": 62
         }
       }
+    },
+    {
+      "key": "what.knowledge",
+      "classID": "Item",
+      "parents": [
+        "what"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Knowledge"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional knowledge category. Assign items explicitly; edit, move or delete freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == \"\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 200
+        }
+      }
+    },
+    {
+      "key": "what.knowledge.decisions",
+      "classID": "Item",
+      "parents": [
+        "what.knowledge"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Decisions"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional knowledge category. Assign items explicitly; edit, move or delete freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == \"\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 201
+        }
+      }
+    },
+    {
+      "key": "what.knowledge.preferences",
+      "classID": "Item",
+      "parents": [
+        "what.knowledge"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Preferences"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional knowledge category. Assign items explicitly; edit, move or delete freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == \"\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 202
+        }
+      }
+    },
+    {
+      "key": "what.knowledge.evidence",
+      "classID": "Item",
+      "parents": [
+        "what.knowledge"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Evidence"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional knowledge category. Assign items explicitly; edit, move or delete freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == \"\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 203
+        }
+      }
+    },
+    {
+      "key": "what.knowledge.questions",
+      "classID": "Item",
+      "parents": [
+        "what.knowledge"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Questions"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional knowledge category. Assign items explicitly; edit, move or delete freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == \"\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 204
+        }
+      }
+    },
+    {
+      "key": "what.knowledge.handoffs",
+      "classID": "Item",
+      "parents": [
+        "what.knowledge"
+      ],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Handoffs"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional knowledge category. Assign items explicitly; edit, move or delete freely."
+        },
+        "selection": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "expression": {
+              "type": "text",
+              "value": "itemID == \"\""
+            }
+          }
+        },
+        "categoryOrder": {
+          "type": "integer",
+          "value": 205
+        }
+      }
+    },
+    {
+      "key": "view.knowledge",
+      "classID": "Item",
+      "parents": [],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Knowledge"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional saved view. Edit or delete freely."
+        },
+        "viewDefinition": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "sort": {
+              "type": "list",
+              "value": [
+                {
+                  "type": "object",
+                  "value": {
+                    "property": {
+                      "type": "text",
+                      "value": "modifiedAt"
+                    },
+                    "isAscending": {
+                      "type": "boolean",
+                      "value": false
+                    }
+                  }
+                }
+              ]
+            },
+            "presentation": {
+              "type": "object",
+              "value": {
+                "profile": {
+                  "type": "text",
+                  "value": "tractanda.table.v0"
+                },
+                "columns": {
+                  "type": "list",
+                  "value": [
+                    {
+                      "type": "object",
+                      "value": {
+                        "property": {
+                          "type": "text",
+                          "value": "subject"
+                        },
+                        "title": {
+                          "type": "text",
+                          "value": "Subject"
+                        },
+                        "width": {
+                          "type": "integer",
+                          "value": 40
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "value": {
+                        "property": {
+                          "type": "text",
+                          "value": "modifiedAt"
+                        },
+                        "title": {
+                          "type": "text",
+                          "value": "Modified"
+                        },
+                        "width": {
+                          "type": "integer",
+                          "value": 24
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "viewCategoryKeys": [
+        "what.knowledge"
+      ]
+    },
+    {
+      "key": "view.knowledge.decisions",
+      "classID": "Item",
+      "parents": [],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Decisions"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional saved view. Edit or delete freely."
+        },
+        "viewDefinition": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "sort": {
+              "type": "list",
+              "value": [
+                {
+                  "type": "object",
+                  "value": {
+                    "property": {
+                      "type": "text",
+                      "value": "modifiedAt"
+                    },
+                    "isAscending": {
+                      "type": "boolean",
+                      "value": false
+                    }
+                  }
+                }
+              ]
+            },
+            "presentation": {
+              "type": "object",
+              "value": {
+                "profile": {
+                  "type": "text",
+                  "value": "tractanda.table.v0"
+                },
+                "columns": {
+                  "type": "list",
+                  "value": [
+                    {
+                      "type": "object",
+                      "value": {
+                        "property": {
+                          "type": "text",
+                          "value": "subject"
+                        },
+                        "title": {
+                          "type": "text",
+                          "value": "Subject"
+                        },
+                        "width": {
+                          "type": "integer",
+                          "value": 40
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "value": {
+                        "property": {
+                          "type": "text",
+                          "value": "modifiedAt"
+                        },
+                        "title": {
+                          "type": "text",
+                          "value": "Modified"
+                        },
+                        "width": {
+                          "type": "integer",
+                          "value": 24
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "viewCategoryKeys": [
+        "what.knowledge.decisions"
+      ]
+    },
+    {
+      "key": "view.knowledge.preferences",
+      "classID": "Item",
+      "parents": [],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Preferences"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional saved view. Edit or delete freely."
+        },
+        "viewDefinition": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "sort": {
+              "type": "list",
+              "value": [
+                {
+                  "type": "object",
+                  "value": {
+                    "property": {
+                      "type": "text",
+                      "value": "modifiedAt"
+                    },
+                    "isAscending": {
+                      "type": "boolean",
+                      "value": false
+                    }
+                  }
+                }
+              ]
+            },
+            "presentation": {
+              "type": "object",
+              "value": {
+                "profile": {
+                  "type": "text",
+                  "value": "tractanda.table.v0"
+                },
+                "columns": {
+                  "type": "list",
+                  "value": [
+                    {
+                      "type": "object",
+                      "value": {
+                        "property": {
+                          "type": "text",
+                          "value": "subject"
+                        },
+                        "title": {
+                          "type": "text",
+                          "value": "Subject"
+                        },
+                        "width": {
+                          "type": "integer",
+                          "value": 40
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "value": {
+                        "property": {
+                          "type": "text",
+                          "value": "modifiedAt"
+                        },
+                        "title": {
+                          "type": "text",
+                          "value": "Modified"
+                        },
+                        "width": {
+                          "type": "integer",
+                          "value": 24
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "viewCategoryKeys": [
+        "what.knowledge.preferences"
+      ]
+    },
+    {
+      "key": "view.knowledge.evidence",
+      "classID": "Item",
+      "parents": [],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Evidence"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional saved view. Edit or delete freely."
+        },
+        "viewDefinition": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "sort": {
+              "type": "list",
+              "value": [
+                {
+                  "type": "object",
+                  "value": {
+                    "property": {
+                      "type": "text",
+                      "value": "modifiedAt"
+                    },
+                    "isAscending": {
+                      "type": "boolean",
+                      "value": false
+                    }
+                  }
+                }
+              ]
+            },
+            "presentation": {
+              "type": "object",
+              "value": {
+                "profile": {
+                  "type": "text",
+                  "value": "tractanda.table.v0"
+                },
+                "columns": {
+                  "type": "list",
+                  "value": [
+                    {
+                      "type": "object",
+                      "value": {
+                        "property": {
+                          "type": "text",
+                          "value": "subject"
+                        },
+                        "title": {
+                          "type": "text",
+                          "value": "Subject"
+                        },
+                        "width": {
+                          "type": "integer",
+                          "value": 40
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "value": {
+                        "property": {
+                          "type": "text",
+                          "value": "modifiedAt"
+                        },
+                        "title": {
+                          "type": "text",
+                          "value": "Modified"
+                        },
+                        "width": {
+                          "type": "integer",
+                          "value": 24
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "viewCategoryKeys": [
+        "what.knowledge.evidence"
+      ]
+    },
+    {
+      "key": "view.knowledge.questions",
+      "classID": "Item",
+      "parents": [],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Questions"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional saved view. Edit or delete freely."
+        },
+        "viewDefinition": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "sort": {
+              "type": "list",
+              "value": [
+                {
+                  "type": "object",
+                  "value": {
+                    "property": {
+                      "type": "text",
+                      "value": "modifiedAt"
+                    },
+                    "isAscending": {
+                      "type": "boolean",
+                      "value": false
+                    }
+                  }
+                }
+              ]
+            },
+            "presentation": {
+              "type": "object",
+              "value": {
+                "profile": {
+                  "type": "text",
+                  "value": "tractanda.table.v0"
+                },
+                "columns": {
+                  "type": "list",
+                  "value": [
+                    {
+                      "type": "object",
+                      "value": {
+                        "property": {
+                          "type": "text",
+                          "value": "subject"
+                        },
+                        "title": {
+                          "type": "text",
+                          "value": "Subject"
+                        },
+                        "width": {
+                          "type": "integer",
+                          "value": 40
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "value": {
+                        "property": {
+                          "type": "text",
+                          "value": "modifiedAt"
+                        },
+                        "title": {
+                          "type": "text",
+                          "value": "Modified"
+                        },
+                        "width": {
+                          "type": "integer",
+                          "value": 24
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "viewCategoryKeys": [
+        "what.knowledge.questions"
+      ]
+    },
+    {
+      "key": "view.knowledge.handoffs",
+      "classID": "Item",
+      "parents": [],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Handoffs"
+        },
+        "body": {
+          "type": "text",
+          "value": "Optional saved view. Edit or delete freely."
+        },
+        "viewDefinition": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "sort": {
+              "type": "list",
+              "value": [
+                {
+                  "type": "object",
+                  "value": {
+                    "property": {
+                      "type": "text",
+                      "value": "modifiedAt"
+                    },
+                    "isAscending": {
+                      "type": "boolean",
+                      "value": false
+                    }
+                  }
+                }
+              ]
+            },
+            "presentation": {
+              "type": "object",
+              "value": {
+                "profile": {
+                  "type": "text",
+                  "value": "tractanda.table.v0"
+                },
+                "columns": {
+                  "type": "list",
+                  "value": [
+                    {
+                      "type": "object",
+                      "value": {
+                        "property": {
+                          "type": "text",
+                          "value": "subject"
+                        },
+                        "title": {
+                          "type": "text",
+                          "value": "Subject"
+                        },
+                        "width": {
+                          "type": "integer",
+                          "value": 40
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "value": {
+                        "property": {
+                          "type": "text",
+                          "value": "modifiedAt"
+                        },
+                        "title": {
+                          "type": "text",
+                          "value": "Modified"
+                        },
+                        "width": {
+                          "type": "integer",
+                          "value": 24
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "viewCategoryKeys": [
+        "what.knowledge.handoffs"
+      ]
+    },
+    {
+      "key": "view.changed-today",
+      "classID": "Item",
+      "parents": [],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Changed today"
+        },
+        "body": {
+          "type": "text",
+          "value": "Items created or modified today in the query time zone. Late-arriving offline changes may be missed."
+        },
+        "viewDefinition": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "sort": {
+              "type": "list",
+              "value": [
+                {
+                  "type": "object",
+                  "value": {
+                    "property": {
+                      "type": "text",
+                      "value": "modifiedAt"
+                    },
+                    "isAscending": {
+                      "type": "boolean",
+                      "value": false
+                    }
+                  }
+                }
+              ]
+            },
+            "presentation": {
+              "type": "object",
+              "value": {
+                "profile": {
+                  "type": "text",
+                  "value": "tractanda.table.v0"
+                },
+                "columns": {
+                  "type": "list",
+                  "value": [
+                    {
+                      "type": "object",
+                      "value": {
+                        "property": {
+                          "type": "text",
+                          "value": "subject"
+                        },
+                        "title": {
+                          "type": "text",
+                          "value": "Subject"
+                        },
+                        "width": {
+                          "type": "integer",
+                          "value": 40
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "value": {
+                        "property": {
+                          "type": "text",
+                          "value": "modifiedAt"
+                        },
+                        "title": {
+                          "type": "text",
+                          "value": "Modified"
+                        },
+                        "width": {
+                          "type": "integer",
+                          "value": 24
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            "expression": {
+              "type": "text",
+              "value": "(createdAt >= $time.today && createdAt < $time.today(1)) || (modifiedAt >= $time.today && modifiedAt < $time.today(1))"
+            }
+          }
+        }
+      }
+    },
+    {
+      "key": "view.recent-changes",
+      "classID": "Item",
+      "parents": [],
+      "fields": {
+        "subject": {
+          "type": "text",
+          "value": "Recent changes (last 7 calendar days)"
+        },
+        "body": {
+          "type": "text",
+          "value": "Items created or modified since the start of the sixth preceding calendar day in the query time zone. Late-arriving offline changes may be missed."
+        },
+        "viewDefinition": {
+          "type": "object",
+          "value": {
+            "language": {
+              "type": "text",
+              "value": "tractanda.spotlight.v0"
+            },
+            "sort": {
+              "type": "list",
+              "value": [
+                {
+                  "type": "object",
+                  "value": {
+                    "property": {
+                      "type": "text",
+                      "value": "modifiedAt"
+                    },
+                    "isAscending": {
+                      "type": "boolean",
+                      "value": false
+                    }
+                  }
+                }
+              ]
+            },
+            "presentation": {
+              "type": "object",
+              "value": {
+                "profile": {
+                  "type": "text",
+                  "value": "tractanda.table.v0"
+                },
+                "columns": {
+                  "type": "list",
+                  "value": [
+                    {
+                      "type": "object",
+                      "value": {
+                        "property": {
+                          "type": "text",
+                          "value": "subject"
+                        },
+                        "title": {
+                          "type": "text",
+                          "value": "Subject"
+                        },
+                        "width": {
+                          "type": "integer",
+                          "value": 40
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "value": {
+                        "property": {
+                          "type": "text",
+                          "value": "modifiedAt"
+                        },
+                        "title": {
+                          "type": "text",
+                          "value": "Modified"
+                        },
+                        "width": {
+                          "type": "integer",
+                          "value": 24
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            "expression": {
+              "type": "text",
+              "value": "(createdAt >= $time.today(-6) && createdAt <= $time.now) || (modifiedAt >= $time.today(-6) && modifiedAt <= $time.now)"
+            }
+          }
+        }
+      }
     }
   ]
 }

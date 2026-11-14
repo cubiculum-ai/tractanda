@@ -110,6 +110,19 @@ public struct CategoryTemplate: Codable, Sendable {
                 installed[entry.key] = item
                 continue
             }
+            // Never silently broaden a new entry after a user removed or converted a
+            // dependency. Existing entries, including tombstones, remain untouched.
+            let dependencies =
+                entry.parents + (entry.viewCategoryKeys ?? [])
+                + (entry.excludedCategoryKeys ?? [])
+                + (entry.viewSortCategoryKeys ?? []).compactMap { $0 }
+                + (entry.viewColumnCategoryKeys ?? []).compactMap { $0 }
+            guard
+                dependencies.allSatisfy({ key in
+                    guard let item = installed[key] else { return false }
+                    return !item.isDeleted && item.fields["selection"] != nil
+                })
+            else { continue }
             var fields = entry.fields
             try bindView(entry, fields: &fields) { key in
                 guard let item = installed[key], !item.isDeleted, item.fields["selection"] != nil else {

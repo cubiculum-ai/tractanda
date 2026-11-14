@@ -82,6 +82,12 @@ tractanda connections list --json</code></pre>
 <h2>Define views and choose their order</h2>
 <p>A view combines category filters, optional text or metadata criteria, sorting and presentation. A temporary view can answer one question; save a useful definition to reuse it. Any ordinary item can carry a saved view definition.</p>
 <p>In the TUI, select a saved view and use <strong>Edit view definition</strong>. The form keeps its criteria, sorting and column settings together. Choose which properties or category dimensions to display, their titles and widths, and any section categories. Save the complete definition as one edit.</p>
+<h3>Optional memory and recent-activity views</h3>
+<p>The starter template includes <strong>Knowledge</strong>, <strong>Decisions</strong>, <strong>Preferences</strong>, <strong>Evidence</strong>, <strong>Questions</strong> and <strong>Handoffs</strong> views, backed by optional categories under What → Knowledge. <strong>Changed today</strong> and <strong>Recent changes (last 7 calendar days)</strong> select items by creation or modification time, including category and view edits. Their calendar windows use the query timezone. Edit their filters, columns and ordering, or delete them as needed.</p>
+<p>Existing stores keep their current categories and views during an upgrade. Add the views you want through the editor or ordinary item APIs, using your own categories, or explicitly apply the updated starter template. Reapplication preserves edited and deleted defaults. New defaults that depend on a removed category are skipped rather than installed with a broader filter.</p>
+<p>For “since my last visit,” an agent can construct a temporary view from its own checkpoint. For example, replace the timestamp below with the last successfully reviewed cutoff:</p>
+<pre><code>createdAt &gt;= $time.iso("2026-11-14T00:00:00Z") || modifiedAt &gt;= $time.iso("2026-11-14T00:00:00Z")</code></pre>
+<p>Keep checkpoints per user/client and relevant query scope; reading a view does not acknowledge every item. An older offline edit arriving later may fall outside this convenience view. Use a broader date, text or semantic query when the task calls for more context.</p>
 <h3>Columns and cards have different ordering rules</h3>
 <ul>
 <li><strong>Kanban columns / report sections:</strong> an explicit section list defines their order. An implicit project board uses that list as a preferred sequence, then adds other eligible status leaves. Otherwise the category hierarchy’s sibling order applies.</li>
@@ -141,9 +147,10 @@ estimatedMinutes &lt;= 20</code></pre>
 </section>
 <section id="agents">
 <h2>Share context with AI agents</h2>
+<p>Agents use ordinary OS user accounts and the same item permissions as human collaborators. Optional memory and handoff views organize shared work; folders, drop boxes, chat and email can remain part of that workflow. The shared skill includes guidance for concise memory records and timestamp-based catch-up.</p>
 <p>The same items and categories are available to the CLI, TUI, browser and MCP clients under the caller’s permissions. Agents can construct temporary views for a task; they do not have to create a saved view for every query.</p>
 <p>Install the repository’s shared skill and connect the MCP adapter using an existing connection profile. Start discovery with <code>tractanda_info</code> and <code>tractanda_describe</code>, then the served introduction and references. An agent should discover the actual categories and their IDs rather than assume that a starter taxonomy is present. Restarting the adapter may not refresh the harness’s tool list; reconnect or refresh discovery if a new tool is missing. Some harnesses require a fresh session. Available category queries and membership explanations remain useful while the catalog is stale.</p>
-<p>Tell an agent which project and task it may work on. An agent launched under your OS account has that account’s access; a tool name does not create a separate identity. Separate agent accounts and managed provisioning remain future work. See <a href="https://github.com/cubiculum-ai/tractanda/blob/main/docs/agent-skill.md">skill installation</a> and <a href="https://github.com/cubiculum-ai/tractanda/blob/main/docs/agent-access.md">agent access</a>.</p>
+<p>Tell an agent which project and task it may work on. An agent launched under your OS account has that account’s access; a tool name does not create a separate identity. Create accounts through normal OS administration and configure their store admission and item permissions as for any other collaborator. See <a href="https://github.com/cubiculum-ai/tractanda/blob/main/docs/agent-skill.md">skill installation</a> and <a href="https://github.com/cubiculum-ai/tractanda/blob/main/docs/agent-access.md">agent access</a>.</p>
 </section>
 <section id="cluster">
 <h2>Cluster operations and status</h2>

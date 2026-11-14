@@ -162,9 +162,9 @@ final class CategoryHierarchyTests: XCTestCase {
             let uncategorized = try create(store, ["subject": .text("Uncategorized knowledge")])
             let ids = try template().install(in: store, timeZone: "UTC", actorUID: store.ownerUID)
             XCTAssertNil(ids["item"], "All items is the empty filter, never a starter record")
-            XCTAssertEqual(ids.count, 71)
+            XCTAssertEqual(ids.count, 85)
             let graph = try CategoryHierarchy(store.candidates())
-            XCTAssertEqual(graph.items.count, 70)
+            XCTAssertEqual(graph.items.count, 76)
             let axes = ["who", "what", "when", "where", "means", "priority", "urgency", "status"]
             XCTAssertEqual(Set(graph.roots), Set(axes.map { ids[$0]! }))
             for axis in axes {
