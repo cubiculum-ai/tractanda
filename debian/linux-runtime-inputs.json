@@ -4,11 +4,11 @@
   "baselines": {
     "kali-rolling": {
       "amd64": {
-        "documents": "1373b7f2b820cd3a809da3d2f4297a6b1b058527dd2e4817e5b3a0f861c54c4e",
+        "documents": "9ff67bffd74004f392db84ef7be2a6fb7ebc95ca25190209deab0bac72d1983f",
         "embeddings": "9e1f9fd105cf6f14b2af2908271e7f1d29b67e2ed47b5f7974ea811b4303168c"
       },
       "arm64": {
-        "documents": "1b6e0ecf122125269d978417e3b77d987ba9b9811ac1b76bfe2f4ff8206004e4",
+        "documents": "50ad93d361f65fb7f1b71bd85a0dbe5e57e2221463cdc5f9edae938a9238542a",
         "embeddings": "9e41eb53fb80897d3e1d582e72f9c5ac539460461c27769cd6fcbddea407c048"
       }
     },
