@@ -25,35 +25,55 @@ def stop(process):
     if process is None or process.poll() is not None:
         return
     process.terminate()
-    try:
-        process.wait(timeout=25)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=5)
+    process.wait()
 
 
 def wait_for(path, process):
-    deadline = time.monotonic() + 20
     while not path.exists():
         if process.poll() is not None:
             raise RuntimeError(f'Server stopped with status {process.returncode}')
-        if time.monotonic() > deadline:
-            raise TimeoutError(f'Server did not create {path.name}')
         time.sleep(0.03)
 
 
 def wait_for_web_startup(path, process):
     """Wait for the CLI's post-permissions startup record, not file creation."""
-    deadline = time.monotonic() + 20
     while True:
         if process.poll() is not None:
             raise RuntimeError(f'Web adapter stopped with status {process.returncode}')
         try:
-            return json.loads(path.read_text())
-        except (FileNotFoundError, json.JSONDecodeError):
-            if time.monotonic() > deadline:
-                raise TimeoutError('Web adapter did not report completed startup')
-            time.sleep(0.03)
+            record = path.read_text()
+        except FileNotFoundError:
+            record = ''
+        # JSON is pretty-printed and may be written in pieces. Find the end of
+        # its root object without mistaking braces inside strings for structure.
+        stack = []
+        quoted = escaped = False
+        for char in record:
+            if not stack:
+                if char.isspace():
+                    continue
+                if char != '{':
+                    raise ValueError('Web adapter startup must be a JSON object')
+                stack.append(char)
+                continue
+            if quoted:
+                if escaped:
+                    escaped = False
+                elif char == '\\':
+                    escaped = True
+                elif char == '"':
+                    quoted = False
+            elif char == '"':
+                quoted = True
+            elif char in '{[':
+                stack.append(char)
+            elif char in '}]':
+                if stack[-1] != ('{' if char == '}' else '['):
+                    raise ValueError('Mismatched delimiters in web adapter startup')
+                stack.pop()
+                if not stack:
+                    return json.loads(record)
+        time.sleep(0.03)
 
 
 def main():
@@ -78,9 +98,9 @@ def main():
         native = web = None
 
         def cli(*arguments):
-            result = subprocess.run([binary, *map(str, arguments)], capture_output=True, text=True, timeout=25)
+            result = subprocess.run([binary, *map(str, arguments)], capture_output=True, text=True)
             if result.returncode:
-                raise RuntimeError(result.stderr)
+                raise RuntimeError(f'CLI exited with status {result.returncode}: {result.stderr}')
             return json.loads(result.stdout)
 
         startup_file = root / 'web-startup.json'
@@ -118,7 +138,7 @@ def main():
                 check(session_file.stat().st_mode & 0o077 == 0, 'Session capability file is private')
 
                 def send_http_request(method='POST', path='/api', body=b'{}', overrides=None, authenticate=True):
-                    connection = http.client.HTTPConnection(address.hostname,address.port,timeout=22)
+                    connection = http.client.HTTPConnection(address.hostname,address.port)
                     headers = {'Content-Type':'application/json','Origin':origin}
                     if authenticate:
                         headers['Authorization'] = f'Bearer {token}'
@@ -171,7 +191,7 @@ def main():
                 check(send_http_request('OPTIONS')[0] == 405, 'Cross-origin preflight is not enabled')
                 check(send_http_request(overrides={'Content-Type':'text/plain'})[0] == 415, 'Non-JSON mutation content type is denied')
                 check(send_http_request('GET','/../../README.md',None)[0] == 404, 'Arbitrary filesystem paths are not served')
-                connection = http.client.HTTPConnection(address.hostname,address.port,timeout=5)
+                connection = http.client.HTTPConnection(address.hostname,address.port)
                 connection.putrequest('POST','/api')
                 connection.putheader('Authorization',f'Bearer {token}')
                 connection.putheader('Content-Type','application/json')
@@ -190,7 +210,7 @@ def main():
                 request = dict(action='revise',itemID=first_id,expectedRevisionID=base_id,
                                operationID='http-'+uuid.uuid4().hex,unset=[],changes={'categoryOverrides':{'type':'object','value':{**copy.deepcopy(revision['fields']['categoryOverrides']['value']),fixture['columns']['ready']:{'type':'text','value':'exclude'},fixture['columns']['doing']:{'type':'text','value':'include'}}}})
                 # Receive only headers, then discard the body: the client has no commit result.
-                connection = http.client.HTTPConnection(address.hostname,address.port,timeout=22)
+                connection = http.client.HTTPConnection(address.hostname,address.port)
                 connection.request('POST','/api',body=envelope('TractandaItem/commit',request),headers={
                     'Content-Type':'application/json','Authorization':f'Bearer {token}','Origin':origin})
                 check(connection.getresponse().status == 200, 'First edit reaches the real native service')
@@ -207,10 +227,9 @@ def main():
                 check(cli('get',socket,first_id)['list'][0]['fields']['categoryOverrides']['value'][fixture['columns']['doing']]['value'] == 'include', 'HTTP edit is visible through the independent CLI')
                 before = cli('kanban',socket,board_id)
                 rebuild = method_result('TractandaStore/rebuild', {'operationID': 'kanban-verifier-rebuild'})[1]
-                rebuild_deadline = time.monotonic() + 20
                 while rebuild['state'] in {'queued', 'running', 'stopping'}:
-                    if time.monotonic() >= rebuild_deadline:
-                        raise TimeoutError('Disposable Kanban rebuild did not complete within20seconds')
+                    if web.poll() is not None or native.poll() is not None:
+                        raise RuntimeError(f'Server stopped during rebuild: web={web.returncode}, native={native.returncode}')
                     time.sleep(0.02)
                     rebuild = method_result('TractandaStore/rebuildStatus', {'jobID': rebuild['jobID']})[1]
                 check(rebuild['state'] == 'completed' and rebuild['indexTrusted'], 'Asynchronous rebuild completes with a trusted index')

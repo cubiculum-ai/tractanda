@@ -472,6 +472,7 @@ class SourceEquivalenceTests(unittest.TestCase):
         for path, value in files.items():
             target = self.repo / path; target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(value)
+        self.reviewed_packages = set(D.REVIEWED_PACKAGE_SHA256)
         policy = patch.object(D, 'REVIEWED_PACKAGE_SHA256', {D.digest(files['Package.swift'].encode())})
         policy.start(); self.addCleanup(policy.stop)
         self.commit()
@@ -507,6 +508,51 @@ class SourceEquivalenceTests(unittest.TestCase):
     def regenerate(self):
         return D.source_equivalence(self.state, self.context, self.origin,
                                     [D.asset_binding(e) for e in self.entries])[0]
+
+    def reviewed_memory_manifest_history(self):
+        self.git('reset', '--hard', self.origin)
+        manifest = Path(__file__).resolve().parents[1].joinpath('Package.swift').read_bytes()
+        self.assertEqual(D.digest(manifest),
+                         'c167088d7ff9168d6989d8e5fd3b551cddb225ef5d1e73b0ec1d60473af587c6')
+        self.assertIn(D.digest(manifest), self.reviewed_packages)
+        self.repo.joinpath('Package.swift').write_bytes(manifest)
+        test = self.repo / 'Tests/TractandaCoreTests/PersonalPeerDaemonTests.swift'
+        test.parent.mkdir(parents=True, exist_ok=True)
+        test.write_text('original existing default test')
+        self.commit(); self.origin = self.git('rev-parse', 'HEAD').strip(); self.capture()
+        inputs = self.root / 'reviewed-memory-inputs'; inputs.mkdir()
+        with patch.object(self, 'root', inputs):
+            self.entries = [self.asset(a) for a in D.ARCHES]
+        test.write_text('corrected existing default test')
+        self.commit(); self.capture()
+        return test
+
+    def test_reviewed_memory_manifest_admits_existing_default_core_test_correction(self):
+        test = self.reviewed_memory_manifest_history()
+        with patch.object(D, 'REVIEWED_PACKAGE_SHA256', self.reviewed_packages):
+            proof = self.regenerate()
+            self.assertEqual([row['path'] for row in proof['changes']],
+                             [test.relative_to(self.repo).as_posix()])
+            self.attach(proof)
+            self.assertEqual(len(D.verify_linux(self.state, self.context)), 2)
+            self.assertTrue(all(row['artifactOrigin']['commit'] == self.origin
+                                for row in self.state['delivery']['linuxAssets']))
+
+    def test_reviewed_memory_manifest_does_not_admit_test_tree_shipping_remap(self):
+        self.reviewed_memory_manifest_history()
+        manifest = self.repo / 'Package.swift'
+        raw = manifest.read_text().replace('.target(name: "TractandaLearning")',
+                                           '.target(name: "TractandaLearning", path: "Tests/TractandaCoreTests")')
+        self.assertNotEqual(raw, manifest.read_text())
+        manifest.write_text(raw); self.commit(); self.capture()
+        with patch.object(D, 'REVIEWED_PACKAGE_SHA256', self.reviewed_packages):
+            with self.assertRaisesRegex(RuntimeError, 'manifest is not reviewed'):
+                self.regenerate()
+        # Even a synthetic approval of the remapped bytes cannot bypass the
+        # independent rejection of explicit Tests source/resource mappings.
+        with patch.object(D, 'REVIEWED_PACKAGE_SHA256', self.reviewed_packages | {D.digest(raw.encode())}):
+            with self.assertRaisesRegex(RuntimeError, 'Explicit Tests target/resource mapping'):
+                self.regenerate()
 
     def test_explicit_proof_retains_exact_origin_receipts_and_reverifies_after_resume(self):
         original = {p: Path(p).read_bytes() for e in self.entries for k, p in e.items() if k != 'arch'}

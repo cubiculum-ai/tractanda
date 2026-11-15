@@ -2362,6 +2362,7 @@ public final class ItemService {
         semantic.maintain()
         // Existing maintenance retries one fenced terminal lease, never active reader I/O.
         _ = try? store.retireOnePendingCorpusRead()
+        _ = try? store.cleanupOneStartupCorpusOrphan()
     }
 
     /// One ordinary indexed query may run its SQL count/page on an isolated read lease.

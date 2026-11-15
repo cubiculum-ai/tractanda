@@ -690,7 +690,10 @@ extension StagingByteQuota {
     }
     /// Absolute normative encoded payload/metadata is committed in the Index ledger first.
     /// Observed bytes remain charged even when a post-commit budget check rejects the operation.
-    func observeDerived(workID: String, retainedEncodedBytes: Int64, recovering: Bool = false) throws {
+    func observeDerived(
+        workID: String, retainedEncodedBytes: Int64, recovering: Bool = false,
+        preservingReservation: Bool = false
+    ) throws {
         lock.lock()
         defer { lock.unlock() }
         guard retainedEncodedBytes >= 0 else {
@@ -709,7 +712,7 @@ extension StagingByteQuota {
         } else {
             groups[group] = retainedEncodedBytes
         }
-        derivedReservations.removeValue(forKey: workID)
+        if !preservingReservation { derivedReservations.removeValue(forKey: workID) }
         if !recovering { try check(0) }
     }
     /// Compact charged metadata cursor; never traverses document units or assembles all work IDs.

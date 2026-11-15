@@ -91,10 +91,14 @@ def active(state):
 # products. Changing a recipe, resource, dependency, or target mapping requires a
 # normal producer run. The original producer receipts always remain untouched.
 EQUIVALENCE_PROFILE = 'tractanda.release-linux-source-equivalence.v1'
-# Reviewed G manifest: release targets use Sources/Tools, Tests contains only
-# default test targets. A different manifest requires a normal producer run or
-# separate review of this admission policy; arbitrary Swift is never evaluated.
-REVIEWED_PACKAGE_SHA256 = {'58971af17f8c0b6871f7d42da6bb6c4dbc109cc589eb5aac67bcff96e1908176'}
+# Reviewed poc.19 G and poc.20 C manifests: release targets use Sources/Tools;
+# Tests contains default test targets. C adds the default TractandaMemory and
+# TractandaMemoryTests targets plus exact parser dependencies. Other manifests
+# require a normal producer run or separate admission review; Swift is not evaluated.
+REVIEWED_PACKAGE_SHA256 = {
+    '58971af17f8c0b6871f7d42da6bb6c4dbc109cc589eb5aac67bcff96e1908176',
+    'c167088d7ff9168d6989d8e5fd3b551cddb225ef5d1e73b0ec1d60473af587c6',
+}
 DEVELOPMENT_ONLY = {'scripts/release-delivery.py', 'scripts/release-macos.py',
                     'scripts/test-release-delivery.py'}
 EVIDENCE_INPUTS = {'inventory': None, 'bundle-manifest': 'bundleManifest',

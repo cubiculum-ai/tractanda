@@ -65,14 +65,57 @@ final class PersonalPeerDaemonTests: XCTestCase, @unchecked Sendable {
         }
         func snapshot() -> (PersonalObjectDescriptor, Int64)? { first }
     }
+    private struct DurableFixtureProgress: Equatable, CustomStringConvertible {
+        var publishedRevisions: UInt64 = 0
+        var publishedBytes: UInt64 = 0
+        var dependencyDepth: UInt64 = 0
+        var consumedRowID: UInt64 = 0
+        var description: String {
+            "revisions=\(publishedRevisions),bytes=\(publishedBytes),depth=\(dependencyDepth),cursor=\(consumedRowID)"
+        }
+        func merged(with next: Self) -> Self {
+            .init(
+                publishedRevisions: max(publishedRevisions, next.publishedRevisions),
+                publishedBytes: max(publishedBytes, next.publishedBytes),
+                dependencyDepth: max(dependencyDepth, next.dependencyDepth),
+                consumedRowID: max(consumedRowID, next.consumedRowID))
+        }
+    }
+    private struct DurableProgressWatchdog {
+        private(set) var highWater = DurableFixtureProgress()
+        private var lastProgressAt: Double
+        init(now: Double) { lastProgressAt = now }
+        mutating func stalled(
+            observing progress: DurableFixtureProgress, now: Double, noProgressSeconds: Double
+        ) -> Bool {
+            let next = highWater.merged(with: progress)
+            if next != highWater {
+                highWater = next
+                lastProgressAt = now
+            }
+            return now - lastProgressAt >= noProgressSeconds
+        }
+    }
+    private struct FixtureProgressScope {
+        let root: URL
+        let storeID: String
+        let localReplicaID: String
+        let remoteReplicaID: String
+        let configurationDigest: String
+    }
     private var activeFixtureRoot: URL?
-    private func capacity() throws {
-        guard let root = activeFixtureRoot else { return }
+    @discardableResult
+    private func capacity(observing scope: FixtureProgressScope? = nil) throws -> DurableFixtureProgress {
+        guard let root = activeFixtureRoot else { return .init() }
         try PeerFixtureCapacity.requireFree(at: root)
         guard let entries = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil) else {
             throw TractandaError("resourceLimit", "Cannot measure personal daemon fixture.")
         }
         var bytes: UInt64 = 0
+        var progress = DurableFixtureProgress()
+        let publishedPrefix = scope.map { $0.root.appendingPathComponent("items").path + "/" }
+        let workPrefix = scope.map { $0.root.appendingPathComponent(".personal-sync/work").path + "/" }
+        let cursorPrefix = scope.map { $0.root.appendingPathComponent(".personal-sync/cursors").path + "/" }
         for case let file as URL in entries {
             let metadata: FileMetadata
             do { metadata = try FileMetadata.read(at: file) } catch FileMetadataError.posix(let code)
@@ -83,8 +126,52 @@ final class PersonalPeerDaemonTests: XCTestCase, @unchecked Sendable {
                     throw TractandaError("resourceLimit", "Personal daemon fixture crossed128MiB cap.")
                 }
                 bytes += metadata.size
+                if let publishedPrefix, file.path.hasPrefix(publishedPrefix),
+                    file.pathExtension == "tractanda"
+                {
+                    progress.publishedRevisions += 1
+                    progress.publishedBytes += metadata.size
+                }
+                if let workPrefix, file.deletingLastPathComponent().path + "/" == workPrefix,
+                    let depth = dependencyFrameDepth(file.lastPathComponent)
+                {
+                    progress.dependencyDepth = max(progress.dependencyDepth, depth)
+                }
+                if let scope, let cursorPrefix,
+                    file.deletingLastPathComponent().path + "/" == cursorPrefix,
+                    file.pathExtension == "json"
+                {
+                    let files = DocumentContentFiles(
+                        root: scope.root, ownerUID: tractanda_uid(),
+                        minimumFreeBytes: Int64(PeerFixtureCapacity.reserveBytes))
+                    guard
+                        let data = try files.readIfPresent(
+                            path: [".personal-sync", "cursors", file.lastPathComponent], maximumBytes: 8192)
+                    else { continue }
+                    let cursor = try JSON.decode(PersonalPeerSyncCursor.self, data)
+                    guard cursor.storeID == scope.storeID, cursor.localReplicaID == scope.localReplicaID,
+                        cursor.remoteReplicaID == scope.remoteReplicaID,
+                        cursor.configurationDigest == scope.configurationDigest, cursor.consumedRowID >= 0
+                    else {
+                        throw TractandaError("fixtureProgress", "Unexpected personal fixture cursor binding.")
+                    }
+                    progress.consumedRowID = max(progress.consumedRowID, UInt64(cursor.consumedRowID))
+                }
             }
         }
+        return progress
+    }
+    private func dependencyFrameDepth(_ name: String) -> UInt64? {
+        guard name.hasSuffix(".json"), let marker = name.range(of: "-frame-", options: .backwards) else {
+            return nil
+        }
+        let prefix = String(name[..<marker.lowerBound])
+        let value = String(name[marker.upperBound...].dropLast(5))
+        guard let identity = UUID(uuidString: prefix), identity.version1Components != nil,
+            identity.uuidString.lowercased() == prefix,
+            let depth = UInt64(value), depth > 0, String(depth) == value
+        else { return nil }
+        return depth
     }
     private func id() throws -> String { try UUID.makeVersion1().uuidString.lowercased() }
     private func unusedPort() async throws -> Int {
@@ -107,6 +194,63 @@ final class PersonalPeerDaemonTests: XCTestCase, @unchecked Sendable {
             try await Task.sleep(for: .milliseconds(50))
         }
         throw TractandaError("fixtureWait", description)
+    }
+    private func eventuallyWithDurableProgress(
+        _ description: String, scope: FixtureProgressScope, _ condition: () async throws -> Bool
+    ) async throws {
+        let seconds =
+            Double(
+                ProcessInfo.processInfo.environment["TRACTANDA_PERSONAL_DAEMON_TEST_WAIT_SECONDS"] ?? "300")
+            ?? 300
+        var watchdog = DurableProgressWatchdog(now: ProcessInfo.processInfo.systemUptime)
+        while true {
+            // One complete walk accounts for capacity and durable work. Retried phase/timestamp
+            // updates cannot renew this wait, and slow advancing work has no total deadline.
+            let progress = try capacity(observing: scope)
+            if try await condition() { return }
+            if watchdog.stalled(
+                observing: progress, now: ProcessInfo.processInfo.systemUptime, noProgressSeconds: seconds)
+            {
+                throw TractandaError(
+                    "fixtureWait",
+                    description
+                        + "; no durable progress: current[\(progress)] highWater[\(watchdog.highWater)]")
+            }
+            try await Task.sleep(for: .seconds(1))
+        }
+    }
+
+    func testDurableProgressWatchdogAllowsHealthyWorkBeyondTotalBudget() {
+        var watchdog = DurableProgressWatchdog(now: 0)
+        for step in 1...4 {
+            XCTAssertFalse(
+                watchdog.stalled(
+                    observing: .init(dependencyDepth: UInt64(step)), now: Double(step * 299),
+                    noProgressSeconds: 300))
+        }
+        XCTAssertFalse(
+            watchdog.stalled(
+                observing: .init(publishedRevisions: 1, publishedBytes: 937), now: 1495,
+                noProgressSeconds: 300))
+        XCTAssertFalse(
+            watchdog.stalled(
+                observing: .init(consumedRowID: 2209), now: 1794, noProgressSeconds: 300))
+        XCTAssertFalse(
+            watchdog.stalled(
+                observing: .init(consumedRowID: 2209), now: 2093, noProgressSeconds: 300))
+        XCTAssertTrue(
+            watchdog.stalled(
+                observing: .init(consumedRowID: 2209), now: 2094, noProgressSeconds: 300))
+    }
+    func testDurableProgressWatchdogDoesNotRenewOnResetOrReplay() {
+        var watchdog = DurableProgressWatchdog(now: 0)
+        let prior = DurableFixtureProgress(
+            publishedRevisions: 20, publishedBytes: 18740, dependencyDepth: 2209, consumedRowID: 20)
+        XCTAssertFalse(watchdog.stalled(observing: prior, now: 10, noProgressSeconds: 300))
+        XCTAssertFalse(watchdog.stalled(observing: .init(), now: 200, noProgressSeconds: 300))
+        XCTAssertFalse(watchdog.stalled(observing: prior, now: 309, noProgressSeconds: 300))
+        XCTAssertEqual(watchdog.highWater, prior)
+        XCTAssertTrue(watchdog.stalled(observing: prior, now: 310, noProgressSeconds: 300))
     }
     private func admin(_ socket: String, _ operation: String, _ fields: [String: ItemValue] = [:])
         async throws -> Data
@@ -518,10 +662,20 @@ final class PersonalPeerDaemonTests: XCTestCase, @unchecked Sendable {
                 leftSocket, "membership.commit", ["preparation": .bytes(JSON.encode(leftPlan))])
             _ = try await admin(
                 rightSocket, "membership.commit", ["preparation": .bytes(JSON.encode(rightPlan))])
-            try await eventually(
-                "Initial finite baseline and fresh rescan must finish while source remains available"
-            ) {
+            let baselineReady = {
                 await rightNetwork.completedCutsForTesting(remoteReplicaID: leftID) >= 2
+            }
+            let baselineDescription =
+                "Initial finite baseline and fresh rescan must finish while source remains available"
+            if revisionCount == 2_209 {
+                try await eventuallyWithDurableProgress(
+                    baselineDescription,
+                    scope: .init(
+                        root: rightRoot, storeID: leftPlan.configuration.storeID,
+                        localReplicaID: rightID, remoteReplicaID: leftID,
+                        configurationDigest: try leftPlan.configuration.digest), baselineReady)
+            } else {
+                try await eventually(baselineDescription, baselineReady)
             }
             let completedObservation = try await rightNetwork.operatorStatus().personalPeers
             let completedPeer = try XCTUnwrap(completedObservation?.first { $0.replicaID == leftID })

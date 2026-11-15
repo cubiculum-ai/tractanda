@@ -1,6 +1,13 @@
+import Crypto
 import XCTest
 
 @testable import TractandaCore
+
+#if canImport(Darwin)
+    import Darwin
+#else
+    import Glibc
+#endif
 
 final class PooledCanonicalRecordTests: XCTestCase {
     private func fixture() throws -> (URL, ItemStore, Revision, ItemIndex.CatalogueRow) {
@@ -114,5 +121,97 @@ final class PooledCanonicalRecordTests: XCTestCase {
 
         XCTAssertThrowsError(
             try PooledCanonicalRecord.read(row: row, root: linkRoot, ownerUID: store.ownerUID))
+    }
+
+    func testServingReadReportsChangedCanonicalBytesAsRecoveryError() throws {
+        let (root, store, revision, row) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        XCTAssertEqual(
+            try PooledCanonicalRecord.readForServing(row: row, root: root, ownerUID: store.ownerUID)
+                .revision, revision)
+        let path = root.appendingPathComponent(row.path)
+        XCTAssertEqual(path.path.withCString { chmod($0, mode_t(0o600)) }, 0)
+        let handle = try FileHandle(forWritingTo: path)
+        try handle.truncate(atOffset: 0)
+        try handle.write(contentsOf: Data("changed".utf8))
+        try handle.close()
+        XCTAssertEqual(path.path.withCString { chmod($0, mode_t(0o400)) }, 0)
+        XCTAssertThrowsError(
+            try PooledCanonicalRecord.readForServing(row: row, root: root, ownerUID: store.ownerUID)
+        ) { XCTAssertEqual(($0 as? TractandaError)?.code, "recoveryError") }
+    }
+
+    func testServingReadNormalizesRecordDecodeFailureWithoutChangingRawReader() throws {
+        let (root, store, _, row) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bytes = Data("not a message envelope".utf8)
+        let path = root.appendingPathComponent(row.path)
+        XCTAssertEqual(path.path.withCString { chmod($0, mode_t(0o600)) }, 0)
+        let handle = try FileHandle(forWritingTo: path)
+        try handle.truncate(atOffset: 0)
+        try handle.write(contentsOf: bytes)
+        try handle.close()
+        XCTAssertEqual(path.path.withCString { chmod($0, mode_t(0o400)) }, 0)
+        let malformed = replacing(row, digest: Data(SHA256.hash(data: bytes)))
+        XCTAssertThrowsError(
+            try PooledCanonicalRecord.read(row: malformed, root: root, ownerUID: store.ownerUID)
+        ) { XCTAssertEqual(($0 as? TractandaError)?.code, "invalidRecord") }
+        XCTAssertThrowsError(
+            try PooledCanonicalRecord.readForServing(row: malformed, root: root, ownerUID: store.ownerUID)
+        ) { XCTAssertEqual(($0 as? TractandaError)?.code, "recoveryError") }
+    }
+
+    func testServingReadPreservesResourceTransientAndCancellationFailures() {
+        for code in [
+            "resourceLimit", "indexResource", "indexTransient", "cancelled", "rebuildNoProgress",
+            "revisionProjectionRequired", "projectionRequired",
+        ] {
+            let expected = TractandaError(code, "original diagnostic", osError: ENFILE)
+            XCTAssertEqual(PooledCanonicalRecord.servingReadFailure(expected) as? TractandaError, expected)
+        }
+        XCTAssertTrue(PooledCanonicalRecord.servingReadFailure(CancellationError()) is CancellationError)
+
+        let failures: [(Int32) -> PooledCanonicalRecordError] = [
+            { .openFailed($0) }, { .metadataUnavailable($0) }, { .readFailed($0) },
+        ]
+        for failure in failures {
+            for cause in [EMFILE, ENFILE, ENOMEM, ENOSPC, EDQUOT] {
+                let mapped = PooledCanonicalRecord.servingReadFailure(failure(cause)) as? TractandaError
+                XCTAssertEqual(mapped?.code, "indexResource")
+                XCTAssertEqual(mapped?.osError, cause)
+            }
+            for cause in [EAGAIN, EINTR, EBUSY, EIO] {
+                let mapped = PooledCanonicalRecord.servingReadFailure(failure(cause)) as? TractandaError
+                XCTAssertEqual(mapped?.code, "indexTransient")
+                XCTAssertEqual(mapped?.osError, cause)
+            }
+            let cancelled = PooledCanonicalRecord.servingReadFailure(failure(ECANCELED)) as? TractandaError
+            XCTAssertEqual(cancelled?.code, "cancelled")
+            XCTAssertEqual(cancelled?.osError, ECANCELED)
+        }
+    }
+
+    func testServingReadKeepsStructuralAndDecodeDamageDistinctFromResourceFailure() {
+        let failures: [PooledCanonicalRecordError] = [
+            .invalidPath, .metadataChanged, .digestMismatch, .identityMismatch, .unsafePermissions,
+        ]
+        for failure in failures {
+            XCTAssertEqual(
+                (PooledCanonicalRecord.servingReadFailure(failure) as? TractandaError)?.code,
+                "recoveryError")
+        }
+        for cause in [ENOENT, ELOOP, ENOTDIR, EACCES, EPERM] {
+            let mapped =
+                PooledCanonicalRecord.servingReadFailure(PooledCanonicalRecordError.openFailed(cause))
+                as? TractandaError
+            XCTAssertEqual(mapped?.code, "recoveryError")
+            XCTAssertEqual(mapped?.osError, cause)
+        }
+        let decoding = DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "fixture"))
+        XCTAssertEqual(
+            (PooledCanonicalRecord.servingReadFailure(decoding) as? TractandaError)?.code, "recoveryError")
+        XCTAssertEqual(
+            (PooledCanonicalRecord.servingReadFailure(PooledCanonicalRecordError.sizeLimit) as? TractandaError)?
+                .code, "resourceLimit")
     }
 }

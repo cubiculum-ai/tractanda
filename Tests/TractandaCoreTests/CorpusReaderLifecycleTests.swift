@@ -53,6 +53,37 @@ final class CorpusReaderLifecycleTests: XCTestCase {
                 classID: "Item", changes: ["body": .text("held corpus reader")], operationID: "reader-source")
         ).revision
     }
+    private func attachedSource(_ store: ItemStore) throws -> (Revision, AttachmentDescriptor) {
+        let item = try source(store)
+        let bytes = Data([1, 2, 3])
+        let upload = try store.beginAttachment(
+            .init(
+                itemID: item.itemID, expectedRevisionID: item.revisionID,
+                operationID: "lifecycle-original", filename: "tiny.pdf", mediaType: "application/pdf",
+                byteCount: 3, sha256: PageCorpusInput.digest(bytes)))
+        let uploadID = try XCTUnwrap(upload.uploadID)
+        _ = try store.appendAttachment(uploadID: uploadID, offset: 0, data: bytes)
+        return (try store.finishAttachment(uploadID: uploadID).revision, upload.attachment)
+    }
+    private func stageOrphan(_ store: ItemStore, revision: Revision, workID: String, root: URL) throws {
+        let current = try store.capturePageCorpus(itemID: revision.itemID)
+        var fields = revision.fields
+        fields["revisionID"] = .text(try UUID.makeVersion1().uuidString.lowercased())
+        fields["body"] = .text("unpublished private source")
+        let input = try PageCorpusInput(
+            storeID: current.input.binding.storeID,
+            revision: Revision(fields: fields, formatVersion: revision.formatVersion))
+        let spools = root.appendingPathComponent("spools")
+        try FileManager.default.createDirectory(
+            at: spools, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let spool = try PageCorpusProjection.prepare(
+            input: input, provider: current.provider, root: spools,
+            policy: .init(maximumBytes: cap, minimumFreeBytes: reserve))
+        _ = try ItemIndex.stageCorpus(
+            indexPath: store.indexDirectory.appendingPathComponent("items.sqlite").path,
+            input: input, prepared: spool, workID: workID,
+            writeBoundary: { _ in try self.check(root) }, boundary: { try self.check(root) })
+    }
     private func index(_ root: URL) throws -> ItemIndex {
         try ItemIndex(path: root.appendingPathComponent("index/items.sqlite").path, create: false)
     }
@@ -149,6 +180,7 @@ final class CorpusReaderLifecycleTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let revision: Revision
         let stale: IndexedCorpusSnapshot
+        let state: String
         let canonicalBefore: [String: Data]
         func canonical(_ store: ItemStore) throws -> [String: Data] {
             var result: [String: Data] = [:]
@@ -189,15 +221,22 @@ final class CorpusReaderLifecycleTests: XCTestCase {
                 input: input, prepared: orphan, workID: discardID, writeBoundary: { _ in }, boundary: {})
             try index(root).releaseCorpusWork(discardID)
             stale = try XCTUnwrap(store.captureIndexedCorpus(itemID: revision.itemID))
+            state = try store.requireProtocolState()
             canonicalBefore = try canonical(store)
         }
         let store = try store(root)
         let index = try index(root)
+        XCTAssertEqual(store.startupRecovery["reason"], "validatedCheckpoint")
+        XCTAssertEqual(try store.requireProtocolState(), state)
+        let changes = try store.itemChanges(sinceState: state)
+        XCTAssertTrue(changes.created.isEmpty)
+        XCTAssertTrue(changes.updated.isEmpty)
+        XCTAssertTrue(changes.destroyed.isEmpty)
         XCTAssertTrue(try index.corpusReadWorkPage().isEmpty)
         XCTAssertEqual(try store.corpusReadStateForTesting().charge, 0)
         let kinds = Dictionary(uniqueKeysWithValues: try index.corpusWorkPage().map { ($0.workID, $0.kind) })
         // These rows were inserted directly, without a document-job or peer-transfer journal.
-        // Personal startup rebuilds disposable indexes; it must not invent ownership for them.
+        // Validated reuse must retire this unowned work without inventing a durable journal.
         XCTAssertNil(kinds[stageID])
         XCTAssertNil(kinds[discardID])
         XCTAssertEqual(try index.corpusRetainedBytes(discardID), 0)
@@ -207,10 +246,208 @@ final class CorpusReaderLifecycleTests: XCTestCase {
         XCTAssertTrue(try index.corpusMatches(store.get(revision.itemID)))
         XCTAssertThrowsError(try store.revalidateIndexedCorpus(stale))
         let live = try XCTUnwrap(store.captureIndexedCorpus(itemID: revision.itemID))
+        XCTAssertEqual(live.indexIdentity, stale.indexIdentity)
+        XCTAssertEqual(live.links.map(\.component.generationID), stale.links.map(\.component.generationID))
         XCTAssertEqual(try store.corpusReadStateForTesting().count, 1)
         _ = try index.cleanupCorpus(limit: 1)
         try store.revalidateIndexedCorpus(live)
         try store.releaseIndexedCorpus(live)
+        try check(root)
+    }
+
+    func testPersonalReusePreservesActiveSlotTerminalJournalAndPeerStaging() throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let journals: [String: Data]
+        let charges: [String: Int64]
+        do {
+            let store = try store(root)
+            let (attached, attachment) = try attachedSource(store)
+            var jobs: [String] = []
+            let config = String(repeating: "a", count: 64)
+            for operation in ["queued", "discarded-slot"] {
+                let job = try store.startDocumentJob(
+                    .init(
+                        itemID: attached.itemID, expectedRevisionID: attached.revisionID,
+                        attachmentID: attachment.attachmentID, operationID: operation),
+                    identity: .init(), configurationSHA256: config)
+                jobs.append(job.jobID)
+            }
+            let current = try store.capturePageCorpus(itemID: attached.itemID)
+            let spools = root.appendingPathComponent("spools")
+            try FileManager.default.createDirectory(
+                at: spools, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            for id in jobs {
+                let spool = try PageCorpusProjection.prepare(
+                    input: current.input, provider: current.provider, root: spools,
+                    policy: .init(maximumBytes: cap, minimumFreeBytes: reserve))
+                _ = try ItemIndex.stageCorpus(
+                    indexPath: store.indexDirectory.appendingPathComponent("items.sqlite").path,
+                    input: current.input, prepared: spool, workID: id,
+                    writeBoundary: { _ in try self.check(root) }, boundary: { try self.check(root) })
+            }
+            _ = try store.controlDocumentJob(
+                jobs[1], action: "discard", configurationSHA256: config, deferMaterialWork: true)
+            let index = try index(root)
+            try index.initializePeerDocumentSchema()
+            let source = try AttachmentDocumentSource(
+                itemID: attached.itemID, revisionID: attached.revisionID,
+                attachmentID: attachment.attachmentID, sha256: attachment.sha256,
+                byteCount: 3, mediaType: "application/pdf")
+            let document = try AttachmentDocumentRepresentation(
+                representationID: UUID.makeVersion1().uuidString.lowercased(),
+                attachmentID: source.attachmentID, source: source, extractedAt: Timestamp.now(),
+                identity: .init(),
+                content: .init(
+                    contentID: UUID.makeVersion1().uuidString.lowercased(),
+                    manifestSHA256: String(repeating: "b", count: 64),
+                    rootSHA256: String(repeating: "c", count: 64), pageCount: 1, totalEncodedBytes: 1,
+                    coverage: .init(converted: 0, failed: 1)))
+            let peer = try index.beginPeerDocumentCorpus(
+                packageID: UUID.makeVersion1().uuidString.lowercased(), document: document
+            ) { _ in }
+            try index.finishPeerDocumentCorpus(peer, units: 0, bytes: 0)
+            try index.touchPeerDocumentCorpus(peer)
+            journals = try Dictionary(
+                uniqueKeysWithValues: jobs.map { id in
+                    (id, try Data(contentsOf: root.appendingPathComponent("document-jobs/\(id)/record.json")))
+                })
+            charges = try Dictionary(
+                uniqueKeysWithValues: (jobs + [peer.workID]).map { id in
+                    (id, try index.corpusRetainedBytes(id))
+                })
+            XCTAssertTrue(charges.values.allSatisfy { $0 > 0 })
+            try check(root)
+        }
+        let store = try store(root)
+        let index = try index(root)
+        XCTAssertEqual(store.startupRecovery["reason"], "validatedCheckpoint")
+        XCTAssertEqual(try store.startupOrphanCorpusStateForTesting().count, 0)
+        for (id, bytes) in journals {
+            XCTAssertEqual(
+                try Data(contentsOf: root.appendingPathComponent("document-jobs/\(id)/record.json")), bytes)
+        }
+        for (id, retained) in charges { XCTAssertEqual(try index.corpusRetainedBytes(id), retained) }
+        try check(root)
+    }
+
+    func testTerminalHistoryRemainsExactWhenItsResidualIndexWorkIsRetired() throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let id: String
+        let history: URL
+        let bytes: Data
+        do {
+            let store = try store(root)
+            let (revision, attachment) = try attachedSource(store)
+            let job = try store.startDocumentJob(
+                .init(
+                    itemID: revision.itemID, expectedRevisionID: revision.revisionID,
+                    attachmentID: attachment.attachmentID, operationID: "terminal-residue"),
+                identity: .init(), configurationSHA256: String(repeating: "a", count: 64))
+            id = job.jobID
+            try stageOrphan(store, revision: revision, workID: id, root: root)
+            let recordPath = root.appendingPathComponent("document-jobs/\(id)/record.json")
+            var record = try JSON.decode(DocumentJobRecord.self, Data(contentsOf: recordPath))
+            record.checkpoint.state = "cancelled"
+            record.checkpoint.discarded = true
+            // Durable terminal history is authoritative; this models residual derived debt
+            // after its active-slot tree was already removed, not a runnable producer.
+            let files = DocumentContentFiles(root: root, ownerUID: getuid(), minimumFreeBytes: reserve)
+            try DocumentJobRecords(root: root, files: files).archive(record)
+            history = root.appendingPathComponent("document-job-history/\(id.prefix(2))/\(id).json")
+            bytes = try Data(contentsOf: history)
+        }
+        let store = try store(root)
+        XCTAssertEqual(store.startupRecovery["reason"], "validatedCheckpoint")
+        XCTAssertEqual(try index(root).corpusRetainedBytes(id), 0)
+        XCTAssertEqual(try Data(contentsOf: history), bytes)
+        try check(root)
+    }
+
+    func testMalformedHistoryCannotBeMistakenForAnUnjournaledOrphan() throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let id = try UUID.makeVersion1().uuidString.lowercased()
+        let debt: Int64
+        do {
+            let store = try store(root)
+            try stageOrphan(store, revision: source(store), workID: id, root: root)
+            debt = try index(root).corpusRetainedBytes(id)
+        }
+        let directory = root.appendingPathComponent("document-job-history/\(id.prefix(2))")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let history = directory.appendingPathComponent(id + ".json")
+        try Data("{".utf8).write(to: history)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: history.path)
+        XCTAssertThrowsError(try store(root))
+        XCTAssertEqual(try index(root).corpusRetainedBytes(id), debt)
+        XCTAssertEqual(try Data(contentsOf: history), Data("{".utf8))
+        try check(root)
+    }
+
+    func testOrphanDebtIsBoundedAcrossReopenAndDrainsWithoutDocumentJobs() throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let workID = try UUID.makeVersion1().uuidString.lowercased()
+        let revision: Revision
+        let state: String
+        do {
+            let store = try store(root)
+            revision = try source(store)
+            let current = try store.capturePageCorpus(itemID: revision.itemID)
+            var fields = revision.fields
+            fields["revisionID"] = .text(try UUID.makeVersion1().uuidString.lowercased())
+            let privateFields = (0..<40).map { "private\($0)" }
+            for (number, name) in privateFields.enumerated() { fields[name] = .text("orphan text \(number)") }
+            let ancestry = try XCTUnwrap(revision.provenance)
+            fields["revisionAncestry"] = try RevisionProvenance(
+                kind: ancestry.kind, originReplicaID: ancestry.originReplicaID, parents: ancestry.parents,
+                writtenFields: Array(Set(ancestry.writtenFields + privateFields)).sorted(),
+                unsetFields: ancestry.unsetFields, frontier: ancestry.frontier,
+                mergeProfile: ancestry.mergeProfile, authorityWitness: ancestry.authorityWitness
+            ).itemValue
+            let input = try PageCorpusInput(
+                storeID: current.input.binding.storeID,
+                revision: Revision(fields: fields, formatVersion: revision.formatVersion))
+            let spools = root.appendingPathComponent("spools")
+            try FileManager.default.createDirectory(
+                at: spools, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            let spool = try PageCorpusProjection.prepare(
+                input: input, provider: current.provider, root: spools,
+                policy: .init(maximumBytes: cap, minimumFreeBytes: reserve))
+            _ = try ItemIndex.stageCorpus(
+                indexPath: store.indexDirectory.appendingPathComponent("items.sqlite").path,
+                input: input, prepared: spool, workID: workID,
+                writeBoundary: { _ in try self.check(root) }, boundary: { try self.check(root) })
+            state = try store.requireProtocolState()
+        }
+        do {
+            let store = try store(root)
+            let pending = try store.startupOrphanCorpusStateForTesting()
+            XCTAssertEqual(store.startupRecovery["reason"], "validatedCheckpoint")
+            XCTAssertEqual(pending.count, 1)
+            XCTAssertGreaterThan(pending.charge, 0, "Fencing is not a refund of retained bytes")
+            XCTAssertLessThanOrEqual(pending.lastUnits, 16)
+            XCTAssertEqual(try store.requireProtocolState(), state)
+            try check(root)
+        }
+        let store = try store(root)
+        let service = ItemService(store: store)
+        XCTAssertEqual(store.startupRecovery["reason"], "validatedCheckpoint")
+        XCTAssertGreaterThan(try store.startupOrphanCorpusStateForTesting().charge, 0)
+        for _ in 0..<16 {
+            if try store.startupOrphanCorpusStateForTesting().count == 0 { break }
+            service.maintainSemanticIndex()
+            XCTAssertLessThanOrEqual(try store.startupOrphanCorpusStateForTesting().lastUnits, 16)
+            try check(root)
+        }
+        XCTAssertEqual(try store.startupOrphanCorpusStateForTesting().count, 0)
+        XCTAssertEqual(try store.startupOrphanCorpusStateForTesting().charge, 0)
+        XCTAssertEqual(try index(root).corpusRetainedBytes(workID), 0)
+        XCTAssertEqual(try store.get(revision.itemID), revision)
+        XCTAssertEqual(try store.requireProtocolState(), state)
         try check(root)
     }
     func testMissingReadyComponentIsExplicitAndOldReaderProtectsSupersededUnits() throws {

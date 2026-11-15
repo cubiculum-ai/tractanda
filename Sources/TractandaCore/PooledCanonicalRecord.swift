@@ -159,6 +159,72 @@ struct PooledCanonicalRecord: Sendable {
             metadataDrifted: metadataDrifted)
     }
 
+    /// Serving boundary only: callers must still authorize before reading. Recovery and
+    /// inventory readers retain the raw errors from read/readForInventory.
+    static func readForServing(
+        row: ItemIndex.CatalogueRow, root: URL, ownerUID: UInt32,
+        maximumBytes: Int = maximumRecordBytes
+    ) throws -> Self {
+        do {
+            return try read(row: row, root: root, ownerUID: ownerUID, maximumBytes: maximumBytes)
+        } catch {
+            throw servingReadFailure(error)
+        }
+    }
+
+    /// Separates canonical damage from a failed read's resource/cancellation cause.
+    /// Classification never retries, changes the original record or marks a checkpoint.
+    static func servingReadFailure(_ error: Error) -> Error {
+        if error is CancellationError { return error }
+        if let failure = error as? TractandaError {
+            if [
+                "resourceLimit", "indexResource", "indexTransient", "cancelled", "rebuildNoProgress",
+                "revisionProjectionRequired", "projectionRequired", "recoveryError",
+            ].contains(failure.code) {
+                return failure
+            }
+            if let cause = failure.osError, let operational = servingPOSIXFailure(cause) {
+                return operational
+            }
+            return TractandaError(
+                "recoveryError", "Canonical record validation failed (\(failure.code)).",
+                osError: failure.osError)
+        }
+        if let failure = error as? PooledCanonicalRecordError {
+            switch failure {
+            case .openFailed(let cause), .metadataUnavailable(let cause), .readFailed(let cause):
+                return servingPOSIXFailure(cause)
+                    ?? TractandaError(
+                        "recoveryError", "Canonical record cannot be read or verified.", osError: cause)
+            case .sizeLimit:
+                return TractandaError("resourceLimit", "Canonical record exceeds the read byte window.")
+            default:
+                return TractandaError(
+                    "recoveryError", "Canonical record no longer matches its catalogue (\(failure)).")
+            }
+        }
+        if error is DecodingError {
+            return TractandaError("recoveryError", "Canonical record could not be decoded.")
+        }
+        // Do not relabel an unrelated error as evidence of canonical corruption.
+        return error
+    }
+
+    private static func servingPOSIXFailure(_ cause: Int32) -> TractandaError? {
+        if [EMFILE, ENFILE, ENOMEM, ENOSPC, EDQUOT].contains(cause) {
+            return TractandaError(
+                "indexResource", "Canonical read resources are unavailable.", osError: cause)
+        }
+        if [EAGAIN, EINTR, EBUSY, EIO].contains(cause) {
+            return TractandaError(
+                "indexTransient", "Canonical read is temporarily unavailable.", osError: cause)
+        }
+        if cause == ECANCELED {
+            return TractandaError("cancelled", "Canonical read was cancelled.", osError: cause)
+        }
+        return nil
+    }
+
     /// Exact original envelope export; the catalogue digest, identity and custody are rechecked.
     static func originalBytes(row: ItemIndex.CatalogueRow, root: URL, ownerUID: UInt32) throws -> Data {
         let verified = try read(row: row, root: root, ownerUID: ownerUID)

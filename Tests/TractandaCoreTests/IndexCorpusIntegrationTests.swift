@@ -393,6 +393,128 @@ final class IndexCorpusIntegrationTests: XCTestCase {
         try budget(root)
     }
 
+    func testOwnerScopedGCPreservesOtherRetiredDebtAndUsesOwnerIndex() throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let path = root.appendingPathComponent("items.sqlite").path
+        let index = try ItemIndex(path: path, create: true)
+        let first = try document(pages: 40)
+        try put(first.base, index: index)
+        let firstID = try id()
+        _ = try stage(first, indexPath: path, root: root, workID: firstID)
+        try index.releaseCorpusWork(firstID)
+        let second = try document(pages: 1)
+        try put(second.base, index: index)
+        let secondID = try id()
+        _ = try stage(second, indexPath: path, root: root, workID: secondID)
+        try index.releaseCorpusWork(secondID)
+        let untouched = try index.corpusRetainedBytes(firstID)
+        XCTAssertGreaterThan(untouched, 0)
+        XCTAssertGreaterThan(try index.corpusRetainedBytes(secondID), 0)
+        _ = try index.cleanupCorpus(limit: 16, ownerWorkID: secondID)
+        XCTAssertEqual(try index.corpusRetainedBytes(secondID), 0)
+        XCTAssertEqual(try index.corpusRetainedBytes(firstID), untouched)
+        XCTAssertLessThanOrEqual(index.corpusGCStatsForTesting.unitsDeleted, 16)
+        let plans = try index.corpusGCPlanForTesting(ownerWorkID: firstID).joined(separator: " ")
+            .uppercased()
+        XCTAssertTrue(plans.contains("CORPUS_GENERATION_OWNER"))
+        XCTAssertFalse(plans.contains("SCAN CORPUS_UNIT"))
+        XCTAssertTrue(try index.corpusMatches(first.base))
+        XCTAssertTrue(try index.corpusMatches(second.base))
+        try budget(root)
+    }
+
+    func testFencedOwnerTransfersLateReuseAndDetachesLaterCanonicalLinks() throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let path = root.appendingPathComponent("items.sqlite").path
+        let index = try ItemIndex(path: path, create: true)
+        let fixture = try document(pages: 1)
+        try put(fixture.base, index: index)
+        let oldID = try id()
+        _ = try stage(fixture, indexPath: path, root: root, workID: oldID)
+        try index.releaseCorpusWork(oldID)
+        let liveID = try id()
+        let live = try stage(fixture, indexPath: path, root: root, workID: liveID)
+        let liveHeader = try index.corpusRetainedBytes(liveID)
+        var observation: IndexCorpusOwnershipObservation?
+        _ = try index.cleanupCorpus(
+            ownerWorkID: oldID, ownershipObservation: { observation = $0 })
+        let charges = try index.corpusOwnershipCharges(XCTUnwrap(observation), owner: oldID)
+        XCTAssertEqual(try index.corpusRetainedBytes(oldID), 0)
+        XCTAssertGreaterThan(try index.corpusRetainedBytes(liveID), liveHeader)
+        XCTAssertTrue(charges.works.contains { $0.workID == liveID && $0.retainedEncodedBytes > liveHeader })
+        XCTAssertEqual(index.corpusGCStatsForTesting.unitsDeleted, 0)
+        try put(fixture.final, index: index, stage: live)
+        XCTAssertEqual(try index.corpusRetainedBytes(liveID), 0)
+
+        // A ready generation can also become current without retaining another work token.
+        let next = try document(pages: 1)
+        try put(next.base, index: index)
+        let nextID = try id()
+        _ = try stage(next, indexPath: path, root: root, workID: nextID)
+        try index.releaseCorpusWork(nextID)
+        try put(next.final, index: index)
+        let before = try XCTUnwrap(
+            index.captureCorpusSnapshot(
+                itemID: next.final.itemID, expectedRevisionID: next.final.revisionID))
+        _ = try index.cleanupCorpus(ownerWorkID: nextID)
+        XCTAssertEqual(try index.corpusRetainedBytes(nextID), 0)
+        XCTAssertEqual(index.corpusGCStatsForTesting.unitsDeleted, 0)
+        XCTAssertEqual(
+            try index.captureCorpusSnapshot(
+                itemID: next.final.itemID, expectedRevisionID: next.final.revisionID), before)
+        try budget(root)
+    }
+
+    func testScopedCursorAdvancesPastProtectedMetadataHeaders() throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let index = try ItemIndex(path: root.appendingPathComponent("items.sqlite").path, create: true)
+        let work = try id()
+        // Metadata-only retention fixture: protected references must survive even a stale
+        // discard marker. No document/canonical payload or physical-byte claim is created.
+        try index.execute("INSERT INTO corpus_work VALUES (?,'discard','{}',100)", [work])
+        let generations = try (0..<18).map { _ in try id() }.sorted()
+        for (number, generation) in generations.enumerated() {
+            try index.execute(
+                "INSERT INTO corpus_generation VALUES (?,?, 'field','ready',0,0,?,50,50)",
+                [generation, "protected-\(number)", work])
+            try index.execute("INSERT INTO corpus_gc_candidate VALUES (?)", [generation])
+            if number < 17 {
+                try index.execute("INSERT INTO corpus_work_generation VALUES (?,?)", [work, generation])
+            }
+        }
+        var observation: IndexCorpusOwnershipObservation?
+        _ = try index.cleanupCorpus(ownerWorkID: work, ownershipObservation: { observation = $0 })
+        XCTAssertEqual(index.corpusGCStatsForTesting.candidateGenerations, 16)
+        XCTAssertEqual(index.corpusGCStatsForTesting.headersDeleted, 0)
+        _ = try index.cleanupCorpus(
+            ownerWorkID: work, ownerCursor: XCTUnwrap(observation).nextCursor)
+        XCTAssertEqual(index.corpusGCStatsForTesting.candidateGenerations, 2)
+        XCTAssertEqual(index.corpusGCStatsForTesting.headersDeleted, 1)
+        XCTAssertEqual(try index.corpusRetainedBytes(work), 950)
+        try budget(root)
+    }
+
+    func testOwnershipObservationKeepsAdmittedFutureReservationUntilProducerCommit() throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let quota = try StagingByteQuota(root: root, ownerUID: getuid(), maximumBytes: 1000)
+        try quota.observeDerived(workID: "old", retainedEncodedBytes: 300)
+        try quota.reserveDerived(workID: "successor", estimatedAdditionalBytes: 128)
+        try quota.observeDerived(
+            workID: "successor", retainedEncodedBytes: 300, recovering: true,
+            preservingReservation: true)
+        try quota.observeDerived(workID: "old", retainedEncodedBytes: 0, recovering: true)
+        XCTAssertEqual(quota.usedBytes, 300)
+        XCTAssertThrowsError(try quota.require(additionalBytes: 600))
+        // The successor's own actual commit retains the existing reservation-clearing rule.
+        try quota.observeDerived(workID: "successor", retainedEncodedBytes: 300)
+        XCTAssertNoThrow(try quota.require(additionalBytes: 600))
+        try budget(root)
+    }
+
     func testGCCursorVisitsBoundedCandidatesAndUsesPerGenerationIndex() throws {
         let root = try root()
         defer { try? FileManager.default.removeItem(at: root) }

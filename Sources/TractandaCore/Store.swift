@@ -1408,6 +1408,11 @@ public final class ItemStore {
     private var jmapBlobs: JMAPBlobStore?
     private var stagingByteQuota: StagingByteQuota!
     private var pendingCorpusReadReleases: Set<String> = []
+    private var startupOrphanCorpusWork: Set<String> = []
+    private var startupOrphanCorpusCursor: String?
+    private var startupOrphanGenerationCursors: [String: String] = [:]
+    private var pendingStartupCorpusObservation:
+        (workID: String, observation: IndexCorpusOwnershipObservation, advanceCursor: Bool)?
     var beforeCorpusReadReleaseForTesting: ((String) throws -> Void)?
     var afterCorpusReadCaptureForTesting: (() throws -> Void)? {
         get { index?.afterCorpusReadCommitForTesting }
@@ -1806,6 +1811,7 @@ public final class ItemStore {
             if !reused { try rebuildPersonalIndex() }
             try restoreCorpusRecoveryCharges()
             try reclaimStartupCorpusReaders()
+            if reused { try reclaimStartupOrphanCorpusWork() }
             try PersonalWorkgroupProfile.complete(record, root: root)
             startupRecovery = [
                 "mode": "personalWorkgroup",
@@ -4975,7 +4981,7 @@ public final class ItemStore {
             // Physical metadata can legitimately drift after restore/copy or an OS change.
             // Accept only the same immutable digest and logical identity, through secure
             // descriptor-chain validation; never rewrite the catalogue or logical dates.
-            let verified = try PooledCanonicalRecord.read(row: row, root: root, ownerUID: ownerUID)
+            let verified = try PooledCanonicalRecord.readForServing(row: row, root: root, ownerUID: ownerUID)
             return try rememberHistorical(verified.revision, byteCount: Int(verified.metadata.size))
         }
         let metadata = try FileMetadata.read(at: url)
@@ -5394,7 +5400,8 @@ public final class ItemStore {
                 canRead(head), let index, let row = try index.revision(revision.revisionID)
             else { return false }
             if personalProfile != nil {
-                let verified = try PooledCanonicalRecord.read(row: row, root: root, ownerUID: ownerUID)
+                let verified = try PooledCanonicalRecord.readForServing(
+                    row: row, root: root, ownerUID: ownerUID)
                 guard verified.revision == revision else {
                     throw TractandaError("recoveryError", "Prepared read found changed canonical content.")
                 }
@@ -13717,6 +13724,112 @@ extension ItemStore {
             }
         }
         try restoreCorpusRecoveryCharges()  // Observe any shared ownership transfers after retirement.
+    }
+
+    private func reclaimStartupOrphanCorpusWork() throws {
+        // Only construction holds the exclusive writer before any new producer can start.
+        // An active-slot journal of ANY state owns its work until its existing lifecycle runs.
+        guard let index else { return }
+        var cursor: String?
+        while true {
+            let page = try index.retainedCorpusWorkPage(after: cursor, limit: 64)
+            guard !page.isEmpty else { break }
+            for work in page {
+                cursor = work.workID
+                guard ["stage", "discard"].contains(work.kind), documentJobs[work.workID] == nil,
+                    try !index.hasPeerDocumentCorpusOwner(work.workID)
+                else { continue }
+                // Missing history is a definite orphan. Existing history must decode as a
+                // terminal completed/discarded journal; unreadable/malformed history preserves
+                // the work by failing closed. Terminal history itself is never rewritten.
+                _ = try documentJobRecords.archived(work.workID)
+                try requirePersonalWriteCapacity()
+                try index.releaseCorpusWork(work.workID)
+                let retained = try index.corpusRetainedBytes(work.workID)
+                try stagingByteQuota.observeDerived(
+                    workID: work.workID, retainedEncodedBytes: retained, recovering: true)
+                if retained > 0 {
+                    guard startupOrphanCorpusWork.count < 64 else {
+                        throw TractandaError("indexError", "Orphan corpus work exceeds its bounded window.")
+                    }
+                    startupOrphanCorpusWork.insert(work.workID)
+                }
+            }
+        }
+        try restoreCorpusRecoveryCharges()  // Include any ownership transferred to protected work.
+        _ = try cleanupOneStartupCorpusOrphan()  // At most sixteen units during ordinary open.
+    }
+
+    @discardableResult
+    func cleanupOneStartupCorpusOrphan() throws -> Bool {
+        guard personalProfile != nil, !personalBaselineImportActive, isCanonicalReady, let index else {
+            return false
+        }
+        if pendingStartupCorpusObservation != nil {
+            try reconcileStartupCorpusObservation(index)
+            return true
+        }
+        guard !startupOrphanCorpusWork.isEmpty else { return false }
+        let ordered = startupOrphanCorpusWork.sorted()  // At most64 fenced metadata IDs.
+        let id = ordered.first(where: { $0 > (startupOrphanCorpusCursor ?? "") }) ?? ordered[0]
+        startupOrphanCorpusCursor = id
+        // Recheck live ownership. Runtime maintenance never classifies or retires new stages.
+        if try documentJobs[id] != nil || index.hasPeerDocumentCorpusOwner(id)
+            || !index.isDiscardedCorpusWork(id)
+        {
+            try stagingByteQuota.observeDerived(
+                workID: id, retainedEncodedBytes: index.corpusRetainedBytes(id), recovering: true,
+                preservingReservation: true)
+            startupOrphanCorpusWork.remove(id)
+            startupOrphanGenerationCursors.removeValue(forKey: id)
+            return true
+        }
+        var failure: Error?
+        var observation = IndexCorpusOwnershipObservation(
+            generationIDs: [], possibleOwners: [], nextCursor: startupOrphanGenerationCursors[id] ?? "")
+        do {
+            _ = try index.cleanupCorpus(
+                limit: 16, ownerWorkID: id, ownerCursor: startupOrphanGenerationCursors[id],
+                ownershipObservation: { observation = $0 },
+                boundary: { try self.requirePersonalWriteCapacity() })
+        } catch { failure = error }
+        // Keep the bounded observation until every affected charge is known, including an
+        // uncertain COMMIT reply. A failed readback cannot refund the old owner's debt.
+        pendingStartupCorpusObservation = (id, observation, failure == nil)
+        try reconcileStartupCorpusObservation(index)
+        if let failure { throw failure }
+        return true
+    }
+
+    private func reconcileStartupCorpusObservation(_ index: ItemIndex) throws {
+        guard let pending = pendingStartupCorpusObservation else { return }
+        let id = pending.workID
+        let charges = try index.corpusOwnershipCharges(pending.observation, owner: id)
+        let observations = charges.works.map { ($0, stagingByteQuota.corpusCharge($0.workID)) }
+        // Apply increases before decreases, so a transfer never transiently undercharges.
+        for (work, _) in observations.filter({ $0.0.retainedEncodedBytes >= $0.1 })
+            + observations.filter({ $0.0.retainedEncodedBytes < $0.1 })
+        {
+            try stagingByteQuota.observeDerived(
+                workID: work.workID, retainedEncodedBytes: work.retainedEncodedBytes, recovering: true,
+                preservingReservation: work.workID != id || !charges.ownerIsDiscarded)
+        }
+        let retained = charges.works.first { $0.workID == id }?.retainedEncodedBytes ?? 0
+        if retained == 0 || !charges.ownerIsDiscarded {
+            startupOrphanCorpusWork.remove(id)
+            startupOrphanGenerationCursors.removeValue(forKey: id)
+        } else if pending.advanceCursor {
+            startupOrphanGenerationCursors[id] = pending.observation.nextCursor
+        }
+        pendingStartupCorpusObservation = nil
+    }
+
+    func startupOrphanCorpusStateForTesting() throws -> (count: Int, charge: Int64, lastUnits: Int) {
+        var charge: Int64 = 0
+        for id in startupOrphanCorpusWork {
+            charge = try PageCorpusEmitter.add(charge, stagingByteQuota.corpusCharge(id))
+        }
+        return (startupOrphanCorpusWork.count, charge, index?.corpusGCStatsForTesting.unitsDeleted ?? 0)
     }
     func corpusReadStateForTesting() throws -> (count: Int, charge: Int64, pending: Int) {
         guard let index else { throw TractandaError("indexUnavailable", "Reader state is unavailable.") }

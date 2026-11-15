@@ -237,7 +237,7 @@ def exercise(binary, adapter, root, checks):
             catalog = client.request("tools/list")["tools"]
             catalog_names = {tool["name"] for tool in catalog}
             assert len(catalog) == len(catalog_names), "Tool names must be unique"
-            assert {
+            expected_catalog_names = {
                 'tractanda_attachment_content',
                 'tractanda_attachment_document_page',
                 'tractanda_attachments',
@@ -245,6 +245,7 @@ def exercise(binary, adapter, root, checks):
                 'tractanda_capture_preview',
                 'tractanda_commit',
                 'tractanda_conflicts',
+                'tractanda_changes',
                 'tractanda_describe',
                 'tractanda_document_job_cancel',
                 'tractanda_document_job_discard',
@@ -281,7 +282,14 @@ def exercise(binary, adapter, root, checks):
                 'tractanda_semantic_search',
                 'tractanda_semantic_status',
                 'tractanda_state',
-            } == catalog_names
+            }
+            missing_catalog_names = expected_catalog_names - catalog_names
+            unexpected_catalog_names = catalog_names - expected_catalog_names
+            assert expected_catalog_names == catalog_names, (
+                "MCP tool catalog mismatch: "
+                f"missing={sorted(missing_catalog_names)}, "
+                f"unexpected={sorted(unexpected_catalog_names)}"
+            )
             for tool in catalog:
                 assert tool["inputSchema"]["additionalProperties"] is False
                 assert tool["annotations"]["openWorldHint"] is False

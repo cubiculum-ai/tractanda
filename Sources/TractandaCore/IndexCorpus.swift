@@ -8,6 +8,11 @@ import Foundation
     import Glibc
 #endif
 
+private let orphanCorpusCandidatesSQL =
+    "SELECT g.id FROM corpus_generation g INDEXED BY corpus_generation_owner "
+    + "JOIN corpus_work w ON w.id=g.owner_work_id AND w.kind='discard' "
+    + "WHERE g.owner_work_id=? AND g.id>? ORDER BY g.id LIMIT 16"
+
 /// Ephemeral fence for this open session, never persisted as a store/device identity.
 struct IndexCorpusFileFence: Sendable, Equatable {
     let device: UInt64
@@ -1068,32 +1073,67 @@ extension ItemIndex {
     /// A cursor visits at most sixteen RETIREMENT candidates, never all live/protected pages.
     /// Per-generation unit selection uses the (generation_id,ordinal) index and a fixed row budget.
     @discardableResult
-    func cleanupCorpus(limit: Int = 16, boundary: () throws -> Void = {}) throws -> Int {
+    func cleanupCorpus(
+        limit: Int = 16, ownerWorkID: String? = nil, ownerCursor: String? = nil,
+        ownershipObservation: ((IndexCorpusOwnershipObservation) -> Void)? = nil,
+        boundary: () throws -> Void = {}
+    ) throws -> Int {
         guard (1...16).contains(limit) else {
             throw TractandaError(
                 "invalidArguments", "Use a cleanup batch of one through sixteen corpus units.")
+        }
+        if let ownerWorkID { try PageCorpusInput.validateID(ownerWorkID) }
+        var cursor = ownerCursor ?? ""
+        var visited: [String] = []
+        var possibleOwners: Set<String> = []
+        defer {
+            if ownerWorkID != nil {
+                ownershipObservation?(
+                    .init(
+                        generationIDs: visited, possibleOwners: possibleOwners.sorted(), nextCursor: cursor))
+            }
         }
         try boundary()
         corpusGCStatsForTesting = .init()
         try execute("BEGIN IMMEDIATE")
         do {
-            var cursor = ""
-            try corpusRows("SELECT generation_id FROM corpus_gc_cursor WHERE singleton=1") {
-                cursor = try corpusText($0, 0)
-            }
             var candidates: [String] = []
-            try corpusRows(
-                "SELECT generation_id FROM corpus_gc_candidate WHERE generation_id>? ORDER BY generation_id LIMIT 16",
-                [cursor]
-            ) { candidates.append(try corpusText($0, 0)) }
-            if candidates.isEmpty, cursor != "" {
-                cursor = ""
-                try execute("UPDATE corpus_gc_cursor SET generation_id='' WHERE singleton=1")
+            var scopedEligible = true
+            if let ownerWorkID {
+                scopedEligible =
+                    try isDiscardedCorpusWork(ownerWorkID)
+                    && !hasPeerDocumentCorpusOwner(ownerWorkID)
+                if scopedEligible {
+                    try corpusRows(
+                        orphanCorpusCandidatesSQL,
+                        [ownerWorkID, cursor]
+                    ) { candidates.append(try corpusText($0, 0)) }
+                    if candidates.isEmpty, cursor != "" {
+                        cursor = ""
+                        try corpusRows(orphanCorpusCandidatesSQL, [ownerWorkID, cursor]) {
+                            candidates.append(try corpusText($0, 0))
+                        }
+                    }
+                }
+            } else {
+                try corpusRows("SELECT generation_id FROM corpus_gc_cursor WHERE singleton=1") {
+                    cursor = try corpusText($0, 0)
+                }
                 try corpusRows(
-                    "SELECT generation_id FROM corpus_gc_candidate ORDER BY generation_id LIMIT 16"
+                    "SELECT generation_id FROM corpus_gc_candidate WHERE generation_id>? ORDER BY generation_id LIMIT 16",
+                    [cursor]
                 ) { candidates.append(try corpusText($0, 0)) }
+                if candidates.isEmpty, cursor != "" {
+                    cursor = ""
+                    try execute("UPDATE corpus_gc_cursor SET generation_id='' WHERE singleton=1")
+                    try corpusRows(
+                        "SELECT generation_id FROM corpus_gc_candidate ORDER BY generation_id LIMIT 16"
+                    ) { candidates.append(try corpusText($0, 0)) }
+                }
             }
+            visited = candidates
             var owners: Set<String> = []  // At most sixteen candidate headers, not a store-sized set.
+            if let ownerWorkID, scopedEligible { owners.insert(ownerWorkID) }
             var removed = 0
             for id in candidates {
                 try boundary()
@@ -1104,7 +1144,39 @@ extension ItemIndex {
                     [id, id]
                 ) { _ in protected = true }
                 cursor = id
-                if protected { continue }
+                if protected {
+                    if let ownerWorkID {
+                        var linked = false
+                        try corpusRows("SELECT 1 FROM corpus_link WHERE generation_id=? LIMIT 1", [id]) {
+                            _ in linked = true
+                        }
+                        if linked {
+                            try execute("UPDATE corpus_generation SET owner_work_id=NULL WHERE id=?", [id])
+                            try execute("DELETE FROM corpus_gc_candidate WHERE generation_id=?", [id])
+                        } else {
+                            var ownReference = false
+                            try corpusRows(
+                                "SELECT 1 FROM corpus_work_generation WHERE generation_id=? AND work_id=?",
+                                [id, ownerWorkID]
+                            ) { _ in ownReference = true }
+                            if !ownReference {
+                                var successor: String?
+                                try corpusRows(
+                                    "SELECT work_id FROM corpus_work_generation WHERE generation_id=? ORDER BY work_id LIMIT 1",
+                                    [id]
+                                ) { successor = try corpusText($0, 0) }
+                                if let successor {
+                                    // Retain even an uncertain update reply.
+                                    possibleOwners.insert(successor)
+                                    try execute(
+                                        "UPDATE corpus_generation SET owner_work_id=? WHERE id=?",
+                                        [successor, id])
+                                }
+                            }
+                        }
+                    }
+                    continue
+                }
                 var owner: String?
                 try corpusRows("SELECT owner_work_id FROM corpus_generation WHERE id=?", [id]) { row in
                     if sqlite3_column_type(row, 0) != SQLITE_NULL { owner = try corpusText(row, 0) }
@@ -1162,11 +1234,19 @@ extension ItemIndex {
                 }
                 if removed == limit { break }
             }
-            try execute("UPDATE corpus_gc_cursor SET generation_id=? WHERE singleton=1", [cursor])
+            if ownerWorkID == nil {
+                try execute("UPDATE corpus_gc_cursor SET generation_id=? WHERE singleton=1", [cursor])
+            }
             for owner in owners {
-                try execute(
-                    "DELETE FROM corpus_work WHERE id=? AND (kind='discard' OR (kind='peer-document' AND NOT EXISTS (SELECT 1 FROM corpus_work_generation WHERE work_id=?))) AND NOT EXISTS (SELECT 1 FROM corpus_generation WHERE owner_work_id=?)",
-                    [owner, owner, owner])
+                if ownerWorkID != nil {
+                    try execute(
+                        "DELETE FROM corpus_work WHERE id=? AND kind='discard' AND NOT EXISTS (SELECT 1 FROM corpus_generation WHERE owner_work_id=?)",
+                        [owner, owner])
+                } else {
+                    try execute(
+                        "DELETE FROM corpus_work WHERE id=? AND (kind='discard' OR (kind='peer-document' AND NOT EXISTS (SELECT 1 FROM corpus_work_generation WHERE work_id=?))) AND NOT EXISTS (SELECT 1 FROM corpus_generation WHERE owner_work_id=?)",
+                        [owner, owner, owner])
+                }
             }
             corpusGCStatsForTesting.unitsDeleted = removed
             try boundary()
@@ -1178,7 +1258,7 @@ extension ItemIndex {
         }
     }
 
-    func corpusGCPlanForTesting() throws -> [String] {
+    func corpusGCPlanForTesting(ownerWorkID: String? = nil) throws -> [String] {
         var plans: [String] = []
         try corpusRows(
             "EXPLAIN QUERY PLAN SELECT id,encoded_bytes FROM corpus_unit WHERE generation_id=? ORDER BY ordinal LIMIT 16",
@@ -1188,7 +1268,78 @@ extension ItemIndex {
             "EXPLAIN QUERY PLAN SELECT generation_id FROM corpus_gc_candidate WHERE generation_id>? ORDER BY generation_id LIMIT 16",
             [""]
         ) { plans.append(try corpusText($0, 3)) }
+        if let ownerWorkID {
+            try corpusRows(
+                "EXPLAIN QUERY PLAN " + orphanCorpusCandidatesSQL,
+                [ownerWorkID, ""]
+            ) { plans.append(try corpusText($0, 3)) }
+        }
         return plans
+    }
+
+    /// Presence is sufficient to preserve peer-owned work; no progress/expiry mutation here.
+    func hasPeerDocumentCorpusOwner(_ workID: String) throws -> Bool {
+        var table = false
+        try corpusRows(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='peer_document_corpus_owner'"
+        ) { _ in table = true }
+        guard table else { return false }
+        var owned = false
+        try corpusRows(
+            "SELECT 1 FROM peer_document_corpus_owner WHERE work=? LIMIT 1", [workID]
+        ) { _ in owned = true }
+        return owned
+    }
+
+    /// A consistent metadata snapshot follows the bounded transaction, including uncertain
+    /// replies. Only its at-most16 visited generations and affected owners are considered.
+    func corpusOwnershipCharges(_ observation: IndexCorpusOwnershipObservation, owner: String) throws
+        -> IndexCorpusOwnershipCharges
+    {
+        guard observation.generationIDs.count <= 16, observation.possibleOwners.count <= 16 else {
+            throw TractandaError("indexError", "Corpus ownership observation exceeds its bounded window.")
+        }
+        try PageCorpusInput.validateID(owner)
+        for id in observation.possibleOwners { try PageCorpusInput.validateID(id) }
+        try execute("BEGIN")
+        do {
+            var owners = Set(observation.possibleOwners + [owner])
+            for generation in observation.generationIDs {
+                try corpusRows("SELECT owner_work_id FROM corpus_generation WHERE id=?", [generation]) {
+                    row in
+                    if sqlite3_column_type(row, 0) != SQLITE_NULL {
+                        let id = try corpusText(row, 0)
+                        try PageCorpusInput.validateID(id)
+                        owners.insert(id)
+                    }
+                }
+            }
+            var values: [IndexedCorpusRetainedWork] = []
+            for id in owners.sorted() {
+                var kind = "absent"
+                try corpusRows("SELECT kind FROM corpus_work WHERE id=?", [id]) {
+                    kind = try corpusText($0, 0)
+                }
+                values.append(
+                    try .init(workID: id, kind: kind, retainedEncodedBytes: corpusRetainedBytes(id)))
+            }
+            let discarded =
+                try values.first { $0.workID == owner }?.kind == "discard"
+                && !hasPeerDocumentCorpusOwner(owner)
+            try execute("COMMIT")
+            return .init(works: values, ownerIsDiscarded: discarded)
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
+
+    func isDiscardedCorpusWork(_ workID: String) throws -> Bool {
+        var discarded = false
+        try corpusRows(
+            "SELECT 1 FROM corpus_work WHERE id=? AND kind='discard'", [workID]
+        ) { _ in discarded = true }
+        return discarded
     }
 
     /// Independent readonly access to one captured component, not the live Store/SQLite handle.
@@ -1997,6 +2148,17 @@ extension ItemIndex {
             try execute("DELETE FROM corpus_work WHERE id=?", [workID])
         }
     }
+}
+
+struct IndexCorpusOwnershipObservation: Sendable {
+    let generationIDs: [String]
+    let possibleOwners: [String]
+    let nextCursor: String
+}
+
+struct IndexCorpusOwnershipCharges: Sendable {
+    let works: [IndexedCorpusRetainedWork]
+    let ownerIsDiscarded: Bool
 }
 
 struct IndexCorpusGCStats: Sendable {
